@@ -1,0 +1,44 @@
+{
+  "subject_brand": "Domino's",
+  "competitor_brands": ["Pizza Hut", "Little Caesars"],
+  "geography": {
+    "type": "us"
+  },
+  "similarity": {
+    "metrics": ["population", "median_age"],
+    "max_distance": 1.75
+  },
+  "location_sources": [
+    {
+      "name": "dominos_store_api",
+      "type": "dominos_api",
+      "sample_path": "../data/raw/dominos_api_sample.json",
+      "mapper": "mappers/dominos_api.json"
+    },
+    {
+      "name": "pizza_hut_kaggle_csv",
+      "type": "pizza_hut_kaggle",
+      "path": "../data/raw/pizza_hut_kaggle_sample.csv",
+      "mapper": "mappers/pizza_hut_kaggle.json"
+    },
+    {
+      "name": "little_caesars_json_objects",
+      "type": "little_caesars_json",
+      "path": "../data/raw/little_caesars_sample.json",
+      "mapper": "mappers/little_caesars_json.json"
+    }
+  ],
+  "demographics_source": {
+    "name": "bigquery_public_acs_zcta",
+    "type": "bigquery",
+    "project_id": "keen-device-610",
+    "credentials_json": "../configuration/keen-device-610-2af9b27dfda3.json",
+    "query": "SELECT LPAD(CAST(geo_id AS STRING), 5, '0') AS zip_code, total_pop AS population, median_income AS median_household_income, median_age FROM `bigquery-public-data.census_bureau_acs.zip_codes_2018_5yr` WHERE geo_id IS NOT NULL"
+  },
+  "warehouse": {
+    "type": "bigquery",
+    "project_id": "keen-device-610",
+    "dataset_id": "birdeye_interview",
+    "credentials_json": "../configuration/keen-device-610-2af9b27dfda3.json"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "brand": "Pizza Hut",
+  "fields": {
+    "location_id": "id",
+    "name": "name",
+    "address": "address",
+    "city": "city",
+    "state": "province",
+    "postal_code": "postalCode",
+    "latitude": "latitude",
+    "longitude": "longitude",
+    "observed_at": "observed_at"
+  }
+}

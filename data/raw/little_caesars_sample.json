@@ -1,0 +1,42 @@
+{
+  "locations": [
+    {
+      "store": {
+        "number": "lc-27610-1",
+        "displayName": "Little Caesars Raleigh East"
+      },
+      "address": {
+        "line1": "800 Demo Dr",
+        "city": "Raleigh",
+        "state": "NC",
+        "zip": "27610"
+      },
+      "geo": {
+        "lat": 35.7675,
+        "lng": -78.5888
+      },
+      "metadata": {
+        "observed_at": "2026-09-03T00:00:00+00:00"
+      }
+    },
+    {
+      "store": {
+        "number": "lc-28105-1",
+        "displayName": "Little Caesars Matthews"
+      },
+      "address": {
+        "line1": "900 Demo Ct",
+        "city": "Matthews",
+        "state": "NC",
+        "zip": "28105"
+      },
+      "geo": {
+        "lat": 35.1168,
+        "lng": -80.7237
+      },
+      "metadata": {
+        "observed_at": "2026-09-03T00:00:00+00:00"
+      }
+    }
+  ]
+}

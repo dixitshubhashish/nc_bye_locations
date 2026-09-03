@@ -1,0 +1,5 @@
+{
+  "project_id": "keen-device-610",
+  "credentials_json": "configuration/keen-device-610-2af9b27dfda3.json",
+  "query": "SELECT id, name FROM `keen-device-610.birdeye_interview.test_123` LIMIT 1000"
+}

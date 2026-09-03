@@ -1,0 +1,48 @@
+{
+  "Stores": [
+    {
+      "StoreID": "dom-27601-1",
+      "StoreName": "Domino's Raleigh Downtown",
+      "AddressDescription": "100 Demo St",
+      "City": "Raleigh",
+      "Region": "NC",
+      "PostalCode": "27601",
+      "Latitude": 35.7796,
+      "Longitude": -78.6382,
+      "ObservedAt": "2026-09-03T00:00:00+00:00"
+    },
+    {
+      "StoreID": "dom-27606-1",
+      "StoreName": "Domino's Raleigh West",
+      "AddressDescription": "200 Demo Ave",
+      "City": "Raleigh",
+      "Region": "NC",
+      "PostalCode": "27606",
+      "Latitude": 35.761,
+      "Longitude": -78.7136,
+      "ObservedAt": "2026-09-03T00:00:00+00:00"
+    },
+    {
+      "StoreID": "dom-27701-1",
+      "StoreName": "Domino's Durham Central",
+      "AddressDescription": "300 Demo Rd",
+      "City": "Durham",
+      "Region": "NC",
+      "PostalCode": "27701",
+      "Latitude": 35.994,
+      "Longitude": -78.8986,
+      "ObservedAt": "2026-09-03T00:00:00+00:00"
+    },
+    {
+      "StoreID": "dom-28202-1",
+      "StoreName": "Domino's Charlotte Uptown",
+      "AddressDescription": "400 Demo Blvd",
+      "City": "Charlotte",
+      "Region": "NC",
+      "PostalCode": "28202",
+      "Latitude": 35.2271,
+      "Longitude": -80.8431,
+      "ObservedAt": "2026-09-03T00:00:00+00:00"
+    }
+  ]
+}
