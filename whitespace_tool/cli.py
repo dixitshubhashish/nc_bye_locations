@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import http.server
 from pathlib import Path
+import socketserver
 
 from whitespace_tool.analysis import analyze_whitespace
 from whitespace_tool.config import load_config
@@ -124,6 +126,16 @@ def push_bigquery(
     print(f"Pushed unified tables to BigQuery dataset {project_id}.{dataset_id}")
 
 
+def serve_mapper_ui(host: str, port: int) -> None:
+    class MapperUiHandler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=str(Path("ui").resolve()), **kwargs)
+
+    with socketserver.TCPServer((host, port), MapperUiHandler) as httpd:
+        print(f"Mapper UI running at http://{host}:{port}/mapper.html")
+        httpd.serve_forever()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Competitive whitespace analysis prototype")
     subparsers = parser.add_subparsers(dest="command")
@@ -158,6 +170,10 @@ def main() -> None:
     bq_parser.add_argument("--dry-run", action="store_true", help="Write BigQuery files locally without pushing")
     bq_parser.add_argument("--credentials-json", default=None, help="Optional service-account JSON path; ADC also works")
 
+    mapper_ui_parser = subparsers.add_parser("mapper-ui", help="Serve local CSV/JSON mapper UI")
+    mapper_ui_parser.add_argument("--host", default="127.0.0.1")
+    mapper_ui_parser.add_argument("--port", type=int, default=8765)
+
     args = parser.parse_args()
     if args.command == "build-db":
         build_db(args.config, args.db)
@@ -176,6 +192,8 @@ def main() -> None:
             args.dry_run,
             args.credentials_json,
         )
+    elif args.command == "mapper-ui":
+        serve_mapper_ui(args.host, args.port)
     else:
         run_analysis(getattr(args, "config", "configs/demo.json"), getattr(args, "output_dir", "outputs/demo"))
 

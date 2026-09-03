@@ -18,6 +18,14 @@ Fetch the first-module ZIP base table from BigQuery public data:
 
 Current tested fetch result: 33,791 ZIP geography rows. Known missing ACS fields from the public join are surfaced by quality checks: 868 rows missing population, 1,348 missing median age, and 2,948 missing median household income. The generated full CSV is intentionally not committed; regenerate it with the command above.
 
+Launch the local mapper UI for adding a new brand source:
+
+```bash
+python3 -m whitespace_tool mapper-ui
+```
+
+Open `http://127.0.0.1:8765/mapper.html`, upload a CSV or JSON source, map source columns/paths to the internal location schema, then download the generated mapper JSON into `configs/mappers/`.
+
 Optional Census ACS pull for all ZIP Code Tabulation Areas:
 
 ```bash

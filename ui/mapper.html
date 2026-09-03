@@ -1,0 +1,559 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Brand Source Mapper</title>
+  <style>
+    :root {
+      --bg: #f6f7f4;
+      --panel: #ffffff;
+      --ink: #1f2933;
+      --muted: #607080;
+      --line: #d8ded8;
+      --accent: #24786d;
+      --accent-ink: #ffffff;
+      --warn: #9a5b13;
+      --error: #a52626;
+      --ok: #246b3d;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    header {
+      border-bottom: 1px solid var(--line);
+      background: #ffffff;
+      padding: 18px 24px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 700;
+    }
+
+    main {
+      display: grid;
+      grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
+      min-height: calc(100vh - 70px);
+    }
+
+    aside {
+      border-right: 1px solid var(--line);
+      background: #fbfcfa;
+      padding: 20px;
+    }
+
+    section {
+      padding: 20px 24px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+
+    h2 {
+      margin: 0 0 12px;
+      font-size: 15px;
+      font-weight: 700;
+    }
+
+    label {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+      margin: 12px 0 6px;
+    }
+
+    input, select, textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #ffffff;
+      color: var(--ink);
+      font: inherit;
+      padding: 9px 10px;
+    }
+
+    textarea {
+      min-height: 230px;
+      resize: vertical;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+    }
+
+    button {
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: var(--accent);
+      color: var(--accent-ink);
+      cursor: pointer;
+      font: inherit;
+      font-weight: 700;
+      padding: 9px 12px;
+    }
+
+    button.secondary {
+      background: #ffffff;
+      color: var(--ink);
+      border-color: var(--line);
+    }
+
+    .button-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 14px;
+    }
+
+    .mapping-grid {
+      display: grid;
+      grid-template-columns: minmax(160px, 220px) minmax(220px, 1fr) minmax(180px, 260px);
+      gap: 8px;
+      align-items: center;
+    }
+
+    .mapping-head {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      padding-bottom: 4px;
+    }
+
+    .required {
+      color: var(--error);
+      font-weight: 800;
+    }
+
+    .status {
+      border-radius: 6px;
+      padding: 10px 12px;
+      margin-bottom: 16px;
+      border: 1px solid var(--line);
+      background: #ffffff;
+      color: var(--muted);
+    }
+
+    .status.ok { color: var(--ok); border-color: #b9d6c3; background: #f2fbf5; }
+    .status.warn { color: var(--warn); border-color: #e5cfaa; background: #fff9ed; }
+    .status.error { color: var(--error); border-color: #e8bbbb; background: #fff5f5; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: #ffffff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 8px 10px;
+      text-align: left;
+      vertical-align: top;
+      font-size: 12px;
+      max-width: 260px;
+      overflow-wrap: anywhere;
+    }
+
+    th {
+      background: #eef3ef;
+      color: #334155;
+      font-weight: 750;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+
+    .tabs {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 14px;
+    }
+
+    .tab {
+      background: #ffffff;
+      color: var(--ink);
+      border-color: var(--line);
+    }
+
+    .tab.active {
+      background: var(--ink);
+      color: #ffffff;
+    }
+
+    .hidden { display: none; }
+
+    @media (max-width: 900px) {
+      main { grid-template-columns: 1fr; }
+      aside { border-right: 0; border-bottom: 1px solid var(--line); }
+      .mapping-grid { grid-template-columns: 1fr; }
+      .mapping-head { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Brand Source Mapper</h1>
+  </header>
+  <main>
+    <aside>
+      <div class="panel">
+        <h2>Source</h2>
+        <label for="brandName">Brand name</label>
+        <input id="brandName" placeholder="Example: Papa Johns">
+
+        <label for="sourceName">Source name</label>
+        <input id="sourceName" placeholder="Example: papa_johns_locator_api">
+
+        <label for="sourceType">Source format</label>
+        <select id="sourceType">
+          <option value="csv">CSV</option>
+          <option value="json">JSON</option>
+        </select>
+
+        <label for="recordPath">JSON record path</label>
+        <input id="recordPath" placeholder="Example: stores or data.locations">
+
+        <label for="fileInput">Upload CSV or JSON</label>
+        <input id="fileInput" type="file" accept=".csv,.json,application/json,text/csv">
+
+        <div class="button-row">
+          <button id="parseBtn">Parse Source</button>
+          <button class="secondary" id="resetBtn">Reset</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Mapper JSON</h2>
+        <textarea id="mapperOutput" spellcheck="false"></textarea>
+        <div class="button-row">
+          <button id="downloadBtn">Download Mapper</button>
+          <button class="secondary" id="copyBtn">Copy</button>
+        </div>
+      </div>
+    </aside>
+
+    <section>
+      <div id="status" class="status">Upload a CSV or JSON source to begin.</div>
+
+      <div class="panel">
+        <h2>Internal Schema Mapping</h2>
+        <div class="mapping-grid" id="mappingGrid"></div>
+      </div>
+
+      <div class="tabs">
+        <button class="tab active" data-tab="sourcePreview">Source Preview</button>
+        <button class="tab" data-tab="normalizedPreview">Normalized Preview</button>
+      </div>
+
+      <div id="sourcePreview"></div>
+      <div id="normalizedPreview" class="hidden"></div>
+    </section>
+  </main>
+
+  <script>
+    const schemaFields = [
+      { key: "location_id", label: "Location ID", required: false, hints: ["id", "storeid", "store_id", "locationid", "number"] },
+      { key: "name", label: "Name", required: false, hints: ["name", "storename", "displayname"] },
+      { key: "address", label: "Address", required: true, hints: ["address", "addressdescription", "line1", "street"] },
+      { key: "city", label: "City", required: true, hints: ["city", "town"] },
+      { key: "state", label: "State", required: true, hints: ["state", "region", "province", "state_code"] },
+      { key: "postal_code", label: "Postal Code", required: true, hints: ["zip", "zipcode", "zip_code", "postalcode", "postal_code"] },
+      { key: "latitude", label: "Latitude", required: false, hints: ["lat", "latitude"] },
+      { key: "longitude", label: "Longitude", required: false, hints: ["lng", "lon", "longitude"] },
+      { key: "observed_at", label: "Observed At", required: false, hints: ["observed_at", "updatedat", "updated_at", "last_seen"] }
+    ];
+
+    let sourceRows = [];
+    let sourceFields = [];
+
+    const el = (id) => document.getElementById(id);
+
+    function normalizeName(value) {
+      return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    }
+
+    function parseCsv(text) {
+      const rows = [];
+      let row = [];
+      let cell = "";
+      let quoted = false;
+      for (let i = 0; i < text.length; i++) {
+        const char = text[i];
+        const next = text[i + 1];
+        if (char === '"' && quoted && next === '"') {
+          cell += '"';
+          i += 1;
+        } else if (char === '"') {
+          quoted = !quoted;
+        } else if (char === "," && !quoted) {
+          row.push(cell);
+          cell = "";
+        } else if ((char === "\n" || char === "\r") && !quoted) {
+          if (char === "\r" && next === "\n") i += 1;
+          row.push(cell);
+          if (row.some((value) => value !== "")) rows.push(row);
+          row = [];
+          cell = "";
+        } else {
+          cell += char;
+        }
+      }
+      row.push(cell);
+      if (row.some((value) => value !== "")) rows.push(row);
+      const headers = rows.shift() || [];
+      return rows.map((values) => Object.fromEntries(headers.map((header, index) => [header, values[index] || ""])));
+    }
+
+    function flattenObject(value, prefix = "", output = {}) {
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        Object.entries(value).forEach(([key, child]) => {
+          const path = prefix ? `${prefix}.${key}` : key;
+          flattenObject(child, path, output);
+        });
+      } else {
+        output[prefix] = value;
+      }
+      return output;
+    }
+
+    function getByPath(row, path) {
+      if (!path) return "";
+      return path.split(".").reduce((current, part) => {
+        if (current && typeof current === "object" && part in current) return current[part];
+        return "";
+      }, row);
+    }
+
+    function findArrays(value, prefix = "") {
+      const results = [];
+      if (Array.isArray(value)) results.push({ path: prefix, rows: value });
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        Object.entries(value).forEach(([key, child]) => {
+          const path = prefix ? `${prefix}.${key}` : key;
+          results.push(...findArrays(child, path));
+        });
+      }
+      return results;
+    }
+
+    function extractJsonRows(payload, recordPath) {
+      if (recordPath) {
+        const rows = getByPath(payload, recordPath);
+        if (!Array.isArray(rows)) throw new Error("JSON record path does not resolve to an array.");
+        return rows;
+      }
+      if (Array.isArray(payload)) return payload;
+      const arrays = findArrays(payload);
+      if (!arrays.length) throw new Error("No array of records found in JSON.");
+      const largest = arrays.sort((a, b) => b.rows.length - a.rows.length)[0];
+      el("recordPath").value = largest.path;
+      return largest.rows;
+    }
+
+    function collectFields(rows) {
+      const fields = new Set();
+      rows.slice(0, 50).forEach((row) => {
+        const flat = flattenObject(row);
+        Object.keys(flat).forEach((key) => fields.add(key));
+      });
+      return [...fields].sort();
+    }
+
+    function suggestField(schemaField) {
+      const normalizedFields = sourceFields.map((field) => ({ field, clean: normalizeName(field) }));
+      for (const hint of schemaField.hints) {
+        const cleanHint = normalizeName(hint);
+        const exact = normalizedFields.find((entry) => entry.clean === cleanHint);
+        if (exact) return exact.field;
+      }
+      for (const hint of schemaField.hints) {
+        const cleanHint = normalizeName(hint);
+        const partial = normalizedFields.find((entry) => entry.clean.includes(cleanHint) || cleanHint.includes(entry.clean));
+        if (partial) return partial.field;
+      }
+      return "";
+    }
+
+    function renderMappings() {
+      const grid = el("mappingGrid");
+      grid.innerHTML = `
+        <div class="mapping-head">Internal field</div>
+        <div class="mapping-head">Source field path</div>
+        <div class="mapping-head">Sample value</div>
+      `;
+      schemaFields.forEach((field) => {
+        const selected = suggestField(field);
+        const options = ['<option value="">Not mapped</option>']
+          .concat(sourceFields.map((sourceField) => `<option value="${escapeHtml(sourceField)}">${escapeHtml(sourceField)}</option>`))
+          .join("");
+        const sample = selected ? sampleValue(selected) : "";
+        grid.insertAdjacentHTML("beforeend", `
+          <div>${field.label} ${field.required ? '<span class="required">*</span>' : ''}</div>
+          <select data-field="${field.key}">${options}</select>
+          <div data-sample="${field.key}">${escapeHtml(sample)}</div>
+        `);
+        grid.querySelector(`select[data-field="${field.key}"]`).value = selected;
+      });
+      grid.querySelectorAll("select").forEach((select) => {
+        select.addEventListener("change", () => {
+          const key = select.dataset.field;
+          grid.querySelector(`[data-sample="${key}"]`).textContent = sampleValue(select.value);
+          updateOutput();
+        });
+      });
+      updateOutput();
+    }
+
+    function sampleValue(path) {
+      for (const row of sourceRows.slice(0, 10)) {
+        const value = getByPath(row, path);
+        if (value !== undefined && value !== null && value !== "") return String(value);
+      }
+      return "";
+    }
+
+    function getMapper() {
+      const fields = {};
+      document.querySelectorAll("select[data-field]").forEach((select) => {
+        if (select.value) fields[select.dataset.field] = select.value;
+      });
+      const mapper = {
+        brand: el("brandName").value.trim(),
+        fields
+      };
+      if (el("sourceType").value === "json" && el("recordPath").value.trim()) {
+        mapper.record_path = el("recordPath").value.trim();
+      }
+      return mapper;
+    }
+
+    function normalizedRows() {
+      const mapper = getMapper();
+      return sourceRows.slice(0, 10).map((row, index) => {
+        const out = { brand: mapper.brand };
+        schemaFields.forEach((field) => {
+          const path = mapper.fields[field.key];
+          out[field.key] = path ? getByPath(row, path) : "";
+        });
+        if (!out.location_id) out.location_id = `${normalizeName(mapper.brand) || "brand"}:${out.postal_code || "zip"}:${index + 1}`;
+        return out;
+      });
+    }
+
+    function validateMapper(mapper) {
+      const missing = schemaFields.filter((field) => field.required && !mapper.fields[field.key]).map((field) => field.label);
+      if (!mapper.brand) missing.unshift("Brand name");
+      if (missing.length) {
+        setStatus(`Missing required mapping: ${missing.join(", ")}`, "warn");
+      } else {
+        setStatus(`Parsed ${sourceRows.length} records with ${sourceFields.length} available source fields.`, "ok");
+      }
+    }
+
+    function updateOutput() {
+      const mapper = getMapper();
+      el("mapperOutput").value = JSON.stringify(mapper, null, 2);
+      validateMapper(mapper);
+      renderTable("normalizedPreview", normalizedRows());
+    }
+
+    function renderTable(targetId, rows) {
+      const target = el(targetId);
+      if (!rows.length) {
+        target.innerHTML = "";
+        return;
+      }
+      const columns = Object.keys(flattenObject(rows[0]));
+      const body = rows.map((row) => {
+        const flat = flattenObject(row);
+        return `<tr>${columns.map((col) => `<td>${escapeHtml(flat[col] ?? "")}</td>`).join("")}</tr>`;
+      }).join("");
+      target.innerHTML = `
+        <table>
+          <thead><tr>${columns.map((col) => `<th>${escapeHtml(col)}</th>`).join("")}</tr></thead>
+          <tbody>${body}</tbody>
+        </table>
+      `;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function setStatus(message, type = "") {
+      el("status").className = `status ${type}`;
+      el("status").textContent = message;
+    }
+
+    async function parseSource() {
+      const file = el("fileInput").files[0];
+      if (!file) {
+        setStatus("Choose a CSV or JSON file first.", "warn");
+        return;
+      }
+      const text = await file.text();
+      try {
+        if (el("sourceType").value === "json" || file.name.toLowerCase().endsWith(".json")) {
+          el("sourceType").value = "json";
+          sourceRows = extractJsonRows(JSON.parse(text), el("recordPath").value.trim());
+        } else {
+          el("sourceType").value = "csv";
+          sourceRows = parseCsv(text);
+        }
+        sourceRows = sourceRows.filter((row) => row && typeof row === "object");
+        sourceFields = collectFields(sourceRows);
+        if (!sourceRows.length) throw new Error("No records found.");
+        renderMappings();
+        renderTable("sourcePreview", sourceRows.slice(0, 10).map((row) => flattenObject(row)));
+      } catch (error) {
+        sourceRows = [];
+        sourceFields = [];
+        setStatus(error.message, "error");
+      }
+    }
+
+    function downloadMapper() {
+      const brand = normalizeName(el("brandName").value) || "brand";
+      const blob = new Blob([el("mapperOutput").value + "\n"], { type: "application/json" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = `${brand}_mapper.json`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    }
+
+    el("parseBtn").addEventListener("click", parseSource);
+    el("downloadBtn").addEventListener("click", downloadMapper);
+    el("copyBtn").addEventListener("click", () => navigator.clipboard.writeText(el("mapperOutput").value));
+    el("resetBtn").addEventListener("click", () => location.reload());
+    el("brandName").addEventListener("input", updateOutput);
+    document.querySelectorAll(".tab").forEach((button) => {
+      button.addEventListener("click", () => {
+        document.querySelectorAll(".tab").forEach((tab) => tab.classList.remove("active"));
+        button.classList.add("active");
+        ["sourcePreview", "normalizedPreview"].forEach((id) => el(id).classList.toggle("hidden", id !== button.dataset.tab));
+      });
+    });
+  </script>
+</body>
+</html>
