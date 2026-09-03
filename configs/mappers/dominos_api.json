@@ -1,0 +1,15 @@
+{
+  "brand": "Domino's",
+  "record_path": "Stores",
+  "fields": {
+    "location_id": "StoreID",
+    "name": "StoreName",
+    "address": "AddressDescription",
+    "city": "City",
+    "state": "Region",
+    "postal_code": "PostalCode",
+    "latitude": "Latitude",
+    "longitude": "Longitude",
+    "observed_at": "ObservedAt"
+  }
+}

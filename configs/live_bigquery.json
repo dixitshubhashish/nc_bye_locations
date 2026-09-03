@@ -1,0 +1,53 @@
+{
+  "subject_brand": "Domino's",
+  "competitor_brands": ["Pizza Hut", "Little Caesars"],
+  "geography": {
+    "type": "us"
+  },
+  "similarity": {
+    "metrics": ["population", "median_age"],
+    "max_distance": 1.75
+  },
+  "freshness_policy": {
+    "require_live_location_sources": true,
+    "max_location_age_hours": 24
+  },
+  "location_sources": [
+    {
+      "name": "dominos_store_api",
+      "type": "dominos_api",
+      "source_tier": "live",
+      "url": "REPLACE_WITH_DOMINOS_API_URL",
+      "headers": {},
+      "timeout_seconds": 60,
+      "mapper": "mappers/dominos_api.json"
+    },
+    {
+      "name": "pizza_hut_current_extract",
+      "type": "pizza_hut_kaggle",
+      "source_tier": "snapshot",
+      "path": "../data/raw/pizza_hut_current.csv",
+      "mapper": "mappers/pizza_hut_kaggle.json"
+    },
+    {
+      "name": "little_caesars_current_json",
+      "type": "little_caesars_json",
+      "source_tier": "snapshot",
+      "path": "../data/raw/little_caesars_current.json",
+      "mapper": "mappers/little_caesars_json.json"
+    }
+  ],
+  "demographics_source": {
+    "name": "bigquery_public_zip_geo_acs",
+    "type": "bigquery",
+    "project_id": "keen-device-610",
+    "credentials_json": "../configuration/keen-device-610-2af9b27dfda3.json",
+    "query": "SELECT z.zip_code, z.city, z.county, z.state_code, z.state_name, z.internal_point_lat AS latitude, z.internal_point_lon AS longitude, a.total_pop AS population, a.households, a.median_income AS median_household_income, a.income_per_capita, a.median_age, a.poverty, a.employed_pop AS employed_population, a.unemployed_pop AS unemployed_population, a.housing_units FROM `bigquery-public-data.geo_us_boundaries.zip_codes` z LEFT JOIN `bigquery-public-data.census_bureau_acs.zip_codes_2018_5yr` a ON z.zip_code = a.geo_id WHERE z.zip_code IS NOT NULL"
+  },
+  "warehouse": {
+    "type": "bigquery",
+    "project_id": "keen-device-610",
+    "dataset_id": "birdeye_interview",
+    "credentials_json": "../configuration/keen-device-610-2af9b27dfda3.json"
+  }
+}

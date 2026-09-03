@@ -1,0 +1,55 @@
+{
+  "subject_brand": "Domino's",
+  "competitor_brands": ["Pizza Hut", "Little Caesars"],
+  "geography": {
+    "type": "zip_prefixes",
+    "values": ["27", "28"]
+  },
+  "similarity": {
+    "metrics": ["population", "median_age"],
+    "max_distance": 1.75
+  },
+  "freshness_policy": {
+    "require_live_location_sources": false,
+    "max_location_age_hours": 24
+  },
+  "location_sources": [
+    {
+      "name": "dominos_store_api",
+      "type": "dominos_api",
+      "source_tier": "demo",
+      "sample_path": "../data/raw/dominos_api_sample.json",
+      "mapper": "mappers/dominos_api.json"
+    },
+    {
+      "name": "pizza_hut_kaggle_csv",
+      "type": "pizza_hut_kaggle",
+      "source_tier": "demo",
+      "path": "../data/raw/pizza_hut_kaggle_sample.csv",
+      "mapper": "mappers/pizza_hut_kaggle.json"
+    },
+    {
+      "name": "little_caesars_json_objects",
+      "type": "little_caesars_json",
+      "source_tier": "demo",
+      "path": "../data/raw/little_caesars_sample.json",
+      "mapper": "mappers/little_caesars_json.json"
+    }
+  ],
+  "demographics_source": {
+    "name": "demo_acs_like_zcta",
+    "type": "csv",
+    "path": "../data/demo_demographics.csv"
+  },
+  "warehouse": {
+    "type": "bigquery",
+    "project_id": "keen-device-610",
+    "dataset_id": "birdeye_interview",
+    "credentials_json": "../configuration/keen-device-610-2af9b27dfda3.json"
+  },
+  "limitations": [
+    "Demo source files are intentionally small. Replace files under data/raw with current locator/API/Kaggle extracts for a submission run.",
+    "ZIP-level matching uses postal code from the location source; address geocoding is outside this prototype.",
+    "Similarity is based on configurable z-score distance over the selected ZIP metrics."
+  ]
+}

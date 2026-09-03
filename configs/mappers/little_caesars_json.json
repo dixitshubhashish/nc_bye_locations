@@ -1,0 +1,15 @@
+{
+  "brand": "Little Caesars",
+  "record_path": "locations",
+  "fields": {
+    "location_id": "store.number",
+    "name": "store.displayName",
+    "address": "address.line1",
+    "city": "address.city",
+    "state": "address.state",
+    "postal_code": "address.zip",
+    "latitude": "geo.lat",
+    "longitude": "geo.lng",
+    "observed_at": "metadata.observed_at"
+  }
+}
