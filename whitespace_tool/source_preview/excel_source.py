@@ -46,8 +46,36 @@ def _cell_value(cell: ElementTree.Element, shared: list[str]) -> str:
             value = "".join(node.text or "" for node in child.iter() if _strip_namespace(node.tag) == "t")
             break
     if cell_type == "s" and value:
-        return shared[int(value)]
+        index = int(value)
+        return shared[index] if index < len(shared) else ""
     return value
+
+
+def _table_from_rows(rows_as_lists: list[list[str]], record_path: str) -> dict:
+    rows_as_lists = [row for row in rows_as_lists if any(str(value).strip() for value in row)]
+    if not rows_as_lists:
+        return preview_payload([], record_path)
+
+    width = max(len(row) for row in rows_as_lists)
+    header_row = rows_as_lists[0]
+    headers = []
+    seen: dict[str, int] = {}
+    for index in range(width):
+        raw_header = str(header_row[index]).strip() if index < len(header_row) else ""
+        header = raw_header or f"column_{index + 1}"
+        if header in seen:
+            seen[header] += 1
+            header = f"{header}_{seen[header]}"
+        else:
+            seen[header] = 1
+        headers.append(header)
+
+    rows = []
+    for row in rows_as_lists[1:]:
+        values = [row[index] if index < len(row) else "" for index in range(width)]
+        if any(str(value).strip() for value in values):
+            rows.append({headers[index]: values[index] for index in range(width)})
+    return preview_payload(rows, record_path)
 
 
 def _xlsx_sheet_map(zf: zipfile.ZipFile) -> dict[str, str]:
@@ -93,12 +121,8 @@ def _preview_xls(content: bytes, sheet_name: str | None) -> dict:
     sheet = workbook.sheet_by_name(sheet_name) if sheet_name else workbook.sheet_by_index(0)
     if sheet.nrows == 0:
         return preview_payload([], sheet.name)
-    headers = [str(value).strip() or f"column_{index + 1}" for index, value in enumerate(sheet.row_values(0))]
-    rows = []
-    for row_index in range(1, sheet.nrows):
-        values = sheet.row_values(row_index)
-        rows.append({headers[index]: values[index] if index < len(values) else "" for index in range(len(headers))})
-    return preview_payload(rows, sheet.name)
+    rows_as_lists = [sheet.row_values(row_index) for row_index in range(sheet.nrows)]
+    return _table_from_rows(rows_as_lists, sheet.name)
 
 
 def preview(content: bytes, record_path: str | None = None, file_name: str = "") -> dict:
@@ -128,11 +152,4 @@ def preview(content: bytes, record_path: str | None = None, file_name: str = "")
                 width = max(values) + 1
                 rows_as_lists.append([values.get(index, "") for index in range(width)])
 
-    if not rows_as_lists:
-        return preview_payload([], sheet_name)
-    headers = [header or f"column_{index + 1}" for index, header in enumerate(rows_as_lists[0])]
-    rows = [
-        {headers[index]: value for index, value in enumerate(row)}
-        for row in rows_as_lists[1:]
-    ]
-    return preview_payload(rows, selected_sheet)
+    return _table_from_rows(rows_as_lists, selected_sheet)

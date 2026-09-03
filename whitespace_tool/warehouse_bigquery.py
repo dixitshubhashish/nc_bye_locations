@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from whitespace_tool.models import LocationRecord, ZipDemographics
+
+
+LOGGER = logging.getLogger("whitespace_tool.mapper")
 
 
 TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
@@ -42,15 +46,44 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
     "restaurants": [
         {"name": "brand_name", "type": "STRING", "mode": "REQUIRED"},
         {"name": "location_key", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "name", "type": "STRING", "mode": "NULLABLE"},
-        {"name": "address", "type": "STRING", "mode": "NULLABLE"},
-        {"name": "city_name", "type": "STRING", "mode": "NULLABLE"},
-        {"name": "state_code", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "name", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "address", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "city_name", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "town", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "state_code", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "province", "type": "STRING", "mode": "NULLABLE"},
         {"name": "zip_code", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "country", "type": "STRING", "mode": "NULLABLE"},
         {"name": "latitude", "type": "FLOAT", "mode": "NULLABLE"},
         {"name": "longitude", "type": "FLOAT", "mode": "NULLABLE"},
         {"name": "first_observed_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
         {"name": "last_observed_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
+        # Enhanced location fields
+        {"name": "franchise_name", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "concept_type", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "cuisine_type", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "neighborhood", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "district", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "phone_number", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "website_url", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "google_maps_link", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "social_media_handles", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "operating_hours", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "seating_capacity", "type": "INTEGER", "mode": "NULLABLE"},
+        {"name": "service_types", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "opening_date", "type": "DATE", "mode": "NULLABLE"},
+        {"name": "status", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "annual_revenue", "type": "FLOAT", "mode": "NULLABLE"},
+        {"name": "average_ticket_size", "type": "FLOAT", "mode": "NULLABLE"},
+        {"name": "daily_footfall", "type": "INTEGER", "mode": "NULLABLE"},
+        {"name": "monthly_footfall", "type": "INTEGER", "mode": "NULLABLE"},
+        {"name": "rental_cost", "type": "FLOAT", "mode": "NULLABLE"},
+        {"name": "lease_cost", "type": "FLOAT", "mode": "NULLABLE"},
+        {"name": "population_density", "type": "FLOAT", "mode": "NULLABLE"},
+        {"name": "average_household_income", "type": "FLOAT", "mode": "NULLABLE"},
+        {"name": "competitor_count", "type": "INTEGER", "mode": "NULLABLE"},
+        {"name": "foot_traffic_score", "type": "FLOAT", "mode": "NULLABLE"},
+        {"name": "parking_availability", "type": "STRING", "mode": "NULLABLE"},
     ],
     "source_observations": [
         {"name": "brand_name", "type": "STRING", "mode": "REQUIRED"},
@@ -74,6 +107,23 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "subject_brand_name", "type": "STRING", "mode": "REQUIRED"},
         {"name": "config_json", "type": "JSON", "mode": "REQUIRED"},
         {"name": "generated_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
+    ],
+    "mapper_configs": [
+        {"name": "event_id", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "mapper_id", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "brand_name", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "source_name", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "source_type", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "field_count", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "config_json", "type": "JSON", "mode": "REQUIRED"},
+        {"name": "created_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
+    ],
+    "indigestible_records": [
+        {"name": "event_id", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "source_name", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "row_number", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "errors", "type": "JSON", "mode": "REQUIRED"},
+        {"name": "raw_record", "type": "JSON", "mode": "REQUIRED"},
     ],
     "whitespace_candidates": [
         {"name": "analysis_run_id", "type": "STRING", "mode": "REQUIRED"},
@@ -126,7 +176,7 @@ def build_table_rows(
                 "analysis_run_id": analysis_run_id,
                 "run_name": config.get("run_name", "competitive_whitespace"),
                 "subject_brand_name": config["subject_brand"],
-                "config_json": config_for_storage,
+                "config_json": json.dumps(config_for_storage, sort_keys=True),
                 "generated_at": generated_at,
             }
         )
@@ -174,12 +224,41 @@ def build_table_rows(
                 "name": row.name,
                 "address": row.address,
                 "city_name": row.city,
+                "town": row.town,
                 "state_code": row.state,
+                "province": row.province,
                 "zip_code": row.zip5,
+                "country": row.country,
                 "latitude": row.latitude,
                 "longitude": row.longitude,
                 "first_observed_at": row.observed_at,
                 "last_observed_at": row.observed_at,
+                # Enhanced location fields
+                "franchise_name": row.franchise_name,
+                "concept_type": row.concept_type,
+                "cuisine_type": row.cuisine_type,
+                "neighborhood": row.neighborhood,
+                "district": row.district,
+                "phone_number": row.phone_number,
+                "website_url": row.website_url,
+                "google_maps_link": row.google_maps_link,
+                "social_media_handles": row.social_media_handles,
+                "operating_hours": row.operating_hours,
+                "seating_capacity": row.seating_capacity,
+                "service_types": row.service_types,
+                "opening_date": row.opening_date,
+                "status": row.status,
+                "annual_revenue": row.annual_revenue,
+                "average_ticket_size": row.average_ticket_size,
+                "daily_footfall": row.daily_footfall,
+                "monthly_footfall": row.monthly_footfall,
+                "rental_cost": row.rental_cost,
+                "lease_cost": row.lease_cost,
+                "population_density": row.population_density,
+                "average_household_income": row.average_household_income,
+                "competitor_count": row.competitor_count,
+                "foot_traffic_score": row.foot_traffic_score,
+                "parking_availability": row.parking_availability,
             }
             for row in locations
         ],
@@ -190,13 +269,14 @@ def build_table_rows(
                 "source_name": row.source,
                 "source_location_id": row.location_id,
                 "observed_at": row.observed_at,
-                "raw_payload": row.raw,
+                "raw_payload": json.dumps(row.raw, sort_keys=True),
             }
             for row in locations
         ],
         "reviews": [],
         "analysis_runs": analysis_runs,
         "whitespace_candidates": whitespace_candidates,
+        "mapper_configs": [],
     }
 
 
@@ -245,9 +325,23 @@ def push_to_bigquery(
             for field in TABLE_SCHEMAS[table_name]
         ]
         table_ref = f"{project_id}.{dataset_id}.{table_name}"
+        LOGGER.info("db_table_prepare table=%s rows=%d", table_ref, len(rows))
         table = bigquery.Table(table_ref, schema=schema)
-        client.create_table(table, exists_ok=True)
+        try:
+            existing = client.get_table(table_ref)
+        except Exception as exc:
+            if getattr(exc, "code", None) != 404:
+                raise
+            client.create_table(table)
+        else:
+            existing_names = {field.name for field in existing.schema}
+            missing_fields = [field for field in schema if field.name not in existing_names]
+            if missing_fields:
+                existing.schema = list(existing.schema) + missing_fields
+                client.update_table(existing, ["schema"])
         if rows:
             errors = client.insert_rows_json(table_ref, rows)
             if errors:
+                LOGGER.error("db_insert_failed table=%s rows=%d error_count=%d errors=%s", table_ref, len(rows), len(errors), errors)
                 raise RuntimeError(f"BigQuery insert errors for {table_name}: {errors}")
+            LOGGER.info("db_insert_succeeded table=%s rows=%d", table_ref, len(rows))

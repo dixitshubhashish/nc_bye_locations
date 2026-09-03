@@ -26,7 +26,11 @@ Launch the local mapper UI for adding a new brand source:
 python3 -m whitespace_tool mapper-ui
 ```
 
-Open `http://127.0.0.1:8765/mapper.html`, upload a source, map source columns/paths to BigQuery target fields, then download the generated mapper JSON into `configs/mappers/`.
+Open `http://127.0.0.1:8765/mapper.html`, upload a source, map source columns/paths to the generic target fields, then choose `Save`. The server validates required mappings, stores a scrubbed mapper config in `mapper_configs`, and writes the normalized rows to `restaurants` and `source_observations`.
+
+Mapper requests and BigQuery failures are recorded in the daily rotating `logs/mapper.log` file. Save errors include a request ID in the UI response so the matching traceback can be found in that log. Set `MAPPER_LOG_DIR` to change the log directory.
+
+Every parsed source type (CSV, Excel, JSON, XML, and GET API JSON) uses the shared validators in `whitespace_tool/data_validation/`. Rows with invalid mapped types or missing mandatory location values are written to `indigestible_records`; valid rows are written to the digestible location tables.
 
 Supported mapper inputs:
 

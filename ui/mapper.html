@@ -33,6 +33,10 @@
       border-bottom: 1px solid var(--line);
       background: #ffffff;
       padding: 18px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
     }
 
     h1 {
@@ -139,6 +143,25 @@
       font-weight: 800;
     }
 
+    select.auto-mapped {
+      border-color: #d98aa8;
+      background: #fff0f5;
+    }
+
+    .mapping-note {
+      color: var(--muted);
+      font-size: 12px;
+      margin: -4px 0 12px;
+    }
+
+    .optional-picker {
+      display: flex;
+      gap: 8px;
+      align-items: end;
+    }
+
+    .optional-picker select { flex: 1; }
+
     .status {
       border-radius: 6px;
       padding: 10px 12px;
@@ -215,6 +238,71 @@
 
     .field-group.hidden { display: none; }
 
+    .label-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin: 12px 0 6px;
+    }
+
+    .label-row label {
+      margin: 0;
+    }
+
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    .checkbox-row input {
+      width: auto;
+      margin: 0;
+    }
+
+    .info-icon {
+      position: relative;
+      display: inline-grid;
+      place-items: center;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      background: #ffffff;
+      font-size: 12px;
+      font-weight: 800;
+      cursor: help;
+    }
+
+    .info-icon:focus {
+      outline: 2px solid #9ccdc5;
+      outline-offset: 2px;
+    }
+
+    .info-icon:hover::after,
+    .info-icon:focus::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      left: 24px;
+      top: -8px;
+      width: 260px;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #ffffff;
+      color: var(--ink);
+      box-shadow: 0 10px 24px rgba(31, 41, 51, 0.12);
+      font-size: 12px;
+      font-weight: 500;
+      line-height: 1.4;
+      z-index: 5;
+    }
+
     .source-row {
       display: grid;
       grid-template-columns: 1fr 1fr auto;
@@ -230,6 +318,63 @@
 
     .source-row label {
       margin-top: 0;
+    }
+
+    .entity-map {
+      display: grid;
+      grid-template-columns: minmax(180px, 0.8fr) minmax(320px, 1.6fr);
+      gap: 16px;
+      align-items: start;
+    }
+
+    .entity-column {
+      display: grid;
+      gap: 12px;
+    }
+
+    .entity-box {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+      overflow: hidden;
+    }
+
+    .entity-title {
+      padding: 10px 12px;
+      background: #eef3ef;
+      color: var(--ink);
+      font-weight: 750;
+    }
+
+    .entity-subtitle {
+      padding: 8px 12px 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .entity-fields {
+      padding: 8px 12px 12px;
+      display: grid;
+      gap: 6px;
+    }
+
+    .entity-field {
+      display: grid;
+      grid-template-columns: minmax(120px, 1fr) minmax(120px, 1fr);
+      gap: 8px;
+      padding: 7px 8px;
+      border: 1px solid #e3e8e3;
+      border-radius: 5px;
+      font-size: 12px;
+    }
+
+    .entity-field-name { font-weight: 700; }
+    .entity-field-source { color: var(--muted); overflow-wrap: anywhere; }
+    .entity-field-source.mapped { color: var(--ok); }
+    .entity-field-source.unmapped { color: #8a9298; font-style: italic; }
+
+    @media (max-width: 900px) {
+      .entity-map { grid-template-columns: 1fr; }
     }
 
     @media (max-width: 900px) {
@@ -249,6 +394,10 @@
       <input id="loginUser" autocomplete="username" value="admin">
       <label for="loginPassword">Password</label>
       <input id="loginPassword" type="password" autocomplete="current-password">
+      <label class="checkbox-row" for="rememberLogin">
+        <input id="rememberLogin" type="checkbox">
+        Remember login
+      </label>
       <div class="button-row">
         <button id="loginBtn">Login</button>
       </div>
@@ -259,6 +408,7 @@
   <div id="appShell" class="hidden">
     <header>
       <h1>Brand Source Mapper</h1>
+      <button class="secondary" id="resetMappingBtn" type="button">Reset to Default Mapping</button>
     </header>
     <main>
     <aside>
@@ -273,14 +423,22 @@
           <option value="api_get_json">GET API JSON</option>
         </select>
 
+        <div class="field-group file-field">
+        <label for="fileInput">Upload source file</label>
+        <input id="fileInput" type="file" accept=".csv,.xlsx,.xls,.json,.xml,application/json,text/csv,application/xml,text/xml">
+        </div>
+
         <label for="brandName">Brand name</label>
-        <input id="brandName" placeholder="Example: Papa Johns">
+        <input id="brandName" placeholder="Example: Domino's">
 
         <label for="sourceName">Source name</label>
-        <input id="sourceName" placeholder="Example: papa_johns_locator_api">
+        <input id="sourceName" placeholder="Example: dominos_store_locator_api">
 
         <div class="field-group record-field">
-        <label for="recordPath">Record path</label>
+        <div class="label-row">
+          <label for="recordPath">Record path</label>
+          <span class="info-icon" tabindex="0" data-tooltip="Use this when records are inside a nested response. Example: locations or data.stores for JSON/API. For Excel, the selected sheet name is used. CSV usually does not need this.">i</span>
+        </div>
         <input id="recordPath" placeholder="JSON: stores or data.locations; Excel: sheet1">
         </div>
 
@@ -331,11 +489,6 @@
         <button class="secondary" id="addHeaderBtn" type="button">Add Header</button>
         </div>
 
-        <div class="field-group file-field">
-        <label for="fileInput">Upload source file</label>
-        <input id="fileInput" type="file" accept=".csv,.xlsx,.xls,.json,.xml,application/json,text/csv,application/xml,text/xml">
-        </div>
-
         <div class="button-row">
           <button id="parseBtn">Parse Source</button>
           <button class="secondary" id="resetBtn">Reset</button>
@@ -346,8 +499,19 @@
         <h2>Mapper JSON</h2>
         <textarea id="mapperOutput" spellcheck="false"></textarea>
         <div class="button-row">
-          <button id="downloadBtn">Download Mapper</button>
+          <button id="saveBtn">Save</button>
           <button class="secondary" id="copyBtn">Copy</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Optional Fields</h2>
+        <div class="mapping-note">Add more fields to the mapping grid when the source provides them.</div>
+        <div class="optional-picker">
+          <select id="optionalFieldSelect" aria-label="Optional field to add">
+            <option value="">Choose a field</option>
+          </select>
+          <button class="secondary" id="addOptionalFieldBtn" type="button">Add</button>
         </div>
       </div>
     </aside>
@@ -356,37 +520,71 @@
       <div id="status" class="status">Upload a source file or enter a GET JSON API URL to begin.</div>
 
       <div class="panel">
-        <h2>Internal Schema Mapping</h2>
+        <h2>Field Mapping</h2>
         <div class="mapping-grid" id="mappingGrid"></div>
       </div>
 
       <div class="tabs">
         <button class="tab active" data-tab="sourcePreview">Source Preview</button>
-        <button class="tab" data-tab="normalizedPreview">Normalized Preview</button>
+        <button class="tab" data-tab="entityPreview">Data Model</button>
       </div>
 
       <div id="sourcePreview"></div>
-      <div id="normalizedPreview" class="hidden"></div>
+      <div id="entityPreview" class="hidden"></div>
     </section>
     </main>
   </div>
 
   <script>
     const mappingTargets = [
-      { key: "location_id", table: "restaurants", field: "location_key", label: "restaurants.location_key", required: false, hints: ["id", "storeid", "store_id", "locationid", "number"] },
-      { key: "name", table: "restaurants", field: "name", label: "restaurants.name", required: false, hints: ["name", "storename", "displayname"] },
-      { key: "address", table: "restaurants", field: "address", label: "restaurants.address", required: true, hints: ["address", "addressdescription", "line1", "street"] },
-      { key: "city", table: "restaurants", field: "city_name", label: "restaurants.city_name", required: true, hints: ["city", "town"] },
-      { key: "state", table: "restaurants", field: "state_code", label: "restaurants.state_code", required: true, hints: ["state", "region", "province", "state_code"] },
-      { key: "postal_code", table: "restaurants", field: "zip_code", label: "restaurants.zip_code", required: true, hints: ["zip", "zipcode", "zip_code", "postalcode", "postal_code"] },
-      { key: "latitude", table: "restaurants", field: "latitude", label: "restaurants.latitude", required: false, hints: ["lat", "latitude"] },
-      { key: "longitude", table: "restaurants", field: "longitude", label: "restaurants.longitude", required: false, hints: ["lng", "lon", "longitude"] },
-      { key: "observed_at", table: "source_observations", field: "observed_at", label: "source_observations.observed_at", required: false, hints: ["observed_at", "updatedat", "updated_at", "last_seen"] }
+      { key: "location_id", table: "restaurants", field: "location_key", label: "Location ID / Store ID", required: false, hints: ["locationid", "storeid", "store_id", "id", "number"] },
+      { key: "name", table: "restaurants", field: "name", label: "Restaurant Name", required: true, hints: ["name", "restaurantname", "storename", "displayname"] },
+      { key: "address", table: "restaurants", field: "address", label: "Street Address", required: true, hints: ["address", "addressdescription", "line1", "street"] },
+      { key: "city", table: "restaurants", field: "city_name", label: "City", required: true, hints: ["city", "town"] },
+      { key: "town", table: "restaurants", field: "town", label: "Town", required: false, hints: ["town", "locality"] },
+      { key: "state", table: "restaurants", field: "state_code", label: "State", required: true, hints: ["state", "region", "province", "state_code"] },
+      { key: "province", table: "restaurants", field: "province", label: "Province", required: false, hints: ["province", "region"] },
+      { key: "postal_code", table: "restaurants", field: "zip_code", label: "ZIP Code", required: true, hints: ["zip", "zipcode", "zip_code", "postalcode", "postal_code"] },
+      { key: "country", table: "restaurants", field: "country", label: "Country", required: false, hints: ["country", "countrycode"] },
+      { key: "latitude", table: "restaurants", field: "latitude", label: "Latitude", required: false, hints: ["lat", "latitude"] },
+      { key: "longitude", table: "restaurants", field: "longitude", label: "Longitude", required: false, hints: ["lng", "lon", "longitude"] },
+      { key: "franchise_name", table: "restaurants", field: "franchise_name", label: "Franchise Name", required: false, hints: ["franchise", "franchisename"] },
+      { key: "concept_type", table: "restaurants", field: "concept_type", label: "Concept Type", required: false, hints: ["concept", "concepttype"] },
+      { key: "cuisine_type", table: "restaurants", field: "cuisine_type", label: "Cuisine Type", required: false, hints: ["cuisine", "cuisinetype"] },
+      { key: "neighborhood", table: "restaurants", field: "neighborhood", label: "Neighborhood", required: false, hints: ["neighborhood"] },
+      { key: "district", table: "restaurants", field: "district", label: "District", required: false, hints: ["district"] },
+      { key: "phone_number", table: "restaurants", field: "phone_number", label: "Phone Number", required: false, hints: ["phone", "phonenumber", "telephone"] },
+      { key: "website_url", table: "restaurants", field: "website_url", label: "Website URL", required: false, hints: ["website", "websiteurl", "url"] },
+      { key: "google_maps_link", table: "restaurants", field: "google_maps_link", label: "Google Maps Link", required: false, hints: ["googlemaps", "mapsurl", "mapslink"] },
+      { key: "social_media_handles", table: "restaurants", field: "social_media_handles", label: "Social Media Handles", required: false, hints: ["social", "socialmedia", "handles"] },
+      { key: "operating_hours", table: "restaurants", field: "operating_hours", label: "Operating Hours", required: false, hints: ["hours", "operatinghours", "openhours"] },
+      { key: "seating_capacity", table: "restaurants", field: "seating_capacity", label: "Seating Capacity", required: false, hints: ["seating", "capacity", "seatingcapacity"] },
+      { key: "service_types", table: "restaurants", field: "service_types", label: "Service Types", required: false, hints: ["service", "servicetype", "services"] },
+      { key: "opening_date", table: "restaurants", field: "opening_date", label: "Opening Date", required: false, hints: ["openingdate", "opendate"] },
+      { key: "status", table: "restaurants", field: "status", label: "Status", required: false, hints: ["status", "storestatus"] },
+      { key: "annual_revenue", table: "restaurants", field: "annual_revenue", label: "Annual Revenue", required: false, hints: ["revenue", "annualrevenue"] },
+      { key: "average_ticket_size", table: "restaurants", field: "average_ticket_size", label: "Average Ticket Size", required: false, hints: ["ticket", "averageticket", "averageticketsize"] },
+      { key: "daily_footfall", table: "restaurants", field: "daily_footfall", label: "Daily Footfall", required: false, hints: ["dailyfootfall", "dailytraffic"] },
+      { key: "monthly_footfall", table: "restaurants", field: "monthly_footfall", label: "Monthly Footfall", required: false, hints: ["monthlyfootfall", "monthlytraffic"] },
+      { key: "rental_cost", table: "restaurants", field: "rental_cost", label: "Rental Cost", required: false, hints: ["rent", "rentalcost"] },
+      { key: "lease_cost", table: "restaurants", field: "lease_cost", label: "Lease Cost", required: false, hints: ["lease", "leasecost"] },
+      { key: "population_density", table: "restaurants", field: "population_density", label: "Population Density", required: false, hints: ["density", "populationdensity"] },
+      { key: "average_household_income", table: "restaurants", field: "average_household_income", label: "Average Household Income", required: false, hints: ["income", "householdincome", "averagehouseholdincome"] },
+      { key: "competitor_count", table: "restaurants", field: "competitor_count", label: "Competitor Count", required: false, hints: ["competitors", "competitorcount"] },
+      { key: "foot_traffic_score", table: "restaurants", field: "foot_traffic_score", label: "Foot Traffic Score", required: false, hints: ["foottraffic", "foottrafficscore"] },
+      { key: "parking_availability", table: "restaurants", field: "parking_availability", label: "Parking Availability", required: false, hints: ["parking", "parkingavailability"] },
+      { key: "observed_at", table: "source_observations", field: "observed_at", label: "Observed At", required: false, hints: ["observed_at", "updatedat", "updated_at", "last_seen"] }
     ];
+
+    const primaryMappingKeys = new Set(mappingTargets.slice(0, 20).map((target) => target.key));
+    let optionalMappingKeys = new Set();
 
     let sourceRows = [];
     let sourceFields = [];
     let resolvedRecordPath = "";
+    let mappingSelections = {};
+    let autoMappedKeys = new Set();
+    let sourceParsed = false;
 
     const el = (id) => document.getElementById(id);
 
@@ -523,19 +721,32 @@
         el("loginStatus").textContent = "Invalid username or password.";
         return;
       }
+      if (el("rememberLogin").checked) {
+        localStorage.setItem("mapper_login_remembered", "true");
+      } else {
+        localStorage.removeItem("mapper_login_remembered");
+      }
       el("loginScreen").classList.add("hidden");
       el("appShell").classList.remove("hidden");
     }
 
-    function suggestField(target) {
+    function restoreRememberedLogin() {
+      if (localStorage.getItem("mapper_login_remembered") === "true") {
+        el("rememberLogin").checked = true;
+        el("loginScreen").classList.add("hidden");
+        el("appShell").classList.remove("hidden");
+      }
+    }
+
+    function suggestField(target, usedFields = new Set()) {
       const normalizedFields = sourceFields.map((field) => ({ field, clean: normalizeName(field) }));
       for (const hint of target.hints) {
         const exact = normalizedFields.find((entry) => entry.clean === normalizeName(hint));
-        if (exact) return exact.field;
+        if (exact && !usedFields.has(exact.field)) return exact.field;
       }
       for (const hint of target.hints) {
         const cleanHint = normalizeName(hint);
-        const partial = normalizedFields.find((entry) => entry.clean.includes(cleanHint) || cleanHint.includes(entry.clean));
+        const partial = normalizedFields.find((entry) => !usedFields.has(entry.field) && (entry.clean.includes(cleanHint) || cleanHint.includes(entry.clean)));
         if (partial) return partial.field;
       }
       return "";
@@ -552,30 +763,79 @@
     function renderMappings() {
       const grid = el("mappingGrid");
       grid.innerHTML = `
-        <div class="mapping-head">BigQuery target field</div>
+        <div class="mapping-head">Business Field</div>
         <div class="mapping-head">Source field path</div>
         <div class="mapping-head">Sample value</div>
       `;
-      mappingTargets.forEach((target) => {
-        const selected = suggestField(target);
-        const options = ['<option value="">Not mapped</option>']
-          .concat(sourceFields.map((sourceField) => `<option value="${escapeHtml(sourceField)}">${escapeHtml(sourceField)}</option>`))
+      const visibleTargets = mappingTargets.filter((target) => primaryMappingKeys.has(target.key) || optionalMappingKeys.has(target.key));
+      const usedFields = new Set();
+      visibleTargets.forEach((target) => {
+        if (!Object.prototype.hasOwnProperty.call(mappingSelections, target.key)) {
+          const selected = suggestField(target, usedFields);
+          mappingSelections[target.key] = selected;
+          if (selected) autoMappedKeys.add(target.key);
+        }
+        if (mappingSelections[target.key]) usedFields.add(mappingSelections[target.key]);
+      });
+      visibleTargets.forEach((target) => {
+        const hasSelection = Object.prototype.hasOwnProperty.call(mappingSelections, target.key);
+        const selected = hasSelection ? mappingSelections[target.key] : "";
+        if (selected) usedFields.add(selected);
+        const options = ['<option value="">Unmapped</option>']
+          .concat(sourceFields.map((sourceField) => {
+            const owner = Object.entries(mappingSelections).find(([, value]) => value === sourceField);
+            const ownerLabel = owner ? mappingTargets.find((item) => item.key === owner[0])?.label : "";
+            const title = ownerLabel ? ` title="Already mapped to ${escapeHtml(ownerLabel)}"` : "";
+            return `<option value="${escapeHtml(sourceField)}"${title}>${escapeHtml(sourceField)}${ownerLabel ? " &#10003;" : ""}</option>`;
+          }))
           .join("");
         grid.insertAdjacentHTML("beforeend", `
           <div>${target.label} ${target.required ? '<span class="required">*</span>' : ''}</div>
-          <select data-field="${target.key}">${options}</select>
+          <select data-field="${target.key}" class="${selected && autoMappedKeys.has(target.key) ? 'auto-mapped' : ''}">${options}</select>
           <div data-sample="${target.key}">${escapeHtml(selected ? sampleValue(selected) : "")}</div>
         `);
-        grid.querySelector(`select[data-field="${target.key}"]`).value = selected;
+        const select = grid.querySelector(`select[data-field="${target.key}"]`);
+        select.value = selected;
       });
       grid.querySelectorAll("select").forEach((select) => {
         select.addEventListener("change", () => {
           const key = select.dataset.field;
-          grid.querySelector(`[data-sample="${key}"]`).textContent = sampleValue(select.value);
-          updateOutput();
+          const nextValue = select.value;
+          const previousOwner = Object.entries(mappingSelections).find(([otherKey, value]) => otherKey !== key && value === nextValue);
+          if (nextValue && previousOwner) {
+            const previousTarget = mappingTargets.find((target) => target.key === previousOwner[0]);
+            const currentTarget = mappingTargets.find((target) => target.key === key);
+            const move = window.confirm(`${nextValue} is already mapped to ${previousTarget.label}. Move it to ${currentTarget.label}?\n\nChoose Cancel to keep it mapped to ${previousTarget.label}.`);
+            if (!move) {
+              select.value = mappingSelections[key] || "";
+              return;
+            }
+            mappingSelections[previousOwner[0]] = "";
+            autoMappedKeys.delete(previousOwner[0]);
+            const previousSelect = grid.querySelector(`select[data-field="${previousOwner[0]}"]`);
+            if (previousSelect) {
+              previousSelect.value = "";
+              previousSelect.classList.remove("auto-mapped");
+              grid.querySelector(`[data-sample="${previousOwner[0]}"]`).textContent = "";
+            }
+            setStatus(`Moved ${nextValue} from ${previousTarget.label} to ${currentTarget.label}.`, "warn");
+          }
+          mappingSelections[key] = nextValue;
+          autoMappedKeys.delete(key);
+          renderMappings();
         });
       });
+      updateOptionalFieldPicker();
       updateOutput();
+    }
+
+    function updateOptionalFieldPicker() {
+      const picker = el("optionalFieldSelect");
+      const available = mappingTargets.filter((target) => !primaryMappingKeys.has(target.key) && !optionalMappingKeys.has(target.key));
+      picker.innerHTML = '<option value="">Choose a field</option>' + available
+        .map((target) => `<option value="${escapeHtml(target.key)}">${escapeHtml(target.label)}</option>`)
+        .join("");
+      el("addOptionalFieldBtn").disabled = available.length === 0;
     }
 
     function getMapper() {
@@ -621,10 +881,13 @@
     }
 
     function validateMapper(mapper) {
+      if (!sourceParsed) return;
       const missing = mappingTargets.filter((target) => target.required && !mapper.fields[target.key]).map((target) => target.label);
       if (!mapper.brand) missing.unshift("brand");
       if (missing.length) {
         setStatus(`Missing required mapping: ${missing.join(", ")}`, "warn");
+      } else if (mappingTargets.filter((target) => primaryMappingKeys.has(target.key) || optionalMappingKeys.has(target.key)).every((target) => mapper.fields[target.key])) {
+        setStatus(`Parsed ${sourceRows.length} records with ${sourceFields.length} source fields.`, "ok");
       } else {
         setStatus(`Parsed ${sourceRows.length} records with ${sourceFields.length} source fields.`, "ok");
       }
@@ -634,7 +897,49 @@
       const mapper = getMapper();
       el("mapperOutput").value = JSON.stringify(mapper, null, 2);
       validateMapper(mapper);
-      renderTable("normalizedPreview", normalizedRows());
+      renderEntityMap();
+    }
+
+    function renderEntityMap() {
+      const target = el("entityPreview");
+      const visibleTargets = mappingTargets.filter((item) => primaryMappingKeys.has(item.key) || optionalMappingKeys.has(item.key));
+      const mappedSourceFields = new Set(Object.values(mappingSelections).filter(Boolean));
+      const entityNames = {
+        restaurants: "Restaurant Locations",
+        source_observations: "Source History"
+      };
+      const groupedTargets = visibleTargets.reduce((groups, item) => {
+        (groups[item.table] ||= []).push(item);
+        return groups;
+      }, {});
+      const sourceItems = sourceFields.map((field) => `
+        <div class="entity-field">
+          <div class="entity-field-name">${escapeHtml(field)}</div>
+          <div class="entity-field-source ${mappedSourceFields.has(field) ? "mapped" : "unmapped"}">${mappedSourceFields.has(field) ? "&#10003; Mapped" : "Unmapped"}</div>
+        </div>
+      `).join("");
+      const entityItems = Object.entries(groupedTargets).map(([table, fields]) => `
+        <div class="entity-box">
+          <div class="entity-title">${escapeHtml(entityNames[table] || table)}</div>
+          <div class="entity-subtitle">Fields received from the source</div>
+          <div class="entity-fields">${fields.map((item) => {
+            const source = mappingSelections[item.key];
+            return `<div class="entity-field"><div class="entity-field-name">${escapeHtml(item.label)}</div><div class="entity-field-source ${source ? "mapped" : "unmapped"}">${source ? `&#8592; ${escapeHtml(source)}` : "Unmapped"}</div></div>`;
+          }).join("")}</div>
+        </div>
+      `).join("");
+      target.innerHTML = `
+        <div class="entity-map">
+          <div class="entity-column">
+            <div class="entity-box">
+              <div class="entity-title">Source Fields</div>
+              <div class="entity-subtitle">Available fields from the parsed source</div>
+              <div class="entity-fields">${sourceItems || '<div class="entity-field-source unmapped">Parse a source to view fields.</div>'}</div>
+            </div>
+          </div>
+          <div class="entity-column">${entityItems || '<div class="status">Parse a source to view the data model.</div>'}</div>
+        </div>
+      `;
     }
 
     function renderTable(targetId, rows) {
@@ -690,8 +995,11 @@
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Preview failed.");
         sourceRows = result.rows || [];
-        sourceFields = result.fields || [];
+        sourceFields = [...new Set((result.fields || []).filter((field) => field !== null && field !== undefined && String(field).trim()))];
+        sourceParsed = true;
         resolvedRecordPath = result.record_path || "";
+        mappingSelections = {};
+        autoMappedKeys = new Set();
         if (resolvedRecordPath && !el("recordPath").value.trim()) el("recordPath").value = resolvedRecordPath;
         if (sourceType === "excel" && resolvedRecordPath) el("sheetName").value = resolvedRecordPath;
         renderMappings();
@@ -699,6 +1007,7 @@
       } catch (error) {
         sourceRows = [];
         sourceFields = [];
+        sourceParsed = false;
         setStatus(error.message, "error");
       }
     }
@@ -732,14 +1041,29 @@
       }
     }
 
-    function downloadMapper() {
-      const brand = normalizeName(el("brandName").value) || "brand";
-      const blob = new Blob([el("mapperOutput").value + "\n"], { type: "application/json" });
-      const link = document.createElement("a");
-      link.href = URL.createObjectURL(blob);
-      link.download = `${brand}_mapper.json`;
-      link.click();
-      URL.revokeObjectURL(link.href);
+    async function saveMapper() {
+      const mapper = getMapper();
+      setStatus("Validating and saving rows...", "");
+      try {
+        const response = await fetch("/api/save", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ mapper, rows: sourceRows, source_fields: sourceFields })
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not save mapper.");
+        setStatus(`Saved ${result.mapped_rows} rows. ${result.indigestible_rows} rows held for review. Event: ${result.event_id}`, "ok");
+      } catch (error) {
+        setStatus(error.message, "error");
+      }
+    }
+
+    function resetMapping() {
+      mappingSelections = {};
+      autoMappedKeys = new Set();
+      optionalMappingKeys = new Set();
+      renderMappings();
+      setStatus("Mapping reset to the default auto-suggested fields.", "ok");
     }
 
     el("parseBtn").addEventListener("click", parseSource);
@@ -750,12 +1074,21 @@
     el("addQueryParamBtn").addEventListener("click", () => addPairRow("queryParams", "zip", "10001"));
     el("addHeaderBtn").addEventListener("click", () => addPairRow("customHeaders", "x-client-id", "value"));
     el("authType").addEventListener("change", updateAuthVisibility);
-    el("downloadBtn").addEventListener("click", downloadMapper);
+    el("saveBtn").addEventListener("click", saveMapper);
+    el("resetMappingBtn").addEventListener("click", resetMapping);
+    el("addOptionalFieldBtn").addEventListener("click", () => {
+      const key = el("optionalFieldSelect").value;
+      if (!key || primaryMappingKeys.has(key) || optionalMappingKeys.has(key)) return;
+      optionalMappingKeys.add(key);
+      renderMappings();
+    });
     el("copyBtn").addEventListener("click", () => navigator.clipboard.writeText(el("mapperOutput").value));
     el("resetBtn").addEventListener("click", () => location.reload());
     el("brandName").addEventListener("input", updateOutput);
     el("sourceName").addEventListener("input", updateOutput);
     el("fileInput").addEventListener("change", () => {
+      sourceParsed = false;
+      setStatus("Source changed. Select Parse to validate mappings.", "");
       const file = el("fileInput").files[0];
       if (file) el("sourceType").value = inferSourceType(file.name);
       el("sourceType").dispatchEvent(new Event("change"));
@@ -764,17 +1097,22 @@
     el("sheetName").addEventListener("change", () => {
       el("recordPath").value = el("sheetName").value;
     });
-    el("sourceType").addEventListener("change", updateSourceVisibility);
+    el("sourceType").addEventListener("change", () => {
+      sourceParsed = false;
+      setStatus("Source changed. Select Parse to validate mappings.", "");
+      updateSourceVisibility();
+    });
     document.querySelectorAll(".tab").forEach((button) => {
       button.addEventListener("click", () => {
         document.querySelectorAll(".tab").forEach((tab) => tab.classList.remove("active"));
         button.classList.add("active");
-        ["sourcePreview", "normalizedPreview"].forEach((id) => el(id).classList.toggle("hidden", id !== button.dataset.tab));
+        ["sourcePreview", "entityPreview"].forEach((id) => el(id).classList.toggle("hidden", id !== button.dataset.tab));
       });
     });
     addPairRow("queryParams", "limit", "100");
     addPairRow("customHeaders", "Accept", "application/json");
     updateSourceVisibility();
+    restoreRememberedLogin();
   </script>
 </body>
 </html>
