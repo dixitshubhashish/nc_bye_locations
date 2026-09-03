@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from whitespace_tool.models import LocationRecord, ZipDemographics
 
@@ -59,12 +60,49 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "observed_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
         {"name": "raw_payload", "type": "JSON", "mode": "NULLABLE"},
     ],
+    "reviews": [
+        {"name": "brand_name", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "location_key", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "review_source", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "rating", "type": "FLOAT", "mode": "NULLABLE"},
+        {"name": "review_count", "type": "INTEGER", "mode": "NULLABLE"},
+        {"name": "observed_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
+    ],
+    "analysis_runs": [
+        {"name": "analysis_run_id", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "run_name", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "subject_brand_name", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "config_json", "type": "JSON", "mode": "REQUIRED"},
+        {"name": "generated_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
+    ],
+    "whitespace_candidates": [
+        {"name": "analysis_run_id", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "zip_code", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "whitespace_type", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "similarity_distance", "type": "FLOAT", "mode": "REQUIRED"},
+        {"name": "competitors_present", "type": "STRING", "mode": "NULLABLE"},
+    ],
 }
+
+
+def _scrub_config(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _scrub_config(child)
+            for key, child in value.items()
+            if key not in {"credentials_json", "headers"} and not key.startswith("_")
+        }
+    if isinstance(value, list):
+        return [_scrub_config(child) for child in value]
+    return value
 
 
 def build_table_rows(
     locations: list[LocationRecord],
     demographics: dict[str, ZipDemographics],
+    config: dict[str, Any] | None = None,
+    whitespace_rows: list[dict[str, Any]] | None = None,
+    summary: dict[str, Any] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     states = sorted({row.state for row in locations if row.state})
     cities = sorted({(row.city, row.state) for row in locations if row.city and row.state})
@@ -72,6 +110,36 @@ def build_table_rows(
     zip_city_state = {}
     for row in locations:
         zip_city_state.setdefault(row.zip5, (row.city, row.state))
+
+    generated_at = None
+    analysis_run_id = None
+    analysis_runs: list[dict[str, Any]] = []
+    whitespace_candidates: list[dict[str, Any]] = []
+    if config is not None and whitespace_rows is not None:
+        from whitespace_tool.models import utc_now_iso
+
+        generated_at = utc_now_iso()
+        analysis_run_id = f"run_{uuid4().hex}"
+        config_for_storage = _scrub_config(config)
+        analysis_runs.append(
+            {
+                "analysis_run_id": analysis_run_id,
+                "run_name": config.get("run_name", "competitive_whitespace"),
+                "subject_brand_name": config["subject_brand"],
+                "config_json": config_for_storage,
+                "generated_at": generated_at,
+            }
+        )
+        whitespace_candidates = [
+            {
+                "analysis_run_id": analysis_run_id,
+                "zip_code": row["zip_code"],
+                "whitespace_type": row["whitespace_type"],
+                "similarity_distance": row["similarity_distance"],
+                "competitors_present": row["competitors_present"],
+            }
+            for row in whitespace_rows
+        ]
 
     return {
         "states": [{"state_code": state, "state_name": None} for state in states],
@@ -126,6 +194,9 @@ def build_table_rows(
             }
             for row in locations
         ],
+        "reviews": [],
+        "analysis_runs": analysis_runs,
+        "whitespace_candidates": whitespace_candidates,
     }
 
 

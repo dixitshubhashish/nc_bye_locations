@@ -2,12 +2,14 @@
 
 Python-only prototype for Birdeye's competitive whitespace assessment. It separates source-specific acquisition from a unified restaurant/location model, stages/pushes unified BigQuery tables, and produces ZIP-level whitespace candidates.
 
+Known assumptions and gaps are tracked in `ASSUMPTIONS_AND_GAPS.md`.
+
 ## Run
 
 ```bash
-python3 -m whitespace_tool analyze --config configs/demo.json --output-dir outputs/demo
-python3 -m whitespace_tool quality-check --config configs/demo.json --output-dir outputs/demo
-python3 -m whitespace_tool push-bigquery --config configs/demo.json --stage-dir outputs/bigquery --dry-run
+.venv/bin/python -m whitespace_tool analyze --config configs/demo.json --output-dir outputs/demo
+.venv/bin/python -m whitespace_tool quality-check --config configs/demo.json --output-dir outputs/demo
+.venv/bin/python -m whitespace_tool push-bigquery --config configs/demo.json --stage-dir outputs/bigquery --dry-run
 ```
 
 Fetch the first-module ZIP base table from BigQuery public data:
@@ -16,7 +18,7 @@ Fetch the first-module ZIP base table from BigQuery public data:
 .venv/bin/python -m whitespace_tool fetch-public-zips --config configuration/public_us_zips_bigquery.json --output data/us_zips_bigquery.csv
 ```
 
-Current tested fetch result: 33,791 ZIP geography rows. Known missing ACS fields from the public join are surfaced by quality checks: 868 rows missing population, 1,348 missing median age, and 2,948 missing median household income. The generated full CSV is intentionally not committed; regenerate it with the command above.
+Current tested fetch result: 33,791 ZIP geography rows. Known missing ACS fields from the public join are surfaced by quality checks: 868 rows missing population, 1,348 missing median age, and 2,948 missing median household income. The generated full CSV is optional export/debug output; analysis reads ZIP demographics from BigQuery.
 
 Launch the local mapper UI for adding a new brand source:
 
@@ -24,15 +26,20 @@ Launch the local mapper UI for adding a new brand source:
 python3 -m whitespace_tool mapper-ui
 ```
 
-Open `http://127.0.0.1:8765/mapper.html`, upload a CSV or JSON source, map source columns/paths to the internal location schema, then download the generated mapper JSON into `configs/mappers/`.
+Open `http://127.0.0.1:8765/mapper.html`, upload a source, map source columns/paths to BigQuery target fields, then download the generated mapper JSON into `configs/mappers/`.
 
-Optional Census ACS pull for all ZIP Code Tabulation Areas:
+Supported mapper inputs:
 
-```bash
-python3 -m whitespace_tool fetch-census --year 2024 --api-key YOUR_CENSUS_KEY --output data/us_zips_acs.csv
-```
+- CSV
+- Excel `.xlsx`
+- Excel `.xls`
+- JSON
+- XML
+- GET API with JSON response
 
-The demo config uses small sample files. For a real run, replace the files under `data/raw/` and point `configs/demo.json` at the new extracts.
+Each input type is handled by a separate Python backend module under `whitespace_tool/source_preview/`. Excel files expose sheet names in the UI so the user can choose which sheet to map.
+
+The demo config uses small sample files for brand locations only. ZIP geography and demographics are read from BigQuery public datasets.
 
 For a current/realtime-oriented run, start from `configs/live_bigquery.json`. It keeps ZIP demographics in BigQuery, requires live location sources where available, and marks snapshot sources so quality checks surface staleness instead of silently treating old extracts as current.
 
@@ -53,13 +60,7 @@ python3 scripts/test_bigquery_connection.py
 
 Put the downloaded service account file at `configuration/keen-device-610-2af9b27dfda3.json`, or edit `credentials_json` in `configuration/bigquery_connection.json`. That local config and credential file are ignored by git.
 
-To use public BigQuery ZIP/ZCTA demographics instead of a local CSV, start from:
-
-```bash
-python3 -m whitespace_tool analyze --config configs/bigquery_demographics_example.json --output-dir outputs/demo
-```
-
-That config uses a `demographics_source` of type `bigquery` and the same warehouse target: `keen-device-610.birdeye_interview`. If you are not using Application Default Credentials, set `credentials_json` in the config or pass `--credentials-json` when pushing warehouse tables.
+`configs/live_bigquery.json` uses a `demographics_source` of type `bigquery` and the same warehouse target: `keen-device-610.birdeye_interview`. If you are not using Application Default Credentials, set `credentials_json` in the config or pass `--credentials-json` when pushing warehouse tables.
 
 ## Approach
 
