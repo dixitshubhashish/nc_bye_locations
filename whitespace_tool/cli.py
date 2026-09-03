@@ -123,7 +123,7 @@ def main() -> None:
     analyze_parser.add_argument("--output-dir", default="outputs/demo", help="Directory for generated CSV/JSON outputs")
 
     public_zips_parser = subparsers.add_parser("fetch-public-zips", help="Fetch ZIP geography + ACS fields from BigQuery public data")
-    public_zips_parser.add_argument("--config", default="config/connections/public_us_zips_bigquery.json")
+    public_zips_parser.add_argument("--config", default="config/connections/storage.json")
     public_zips_parser.add_argument("--output", default="data/us_zips_bigquery.csv")
     public_zips_parser.add_argument("--limit", type=int, default=None, help="Optional row limit for inspection")
 

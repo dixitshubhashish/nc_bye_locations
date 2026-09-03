@@ -1,28 +1,25 @@
 from __future__ import annotations
 
 import argparse
-import json
+import sys
 from pathlib import Path
 from typing import Any
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from whitespace_tool.storage_config import load_storage_config
+
 
 def load_config(path: str) -> dict[str, Any]:
-    config_path = Path(path)
-    if not config_path.exists():
+    try:
+        return load_storage_config(path)
+    except FileNotFoundError as exc:
         raise SystemExit(
-            f"Missing {config_path}. Copy config/connections/bigquery_connection.example.json "
-            f"to {config_path}, then set your service account JSON path."
-        )
-    with config_path.open("r", encoding="utf-8") as fh:
-        config = json.load(fh)
-
-    credentials_json = config.get("credentials_json")
-    if credentials_json:
-        credentials_path = Path(credentials_json)
-        if not credentials_path.is_absolute():
-            credentials_path = config_path.parent.parent / credentials_path
-        config["credentials_json"] = str(credentials_path)
-    return config
+            f"Missing {path}. Copy config/connections/storage.example.json to {path}, "
+            "then set your service account JSON path."
+        ) from exc
 
 
 def run_query(config: dict[str, Any]) -> None:
@@ -42,7 +39,7 @@ def run_query(config: dict[str, Any]) -> None:
     else:
         client = bigquery.Client(project=project_id)
 
-    query = config["query"]
+    query = config.get("connection_test_query", "SELECT 1 AS connection_test")
     rows = list(client.query(query).result())
     print(f"Connection OK. Returned {len(rows)} rows.")
     for row in rows[:10]:
@@ -53,7 +50,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Test BigQuery service account connection")
     parser.add_argument(
         "--config",
-        default="config/connections/bigquery_connection.json",
+        default="config/connections/storage.json",
         help="Path to BigQuery connection config JSON",
     )
     args = parser.parse_args()

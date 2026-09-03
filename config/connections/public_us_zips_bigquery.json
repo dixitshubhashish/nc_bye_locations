@@ -1,5 +1,0 @@
-{
-  "project_id": "keen-device-610",
-  "credentials_json": "keen-device-610-2af9b27dfda3.json",
-  "public_us_zips_query": "SELECT z.zip_code, z.city, z.county, z.state_code, z.state_name, z.internal_point_lat AS latitude, z.internal_point_lon AS longitude, a.total_pop AS population, a.households, a.median_income AS median_household_income, a.income_per_capita, a.median_age, a.poverty, a.employed_pop AS employed_population, a.unemployed_pop AS unemployed_population, a.housing_units FROM `bigquery-public-data.geo_us_boundaries.zip_codes` z LEFT JOIN `bigquery-public-data.census_bureau_acs.zip_codes_2018_5yr` a ON z.zip_code = a.geo_id WHERE z.zip_code IS NOT NULL ORDER BY z.zip_code"
-}

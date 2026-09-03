@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from whitespace_tool.models import ZipDemographics
+from whitespace_tool.storage_config import load_storage_config
 
 
 def _number(value: str) -> float | None:
@@ -64,16 +65,23 @@ def fetch_bigquery_demographics(
     return rows
 
 
+def resolve_bigquery_connection(source: dict[str, Any], config: dict[str, Any]) -> tuple[str, str | None]:
+    storage = load_storage_config()
+    project_id = source.get("project_id") or storage.get("project_id")
+    credentials_json = source.get("credentials_json") or storage.get("credentials_json")
+    if not project_id:
+        raise ValueError("BigQuery project_id is missing from the storage configuration")
+    if source.get("credentials_json") and credentials_json and not Path(credentials_json).is_absolute():
+        credentials_json = str(Path(config["_config_dir"]) / credentials_json)
+    return str(project_id), credentials_json
+
+
 def load_demographics(config: dict[str, Any]) -> dict[str, ZipDemographics]:
     source = config["demographics_source"]
     if source["type"] == "bigquery":
-        credentials_json = source.get("credentials_json")
-        if credentials_json:
-            credentials_path = Path(credentials_json)
-            if not credentials_path.is_absolute():
-                credentials_json = str(Path(config["_config_dir"]) / credentials_path)
+        project_id, credentials_json = resolve_bigquery_connection(source, config)
         return fetch_bigquery_demographics(
-            source["project_id"],
+            project_id,
             source["query"],
             source.get("name", "bigquery_demographics"),
             credentials_json,
