@@ -13,15 +13,18 @@ import re
 from logging.handlers import TimedRotatingFileHandler
 
 from whitespace_tool.source_adapters import api_get_source, csv_source, excel_source, json_source, xml_source
-from whitespace_tool.data_validation import validate_source_row
+from whitespace_tool.data_validation import validate_normalized_location, validate_source_row
 from whitespace_tool.normalization import normalize_location
 from whitespace_tool.models import utc_now_iso
 from whitespace_tool.learning import suggest_from_templates
+from whitespace_tool.field_registry import load_field_registry
 from whitespace_tool.sources.demographics import fetch_bigquery_demographics
 from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows, clear_dataset_tables, push_to_bigquery
+from whitespace_tool.storage_config import load_storage_config
 
 
 SUPPORTED_SOURCE_TYPES = {"csv", "excel", "json", "xml", "api_get_json"}
+MINIMUM_US_ZIP_REFERENCE_ROWS = 30000
 
 
 def _build_logger() -> logging.Logger:
@@ -91,11 +94,98 @@ def source_sheets(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def mapper_targets() -> list[dict[str, Any]]:
-    return [
-        {"table": table, "field": field["name"], "type": field["type"], "mode": field["mode"]}
-        for table, fields in TABLE_SCHEMAS.items()
-        for field in fields
-    ]
+    return field_catalog()
+
+
+def field_catalog() -> list[dict[str, Any]]:
+    from google.cloud import bigquery
+
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    _ensure_dataset(client, project_id, dataset_id)
+    table_ref = f"{project_id}.{dataset_id}.field_catalog"
+    schema = [bigquery.SchemaField(field["name"], field["type"], mode=field["mode"], default_value_expression=field.get("default")) for field in TABLE_SCHEMAS["field_catalog"]]
+    try:
+        client.get_table(table_ref)
+    except Exception as exc:
+        if getattr(exc, "code", None) != 404:
+            raise
+        client.create_table(bigquery.Table(table_ref, schema=schema))
+    rows = [dict(row) for row in client.query(f"SELECT * FROM `{table_ref}` ORDER BY is_custom, label").result()]
+    if not rows:
+        now = utc_now_iso()
+        seed = []
+        for field in load_field_registry():
+            seed.append({
+                "field_id": str(uuid4()),
+                "slug": field["key"], "label": field["label"], "table_name": field["table"], "field_name": field["field"],
+                "data_type": field["type"], "required": field.get("required", False), "hints": json.dumps(field.get("hints", [])),
+                "aliases": json.dumps([]), "is_custom": False, "created_at": now, "updated_at": now,
+            })
+        load_job = client.load_table_from_json(seed, table_ref, job_config=bigquery.LoadJobConfig(schema=schema))
+        load_job.result()
+        rows = [dict(row) for row in client.query(f"SELECT * FROM `{table_ref}` ORDER BY is_custom, label").result()]
+    for row in rows:
+        for key in ("created_at", "updated_at"):
+            if hasattr(row.get(key), "isoformat"):
+                row[key] = row[key].isoformat()
+        for key in ("hints", "aliases"):
+            if isinstance(row.get(key), str):
+                row[key] = json.loads(row[key])
+        row["key"] = row.pop("slug")
+        row["table"] = row.pop("table_name")
+        row["field"] = row.pop("field_name")
+        row["type"] = row.pop("data_type")
+        row["hints"] = list(dict.fromkeys(row.get("hints", []) + row.get("aliases", [])))
+    return rows
+
+
+def add_field_alias(data: dict[str, Any]) -> dict[str, Any]:
+    from google.cloud import bigquery
+
+    if str(data.get("password", "")) != "54321":
+        raise ValueError("Administrative password required")
+    field_key = str(data.get("field_key", "")).strip()
+    alias = str(data.get("alias", "")).strip()
+    if not field_key or not alias:
+        raise ValueError("Standard field and source label are required")
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    table_ref = f"{project_id}.{dataset_id}.field_catalog"
+    current_query = f"SELECT aliases FROM `{table_ref}` WHERE slug = @slug LIMIT 1"
+    current_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("slug", "STRING", field_key)])
+    current = list(client.query(current_query, job_config=current_config).result())
+    if not current:
+        raise ValueError("Standard field was not found")
+    current_aliases = current[0]["aliases"]
+    if isinstance(current_aliases, str):
+        current_aliases = json.loads(current_aliases)
+    aliases = json.dumps(sorted(set(current_aliases or []) | {alias}))
+    query = f"UPDATE `{table_ref}` SET aliases = @aliases, updated_at = CURRENT_TIMESTAMP() WHERE slug = @slug"
+    config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("slug", "STRING", field_key), bigquery.ScalarQueryParameter("aliases", "JSON", aliases)])
+    client.query(query, job_config=config).result()
+    return {"field_key": field_key, "alias": alias}
+
+
+def create_custom_field(data: dict[str, Any]) -> dict[str, Any]:
+    label = str(data.get("label", "")).strip()
+    if not label:
+        raise ValueError("Field label is required")
+    if str(data.get("password", "")) != "54321":
+        raise ValueError("Administrative password required")
+    slug = re.sub(r"[^a-z0-9]+", "_", str(data.get("slug") or label.lower())).strip("_")
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    catalog = field_catalog()
+    if any(row["key"] == slug for row in catalog):
+        raise ValueError("A field with this slug already exists")
+    table_ref = f"{project_id}.{dataset_id}.field_catalog"
+    now = utc_now_iso()
+    field = {"field_id": str(uuid4()), "slug": slug, "label": label, "table_name": "listings", "field_name": slug, "data_type": data.get("type", "string"), "required": False, "hints": json.dumps([slug]), "aliases": json.dumps([]), "is_custom": True, "created_at": now, "updated_at": now}
+    errors = client.insert_rows_json(table_ref, [field])
+    if errors:
+        raise RuntimeError(f"Custom field could not be saved: {errors}")
+    return {"field": {"key": slug, "label": label, "table": "listings", "field": slug, "type": field["data_type"], "required": False, "hints": [slug], "is_custom": True}}
 
 
 REQUIRED_MAPPER_FIELDS = {"name", "address", "city", "state", "postal_code"}
@@ -136,15 +226,10 @@ def _scrub_mapper(mapper: dict[str, Any]) -> dict[str, Any]:
 
 
 def _warehouse_settings() -> tuple[str, str, str | None]:
-    warehouse_config = Path(os.environ.get("WORKFLOW_CONFIG", "config/demo.json"))
-    with warehouse_config.open("r", encoding="utf-8") as handle:
-        warehouse = json.load(handle).get("warehouse", {})
-    credentials_json = warehouse.get("credentials_json")
-    if credentials_json and not Path(credentials_json).is_absolute():
-        credentials_json = str(warehouse_config.parent / credentials_json)
-    if not warehouse.get("project_id") or not warehouse.get("dataset_id"):
+    storage_config = load_storage_config(os.environ.get("WORKFLOW_STORAGE_CONFIG", "config/connections/storage.json"))
+    if not storage_config.get("project_id") or not storage_config.get("bronze_dataset_id"):
         raise ValueError("Storage project and dataset are missing from the configuration")
-    return warehouse["project_id"], warehouse.get("bronze_dataset_id") or warehouse.get("dataset_id", ""), credentials_json
+    return storage_config["project_id"], storage_config["bronze_dataset_id"], storage_config.get("credentials_json")
 
 
 def _load_mapped_zip_demographics(zip_codes: set[str]) -> dict[str, Any]:
@@ -165,6 +250,38 @@ def _load_mapped_zip_demographics(zip_codes: set[str]) -> dict[str, Any]:
     )
     LOGGER.info("zip_lookup_succeeded requested=%d matched=%d", len(zip_codes), len(demographics))
     return demographics
+
+
+def prepare_zipcodes() -> dict[str, Any]:
+    from google.cloud import bigquery
+
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    table_ref = f"{project_id}.{dataset_id}.us_zipcodes"
+    _ensure_dataset(client, project_id, dataset_id)
+    try:
+        existing = client.get_table(table_ref)
+        count = next(iter(client.query(f"SELECT COUNT(*) AS total FROM `{table_ref}`").result()))["total"]
+        if count >= MINIMUM_US_ZIP_REFERENCE_ROWS:
+            LOGGER.info("zip_reference_ready table=%s rows=%d", table_ref, count)
+            return {"status": "ready", "rows": int(count), "loaded": False}
+    except Exception as exc:
+        if getattr(exc, "code", None) != 404:
+            raise
+
+    config_path = Path(os.environ.get("WORKFLOW_CONFIG", "config/demo.json"))
+    with config_path.open("r", encoding="utf-8") as handle:
+        config = json.load(handle)
+    source = config.get("demographics_source", {})
+    credentials_json = source.get("credentials_json")
+    if credentials_json and not Path(credentials_json).is_absolute():
+        credentials_json = str(config_path.parent / credentials_json)
+    LOGGER.info("zip_reference_load_started table=%s", table_ref)
+    demographics = fetch_bigquery_demographics(source["project_id"], source["query"], source.get("name", "public_demographics"), credentials_json)
+    rows = {"us_zipcodes": build_table_rows([], demographics)["us_zipcodes"]}
+    push_to_bigquery(project_id, dataset_id, rows, credentials_json, write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE)
+    LOGGER.info("zip_reference_load_succeeded table=%s rows=%d", table_ref, len(rows["us_zipcodes"]))
+    return {"status": "ready", "rows": len(rows["us_zipcodes"]), "loaded": True}
 
 
 def _bigquery_client(project_id: str, credentials_json: str | None):
@@ -221,7 +338,7 @@ def list_brands(search: str = "") -> dict[str, Any]:
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
     _ensure_businesses_table(client, project_id, dataset_id)
-    query = f"SELECT business_id, name, slug, website_url, status FROM `{project_id}.{dataset_id}.businesses` WHERE @search = '' OR LOWER(name) LIKE CONCAT('%', LOWER(@search), '%') ORDER BY name LIMIT 100"
+    query = f"SELECT business_id, name, slug, website_url, status FROM `{project_id}.{dataset_id}.businesses` WHERE is_deleted IS NOT TRUE AND (@search = '' OR LOWER(name) LIKE CONCAT('%', LOWER(@search), '%')) ORDER BY name LIMIT 100"
     config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("search", "STRING", search)])
     return {"brands": [dict(row) for row in client.query(query, job_config=config).result()]}
 
@@ -277,7 +394,7 @@ def create_brand(data: dict[str, Any]) -> dict[str, Any]:
         bigquery.ScalarQueryParameter("country_of_origin", "STRING", data.get("country_of_origin")),
     ]
     client.query(query, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
-    lookup = f"SELECT business_id, name, slug, website_url, status FROM `{project_id}.{dataset_id}.businesses` WHERE slug = @slug ORDER BY created_at DESC LIMIT 1"
+    lookup = f"SELECT business_id, name, slug, website_url, status FROM `{project_id}.{dataset_id}.businesses` WHERE is_deleted IS NOT TRUE AND slug = @slug ORDER BY created_at DESC LIMIT 1"
     result = list(client.query(lookup, job_config=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("slug", "STRING", slug)])).result())
     if not result:
         raise RuntimeError("Brand was created but its database-generated ID could not be read back")
@@ -303,6 +420,108 @@ def learn_mappings(data: dict[str, Any]) -> dict[str, Any]:
     return {"suggestions": suggest_from_templates(templates, source_fields, source_type)}
 
 
+def list_templates(search: str = "", business_id: str = "", source_type_id: str = "") -> dict[str, Any]:
+    from google.cloud import bigquery
+
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    query = f"SELECT workflow_template_id, business_id, name, components, created_at, updated_at FROM `{project_id}.{dataset_id}.workflow_templates` WHERE (@search = '' OR LOWER(name) LIKE CONCAT('%', LOWER(@search), '%')) AND (@business_id = '' OR business_id = @business_id) AND (@source_type_id = '' OR JSON_VALUE(components, '$.source_type_id') = @source_type_id OR JSON_VALUE(components, '$.mapper.source_type_id') = @source_type_id) ORDER BY updated_at DESC LIMIT 100"
+    config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("search", "STRING", search), bigquery.ScalarQueryParameter("business_id", "STRING", business_id), bigquery.ScalarQueryParameter("source_type_id", "STRING", source_type_id)])
+    templates = []
+    for row in client.query(query, job_config=config).result():
+        item = dict(row)
+        if hasattr(item.get("created_at"), "isoformat"):
+            item["created_at"] = item["created_at"].isoformat()
+        if hasattr(item.get("updated_at"), "isoformat"):
+            item["updated_at"] = item["updated_at"].isoformat()
+        if isinstance(item.get("components"), str):
+            item["components"] = json.loads(item["components"])
+        templates.append(item)
+    return {"templates": templates}
+
+
+def list_source_types() -> dict[str, Any]:
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    try:
+        rows = client.query(f"SELECT source_type_id, name FROM `{project_id}.{dataset_id}.source_types` ORDER BY name").result()
+    except Exception as exc:
+        if getattr(exc, "code", None) == 404:
+            return {"source_types": []}
+        raise
+    return {"source_types": [dict(row) for row in rows]}
+
+
+def save_template_version(data: dict[str, Any]) -> dict[str, Any]:
+    from google.cloud import bigquery
+
+    template_id = str(data.get("workflow_template_id", "")).strip()
+    components = data.get("components")
+    if not template_id or not isinstance(components, dict):
+        raise ValueError("workflow_template_id and components are required")
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    table_ref = f"{project_id}.{dataset_id}.workflow_templates"
+    query = f"UPDATE `{table_ref}` SET archived_components = components, components = @components, updated_at = CURRENT_TIMESTAMP() WHERE workflow_template_id = @template_id"
+    config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("template_id", "STRING", template_id), bigquery.ScalarQueryParameter("components", "JSON", json.dumps(components, sort_keys=True))])
+    client.query(query, job_config=config).result()
+    return {"workflow_template_id": template_id, "updated": True}
+
+
+def list_rejected(event_id: str = "") -> dict[str, Any]:
+    from google.cloud import bigquery
+
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    query = f"SELECT event_id, business_id, source_type_id, row_number, errors, raw_record FROM `{project_id}.{dataset_id}.error_listings` WHERE is_deleted IS NOT TRUE AND (@event_id = '' OR event_id = @event_id) ORDER BY event_id, row_number LIMIT 500"
+    config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("event_id", "STRING", event_id)])
+    try:
+        result_rows = client.query(query, job_config=config).result()
+    except Exception as exc:
+        if getattr(exc, "code", None) == 404:
+            return {"records": []}
+        raise
+    records = []
+    for row in result_rows:
+        item = dict(row)
+        for key in ("errors", "raw_record"):
+            if isinstance(item.get(key), str):
+                try:
+                    item[key] = json.loads(item[key])
+                except ValueError:
+                    pass
+        records.append(item)
+    return {"records": records}
+
+
+def count_error_listings(business_id: str = "") -> int:
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    query = f"SELECT COUNT(*) AS total FROM `{project_id}.{dataset_id}.error_listings` WHERE is_deleted IS NOT TRUE AND (@business_id = '' OR business_id = @business_id)"
+    from google.cloud import bigquery
+    config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("business_id", "STRING", business_id)])
+    try:
+        return int(next(iter(client.query(query, job_config=config).result()))["total"])
+    except Exception as exc:
+        if getattr(exc, "code", None) == 404:
+            return 0
+        raise
+
+
+def reprocess_rejected(data: dict[str, Any]) -> dict[str, Any]:
+    event_id = str(data.get("event_id", "")).strip()
+    mapper = data.get("mapper")
+    if not event_id or not isinstance(mapper, dict):
+        raise ValueError("event_id and mapper are required")
+    records = list_rejected(event_id)["records"]
+    selected_numbers = {int(value) for value in data.get("row_numbers", [])}
+    rows = [record["raw_record"] for record in records if not selected_numbers or record["row_number"] in selected_numbers]
+    if not rows:
+        raise ValueError("No rejected records were found for reprocessing")
+    source_fields = sorted({path for path in mapper.get("fields", {}).values() if path})
+    return save_mapper({"mapper": mapper, "rows": rows, "source_fields": source_fields})
+
+
 def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
     mapper = payload.get("mapper")
     rows = payload.get("rows")
@@ -323,6 +542,7 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
 
     source_name = str(mapper["source_name"]).strip()
     source_type_id = str(mapper.get("source_type_id", "")).strip() or ensure_source_type(str(mapper.get("source_type", "unknown")))
+    field_definitions = field_catalog()
     business_id = str(mapper.get("business_id", "")).strip()
     if not business_id:
         raise ValueError("Select an existing business or create a new business before saving")
@@ -330,7 +550,7 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
     mapper["business_id"] = business_id
     mapper["source_type_id"] = source_type_id
     locations = []
-    indigestible_records = []
+    error_listings = []
     for index, row in enumerate(rows):
         row_errors = validate_source_row(row, mapper)
         location = normalize_location(row, mapper, source_name, index)
@@ -338,13 +558,18 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
             row_errors.append({"field": "required_location", "reason": "missing brand or ZIP Code"})
         elif any(not str(getattr(location, field) or "").strip() for field in REQUIRED_LOCATION_VALUES):
             row_errors.append({"field": "required_location", "reason": "missing mandatory value"})
+        if location is not None:
+            row_errors.extend(validate_normalized_location(location, field_definitions))
         if row_errors:
-            indigestible_records.append({
+            error_listings.append({
                 "event_id": event_id,
+                "business_id": business_id,
                 "source_type_id": source_type_id,
                 "row_number": index + 1,
                 "errors": json.dumps(row_errors, sort_keys=True),
                 "raw_record": json.dumps(row, sort_keys=True),
+                "is_deleted": False,
+                "deleted_on": None,
             })
         elif location is not None:
             locations.append(location)
@@ -355,7 +580,7 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
     demographics = _load_mapped_zip_demographics({location.zip5 for location in locations})
     rows_by_table = build_table_rows(locations, demographics)
     rows_by_table["businesses"] = []
-    for record in indigestible_records:
+    for record in error_listings:
         record["source_type_id"] = source_type_id
     rows_by_table["source_types"] = []
     rows_by_table["workflow_templates"] = [{
@@ -364,7 +589,7 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
         "components": json.dumps({"mapper": mapper, "source_type_id": source_type_id}, sort_keys=True),
         "archived_components": None, "created_at": utc_now_iso(), "updated_at": utc_now_iso(),
     }]
-    rows_by_table["indigestible_records"] = indigestible_records
+    rows_by_table["error_listings"] = error_listings
     push_to_bigquery(project_id, dataset_id, rows_by_table, credentials_json)
     LOGGER.info(
         "save_succeeded mapper_id=%s dataset=%s mapped_rows=%d mapped_fields=%d",
@@ -373,20 +598,11 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
         len(locations),
         len(mapper["fields"]),
     )
-    return {"event_id": event_id, "mapper_id": mapper_id, "total_rows": len(rows), "mapped_rows": len(locations), "indigestible_rows": len(indigestible_records), "field_count": len(mapper["fields"]), "dataset": f"{project_id}.{dataset_id}"}
+    return {"event_id": event_id, "mapper_id": mapper_id, "total_rows": len(rows), "mapped_rows": len(locations), "error_listings": len(error_listings), "field_count": len(mapper["fields"]), "dataset": f"{project_id}.{dataset_id}"}
 
 
 def clear_saved_data() -> dict[str, Any]:
-    warehouse_config = Path(os.environ.get("WORKFLOW_CONFIG", "config/demo.json"))
-    with warehouse_config.open("r", encoding="utf-8") as handle:
-        warehouse = json.load(handle).get("warehouse", {})
-    project_id = warehouse.get("project_id")
-    dataset_id = warehouse.get("dataset_id")
-    credentials_json = warehouse.get("credentials_json")
-    if credentials_json and not Path(credentials_json).is_absolute():
-        credentials_json = str(warehouse_config.parent / credentials_json)
-    if not project_id or not dataset_id:
-        raise ValueError("Storage project and dataset are missing from the configuration")
+    project_id, dataset_id, credentials_json = _warehouse_settings()
     deleted = clear_dataset_tables(project_id, dataset_id, credentials_json)
     return {"dataset": f"{project_id}.{dataset_id}", "deleted_tables": deleted, "deleted_count": len(deleted)}
 
@@ -404,6 +620,15 @@ def make_handler(ui_dir: Path):
             if self.path == "/api/schema":
                 _json_response(self, 200, {"targets": mapper_targets()})
                 return
+            if self.path == "/api/field-registry":
+                _json_response(self, 200, {"fields": mapper_targets()})
+                return
+            if self.path == "/api/prepare":
+                try:
+                    _json_response(self, 200, prepare_zipcodes())
+                except Exception as exc:
+                    _json_response(self, 400, {"error": str(exc)})
+                return
             if self.path.startswith("/api/brands"):
                 from urllib.parse import parse_qs, urlsplit
                 search = parse_qs(urlsplit(self.path).query).get("search", [""])[0]
@@ -412,10 +637,44 @@ def make_handler(ui_dir: Path):
                 except Exception as exc:
                     _json_response(self, 400, {"error": str(exc)})
                 return
+            if self.path.startswith("/api/templates"):
+                from urllib.parse import parse_qs, urlsplit
+                params = parse_qs(urlsplit(self.path).query)
+                search = params.get("search", [""])[0]
+                business_id = params.get("business_id", [""])[0]
+                source_type_id = params.get("source_type_id", [""])[0]
+                try:
+                    _json_response(self, 200, list_templates(search, business_id, source_type_id))
+                except Exception as exc:
+                    _json_response(self, 400, {"error": str(exc)})
+                return
+            if self.path == "/api/source-types":
+                try:
+                    _json_response(self, 200, list_source_types())
+                except Exception as exc:
+                    _json_response(self, 400, {"error": str(exc)})
+                return
+
+            if self.path.startswith("/api/rejected"):
+                from urllib.parse import parse_qs, urlsplit
+                event_id = parse_qs(urlsplit(self.path).query).get("event_id", [""])[0]
+                try:
+                    _json_response(self, 200, list_rejected(event_id))
+                except Exception as exc:
+                    _json_response(self, 400, {"error": str(exc)})
+                return
+            if self.path.startswith("/api/error-listings/count"):
+                from urllib.parse import parse_qs, urlsplit
+                business_id = parse_qs(urlsplit(self.path).query).get("business_id", [""])[0]
+                try:
+                    _json_response(self, 200, {"count": count_error_listings(business_id)})
+                except Exception as exc:
+                    _json_response(self, 400, {"error": str(exc)})
+                return
             super().do_GET()
 
         def do_POST(self) -> None:
-            if self.path not in {"/api/preview", "/api/sheets", "/api/save", "/api/clear", "/api/brands", "/api/learning"}:
+            if self.path not in {"/api/preview", "/api/sheets", "/api/save", "/api/clear", "/api/brands", "/api/learning", "/api/reprocess", "/api/field-alias", "/api/custom-field", "/api/templates/save"}:
                 _json_response(self, 404, {"error": "Not found"})
                 return
             request_id = uuid4().hex
@@ -434,6 +693,14 @@ def make_handler(ui_dir: Path):
                     _json_response(self, 200, create_brand(payload))
                 elif self.path == "/api/learning":
                     _json_response(self, 200, learn_mappings(payload))
+                elif self.path == "/api/reprocess":
+                    _json_response(self, 200, reprocess_rejected(payload))
+                elif self.path == "/api/field-alias":
+                    _json_response(self, 200, add_field_alias(payload))
+                elif self.path == "/api/custom-field":
+                    _json_response(self, 200, create_custom_field(payload))
+                elif self.path == "/api/templates/save":
+                    _json_response(self, 200, save_template_version(payload))
                 else:
                     _json_response(self, 200, preview_source(payload))
             except Exception as exc:
@@ -448,5 +715,5 @@ def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
     handler = make_handler(ui_dir)
     socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer((host, port), handler) as httpd:
-        print(f"Workflow UI running at http://{host}:{port}/workflow_templates.html")
+        print(f"Workflow UI running at http://{host}:{port}/integrations.html")
         httpd.serve_forever()

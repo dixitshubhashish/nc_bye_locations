@@ -1,3 +1,18 @@
+CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.field_catalog` (
+  field_id STRING NOT NULL DEFAULT GENERATE_UUID(),
+  slug STRING NOT NULL,
+  label STRING NOT NULL,
+  table_name STRING NOT NULL,
+  field_name STRING NOT NULL,
+  data_type STRING NOT NULL,
+  required BOOL NOT NULL,
+  hints JSON NOT NULL,
+  aliases JSON NOT NULL,
+  is_custom BOOL NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
 CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.us_zipcodes` (
   zip_code STRING NOT NULL,
   city_name STRING,
@@ -30,7 +45,9 @@ CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.businesses` (
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP(),
   meta_title STRING,
   meta_description STRING,
-  country_of_origin STRING
+  country_of_origin STRING,
+  is_deleted BOOL DEFAULT FALSE,
+  deleted_on TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.listings` (
@@ -74,7 +91,9 @@ CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.listings` (
   ,average_household_income FLOAT64
   ,competitor_count INT64
   ,foot_traffic_score FLOAT64
-  ,parking_availability STRING
+  ,parking_availability STRING,
+  is_deleted BOOL DEFAULT FALSE,
+  deleted_on TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.workflow_templates` (
@@ -94,12 +113,15 @@ CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.source_types` (
   created_at TIMESTAMP NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.indigestible_records` (
+CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.error_listings` (
   event_id STRING NOT NULL,
+  business_id STRING NOT NULL,
   source_type_id STRING NOT NULL,
   row_number INT64 NOT NULL,
   errors JSON NOT NULL,
-  raw_record JSON NOT NULL
+  raw_record JSON NOT NULL,
+  is_deleted BOOL DEFAULT FALSE,
+  deleted_on TIMESTAMP
 );
 
 

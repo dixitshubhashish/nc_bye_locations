@@ -26,13 +26,13 @@ Launch the local workflow-template UI for adding a new brand source:
 python3 -m whitespace_tool workflow-ui
 ```
 
-Open `http://127.0.0.1:8765/workflow_templates.html`, upload a source, map source columns/paths to the generic target fields, then choose `Save`. The server validates required mappings, stores the workflow template, and writes bronze rows.
+Open `http://127.0.0.1:8765/integrations.html`, upload a source, map source columns/paths to the generic target fields, then choose `Save`. The server validates required mappings, stores the workflow template, and writes bronze rows.
 
 Mapper requests and BigQuery failures are recorded in the daily rotating `logs/mapper.log` file. Save errors include a request ID in the UI response so the matching traceback can be found in that log. Set `MAPPER_LOG_DIR` to change the log directory.
 
-The Workflow Templates view includes `Clear Saved Data`, a destructive action that requires confirmation and removes every table or view returned from the configured storage dataset. It does not delete the dataset itself, and every deletion is logged.
+The Workflow Templates view includes `Clear Saved Data`, a destructive action that requires confirmation. It soft-deletes user-entered business/listing/rejected data by setting `is_deleted` and `deleted_on`, while preserving `us_zipcodes`, `field_catalog`, `source_types`, and `workflow_templates`; it does not delete the dataset itself, and every action is logged.
 
-Every parsed source type (CSV, Excel, JSON, XML, and GET API JSON) uses the shared validators in `whitespace_tool/data_validation/`. Rows with invalid mapped types or missing mandatory location values are written to `indigestible_records`; valid rows are written to the bronze location tables.
+Every parsed source type (CSV, Excel, JSON, XML, and GET API JSON) uses the shared validators in `whitespace_tool/data_validation/`. Rows with invalid mapped types or missing mandatory location values are written to `error_listings`; valid rows are written to the bronze location tables.
 
 The medallion datasets are `birdeye_bronze_listings`, `birdeye_silver_listings`, and `birdeye_gold_listings`. The current mapper writes only to the bronze dataset.
 
