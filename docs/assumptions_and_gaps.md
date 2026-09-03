@@ -66,7 +66,7 @@ This document tracks known assumptions, data gaps, and deliberate tradeoffs in t
 
 - BigQuery is the only database/warehouse target.
 - Local generated JSONL files are dry-run/staging artifacts, not the source of truth.
-- BigQuery table definitions are in `bigquery_schema.sql`.
+- Bronze table definitions are in `database/bronze_schema.sql`.
 - BigQuery insert logic currently creates tables if missing and inserts JSON rows.
 - There is no production-grade merge/upsert strategy yet.
 - There is no partitioning or clustering strategy yet.

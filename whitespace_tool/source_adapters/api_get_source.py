@@ -4,7 +4,7 @@ import base64
 from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
 import urllib.request
 
-from whitespace_tool.source_preview.json_source import preview as preview_json
+from whitespace_tool.source_adapters.json_source import preview as preview_json
 
 
 def _clean_pairs(pairs: list[dict[str, str]] | None) -> dict[str, str]:

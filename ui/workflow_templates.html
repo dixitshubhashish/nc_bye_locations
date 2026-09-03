@@ -1,0 +1,1326 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Competitive Whitespace Tool</title>
+  <style>
+    :root {
+      --bg: #f6f7f4;
+      --panel: #ffffff;
+      --ink: #1f2933;
+      --muted: #607080;
+      --line: #d8ded8;
+      --accent: #24786d;
+      --accent-ink: #ffffff;
+      --warn: #9a5b13;
+      --error: #a52626;
+      --ok: #246b3d;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    header {
+      border-bottom: 1px solid var(--line);
+      background: #ffffff;
+      padding: 18px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .top-tabs {
+      display: flex;
+      gap: 6px;
+    }
+
+    .top-tab {
+      background: #ffffff;
+      color: var(--ink);
+      border-color: var(--line);
+    }
+
+    .top-tab.active {
+      background: var(--ink);
+      color: #ffffff;
+    }
+
+    header.reporting-active #productTitle,
+    header.reporting-active #resetMappingBtn,
+    header.reporting-active #clearDataBtn { visibility: hidden; }
+
+    .reporting-view {
+      height: calc(100vh - 71px);
+      padding: 0;
+    }
+
+    .reporting-frame { width: 100%; height: 100%; border: 0; display: block; }
+
+    .progress-wrap {
+      position: sticky;
+      top: 0;
+      z-index: 4;
+      padding: 10px 24px;
+      border-bottom: 1px solid var(--line);
+      background: #ffffff;
+    }
+
+    .progress-track {
+      height: 8px;
+      overflow: hidden;
+      border-radius: 4px;
+      background: #e8ece8;
+    }
+
+    .progress-fill {
+      width: 0;
+      height: 100%;
+      background: var(--accent);
+      transition: width 180ms ease;
+    }
+
+    .progress-label {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 700;
+    }
+
+    main {
+      display: grid;
+      grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
+      min-height: calc(100vh - 70px);
+    }
+
+    aside {
+      border-right: 1px solid var(--line);
+      background: #fbfcfa;
+      padding: 20px;
+    }
+
+    section {
+      padding: 20px 24px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+
+    h2 {
+      margin: 0 0 12px;
+      font-size: 15px;
+      font-weight: 700;
+    }
+
+    label {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+      margin: 12px 0 6px;
+    }
+
+    input, select, textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #ffffff;
+      color: var(--ink);
+      font: inherit;
+      padding: 9px 10px;
+    }
+
+    textarea {
+      min-height: 230px;
+      resize: vertical;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+    }
+
+    button {
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: var(--accent);
+      color: var(--accent-ink);
+      cursor: pointer;
+      font: inherit;
+      font-weight: 700;
+      padding: 9px 12px;
+    }
+
+    button.secondary {
+      background: #ffffff;
+      color: var(--ink);
+      border-color: var(--line);
+    }
+
+    .button-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 14px;
+    }
+
+    .action-feedback {
+      min-height: 20px;
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .action-feedback.ok { color: var(--ok); }
+    .action-feedback.error { color: var(--error); }
+
+    .mapping-grid {
+      display: grid;
+      grid-template-columns: minmax(160px, 220px) minmax(220px, 1fr) minmax(180px, 260px);
+      gap: 8px;
+      align-items: center;
+    }
+
+    .mapping-head {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      padding-bottom: 4px;
+    }
+
+    .required {
+      color: var(--error);
+      font-weight: 800;
+    }
+
+    select.auto-mapped {
+      border-color: #d98aa8;
+      background: #fff0f5;
+    }
+
+    .mapping-note {
+      color: var(--muted);
+      font-size: 12px;
+      margin: -4px 0 12px;
+    }
+
+    .optional-picker {
+      display: flex;
+      gap: 8px;
+      align-items: end;
+    }
+
+    .optional-picker select { flex: 1; }
+
+    .status {
+      border-radius: 6px;
+      padding: 10px 12px;
+      margin-bottom: 16px;
+      border: 1px solid var(--line);
+      background: #ffffff;
+      color: var(--muted);
+    }
+
+    .status.ok { color: var(--ok); border-color: #b9d6c3; background: #f2fbf5; }
+    .status.warn { color: var(--warn); border-color: #e5cfaa; background: #fff9ed; }
+    .status.error { color: var(--error); border-color: #e8bbbb; background: #fff5f5; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: #ffffff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 8px 10px;
+      text-align: left;
+      vertical-align: top;
+      font-size: 12px;
+      max-width: 260px;
+      overflow-wrap: anywhere;
+    }
+
+    th {
+      background: #eef3ef;
+      color: #334155;
+      font-weight: 750;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+
+    .tabs {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 14px;
+    }
+
+    .tab {
+      background: #ffffff;
+      color: var(--ink);
+      border-color: var(--line);
+    }
+
+    .tab.active {
+      background: var(--ink);
+      color: #ffffff;
+    }
+
+    .hidden { display: none !important; }
+
+    .login-screen {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+
+    .login-box {
+      width: min(420px, 100%);
+      background: #ffffff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 22px;
+    }
+
+    .field-group.hidden { display: none; }
+
+    .label-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin: 12px 0 6px;
+    }
+
+    .label-row label {
+      margin: 0;
+    }
+
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    .checkbox-row input {
+      width: auto;
+      margin: 0;
+    }
+
+    .info-icon {
+      position: relative;
+      display: inline-grid;
+      place-items: center;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      background: #ffffff;
+      font-size: 12px;
+      font-weight: 800;
+      cursor: help;
+    }
+
+    .info-icon:focus {
+      outline: 2px solid #9ccdc5;
+      outline-offset: 2px;
+    }
+
+    .info-icon:hover::after,
+    .info-icon:focus::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      left: 24px;
+      top: -8px;
+      width: 260px;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #ffffff;
+      color: var(--ink);
+      box-shadow: 0 10px 24px rgba(31, 41, 51, 0.12);
+      font-size: 12px;
+      font-weight: 500;
+      line-height: 1.4;
+      z-index: 5;
+    }
+
+    .source-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr auto;
+      gap: 8px;
+      align-items: end;
+      margin-top: 8px;
+    }
+
+    .source-row button {
+      min-width: 40px;
+      padding: 9px 10px;
+    }
+
+    .source-row label {
+      margin-top: 0;
+    }
+
+    .entity-map {
+      display: grid;
+      grid-template-columns: minmax(180px, 0.8fr) minmax(320px, 1.6fr);
+      gap: 16px;
+      align-items: start;
+    }
+
+    .entity-column {
+      display: grid;
+      gap: 12px;
+    }
+
+    .entity-box {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+      overflow: hidden;
+    }
+
+    .entity-title {
+      padding: 10px 12px;
+      background: #eef3ef;
+      color: var(--ink);
+      font-weight: 750;
+    }
+
+    .entity-subtitle {
+      padding: 8px 12px 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .entity-fields {
+      padding: 8px 12px 12px;
+      display: grid;
+      gap: 6px;
+    }
+
+    .entity-field {
+      display: grid;
+      grid-template-columns: minmax(120px, 1fr) minmax(120px, 1fr);
+      gap: 8px;
+      padding: 7px 8px;
+      border: 1px solid #e3e8e3;
+      border-radius: 5px;
+      font-size: 12px;
+    }
+
+    .entity-field-name { font-weight: 700; }
+    .entity-field-source { color: var(--muted); overflow-wrap: anywhere; }
+    .entity-field-source.mapped { color: var(--ok); }
+    .entity-field-source.unmapped { color: #8a9298; font-style: italic; }
+
+    @media (max-width: 900px) {
+      .entity-map { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 900px) {
+      main { grid-template-columns: 1fr; }
+      aside { border-right: 0; border-bottom: 1px solid var(--line); }
+      .mapping-grid { grid-template-columns: 1fr; }
+      .mapping-head { display: none; }
+      .source-row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div id="loginScreen" class="login-screen">
+    <div class="login-box">
+      <h1 id="productTitle">Competitive Whitespace Tool</h1>
+      <label for="loginUser">Username</label>
+      <input id="loginUser" autocomplete="username" value="admin">
+      <label for="loginPassword">Password</label>
+      <input id="loginPassword" type="password" autocomplete="current-password">
+      <label class="checkbox-row" for="rememberLogin">
+        <input id="rememberLogin" type="checkbox">
+        Remember login
+      </label>
+      <div class="button-row">
+        <button id="loginBtn">Login</button>
+      </div>
+      <div id="loginStatus" class="status hidden"></div>
+    </div>
+  </div>
+
+  <div id="appShell" class="hidden">
+    <header>
+      <h1>Competitive Whitespace Tool</h1>
+      <nav class="top-tabs" aria-label="Primary navigation">
+        <button class="top-tab active" data-view="mapperView" type="button">Workflow Templates</button>
+        <button class="top-tab" data-view="reportingView" type="button">Reporting</button>
+      </nav>
+      <button class="secondary" id="resetMappingBtn" type="button">Reset Template</button>
+      <button class="secondary" id="clearDataBtn" type="button">Clear Saved Data</button>
+    </header>
+    <div id="mapperView">
+    <div class="progress-wrap" aria-live="polite">
+      <div class="progress-label"><span id="progressMessage">Ready</span><span id="progressValue">0%</span></div>
+      <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
+    </div>
+    <main>
+    <aside>
+      <div class="panel">
+        <h2>Source</h2>
+        <label for="sourceType">Source format</label>
+        <select id="sourceType">
+          <option value="csv">CSV</option>
+          <option value="excel">Excel (.xlsx)</option>
+          <option value="json">JSON</option>
+          <option value="xml">XML</option>
+          <option value="api_get_json">GET API JSON</option>
+        </select>
+
+        <div class="field-group file-field">
+        <label for="fileInput">Upload source file</label>
+        <input id="fileInput" type="file" accept=".csv,.xlsx,.xls,.json,.xml,application/json,text/csv,application/xml,text/xml">
+        </div>
+
+        <label for="brandSelect">Business</label>
+        <select id="brandSelect" aria-label="Select business">
+          <option value="">Select an existing business</option>
+          <option value="__create_new__">Create New Business</option>
+        </select>
+        <div id="newBrandFields" class="field-group hidden">
+          <label for="newBrandName">Name</label><input id="newBrandName">
+          <label for="newBrandSlug">Slug</label><input id="newBrandSlug">
+          <label for="newBrandDescription">Description</label><textarea id="newBrandDescription"></textarea>
+          <label for="newBrandLogo">Logo URL</label><input id="newBrandLogo" type="url">
+          <label for="newBrandWebsite">Website URL</label><input id="newBrandWebsite" type="url">
+          <label for="newBrandStatus">Status</label><select id="newBrandStatus"><option value="active">Active</option><option value="inactive">Inactive</option></select>
+          <label for="newBrandMetaTitle">Meta Title</label><input id="newBrandMetaTitle">
+          <label for="newBrandMetaDescription">Meta Description</label><textarea id="newBrandMetaDescription"></textarea>
+          <label for="newBrandOrigin">Country of Origin</label><input id="newBrandOrigin">
+          <button id="createBrandBtn" type="button">Save Brand</button>
+        </div>
+
+        <label for="sourceName">Source name</label>
+        <input id="sourceName" placeholder="Example: dominos_store_locator_api">
+
+        <div class="field-group record-field">
+        <div class="label-row">
+          <label for="recordPath">Record path</label>
+          <span class="info-icon" tabindex="0" data-tooltip="Use this when records are inside a nested response. Example: locations or data.stores for JSON/API. For Excel, the selected sheet name is used. CSV usually does not need this.">i</span>
+        </div>
+        <input id="recordPath" placeholder="JSON: stores or data.locations; Excel: sheet1">
+        </div>
+
+        <div class="field-group excel-field">
+        <label for="sheetName">Excel sheet</label>
+        <select id="sheetName" disabled>
+          <option value="">Upload Excel to load sheets</option>
+        </select>
+        </div>
+
+        <div class="field-group api-field">
+        <label for="apiUrl">GET API URL</label>
+        <input id="apiUrl" placeholder="https://example.com/stores.json">
+
+        <label>Query parameters</label>
+        <div id="queryParams"></div>
+        <button class="secondary" id="addQueryParamBtn" type="button">Add Param</button>
+
+        <label for="authType">Authentication</label>
+        <select id="authType">
+          <option value="none">None</option>
+          <option value="bearer">Bearer token</option>
+          <option value="basic">Basic username/password</option>
+          <option value="api_key_header">API key header</option>
+        </select>
+
+        <div class="field-group auth-field auth-bearer">
+          <label for="bearerToken">Bearer token</label>
+          <input id="bearerToken" type="password" placeholder="Token">
+        </div>
+
+        <div class="field-group auth-field auth-basic">
+          <label for="basicUser">Basic username</label>
+          <input id="basicUser" autocomplete="off" placeholder="Username">
+          <label for="basicPassword">Basic password</label>
+          <input id="basicPassword" type="password" autocomplete="off" placeholder="Password">
+        </div>
+
+        <div class="field-group auth-field auth-api-key">
+          <label for="apiKeyName">API key header name</label>
+          <input id="apiKeyName" placeholder="x-api-key">
+          <label for="apiKeyValue">API key value</label>
+          <input id="apiKeyValue" type="password" placeholder="Key">
+        </div>
+
+        <label>Custom headers</label>
+        <div id="customHeaders"></div>
+        <button class="secondary" id="addHeaderBtn" type="button">Add Header</button>
+        </div>
+
+        <div class="button-row">
+          <button id="parseBtn">Parse Source</button>
+          <button class="secondary" id="resetBtn">Reset</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Workflow Template</h2>
+        <textarea id="mapperOutput" spellcheck="false"></textarea>
+        <div class="button-row">
+          <button id="saveBtn">Save Mapping Template</button>
+          <button class="secondary" id="copyBtn">Copy</button>
+        </div>
+        <div id="copyFeedback" class="action-feedback" role="status" aria-live="polite"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Optional Fields</h2>
+        <div class="mapping-note">Add more fields to the mapping grid when the source provides them.</div>
+        <div class="optional-picker">
+          <select id="optionalFieldSelect" aria-label="Optional field to add">
+            <option value="">Choose a field</option>
+          </select>
+          <button class="secondary" id="addOptionalFieldBtn" type="button">Add</button>
+        </div>
+      </div>
+    </aside>
+
+    <section>
+      <div id="status" class="status">Upload a source file or enter a GET JSON API URL to begin.</div>
+
+      <div class="panel">
+        <h2>Template Components</h2>
+        <div class="mapping-grid" id="mappingGrid"></div>
+      </div>
+
+      <div class="tabs">
+        <button class="tab active" data-tab="sourcePreview">Source Preview</button>
+        <button class="tab" data-tab="entityPreview">Data Model</button>
+      </div>
+
+      <div id="sourcePreview"></div>
+      <div id="entityPreview" class="hidden"></div>
+    </section>
+    </main>
+    </div>
+    <section id="reportingView" class="reporting-view hidden">
+      <iframe class="reporting-frame" title="Reporting dashboard" src="https://lookerstudio.google.com/embed/reporting/1f6e8f3c-2c43-4a55-9f4a-8a4b3f9e2d10/page/p_abc123"></iframe>
+    </section>
+  </div>
+
+  <script>
+    const mappingTargets = [
+      { key: "location_id", table: "listings", field: "location_key", label: "Location ID / Store ID", required: false, hints: ["locationid", "storeid", "store_id", "id", "number"] },
+      { key: "name", table: "listings", field: "name", label: "Restaurant Name", required: true, hints: ["name", "restaurantname", "storename", "displayname"] },
+      { key: "address", table: "listings", field: "address", label: "Street Address", required: true, hints: ["address", "addressdescription", "line1", "street"] },
+      { key: "city", table: "listings", field: "city_name", label: "City", required: true, hints: ["city", "town"] },
+      { key: "town", table: "listings", field: "town", label: "Town", required: false, hints: ["town", "locality"] },
+      { key: "state", table: "listings", field: "state_code", label: "State", required: true, hints: ["state", "region", "province", "state_code"] },
+      { key: "province", table: "listings", field: "province", label: "Province", required: false, hints: ["province", "region"] },
+      { key: "postal_code", table: "listings", field: "zip_code", label: "ZIP Code", required: true, hints: ["zip", "zipcode", "zip_code", "postalcode", "postal_code"] },
+      { key: "country", table: "listings", field: "country", label: "Country", required: false, hints: ["country", "countrycode"] },
+      { key: "latitude", table: "listings", field: "latitude", label: "Latitude", required: false, hints: ["lat", "latitude"] },
+      { key: "longitude", table: "listings", field: "longitude", label: "Longitude", required: false, hints: ["lng", "lon", "longitude"] },
+      { key: "franchise_name", table: "listings", field: "franchise_name", label: "Franchise Name", required: false, hints: ["franchise", "franchisename"] },
+      { key: "concept_type", table: "listings", field: "concept_type", label: "Concept Type", required: false, hints: ["concept", "concepttype"] },
+      { key: "cuisine_type", table: "listings", field: "cuisine_type", label: "Cuisine Type", required: false, hints: ["cuisine", "cuisinetype"] },
+      { key: "neighborhood", table: "listings", field: "neighborhood", label: "Neighborhood", required: false, hints: ["neighborhood"] },
+      { key: "district", table: "listings", field: "district", label: "District", required: false, hints: ["district"] },
+      { key: "phone_number", table: "listings", field: "phone_number", label: "Phone Number", required: false, hints: ["phone", "phonenumber", "telephone"] },
+      { key: "website_url", table: "listings", field: "website_url", label: "Website URL", required: false, hints: ["website", "websiteurl", "url"] },
+      { key: "google_maps_link", table: "listings", field: "google_maps_link", label: "Google Maps Link", required: false, hints: ["googlemaps", "mapsurl", "mapslink"] },
+      { key: "social_media_handles", table: "listings", field: "social_media_handles", label: "Social Media Handles", required: false, hints: ["social", "socialmedia", "handles"] },
+      { key: "operating_hours", table: "listings", field: "operating_hours", label: "Operating Hours", required: false, hints: ["hours", "operatinghours", "openhours"] },
+      { key: "seating_capacity", table: "listings", field: "seating_capacity", label: "Seating Capacity", required: false, hints: ["seating", "capacity", "seatingcapacity"] },
+      { key: "service_types", table: "listings", field: "service_types", label: "Service Types", required: false, hints: ["service", "servicetype", "services"] },
+      { key: "opening_date", table: "listings", field: "opening_date", label: "Opening Date", required: false, hints: ["openingdate", "opendate"] },
+      { key: "status", table: "listings", field: "status", label: "Status", required: false, hints: ["status", "storestatus"] },
+      { key: "annual_revenue", table: "listings", field: "annual_revenue", label: "Annual Revenue", required: false, hints: ["revenue", "annualrevenue"] },
+      { key: "average_ticket_size", table: "listings", field: "average_ticket_size", label: "Average Ticket Size", required: false, hints: ["ticket", "averageticket", "averageticketsize"] },
+      { key: "daily_footfall", table: "listings", field: "daily_footfall", label: "Daily Footfall", required: false, hints: ["dailyfootfall", "dailytraffic"] },
+      { key: "monthly_footfall", table: "listings", field: "monthly_footfall", label: "Monthly Footfall", required: false, hints: ["monthlyfootfall", "monthlytraffic"] },
+      { key: "rental_cost", table: "listings", field: "rental_cost", label: "Rental Cost", required: false, hints: ["rent", "rentalcost"] },
+      { key: "lease_cost", table: "listings", field: "lease_cost", label: "Lease Cost", required: false, hints: ["lease", "leasecost"] },
+      { key: "population_density", table: "listings", field: "population_density", label: "Population Density", required: false, hints: ["density", "populationdensity"] },
+      { key: "average_household_income", table: "listings", field: "average_household_income", label: "Average Household Income", required: false, hints: ["income", "householdincome", "averagehouseholdincome"] },
+      { key: "competitor_count", table: "listings", field: "competitor_count", label: "Competitor Count", required: false, hints: ["competitors", "competitorcount"] },
+      { key: "foot_traffic_score", table: "listings", field: "foot_traffic_score", label: "Foot Traffic Score", required: false, hints: ["foottraffic", "foottrafficscore"] },
+      { key: "parking_availability", table: "listings", field: "parking_availability", label: "Parking Availability", required: false, hints: ["parking", "parkingavailability"] },
+      { key: "observed_at", table: "listings", field: "first_observed_at", label: "Observed At", required: false, hints: ["observed_at", "updatedat", "updated_at", "last_seen"] }
+    ];
+
+    const primaryMappingKeys = new Set(mappingTargets.slice(0, 20).map((target) => target.key));
+    let optionalMappingKeys = new Set();
+
+    let sourceRows = [];
+    let sourceFields = [];
+    let resolvedRecordPath = "";
+    let mappingSelections = {};
+    let autoMappedKeys = new Set();
+    let learnedSuggestions = {};
+    let sourceParsed = false;
+    let selectedBrand = null;
+
+    const el = (id) => document.getElementById(id);
+
+    function normalizeName(value) {
+      return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function flattenObject(value, prefix = "", output = {}) {
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        Object.entries(value).forEach(([key, child]) => {
+          const path = prefix ? `${prefix}.${key}` : key;
+          flattenObject(child, path, output);
+        });
+      } else {
+        output[prefix] = value;
+      }
+      return output;
+    }
+
+    function getByPath(row, path) {
+      if (!path) return "";
+      return path.split(".").reduce((current, part) => {
+        if (current && typeof current === "object" && part in current) return current[part];
+        return "";
+      }, row);
+    }
+
+    function setStatus(message, type = "") {
+      el("status").className = `status ${type}`;
+      el("status").textContent = message;
+    }
+
+    function setProgress(percent, message) {
+      const boundedPercent = Math.max(0, Math.min(100, percent));
+      el("progressFill").style.width = `${boundedPercent}%`;
+      el("progressValue").textContent = `${boundedPercent}%`;
+      el("progressMessage").textContent = message;
+    }
+
+    function switchView(viewId) {
+      document.querySelectorAll("[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === viewId));
+      ["mapperView", "reportingView"].forEach((id) => el(id).classList.toggle("hidden", id !== viewId));
+      el("appShell").querySelector("header").classList.toggle("reporting-active", viewId === "reportingView");
+    }
+
+    function inferSourceType(fileName) {
+      const lower = fileName.toLowerCase();
+      if (lower.endsWith(".xlsx") || lower.endsWith(".xls")) return "excel";
+      if (lower.endsWith(".json")) return "json";
+      if (lower.endsWith(".xml")) return "xml";
+      return "csv";
+    }
+
+    function isExcelFile(file) {
+      if (!file) return false;
+      const lower = file.name.toLowerCase();
+      return lower.endsWith(".xlsx") || lower.endsWith(".xls");
+    }
+
+    function fileToBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result).split(",", 2)[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    function addPairRow(targetId, keyPlaceholder, valuePlaceholder, key = "", value = "") {
+      const row = document.createElement("div");
+      row.className = "source-row";
+      row.innerHTML = `
+        <div>
+          <label>Key</label>
+          <input data-pair-key placeholder="${escapeHtml(keyPlaceholder)}" value="${escapeHtml(key)}">
+        </div>
+        <div>
+          <label>Value</label>
+          <input data-pair-value placeholder="${escapeHtml(valuePlaceholder)}" value="${escapeHtml(value)}">
+        </div>
+        <button class="secondary" type="button" title="Remove">X</button>
+      `;
+      row.querySelector("button").addEventListener("click", () => row.remove());
+      el(targetId).appendChild(row);
+    }
+
+    function collectPairs(targetId) {
+      return Array.from(el(targetId).querySelectorAll(".source-row"))
+        .map((row) => ({
+          key: row.querySelector("[data-pair-key]").value.trim(),
+          value: row.querySelector("[data-pair-value]").value.trim()
+        }))
+        .filter((pair) => pair.key);
+    }
+
+    function collectAuth() {
+      const type = el("authType").value;
+      if (type === "bearer") {
+        return { type, token: el("bearerToken").value.trim() };
+      }
+      if (type === "basic") {
+        return { type, username: el("basicUser").value, password: el("basicPassword").value };
+      }
+      if (type === "api_key_header") {
+        return { type, key_name: el("apiKeyName").value.trim(), key_value: el("apiKeyValue").value.trim() };
+      }
+      return { type: "none" };
+    }
+
+    function updateAuthVisibility() {
+      const authType = el("authType").value;
+      document.querySelectorAll(".auth-field").forEach((field) => field.classList.add("hidden"));
+      if (authType === "bearer") document.querySelector(".auth-bearer").classList.remove("hidden");
+      if (authType === "basic") document.querySelector(".auth-basic").classList.remove("hidden");
+      if (authType === "api_key_header") document.querySelector(".auth-api-key").classList.remove("hidden");
+    }
+
+    function updateSourceVisibility() {
+      const sourceType = el("sourceType").value;
+      const isApi = sourceType === "api_get_json";
+      const isExcel = sourceType === "excel";
+      const hasRecordPath = ["json", "xml", "api_get_json"].includes(sourceType);
+
+      document.querySelectorAll(".api-field").forEach((field) => field.classList.toggle("hidden", !isApi));
+      document.querySelectorAll(".excel-field").forEach((field) => field.classList.toggle("hidden", !isExcel));
+      document.querySelectorAll(".file-field").forEach((field) => field.classList.toggle("hidden", isApi));
+      document.querySelectorAll(".record-field").forEach((field) => field.classList.toggle("hidden", !hasRecordPath));
+
+      el("fileInput").disabled = isApi;
+      el("apiUrl").disabled = !isApi;
+      el("sheetName").disabled = !isExcel || !el("sheetName").options.length;
+      updateAuthVisibility();
+    }
+
+    function login() {
+      const ok = el("loginUser").value.trim() === "admin" && el("loginPassword").value.trim() === "birdeye";
+      if (!ok) {
+        el("loginStatus").className = "status error";
+        el("loginStatus").textContent = "Invalid username or password.";
+        return;
+      }
+      if (el("rememberLogin").checked) {
+        localStorage.setItem("mapper_login_remembered", "true");
+      } else {
+        localStorage.removeItem("mapper_login_remembered");
+      }
+      el("loginScreen").classList.add("hidden");
+      el("appShell").classList.remove("hidden");
+    }
+
+    function restoreRememberedLogin() {
+      if (localStorage.getItem("mapper_login_remembered") === "true") {
+        el("rememberLogin").checked = true;
+        el("loginScreen").classList.add("hidden");
+        el("appShell").classList.remove("hidden");
+      }
+    }
+
+    function suggestField(target, usedFields = new Set()) {
+      const learned = learnedSuggestions[target.key]?.source;
+      if (learned && sourceFields.includes(learned) && !usedFields.has(learned)) return learned;
+      const normalizedFields = sourceFields.map((field) => ({ field, clean: normalizeName(field) }));
+      for (const hint of target.hints) {
+        const exact = normalizedFields.find((entry) => entry.clean === normalizeName(hint));
+        if (exact && !usedFields.has(exact.field)) return exact.field;
+      }
+      for (const hint of target.hints) {
+        const cleanHint = normalizeName(hint);
+        const partial = normalizedFields.find((entry) => !usedFields.has(entry.field) && (entry.clean.includes(cleanHint) || cleanHint.includes(entry.clean)));
+        if (partial) return partial.field;
+      }
+      return "";
+    }
+
+    function sampleValue(path) {
+      for (const row of sourceRows.slice(0, 10)) {
+        const value = getByPath(row, path);
+        if (value !== undefined && value !== null && value !== "") return String(value);
+      }
+      return "";
+    }
+
+    function renderMappings() {
+      const grid = el("mappingGrid");
+      grid.innerHTML = `
+        <div class="mapping-head">Business Field</div>
+        <div class="mapping-head">Source field path</div>
+        <div class="mapping-head">Sample value</div>
+      `;
+      const visibleTargets = mappingTargets.filter((target) => primaryMappingKeys.has(target.key) || optionalMappingKeys.has(target.key));
+      const usedFields = new Set();
+      visibleTargets.forEach((target) => {
+        if (!Object.prototype.hasOwnProperty.call(mappingSelections, target.key)) {
+          const selected = suggestField(target, usedFields);
+          mappingSelections[target.key] = selected;
+          if (selected) autoMappedKeys.add(target.key);
+        }
+        if (mappingSelections[target.key]) usedFields.add(mappingSelections[target.key]);
+      });
+      visibleTargets.forEach((target) => {
+        const hasSelection = Object.prototype.hasOwnProperty.call(mappingSelections, target.key);
+        const selected = hasSelection ? mappingSelections[target.key] : "";
+        if (selected) usedFields.add(selected);
+        const options = ['<option value="">Unmapped</option>']
+          .concat(sourceFields.map((sourceField) => {
+            const owner = Object.entries(mappingSelections).find(([, value]) => value === sourceField);
+            const ownerLabel = owner ? mappingTargets.find((item) => item.key === owner[0])?.label : "";
+            const title = ownerLabel ? ` title="Already mapped to ${escapeHtml(ownerLabel)}"` : "";
+            return `<option value="${escapeHtml(sourceField)}"${title}>${escapeHtml(sourceField)}${ownerLabel ? " &#10003;" : ""}</option>`;
+          }))
+          .join("");
+        grid.insertAdjacentHTML("beforeend", `
+          <div>${target.label} ${target.required ? '<span class="required">*</span>' : ''}</div>
+          <select data-field="${target.key}" class="${selected && autoMappedKeys.has(target.key) ? 'auto-mapped' : ''}">${options}</select>
+          <div data-sample="${target.key}">${escapeHtml(selected ? sampleValue(selected) : "")}</div>
+        `);
+        const select = grid.querySelector(`select[data-field="${target.key}"]`);
+        select.value = selected;
+      });
+      grid.querySelectorAll("select").forEach((select) => {
+        select.addEventListener("change", () => {
+          const key = select.dataset.field;
+          const nextValue = select.value;
+          const previousOwner = Object.entries(mappingSelections).find(([otherKey, value]) => otherKey !== key && value === nextValue);
+          if (nextValue && previousOwner) {
+            const previousTarget = mappingTargets.find((target) => target.key === previousOwner[0]);
+            const currentTarget = mappingTargets.find((target) => target.key === key);
+            const move = window.confirm(`${nextValue} is already mapped to ${previousTarget.label}. Move it to ${currentTarget.label}?\n\nChoose Cancel to keep it mapped to ${previousTarget.label}.`);
+            if (!move) {
+              select.value = mappingSelections[key] || "";
+              return;
+            }
+            mappingSelections[previousOwner[0]] = "";
+            autoMappedKeys.delete(previousOwner[0]);
+            const previousSelect = grid.querySelector(`select[data-field="${previousOwner[0]}"]`);
+            if (previousSelect) {
+              previousSelect.value = "";
+              previousSelect.classList.remove("auto-mapped");
+              grid.querySelector(`[data-sample="${previousOwner[0]}"]`).textContent = "";
+            }
+            setStatus(`Moved ${nextValue} from ${previousTarget.label} to ${currentTarget.label}.`, "warn");
+          }
+          mappingSelections[key] = nextValue;
+          autoMappedKeys.delete(key);
+          renderMappings();
+        });
+      });
+      updateOptionalFieldPicker();
+      updateOutput();
+    }
+
+    function updateOptionalFieldPicker() {
+      const picker = el("optionalFieldSelect");
+      const available = mappingTargets.filter((target) => !primaryMappingKeys.has(target.key) && !optionalMappingKeys.has(target.key));
+      picker.innerHTML = '<option value="">Choose a field</option>' + available
+        .map((target) => `<option value="${escapeHtml(target.key)}">${escapeHtml(target.label)}</option>`)
+        .join("");
+      el("addOptionalFieldBtn").disabled = available.length === 0;
+    }
+
+    function getMapper() {
+      const fields = {};
+      document.querySelectorAll("select[data-field]").forEach((select) => {
+        if (select.value) fields[select.dataset.field] = select.value;
+      });
+      const mapper = {
+        brand: selectedBrand?.name || "",
+        business_id: selectedBrand?.business_id || "",
+        source_name: el("sourceName").value.trim(),
+        source_type: el("sourceType").value,
+        fields
+      };
+      const recordPath = el("recordPath").value.trim() || resolvedRecordPath;
+      if (recordPath && ["json", "xml", "excel", "api_get_json"].includes(el("sourceType").value)) {
+        mapper.record_path = recordPath;
+      }
+      if (el("sourceType").value === "api_get_json") {
+        mapper.api_request = {
+          method: "GET",
+          url: el("apiUrl").value.trim(),
+          query_params: collectPairs("queryParams"),
+          headers: collectPairs("customHeaders"),
+          auth: collectAuth()
+        };
+      }
+      return mapper;
+    }
+
+    async function loadBrands(search = "") {
+      try {
+        const response = await fetch(`/api/brands?search=${encodeURIComponent(search)}`);
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not load brands.");
+        const brands = result.brands || [];
+        el("brandSelect").innerHTML = '<option value="">Select an existing business</option>' + brands.map((brand) => `<option value="${escapeHtml(brand.business_id)}">${escapeHtml(brand.name)}</option>`).join("") + '<option value="__create_new__">Create New Business</option>';
+        el("brandSelect").dataset.brands = JSON.stringify(brands);
+      } catch (error) {
+        setStatus(error.message, "error");
+      }
+    }
+
+    async function createNewBrand() {
+      const name = el("newBrandName").value.trim();
+      if (!name) { setStatus("Brand name is required.", "warn"); return; }
+      try {
+        const response = await fetch("/api/brands", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
+          name, slug: el("newBrandSlug").value.trim(), description: el("newBrandDescription").value.trim(), logo_url: el("newBrandLogo").value.trim(), website_url: el("newBrandWebsite").value.trim(), status: el("newBrandStatus").value, meta_title: el("newBrandMetaTitle").value.trim(), meta_description: el("newBrandMetaDescription").value.trim(), country_of_origin: el("newBrandOrigin").value.trim()
+        }) });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not create brand.");
+        selectedBrand = result.brand;
+        el("brandSelect").value = selectedBrand.business_id;
+        await loadBrands(selectedBrand.name);
+        el("brandSelect").value = selectedBrand.business_id;
+        el("newBrandFields").classList.add("hidden");
+        setStatus(`Brand ${selectedBrand.name} is ready for mapping.`, "ok");
+        updateOutput();
+      } catch (error) { setStatus(error.message, "error"); }
+    }
+
+    function normalizedRows() {
+      const mapper = getMapper();
+      return sourceRows.slice(0, 10).map((row, index) => {
+        const out = { brand: mapper.brand };
+        mappingTargets.forEach((target) => {
+          const path = mapper.fields[target.key];
+          out[`${target.table}.${target.field}`] = path ? getByPath(row, path) : "";
+        });
+        if (!out["restaurants.location_key"]) {
+          out["restaurants.location_key"] = `${normalizeName(mapper.brand) || "brand"}:${out["restaurants.zip_code"] || "zip"}:${index + 1}`;
+        }
+        return out;
+      });
+    }
+
+    function validateMapper(mapper) {
+      if (!sourceParsed) return;
+      const missing = mappingTargets.filter((target) => target.required && !mapper.fields[target.key]).map((target) => target.label);
+      if (!mapper.brand) missing.unshift("brand");
+      if (missing.length) {
+        setStatus(`Missing required mapping: ${missing.join(", ")}`, "warn");
+      } else if (mappingTargets.filter((target) => primaryMappingKeys.has(target.key) || optionalMappingKeys.has(target.key)).every((target) => mapper.fields[target.key])) {
+        setStatus(`Parsed ${sourceRows.length} records with ${sourceFields.length} source fields.`, "ok");
+      } else {
+        setStatus(`Parsed ${sourceRows.length} records with ${sourceFields.length} source fields.`, "ok");
+      }
+    }
+
+    function updateOutput() {
+      const mapper = getMapper();
+      el("mapperOutput").value = JSON.stringify(mapper, null, 2);
+      validateMapper(mapper);
+      renderEntityMap();
+    }
+
+    function renderEntityMap() {
+      const target = el("entityPreview");
+      const visibleTargets = mappingTargets.filter((item) => primaryMappingKeys.has(item.key) || optionalMappingKeys.has(item.key));
+      const mappedSourceFields = new Set(Object.values(mappingSelections).filter(Boolean));
+      const entityNames = {
+        listings: "Listings",
+        workflow_templates: "Workflow Templates",
+        source_types: "Source Types"
+      };
+      const groupedTargets = visibleTargets.reduce((groups, item) => {
+        (groups[item.table] ||= []).push(item);
+        return groups;
+      }, {});
+      const sourceItems = sourceFields.map((field) => `
+        <div class="entity-field">
+          <div class="entity-field-name">${escapeHtml(field)}</div>
+          <div class="entity-field-source ${mappedSourceFields.has(field) ? "mapped" : "unmapped"}">${mappedSourceFields.has(field) ? "&#10003; Mapped" : "Unmapped"}</div>
+        </div>
+      `).join("");
+      const entityItems = Object.entries(groupedTargets).map(([table, fields]) => `
+        <div class="entity-box">
+          <div class="entity-title">${escapeHtml(entityNames[table] || table)}</div>
+          <div class="entity-subtitle">Fields received from the source</div>
+          <div class="entity-fields">${fields.map((item) => {
+            const source = mappingSelections[item.key];
+            return `<div class="entity-field"><div class="entity-field-name">${escapeHtml(item.label)}</div><div class="entity-field-source ${source ? "mapped" : "unmapped"}">${source ? `&#8592; ${escapeHtml(source)}` : "Unmapped"}</div></div>`;
+          }).join("")}</div>
+        </div>
+      `).join("");
+      target.innerHTML = `
+        <div class="entity-map">
+          <div class="entity-column">
+            <div class="entity-box">
+              <div class="entity-title">Source Fields</div>
+              <div class="entity-subtitle">Available fields from the parsed source</div>
+              <div class="entity-fields">${sourceItems || '<div class="entity-field-source unmapped">Parse a source to view fields.</div>'}</div>
+            </div>
+          </div>
+          <div class="entity-column">${entityItems || '<div class="status">Parse a source to view the data model.</div>'}</div>
+        </div>
+      `;
+    }
+
+    function renderTable(targetId, rows) {
+      const target = el(targetId);
+      if (!rows.length) {
+        target.innerHTML = "";
+        return;
+      }
+      const columns = Object.keys(flattenObject(rows[0]));
+      const body = rows.map((row) => {
+        const flat = flattenObject(row);
+        return `<tr>${columns.map((col) => `<td>${escapeHtml(flat[col] ?? "")}</td>`).join("")}</tr>`;
+      }).join("");
+      target.innerHTML = `
+        <table>
+          <thead><tr>${columns.map((col) => `<th>${escapeHtml(col)}</th>`).join("")}</tr></thead>
+          <tbody>${body}</tbody>
+        </table>
+      `;
+    }
+
+    async function parseSource() {
+      setStatus("Parsing source in Python backend...", "");
+      try {
+        const file = el("fileInput").files[0];
+        let sourceType = el("sourceType").value;
+        const payload = {
+          source_type: sourceType,
+          record_path: el("recordPath").value.trim()
+        };
+        if (sourceType === "api_get_json") {
+          if (!el("apiUrl").value.trim()) throw new Error("Enter a GET API URL.");
+          payload.api_url = el("apiUrl").value.trim();
+          payload.query_params = collectPairs("queryParams");
+          payload.headers = Object.fromEntries(collectPairs("customHeaders").map((pair) => [pair.key, pair.value]));
+          payload.auth = collectAuth();
+        } else {
+          if (!file) throw new Error("Choose a source file.");
+          sourceType = inferSourceType(file.name);
+          el("sourceType").value = sourceType;
+          payload.source_type = sourceType;
+          payload.file_name = file.name;
+          payload.content_base64 = await fileToBase64(file);
+          if (sourceType === "excel" && el("sheetName").value) {
+            payload.record_path = el("sheetName").value;
+          }
+        }
+        const response = await fetch("/api/preview", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Preview failed.");
+        sourceRows = result.rows || [];
+        sourceFields = [...new Set((result.fields || []).filter((field) => field !== null && field !== undefined && String(field).trim()))];
+        sourceParsed = true;
+        learnedSuggestions = {};
+        try {
+          const learningResponse = await fetch("/api/learning", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ source_type: sourceType, source_fields: sourceFields })
+          });
+          if (learningResponse.ok) learnedSuggestions = (await learningResponse.json()).suggestions || {};
+        } catch (learningError) {
+          learnedSuggestions = {};
+        }
+        resolvedRecordPath = result.record_path || "";
+        mappingSelections = {};
+        autoMappedKeys = new Set();
+        if (resolvedRecordPath && !el("recordPath").value.trim()) el("recordPath").value = resolvedRecordPath;
+        if (sourceType === "excel" && resolvedRecordPath) el("sheetName").value = resolvedRecordPath;
+        renderMappings();
+        renderTable("sourcePreview", sourceRows.slice(0, 10).map((row) => flattenObject(row)));
+      } catch (error) {
+        sourceRows = [];
+        sourceFields = [];
+        sourceParsed = false;
+        setStatus(error.message, "error");
+      }
+    }
+
+    async function loadExcelSheets() {
+      const file = el("fileInput").files[0];
+      el("sheetName").innerHTML = '<option value="">Upload Excel to load sheets</option>';
+      el("sheetName").disabled = true;
+      if (!isExcelFile(file)) return;
+      try {
+        const payload = {
+          file_name: file.name,
+          content_base64: await fileToBase64(file)
+        };
+        const response = await fetch("/api/sheets", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not load sheets.");
+        const sheets = result.sheets || [];
+        el("sheetName").innerHTML = sheets.map((sheet) => `<option value="${escapeHtml(sheet)}">${escapeHtml(sheet)}</option>`).join("");
+        el("sheetName").disabled = sheets.length === 0;
+        if (sheets.length) {
+          el("recordPath").value = sheets[0];
+          setStatus(`Loaded ${sheets.length} Excel sheet${sheets.length === 1 ? "" : "s"}.`, "ok");
+        }
+      } catch (error) {
+        setStatus(error.message, "error");
+      }
+    }
+
+    async function saveMapper() {
+      const mapper = getMapper();
+      setStatus("Validating...", "");
+      setProgress(10, "Validating records");
+      try {
+        setProgress(35, `Preparing ${sourceRows.length} records`);
+        const response = await fetch("/api/save", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ mapper, rows: sourceRows, source_fields: sourceFields })
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not save workflow template.");
+        setProgress(100, "Processing complete");
+        setStatus(`Processing complete: ${result.mapped_rows} of ${result.total_rows} records processed successfully; ${result.indigestible_rows} rejected records are available under event ${result.event_id}.`, "ok");
+      } catch (error) {
+        setProgress(0, "Save failed");
+        setStatus(error.message, "error");
+      }
+    }
+
+    async function clearSavedData() {
+      if (!window.confirm("Clear all saved tables in the configured dataset? This cannot be undone.")) return;
+      setStatus("Clearing saved data...", "warn");
+      try {
+        const response = await fetch("/api/clear", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}"
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not clear saved data.");
+        setStatus(`Saved data cleared. ${result.deleted_count} tables removed.`, "ok");
+      } catch (error) {
+        setStatus(error.message, "error");
+      }
+    }
+
+    function resetMapping() {
+      mappingSelections = {};
+      autoMappedKeys = new Set();
+      optionalMappingKeys = new Set();
+      renderMappings();
+      setStatus("Mapping reset to the default auto-suggested fields.", "ok");
+    }
+
+    el("parseBtn").addEventListener("click", parseSource);
+    el("loginBtn").addEventListener("click", login);
+    el("loginPassword").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") login();
+    });
+    el("addQueryParamBtn").addEventListener("click", () => addPairRow("queryParams", "zip", "10001"));
+    el("addHeaderBtn").addEventListener("click", () => addPairRow("customHeaders", "x-client-id", "value"));
+    el("authType").addEventListener("change", updateAuthVisibility);
+    el("saveBtn").addEventListener("click", saveMapper);
+    el("resetMappingBtn").addEventListener("click", resetMapping);
+    el("clearDataBtn").addEventListener("click", clearSavedData);
+    document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
+    el("addOptionalFieldBtn").addEventListener("click", () => {
+      const key = el("optionalFieldSelect").value;
+      if (!key || primaryMappingKeys.has(key) || optionalMappingKeys.has(key)) return;
+      optionalMappingKeys.add(key);
+      renderMappings();
+    });
+    el("copyBtn").addEventListener("click", async () => {
+      const feedback = el("copyFeedback");
+      try {
+        await navigator.clipboard.writeText(el("mapperOutput").value);
+        feedback.className = "action-feedback ok";
+        feedback.textContent = "Workflow template copied to clipboard.";
+      } catch (error) {
+        feedback.className = "action-feedback error";
+        feedback.textContent = "Could not copy workflow template.";
+      }
+    });
+    el("resetBtn").addEventListener("click", () => location.reload());
+    el("brandSelect").addEventListener("change", (event) => {
+      if (event.target.value === "__create_new__") {
+        selectedBrand = null;
+        el("newBrandFields").classList.remove("hidden");
+        updateOutput();
+        return;
+      }
+      const brands = JSON.parse(event.target.dataset.brands || "[]");
+      selectedBrand = brands.find((brand) => brand.business_id === event.target.value) || null;
+      el("newBrandFields").classList.add("hidden");
+      updateOutput();
+    });
+    el("createBrandBtn").addEventListener("click", createNewBrand);
+    el("sourceName").addEventListener("input", updateOutput);
+    el("fileInput").addEventListener("change", () => {
+      sourceParsed = false;
+      setStatus("Source changed. Select Parse to validate mappings.", "");
+      const file = el("fileInput").files[0];
+      if (file) el("sourceType").value = inferSourceType(file.name);
+      el("sourceType").dispatchEvent(new Event("change"));
+      loadExcelSheets();
+    });
+    el("sheetName").addEventListener("change", () => {
+      el("recordPath").value = el("sheetName").value;
+    });
+    el("sourceType").addEventListener("change", () => {
+      sourceParsed = false;
+      setStatus("Source changed. Select Parse to validate mappings.", "");
+      updateSourceVisibility();
+    });
+    document.querySelectorAll(".tab").forEach((button) => {
+      button.addEventListener("click", () => {
+        document.querySelectorAll(".tab").forEach((tab) => tab.classList.remove("active"));
+        button.classList.add("active");
+        ["sourcePreview", "entityPreview"].forEach((id) => el(id).classList.toggle("hidden", id !== button.dataset.tab));
+      });
+    });
+    addPairRow("queryParams", "limit", "100");
+    addPairRow("customHeaders", "Accept", "application/json");
+    updateSourceVisibility();
+    loadBrands();
+    restoreRememberedLogin();
+  </script>
+</body>
+</html>

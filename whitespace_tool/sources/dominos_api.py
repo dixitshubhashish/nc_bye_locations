@@ -5,7 +5,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from whitespace_tool.mapper import load_mapper, normalize_location
+from whitespace_tool.normalization import load_mapper, normalize_location
 from whitespace_tool.models import LocationRecord
 
 

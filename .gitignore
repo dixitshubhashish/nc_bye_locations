@@ -1,10 +1,11 @@
 __pycache__/
 *.py[cod]
+logs/
 .DS_Store
 .venv/
 outputs/
 data/us_zips_bigquery.csv
-configuration/bigquery_connection.json
-configuration/*service*account*.json
-configuration/service_account.json
-configuration/keen-device-610-2af9b27dfda3.json
+config/connections/bigquery_connection.json
+config/connections/*service*account*.json
+config/connections/service_account.json
+config/connections/keen-device-610-2af9b27dfda3.json

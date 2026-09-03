@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from whitespace_tool.source_preview.common import choose_json_records, preview_payload
+from whitespace_tool.source_adapters.common import choose_json_records, preview_payload
 
 
 def preview(content: bytes, record_path: str | None = None) -> dict:
