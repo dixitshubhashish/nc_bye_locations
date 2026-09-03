@@ -6,11 +6,10 @@ from pathlib import Path
 from whitespace_tool.analysis import analyze_whitespace
 from whitespace_tool.config import load_config
 from whitespace_tool.data_quality import run_quality_checks
-from whitespace_tool.database import connect, load_demographics as load_demographics_table, load_restaurants
 from whitespace_tool.io import write_csv, write_demographics_csv, write_json
 from whitespace_tool.models import utc_now_iso
 from whitespace_tool.sources.csv_locations import load_location_sources
-from whitespace_tool.sources.demographics import fetch_acs_zcta, load_demographics
+from whitespace_tool.sources.demographics import load_demographics
 from whitespace_tool.warehouse_bigquery import (
     build_table_rows,
     push_to_bigquery,
@@ -46,23 +45,6 @@ def run_analysis(config_path: str, output_dir: str) -> None:
         },
     )
     print(f"Wrote {len(location_rows)} location rows and {len(whitespace_rows)} whitespace ZIP rows to {out}")
-
-
-def build_db(config_path: str, db_path: str) -> None:
-    config = load_config(config_path)
-    locations = load_location_sources(config)
-    demographics = load_demographics(config)
-    conn = connect(db_path)
-    with conn:
-        load_demographics_table(conn, demographics)
-        load_restaurants(conn, locations)
-    print(f"Wrote relational tables to {db_path}")
-
-
-def fetch_census(year: int, output_path: str, api_key: str | None) -> None:
-    demographics = fetch_acs_zcta(year, api_key=api_key)
-    write_demographics_csv(output_path, demographics)
-    print(f"Wrote {len(demographics)} Census ACS ZCTA rows to {output_path}")
 
 
 def fetch_public_zips(config_path: str, output_path: str, limit: int | None) -> None:
@@ -114,7 +96,8 @@ def push_bigquery(
     if not report["passed"]:
         raise RuntimeError("Data quality failed. Run quality-check and fix errors before pushing to BigQuery.")
 
-    rows_by_table = build_table_rows(locations, demographics)
+    _, whitespace_rows, summary = analyze_whitespace(locations, demographics, config)
+    rows_by_table = build_table_rows(locations, demographics, config, whitespace_rows, summary)
     write_bigquery_schema(stage_dir)
     write_bigquery_jsonl(stage_dir, rows_by_table)
     if dry_run:
@@ -124,6 +107,12 @@ def push_bigquery(
     print(f"Pushed unified tables to BigQuery dataset {project_id}.{dataset_id}")
 
 
+def serve_mapper_ui(host: str, port: int) -> None:
+    from whitespace_tool.mapper_server import serve
+
+    serve(host, port)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Competitive whitespace analysis prototype")
     subparsers = parser.add_subparsers(dest="command")
@@ -131,15 +120,6 @@ def main() -> None:
     analyze_parser = subparsers.add_parser("analyze", help="Run whitespace analysis outputs")
     analyze_parser.add_argument("--config", default="configs/demo.json", help="Path to a JSON run configuration")
     analyze_parser.add_argument("--output-dir", default="outputs/demo", help="Directory for generated CSV/JSON outputs")
-
-    db_parser = subparsers.add_parser("build-db", help="Build SQLite RDBMS tables from configured sources")
-    db_parser.add_argument("--config", default="configs/demo.json", help="Path to a JSON run configuration")
-    db_parser.add_argument("--db", default="outputs/demo/whitespace.db", help="SQLite database path")
-
-    census_parser = subparsers.add_parser("fetch-census", help="Fetch all ACS ZIP/ZCTA demographics")
-    census_parser.add_argument("--year", type=int, default=2024, help="ACS 5-year API year")
-    census_parser.add_argument("--output", default="data/us_zips_acs.csv", help="Output CSV path")
-    census_parser.add_argument("--api-key", default=None, help="Optional Census API key; CENSUS_API_KEY env var also works")
 
     public_zips_parser = subparsers.add_parser("fetch-public-zips", help="Fetch ZIP geography + ACS fields from BigQuery public data")
     public_zips_parser.add_argument("--config", default="configuration/public_us_zips_bigquery.json")
@@ -158,12 +138,12 @@ def main() -> None:
     bq_parser.add_argument("--dry-run", action="store_true", help="Write BigQuery files locally without pushing")
     bq_parser.add_argument("--credentials-json", default=None, help="Optional service-account JSON path; ADC also works")
 
+    mapper_ui_parser = subparsers.add_parser("mapper-ui", help="Serve local CSV/JSON mapper UI")
+    mapper_ui_parser.add_argument("--host", default="127.0.0.1")
+    mapper_ui_parser.add_argument("--port", type=int, default=8765)
+
     args = parser.parse_args()
-    if args.command == "build-db":
-        build_db(args.config, args.db)
-    elif args.command == "fetch-census":
-        fetch_census(args.year, args.output, args.api_key)
-    elif args.command == "fetch-public-zips":
+    if args.command == "fetch-public-zips":
         fetch_public_zips(args.config, args.output, args.limit)
     elif args.command == "quality-check":
         quality_check(args.config, args.output_dir)
@@ -176,6 +156,8 @@ def main() -> None:
             args.dry_run,
             args.credentials_json,
         )
+    elif args.command == "mapper-ui":
+        serve_mapper_ui(args.host, args.port)
     else:
         run_analysis(getattr(args, "config", "configs/demo.json"), getattr(args, "output_dir", "outputs/demo"))
 
