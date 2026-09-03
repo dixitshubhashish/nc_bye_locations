@@ -16,6 +16,7 @@ from whitespace_tool.warehouse_bigquery import (
     write_bigquery_jsonl,
     write_bigquery_schema,
 )
+from whitespace_tool.storage_config import load_storage_config
 
 
 def run_analysis(config_path: str, output_dir: str) -> None:
@@ -79,14 +80,14 @@ def push_bigquery(
     credentials_json: str | None,
 ) -> None:
     config = load_config(config_path)
-    warehouse = config.get("warehouse", {})
-    project_id = project_id or warehouse.get("project_id")
-    dataset_id = dataset_id or warehouse.get("bronze_dataset_id", warehouse.get("dataset_id"))
-    credentials_json = credentials_json or warehouse.get("credentials_json")
+    storage = load_storage_config()
+    project_id = project_id or storage.get("project_id")
+    dataset_id = dataset_id or storage.get("bronze_dataset_id")
+    credentials_json = credentials_json or storage.get("credentials_json")
     if credentials_json:
         credentials_path = Path(credentials_json)
         if not credentials_path.is_absolute():
-            credentials_json = str(Path(config["_config_dir"]) / credentials_path)
+            credentials_json = str(credentials_path)
     if not project_id or not dataset_id:
         raise RuntimeError("BigQuery project_id and dataset_id must be provided by args or config warehouse block.")
 
@@ -159,7 +160,7 @@ def main() -> None:
     elif args.command == "workflow-ui":
         serve_workflow_ui(args.host, args.port)
     else:
-        run_analysis(getattr(args, "config", "config/demo.json"), getattr(args, "output_dir", "outputs/demo"))
+        serve_workflow_ui("127.0.0.1", 8765)
 
 
 if __name__ == "__main__":

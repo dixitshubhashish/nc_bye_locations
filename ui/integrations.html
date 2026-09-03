@@ -30,6 +30,9 @@
     }
 
     header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
       border-bottom: 1px solid var(--line);
       background: #ffffff;
       padding: 18px 24px;
@@ -55,6 +58,13 @@
       color: #ffffff;
     }
 
+    .header-actions { display: flex; gap: 6px; align-items: center; }
+    .header-actions button { font-size: 12px; padding: 6px 8px; }
+    .danger-dialog { border: 2px solid var(--error); border-radius: 8px; padding: 22px; color: var(--ink); }
+    .danger-dialog::backdrop { background: rgba(31, 41, 51, 0.48); }
+    .danger-dialog h2 { color: var(--error); font-size: 20px; }
+    .danger-dialog p { max-width: 440px; }
+
     header.reporting-active #productTitle,
     header.reporting-active #resetMappingBtn,
     header.reporting-active #clearDataBtn { visibility: hidden; }
@@ -66,9 +76,47 @@
 
     .reporting-frame { width: 100%; height: 100%; border: 0; display: block; }
 
+    .review-view { padding: 24px; }
+    .review-toolbar { display: flex; gap: 8px; max-width: 620px; margin-bottom: 16px; }
+    .review-toolbar input { flex: 1; }
+    .review-row-actions { white-space: nowrap; }
+    .template-library { padding: 24px; }
+    .template-search { display: flex; gap: 8px; max-width: 620px; margin-bottom: 16px; }
+    .template-search input { flex: 1; }
+
+    .advanced-template summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 18px;
+      font-weight: 700;
+      line-height: 1.5;
+    }
+
+    .advanced-template {
+      margin-top: 22px;
+      padding-top: 16px;
+      border-top: 1px solid var(--line);
+    }
+
+    .template-progress {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .template-progress strong { color: var(--accent); font-size: 18px; }
+
+    .advanced-template textarea {
+      font-size: 18px;
+    }
+
     .progress-wrap {
       position: sticky;
-      top: 0;
+      top: 71px;
       z-index: 4;
       padding: 10px 24px;
       border-bottom: 1px solid var(--line);
@@ -187,16 +235,17 @@
       min-height: 20px;
       margin-top: 8px;
       color: var(--muted);
-      font-size: 12px;
+      font-size: 15px;
       font-weight: 650;
     }
 
     .action-feedback.ok { color: var(--ok); }
+    .action-feedback.warn { color: var(--warn); }
     .action-feedback.error { color: var(--error); }
 
     .mapping-grid {
       display: grid;
-      grid-template-columns: minmax(160px, 220px) minmax(220px, 1fr) minmax(180px, 260px);
+      grid-template-columns: minmax(160px, 220px) minmax(220px, 1fr) minmax(180px, 260px) 36px;
       gap: 8px;
       align-items: center;
     }
@@ -231,6 +280,20 @@
     }
 
     .optional-picker select { flex: 1; }
+
+    .mapping-remove {
+      min-width: 30px;
+      padding: 5px 6px;
+      color: var(--error);
+      border-color: #e8bbbb;
+      justify-self: end;
+    }
+
+    .alias-picker {
+      display: grid;
+      gap: 8px;
+      margin-top: 12px;
+    }
 
     .status {
       border-radius: 6px;
@@ -480,14 +543,20 @@
       <h1>Competitive Whitespace Tool</h1>
       <nav class="top-tabs" aria-label="Primary navigation">
         <button class="top-tab active" data-view="mapperView" type="button">Workflow Templates</button>
+        <button class="top-tab" data-view="reviewView" type="button">Review Error Listings (<span id="reviewCount">0</span>)</button>
+        <button class="top-tab" data-view="templateLibraryView" type="button">Template Library</button>
         <button class="top-tab" data-view="reportingView" type="button">Reporting</button>
       </nav>
-      <button class="secondary" id="resetMappingBtn" type="button">Reset Template</button>
-      <button class="secondary" id="clearDataBtn" type="button">Clear Saved Data</button>
+      <div class="header-actions">
+        <button class="secondary" id="resetMappingBtn" type="button">Reset Fields Mapping</button>
+        <button class="secondary" id="restartMappingBtn" type="button">Restart Mapping</button>
+        <button class="secondary" id="clearDataBtn" type="button">Clear Saved Data</button>
+        <button class="secondary" id="logoutBtn" type="button">Log out</button>
+      </div>
     </header>
     <div id="mapperView">
-    <div class="progress-wrap" aria-live="polite">
-      <div class="progress-label"><span id="progressMessage">Ready</span><span id="progressValue">0%</span></div>
+    <div id="saveProgress" class="progress-wrap hidden" aria-live="polite" aria-busy="false">
+      <div class="progress-label"><span id="progressMessage">Preparing records for BigQuery</span><span id="progressValue">0%</span></div>
       <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
     </div>
     <main>
@@ -591,33 +660,49 @@
       </div>
 
       <div class="panel">
-        <h2>Workflow Template</h2>
-        <textarea id="mapperOutput" spellcheck="false"></textarea>
+        <div class="template-progress"><span>Mapping Coverage</span><strong id="mappingPercentage">0%</strong></div>
+        <div id="mappingCoverageDetail" class="mapping-note">Parse a source to measure mapped columns.</div>
         <div class="button-row">
-          <button id="saveBtn">Save Mapping Template</button>
-          <button class="secondary" id="copyBtn">Copy</button>
+          <button id="saveBtn">Save Workflow Template</button>
         </div>
-        <div id="copyFeedback" class="action-feedback" role="status" aria-live="polite"></div>
+        <details class="advanced-template">
+          <summary>View Workflow Template</summary>
+          <textarea id="mapperOutput" spellcheck="false"></textarea>
+          <div class="button-row">
+            <button class="secondary" id="copyBtn">Copy Template Data</button>
+          </div>
+          <div id="copyFeedback" class="action-feedback" role="status" aria-live="polite"></div>
+        </details>
+      </div>
+
+    </aside>
+
+    <section>
+      <div id="status" class="status">Select a source format, then upload a CSV, Excel, JSON, or XML file, or provide a GET JSON API endpoint. Parse the source to generate the field-mapping preview.</div>
+
+      <div class="panel">
+        <h2>Template Components</h2>
+        <div class="mapping-grid" id="mappingGrid"></div>
       </div>
 
       <div class="panel">
         <h2>Optional Fields</h2>
-        <div class="mapping-note">Add more fields to the mapping grid when the source provides them.</div>
+        <div class="mapping-note">Add fields available in this source. New fields appear at the end of the mapping list.</div>
         <div class="optional-picker">
           <select id="optionalFieldSelect" aria-label="Optional field to add">
             <option value="">Choose a field</option>
           </select>
           <button class="secondary" id="addOptionalFieldBtn" type="button">Add</button>
         </div>
-      </div>
-    </aside>
-
-    <section>
-      <div id="status" class="status">Upload a source file or enter a GET JSON API URL to begin.</div>
-
-      <div class="panel">
-        <h2>Template Components</h2>
-        <div class="mapping-grid" id="mappingGrid"></div>
+        <div class="alias-picker">
+          <label for="customFieldLabel">New custom field label</label>
+          <input id="customFieldLabel" placeholder="For example: Delivery Zone">
+          <input id="customFieldSlug" placeholder="Slug, for example delivery_zone">
+          <select id="customFieldType"><option value="string">Text</option><option value="float">Number</option><option value="integer">Whole number</option><option value="date">Date</option></select>
+          <input id="aliasPassword" type="password" placeholder="Administrative password">
+          <button class="secondary" id="addCustomFieldBtn" type="button">Add Custom Field</button>
+          <div id="customFieldFeedback" class="action-feedback" role="status" aria-live="polite"></div>
+        </div>
       </div>
 
       <div class="tabs">
@@ -633,10 +718,36 @@
     <section id="reportingView" class="reporting-view hidden">
       <iframe class="reporting-frame" title="Reporting dashboard" src="https://lookerstudio.google.com/embed/reporting/1f6e8f3c-2c43-4a55-9f4a-8a4b3f9e2d10/page/p_abc123"></iframe>
     </section>
+    <section id="reviewView" class="review-view hidden">
+      <h2>Review Records</h2>
+      <div class="review-toolbar">
+        <input id="reviewEventId" placeholder="Search by event ID">
+        <button id="reviewSearchBtn" type="button">Search</button>
+      </div>
+      <div id="reviewResults" class="status">Search for an event to review records that need attention.</div>
+    </section>
+    <section id="templateLibraryView" class="template-library hidden">
+      <h2>Template Library</h2>
+      <div class="template-search">
+        <input id="templateSearch" placeholder="Search workflow templates">
+        <select id="templateBusinessFilter" aria-label="Filter by business"><option value="">All businesses</option></select>
+        <select id="templateSourceFilter" aria-label="Filter by source type"><option value="">All source types</option></select>
+        <button id="templateSearchBtn" type="button">Search</button>
+      </div>
+      <div id="templateResults" class="status">Search saved templates to edit an existing mapping.</div>
+    </section>
   </div>
+  <dialog id="dangerDialog" class="danger-dialog">
+    <h2>DANGER</h2>
+    <p>This will delete user-entered businesses, listings, and rejected records from the active storage area. ZIP reference data, standard fields, source types, and workflow templates will be preserved.</p>
+    <div class="button-row">
+      <button id="confirmClearBtn" type="button">Delete Data</button>
+      <button class="secondary" id="cancelClearBtn" type="button">Cancel</button>
+    </div>
+  </dialog>
 
   <script>
-    const mappingTargets = [
+    let mappingTargets = [
       { key: "location_id", table: "listings", field: "location_key", label: "Location ID / Store ID", required: false, hints: ["locationid", "storeid", "store_id", "id", "number"] },
       { key: "name", table: "listings", field: "name", label: "Restaurant Name", required: true, hints: ["name", "restaurantname", "storename", "displayname"] },
       { key: "address", table: "listings", field: "address", label: "Street Address", required: true, hints: ["address", "addressdescription", "line1", "street"] },
@@ -678,6 +789,7 @@
 
     const primaryMappingKeys = new Set(mappingTargets.slice(0, 20).map((target) => target.key));
     let optionalMappingKeys = new Set();
+    let hiddenMappingKeys = new Set();
 
     let sourceRows = [];
     let sourceFields = [];
@@ -687,6 +799,11 @@
     let learnedSuggestions = {};
     let sourceParsed = false;
     let selectedBrand = null;
+    let customAliases = {};
+    let lastSaveEventId = "";
+    let activeTemplateId = "";
+    const draftStorageKey = "competitive_whitespace_mapping_draft";
+    const loginSessionStorageKey = "competitive_whitespace_login_session";
 
     const el = (id) => document.getElementById(id);
 
@@ -727,17 +844,198 @@
       el("status").textContent = message;
     }
 
+    function setCustomFieldFeedback(message, type = "") {
+      el("customFieldFeedback").className = `action-feedback ${type}`;
+      el("customFieldFeedback").textContent = message;
+    }
+
     function setProgress(percent, message) {
       const boundedPercent = Math.max(0, Math.min(100, percent));
+      el("saveProgress").classList.remove("hidden");
+      el("saveProgress").setAttribute("aria-busy", "true");
       el("progressFill").style.width = `${boundedPercent}%`;
       el("progressValue").textContent = `${boundedPercent}%`;
       el("progressMessage").textContent = message;
     }
 
+    function hideProgress() {
+      el("saveProgress").classList.add("hidden");
+      el("saveProgress").setAttribute("aria-busy", "false");
+    }
+
+    function saveDraft() {
+      if (!sourceParsed) return;
+      const draft = {
+        sourceType: el("sourceType").value,
+        brandSelect: el("brandSelect").value,
+        selectedBrand,
+        sourceName: el("sourceName").value,
+        recordPath: el("recordPath").value,
+        sheetName: el("sheetName").value,
+        apiUrl: el("apiUrl").value,
+        authType: el("authType").value,
+        sourceRows,
+        sourceFields,
+        resolvedRecordPath,
+        mappingSelections,
+        autoMappedKeys: [...autoMappedKeys],
+        optionalMappingKeys: [...optionalMappingKeys],
+        hiddenMappingKeys: [...hiddenMappingKeys],
+        customAliases,
+        activeTemplateId
+      };
+      sessionStorage.setItem(draftStorageKey, JSON.stringify(draft));
+    }
+
+    function restoreDraft() {
+      try {
+        const draft = JSON.parse(sessionStorage.getItem(draftStorageKey) || "null");
+        if (!draft || !Array.isArray(draft.sourceRows)) return;
+        sourceRows = draft.sourceRows || [];
+        sourceFields = draft.sourceFields || [];
+        sourceParsed = sourceRows.length > 0;
+        resolvedRecordPath = draft.resolvedRecordPath || "";
+        mappingSelections = draft.mappingSelections || {};
+        autoMappedKeys = new Set(draft.autoMappedKeys || []);
+        optionalMappingKeys = new Set(draft.optionalMappingKeys || []);
+        hiddenMappingKeys = new Set(draft.hiddenMappingKeys || []);
+        customAliases = draft.customAliases || {};
+        activeTemplateId = draft.activeTemplateId || "";
+        el("sourceType").value = draft.sourceType || "csv";
+        el("sourceName").value = draft.sourceName || "";
+        el("recordPath").value = draft.recordPath || "";
+        el("sheetName").value = draft.sheetName || "";
+        el("apiUrl").value = draft.apiUrl || "";
+        el("authType").value = draft.authType || "none";
+        updateAuthVisibility();
+        updateSourceVisibility();
+        selectedBrand = draft.selectedBrand || null;
+        renderMappings();
+        renderTable("sourcePreview", sourceRows.slice(0, 10).map((row) => flattenObject(row)));
+        setStatus("Draft restored. Review the mapping before saving.", "ok");
+      } catch (error) {
+        sessionStorage.removeItem(draftStorageKey);
+      }
+    }
+
     function switchView(viewId) {
       document.querySelectorAll("[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === viewId));
-      ["mapperView", "reportingView"].forEach((id) => el(id).classList.toggle("hidden", id !== viewId));
+      ["mapperView", "reportingView", "reviewView", "templateLibraryView"].forEach((id) => el(id).classList.toggle("hidden", id !== viewId));
       el("appShell").querySelector("header").classList.toggle("reporting-active", viewId === "reportingView");
+    }
+
+    async function loadRejectedRecords() {
+      const eventId = el("reviewEventId").value.trim();
+      const target = el("reviewResults");
+      target.className = "status";
+      target.textContent = "Loading records for review...";
+      try {
+        const response = await fetch(`/api/rejected?event_id=${encodeURIComponent(eventId)}`);
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not load review records.");
+        if (!result.records.length) {
+          target.textContent = "No records found for this event.";
+          return;
+        }
+        target.className = "";
+        target.innerHTML = `<table><thead><tr><th>Event</th><th>Row</th><th>Issues</th><th>Source Record</th><th>Action</th></tr></thead><tbody>${result.records.map((record) => `<tr><td>${escapeHtml(record.event_id)}</td><td>${escapeHtml(record.row_number)}</td><td>${escapeHtml(JSON.stringify(record.errors))}</td><td>${escapeHtml(JSON.stringify(record.raw_record))}</td><td class="review-row-actions"><button type="button" data-reprocess="${escapeHtml(record.row_number)}" data-event="${escapeHtml(record.event_id)}">Reprocess</button></td></tr>`).join("")}</tbody></table>`;
+        target.querySelectorAll("button[data-reprocess]").forEach((button) => button.addEventListener("click", () => reprocessRejected(button.dataset.event, Number(button.dataset.reprocess))));
+      } catch (error) {
+        target.className = "status error";
+        target.textContent = error.message;
+      }
+    }
+
+    async function refreshReviewCount() {
+      const businessId = selectedBrand?.business_id || "";
+      try {
+        const response = await fetch(`/api/error-listings/count?business_id=${encodeURIComponent(businessId)}`);
+        const result = await response.json();
+        if (response.ok) el("reviewCount").textContent = result.count;
+      } catch (error) {
+        el("reviewCount").textContent = "0";
+      }
+    }
+
+    async function loadTemplateLibrary() {
+      const target = el("templateResults");
+      const search = el("templateSearch").value.trim();
+      const businessId = el("templateBusinessFilter").value;
+      const sourceTypeId = el("templateSourceFilter").value;
+      target.className = "status";
+      target.textContent = "Loading workflow templates...";
+      try {
+        const response = await fetch(`/api/templates?search=${encodeURIComponent(search)}&business_id=${encodeURIComponent(businessId)}&source_type_id=${encodeURIComponent(sourceTypeId)}`);
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not load workflow templates.");
+        if (!result.templates.length) {
+          target.textContent = "No workflow templates found.";
+          return;
+        }
+        target.className = "";
+        target.innerHTML = `<table><thead><tr><th>Template</th><th>Business ID</th><th>Created</th><th>Updated</th><th>Action</th></tr></thead><tbody>${result.templates.map((template) => `<tr><td>${escapeHtml(template.name)}</td><td>${escapeHtml(template.business_id)}</td><td>${escapeHtml(template.created_at)}</td><td>${escapeHtml(template.updated_at)}</td><td><button type="button" data-load-template="${escapeHtml(template.workflow_template_id)}">Load</button></td></tr>`).join("")}</tbody></table>`;
+        target.querySelectorAll("button[data-load-template]").forEach((button) => button.addEventListener("click", () => loadTemplateIntoEditor(result.templates.find((template) => template.workflow_template_id === button.dataset.loadTemplate))));
+      } catch (error) {
+        target.className = "status error";
+        target.textContent = error.message;
+      }
+    }
+
+    async function loadTemplateFilters() {
+      const businessResponse = await fetch("/api/brands?search=");
+      const businesses = (await businessResponse.json()).brands || [];
+      el("templateBusinessFilter").innerHTML = '<option value="">All businesses</option>' + businesses.map((business) => `<option value="${escapeHtml(business.business_id)}">${escapeHtml(business.name)}</option>`).join("");
+      const sourceResponse = await fetch("/api/source-types");
+      const sourceTypes = (await sourceResponse.json()).source_types || [];
+      el("templateSourceFilter").innerHTML = '<option value="">All source types</option>' + sourceTypes.map((source) => `<option value="${escapeHtml(source.source_type_id)}">${escapeHtml(source.name)}</option>`).join("");
+    }
+
+    function loadTemplateIntoEditor(template) {
+      const components = template.components?.mapper || template.components || {};
+      selectedBrand = { business_id: template.business_id, name: components.brand || "" };
+      activeTemplateId = template.workflow_template_id;
+      const brandOption = document.querySelector(`#brandSelect option[value="${CSS.escape(template.business_id)}"]`);
+      if (brandOption) el("brandSelect").value = template.business_id;
+      el("sourceName").value = components.source_name || template.name || "";
+      mappingSelections = { ...(components.fields || {}) };
+      optionalMappingKeys = new Set(Object.keys(mappingSelections).filter((key) => !primaryMappingKeys.has(key)));
+      hiddenMappingKeys = new Set();
+      autoMappedKeys = new Set();
+      renderMappings();
+      switchView("mapperView");
+      setStatus(`Loaded ${template.name}. Edit the fields, then save the updated template.`, "ok");
+    }
+
+    async function saveEditedTemplate() {
+      const response = await fetch("/api/templates/save", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workflow_template_id: activeTemplateId, components: { mapper: getMapper() } }) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not update workflow template.");
+      setStatus("Workflow template version saved.", "ok");
+    }
+
+    async function reprocessRejected(eventId, rowNumber) {
+      try {
+        const response = await fetch("/api/reprocess", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ event_id: eventId, row_numbers: [rowNumber], mapper: getMapper() }) });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not reprocess record.");
+        el("reviewResults").className = "status ok";
+        el("reviewResults").textContent = `Record reprocessed: ${result.mapped_rows} accepted, ${result.error_listings} still need attention. New event: ${result.event_id}`;
+      } catch (error) {
+        el("reviewResults").className = "status error";
+        el("reviewResults").textContent = error.message;
+      }
+    }
+
+    async function loadFieldRegistry() {
+      try {
+        const response = await fetch("/api/field-registry");
+        if (!response.ok) throw new Error("Could not load field definitions.");
+        const result = await response.json();
+        if (Array.isArray(result.fields) && result.fields.length) mappingTargets = result.fields;
+        if (sourceParsed) renderMappings();
+      } catch (error) {
+        setStatus(error.message, "error");
+      }
     }
 
     function inferSourceType(fileName) {
@@ -841,15 +1139,34 @@
       } else {
         localStorage.removeItem("mapper_login_remembered");
       }
+      sessionStorage.setItem(loginSessionStorageKey, "true");
       el("loginScreen").classList.add("hidden");
       el("appShell").classList.remove("hidden");
     }
 
     function restoreRememberedLogin() {
-      if (localStorage.getItem("mapper_login_remembered") === "true") {
-        el("rememberLogin").checked = true;
+      const remembered = localStorage.getItem("mapper_login_remembered") === "true";
+      const activeSession = sessionStorage.getItem(loginSessionStorageKey) === "true";
+      if (remembered || activeSession) {
+        el("rememberLogin").checked = remembered;
         el("loginScreen").classList.add("hidden");
         el("appShell").classList.remove("hidden");
+      }
+    }
+
+    async function prepareReferenceData() {
+      const status = el("loginStatus");
+      status.className = "status";
+      status.textContent = "Preparing ZIP reference data...";
+      try {
+        const response = await fetch("/api/prepare");
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not prepare reference data.");
+        status.className = "status ok";
+        status.textContent = `ZIP reference ready: ${result.rows.toLocaleString()} records.`;
+      } catch (error) {
+        status.className = "status warn";
+        status.textContent = `Reference data will be prepared when storage is available: ${error.message}`;
       }
     }
 
@@ -857,11 +1174,12 @@
       const learned = learnedSuggestions[target.key]?.source;
       if (learned && sourceFields.includes(learned) && !usedFields.has(learned)) return learned;
       const normalizedFields = sourceFields.map((field) => ({ field, clean: normalizeName(field) }));
-      for (const hint of target.hints) {
+      const hints = [...(target.hints || []), ...(customAliases[target.key] || [])];
+      for (const hint of hints) {
         const exact = normalizedFields.find((entry) => entry.clean === normalizeName(hint));
         if (exact && !usedFields.has(exact.field)) return exact.field;
       }
-      for (const hint of target.hints) {
+      for (const hint of hints) {
         const cleanHint = normalizeName(hint);
         const partial = normalizedFields.find((entry) => !usedFields.has(entry.field) && (entry.clean.includes(cleanHint) || cleanHint.includes(entry.clean)));
         if (partial) return partial.field;
@@ -883,8 +1201,9 @@
         <div class="mapping-head">Business Field</div>
         <div class="mapping-head">Source field path</div>
         <div class="mapping-head">Sample value</div>
+        <div class="mapping-head"> </div>
       `;
-      const visibleTargets = mappingTargets.filter((target) => primaryMappingKeys.has(target.key) || optionalMappingKeys.has(target.key));
+      const visibleTargets = getVisibleTargets();
       const usedFields = new Set();
       visibleTargets.forEach((target) => {
         if (!Object.prototype.hasOwnProperty.call(mappingSelections, target.key)) {
@@ -910,6 +1229,7 @@
           <div>${target.label} ${target.required ? '<span class="required">*</span>' : ''}</div>
           <select data-field="${target.key}" class="${selected && autoMappedKeys.has(target.key) ? 'auto-mapped' : ''}">${options}</select>
           <div data-sample="${target.key}">${escapeHtml(selected ? sampleValue(selected) : "")}</div>
+          <div>${target.required ? '' : `<button class="secondary mapping-remove" type="button" data-remove-field="${target.key}" title="Remove field" aria-label="Remove ${escapeHtml(target.label)}">&#128465;</button>`}</div>
         `);
         const select = grid.querySelector(`select[data-field="${target.key}"]`);
         select.value = selected;
@@ -942,17 +1262,35 @@
           renderMappings();
         });
       });
+      grid.querySelectorAll("button[data-remove-field]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const key = button.dataset.removeField;
+          mappingSelections[key] = "";
+          autoMappedKeys.delete(key);
+          optionalMappingKeys.delete(key);
+          if (primaryMappingKeys.has(key)) hiddenMappingKeys.add(key);
+          renderMappings();
+        });
+      });
       updateOptionalFieldPicker();
       updateOutput();
     }
 
     function updateOptionalFieldPicker() {
       const picker = el("optionalFieldSelect");
-      const available = mappingTargets.filter((target) => !primaryMappingKeys.has(target.key) && !optionalMappingKeys.has(target.key));
+      const available = mappingTargets.filter((target) => !target.required && ((primaryMappingKeys.has(target.key) && hiddenMappingKeys.has(target.key)) || (!primaryMappingKeys.has(target.key) && !optionalMappingKeys.has(target.key))));
       picker.innerHTML = '<option value="">Choose a field</option>' + available
         .map((target) => `<option value="${escapeHtml(target.key)}">${escapeHtml(target.label)}</option>`)
         .join("");
       el("addOptionalFieldBtn").disabled = available.length === 0;
+    }
+
+    function getVisibleTargets() {
+      const standardTargets = mappingTargets.filter((target) => primaryMappingKeys.has(target.key) && !hiddenMappingKeys.has(target.key));
+      const optionalTargets = [...optionalMappingKeys]
+        .map((key) => mappingTargets.find((target) => target.key === key))
+        .filter(Boolean);
+      return [...standardTargets, ...optionalTargets];
     }
 
     function getMapper() {
@@ -965,7 +1303,8 @@
         business_id: selectedBrand?.business_id || "",
         source_name: el("sourceName").value.trim(),
         source_type: el("sourceType").value,
-        fields
+        fields,
+        aliases: customAliases
       };
       const recordPath = el("recordPath").value.trim() || resolvedRecordPath;
       if (recordPath && ["json", "xml", "excel", "api_get_json"].includes(el("sourceType").value)) {
@@ -991,6 +1330,7 @@
         const brands = result.brands || [];
         el("brandSelect").innerHTML = '<option value="">Select an existing business</option>' + brands.map((brand) => `<option value="${escapeHtml(brand.business_id)}">${escapeHtml(brand.name)}</option>`).join("") + '<option value="__create_new__">Create New Business</option>';
         el("brandSelect").dataset.brands = JSON.stringify(brands);
+        if (selectedBrand) el("brandSelect").value = selectedBrand.business_id;
       } catch (error) {
         setStatus(error.message, "error");
       }
@@ -1036,7 +1376,7 @@
       if (!mapper.brand) missing.unshift("brand");
       if (missing.length) {
         setStatus(`Missing required mapping: ${missing.join(", ")}`, "warn");
-      } else if (mappingTargets.filter((target) => primaryMappingKeys.has(target.key) || optionalMappingKeys.has(target.key)).every((target) => mapper.fields[target.key])) {
+      } else if (mappingTargets.filter((target) => (primaryMappingKeys.has(target.key) && !hiddenMappingKeys.has(target.key)) || optionalMappingKeys.has(target.key)).every((target) => mapper.fields[target.key])) {
         setStatus(`Parsed ${sourceRows.length} records with ${sourceFields.length} source fields.`, "ok");
       } else {
         setStatus(`Parsed ${sourceRows.length} records with ${sourceFields.length} source fields.`, "ok");
@@ -1045,14 +1385,19 @@
 
     function updateOutput() {
       const mapper = getMapper();
+      const mappedSourceFields = new Set(Object.values(mapper.fields).filter(Boolean));
+      const coverage = sourceFields.length ? Math.round(mappedSourceFields.size / sourceFields.length * 100) : 0;
+      el("mappingPercentage").textContent = `${coverage}%`;
+      el("mappingCoverageDetail").textContent = sourceFields.length ? `${mappedSourceFields.size} of ${sourceFields.length} source columns mapped` : "Parse a source to measure mapped columns.";
       el("mapperOutput").value = JSON.stringify(mapper, null, 2);
       validateMapper(mapper);
       renderEntityMap();
+      saveDraft();
     }
 
     function renderEntityMap() {
       const target = el("entityPreview");
-      const visibleTargets = mappingTargets.filter((item) => primaryMappingKeys.has(item.key) || optionalMappingKeys.has(item.key));
+      const visibleTargets = getVisibleTargets();
       const mappedSourceFields = new Set(Object.values(mappingSelections).filter(Boolean));
       const entityNames = {
         listings: "Listings",
@@ -1113,7 +1458,7 @@
     }
 
     async function parseSource() {
-      setStatus("Parsing source in Python backend...", "");
+      setStatus("Reading your source...", "");
       try {
         const file = el("fileInput").files[0];
         let sourceType = el("sourceType").value;
@@ -1161,7 +1506,9 @@
         }
         resolvedRecordPath = result.record_path || "";
         mappingSelections = {};
+        activeTemplateId = "";
         autoMappedKeys = new Set();
+        sessionStorage.removeItem(draftStorageKey);
         if (resolvedRecordPath && !el("recordPath").value.trim()) el("recordPath").value = resolvedRecordPath;
         if (sourceType === "excel" && resolvedRecordPath) el("sheetName").value = resolvedRecordPath;
         renderMappings();
@@ -1204,11 +1551,12 @@
     }
 
     async function saveMapper() {
+      if (activeTemplateId) return saveEditedTemplate();
       const mapper = getMapper();
-      setStatus("Validating...", "");
-      setProgress(10, "Validating records");
+      setStatus("Preparing records for BigQuery storage...", "");
+      setProgress(10, "Preparing records for BigQuery");
       try {
-        setProgress(35, `Preparing ${sourceRows.length} records`);
+        setProgress(35, `Writing ${sourceRows.length} records to BigQuery`);
         const response = await fetch("/api/save", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -1216,16 +1564,27 @@
         });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not save workflow template.");
-        setProgress(100, "Processing complete");
-        setStatus(`Processing complete: ${result.mapped_rows} of ${result.total_rows} records processed successfully; ${result.indigestible_rows} rejected records are available under event ${result.event_id}.`, "ok");
+        lastSaveEventId = result.event_id;
+        el("reviewEventId").value = result.event_id;
+        await refreshReviewCount();
+        hideProgress();
+        setStatus(`Processing complete: ${result.mapped_rows} of ${result.total_rows} records processed successfully; ${result.error_listings} error listings are available under event ${result.event_id}.`, "ok");
       } catch (error) {
-        setProgress(0, "Save failed");
+        hideProgress();
         setStatus(error.message, "error");
       }
     }
 
     async function clearSavedData() {
-      if (!window.confirm("Clear all saved tables in the configured dataset? This cannot be undone.")) return;
+      const dialog = el("dangerDialog");
+      if (typeof dialog.showModal === "function") {
+        dialog.showModal();
+        return;
+      }
+      if (window.confirm("DANGER: delete user-entered saved data?")) await performClearSavedData();
+    }
+
+    async function performClearSavedData() {
       setStatus("Clearing saved data...", "warn");
       try {
         const response = await fetch("/api/clear", {
@@ -1235,18 +1594,57 @@
         });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not clear saved data.");
-        setStatus(`Saved data cleared. ${result.deleted_count} tables removed.`, "ok");
+        setStatus(`Saved data archived. ${result.deleted_count} data tables marked deleted.`, "ok");
       } catch (error) {
         setStatus(error.message, "error");
       }
     }
 
     function resetMapping() {
+      activeTemplateId = "";
       mappingSelections = {};
       autoMappedKeys = new Set();
       optionalMappingKeys = new Set();
+      hiddenMappingKeys = new Set();
+      customAliases = {};
+      saveDraft();
       renderMappings();
-      setStatus("Mapping reset to the default auto-suggested fields.", "ok");
+      setStatus("Fields restored to the default suggestions.", "ok");
+    }
+
+    function logout() {
+      localStorage.removeItem("mapper_login_remembered");
+      sessionStorage.removeItem(loginSessionStorageKey);
+      el("loginPassword").value = "";
+      el("loginStatus").className = "status hidden";
+      el("appShell").classList.add("hidden");
+      el("loginScreen").classList.remove("hidden");
+    }
+
+    function restartMapping() {
+      sessionStorage.removeItem(draftStorageKey);
+      location.reload();
+    }
+
+    async function addCustomField() {
+      const label = el("customFieldLabel").value.trim();
+      if (!label) {
+        setCustomFieldFeedback("Enter a label before adding a custom field.", "warn");
+        return;
+      }
+      try {
+        const response = await fetch("/api/custom-field", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
+          label, slug: el("customFieldSlug").value.trim(), type: el("customFieldType").value, password: el("aliasPassword").value
+        }) });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not save custom field.");
+        await loadFieldRegistry();
+        el("customFieldLabel").value = "";
+        el("customFieldSlug").value = "";
+        el("aliasPassword").value = "";
+        updateOptionalFieldPicker();
+        setCustomFieldFeedback(`Custom field ${result.field.label} saved.`, "ok");
+      } catch (error) { setCustomFieldFeedback(error.message, "error"); }
     }
 
     el("parseBtn").addEventListener("click", parseSource);
@@ -1259,13 +1657,28 @@
     el("authType").addEventListener("change", updateAuthVisibility);
     el("saveBtn").addEventListener("click", saveMapper);
     el("resetMappingBtn").addEventListener("click", resetMapping);
+    el("restartMappingBtn").addEventListener("click", restartMapping);
     el("clearDataBtn").addEventListener("click", clearSavedData);
+    el("logoutBtn").addEventListener("click", logout);
+    el("confirmClearBtn").addEventListener("click", async () => {
+      el("dangerDialog").close();
+      await performClearSavedData();
+    });
+    el("cancelClearBtn").addEventListener("click", () => el("dangerDialog").close());
+    el("reviewSearchBtn").addEventListener("click", loadRejectedRecords);
+    el("templateSearchBtn").addEventListener("click", loadTemplateLibrary);
+    el("templateSearch").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") loadTemplateLibrary();
+    });
+    el("addCustomFieldBtn").addEventListener("click", addCustomField);
     document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
     el("addOptionalFieldBtn").addEventListener("click", () => {
       const key = el("optionalFieldSelect").value;
-      if (!key || primaryMappingKeys.has(key) || optionalMappingKeys.has(key)) return;
-      optionalMappingKeys.add(key);
+      if (!key) return;
+      if (primaryMappingKeys.has(key)) hiddenMappingKeys.delete(key);
+      else optionalMappingKeys.add(key);
       renderMappings();
+      updateOutput();
     });
     el("copyBtn").addEventListener("click", async () => {
       const feedback = el("copyFeedback");
@@ -1289,13 +1702,14 @@
       const brands = JSON.parse(event.target.dataset.brands || "[]");
       selectedBrand = brands.find((brand) => brand.business_id === event.target.value) || null;
       el("newBrandFields").classList.add("hidden");
+      refreshReviewCount();
       updateOutput();
     });
     el("createBrandBtn").addEventListener("click", createNewBrand);
     el("sourceName").addEventListener("input", updateOutput);
     el("fileInput").addEventListener("change", () => {
       sourceParsed = false;
-      setStatus("Source changed. Select Parse to validate mappings.", "");
+      setStatus("Source changed. Ready to review fields.", "");
       const file = el("fileInput").files[0];
       if (file) el("sourceType").value = inferSourceType(file.name);
       el("sourceType").dispatchEvent(new Event("change"));
@@ -1306,7 +1720,7 @@
     });
     el("sourceType").addEventListener("change", () => {
       sourceParsed = false;
-      setStatus("Source changed. Select Parse to validate mappings.", "");
+      setStatus("Source changed. Ready to review fields.", "");
       updateSourceVisibility();
     });
     document.querySelectorAll(".tab").forEach((button) => {
@@ -1319,8 +1733,11 @@
     addPairRow("queryParams", "limit", "100");
     addPairRow("customHeaders", "Accept", "application/json");
     updateSourceVisibility();
+    loadFieldRegistry();
     loadBrands();
+    loadTemplateFilters();
     restoreRememberedLogin();
+    prepareReferenceData();
   </script>
 </body>
 </html>

@@ -6,6 +6,7 @@ logs/
 outputs/
 data/us_zips_bigquery.csv
 config/connections/bigquery_connection.json
+config/connections/storage.json
 config/connections/*service*account*.json
 config/connections/service_account.json
 config/connections/keen-device-610-2af9b27dfda3.json

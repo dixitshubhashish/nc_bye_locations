@@ -13,29 +13,7 @@
     "require_live_location_sources": false,
     "max_location_age_hours": 24
   },
-  "location_sources": [
-    {
-      "name": "dominos_store_api",
-      "type": "dominos_api",
-      "source_tier": "demo",
-      "sample_path": "../data/source_files/dominos_api_sample.json",
-      "mapper": "workflow_templates/dominos_api.json"
-    },
-    {
-      "name": "pizza_hut_kaggle_csv",
-      "type": "pizza_hut_kaggle",
-      "source_tier": "demo",
-      "path": "../data/source_files/pizza_hut_kaggle_sample.csv",
-      "mapper": "workflow_templates/pizza_hut_kaggle.json"
-    },
-    {
-      "name": "little_caesars_json_objects",
-      "type": "little_caesars_json",
-      "source_tier": "demo",
-      "path": "../data/source_files/little_caesars_sample.json",
-      "mapper": "workflow_templates/little_caesars_json.json"
-    }
-  ],
+  "location_sources": [],
   "demographics_source": {
     "name": "bigquery_public_zip_geo_acs",
     "type": "bigquery",
@@ -43,17 +21,7 @@
     "credentials_json": "connections/keen-device-610-2af9b27dfda3.json",
     "query": "SELECT z.zip_code, z.city, z.county, z.state_code, z.state_name, z.internal_point_lat AS latitude, z.internal_point_lon AS longitude, a.total_pop AS population, a.households, a.median_income AS median_household_income, a.income_per_capita, a.median_age, a.poverty, a.employed_pop AS employed_population, a.unemployed_pop AS unemployed_population, a.housing_units FROM `bigquery-public-data.geo_us_boundaries.zip_codes` z LEFT JOIN `bigquery-public-data.census_bureau_acs.zip_codes_2018_5yr` a ON z.zip_code = a.geo_id WHERE z.zip_code IS NOT NULL"
   },
-  "warehouse": {
-    "type": "bigquery",
-    "project_id": "keen-device-610",
-    "dataset_id": "birdeye_bronze_listings",
-    "bronze_dataset_id": "birdeye_bronze_listings",
-    "silver_dataset_id": "birdeye_silver_listings",
-    "gold_dataset_id": "birdeye_gold_listings",
-    "credentials_json": "connections/keen-device-610-2af9b27dfda3.json"
-  },
   "limitations": [
-    "Demo source files are intentionally small. Replace files under data/source_files with current locator/API/Kaggle extracts for a submission run.",
     "ZIP-level matching uses postal code from the location source; address geocoding is outside this prototype.",
     "Similarity is based on configurable z-score distance over the selected ZIP metrics."
   ]

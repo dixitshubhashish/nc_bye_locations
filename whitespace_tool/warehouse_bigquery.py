@@ -13,6 +13,20 @@ LOGGER = logging.getLogger("whitespace_tool.workflow")
 
 
 TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
+    "field_catalog": [
+        {"name": "field_id", "type": "STRING", "mode": "REQUIRED", "default": "GENERATE_UUID()"},
+        {"name": "slug", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "label", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "table_name", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "field_name", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "data_type", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "required", "type": "BOOLEAN", "mode": "REQUIRED"},
+        {"name": "hints", "type": "JSON", "mode": "REQUIRED"},
+        {"name": "aliases", "type": "JSON", "mode": "REQUIRED"},
+        {"name": "is_custom", "type": "BOOLEAN", "mode": "REQUIRED"},
+        {"name": "created_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
+        {"name": "updated_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
+    ],
     "us_zipcodes": [
         {"name": "zip_code", "type": "STRING", "mode": "REQUIRED"},
         {"name": "city_name", "type": "STRING", "mode": "NULLABLE"},
@@ -45,6 +59,8 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "meta_title", "type": "STRING", "mode": "NULLABLE"},
         {"name": "meta_description", "type": "STRING", "mode": "NULLABLE"},
         {"name": "country_of_origin", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "is_deleted", "type": "BOOLEAN", "mode": "NULLABLE"},
+        {"name": "deleted_on", "type": "TIMESTAMP", "mode": "NULLABLE"},
     ],
     "listings": [
         {"name": "listing_id", "type": "STRING", "mode": "REQUIRED", "default": "GENERATE_UUID()"},
@@ -89,6 +105,8 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "competitor_count", "type": "INTEGER", "mode": "NULLABLE"},
         {"name": "foot_traffic_score", "type": "FLOAT", "mode": "NULLABLE"},
         {"name": "parking_availability", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "is_deleted", "type": "BOOLEAN", "mode": "NULLABLE"},
+        {"name": "deleted_on", "type": "TIMESTAMP", "mode": "NULLABLE"},
     ],
     "workflow_templates": [
         {"name": "workflow_template_id", "type": "STRING", "mode": "REQUIRED", "default": "GENERATE_UUID()"},
@@ -105,12 +123,15 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "data_format", "type": "JSON", "mode": "REQUIRED"},
         {"name": "created_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
     ],
-    "indigestible_records": [
+    "error_listings": [
         {"name": "event_id", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "business_id", "type": "STRING", "mode": "REQUIRED"},
         {"name": "source_type_id", "type": "STRING", "mode": "REQUIRED"},
         {"name": "row_number", "type": "INTEGER", "mode": "REQUIRED"},
         {"name": "errors", "type": "JSON", "mode": "REQUIRED"},
         {"name": "raw_record", "type": "JSON", "mode": "REQUIRED"},
+        {"name": "is_deleted", "type": "BOOLEAN", "mode": "NULLABLE"},
+        {"name": "deleted_on", "type": "TIMESTAMP", "mode": "NULLABLE"},
     ],
 }
 
@@ -203,12 +224,14 @@ def build_table_rows(
                 "competitor_count": row.competitor_count,
                 "foot_traffic_score": row.foot_traffic_score,
                 "parking_availability": row.parking_availability,
+                "is_deleted": False,
+                "deleted_on": None,
             }
             for row in locations
         ],
         "workflow_templates": [],
         "source_types": [],
-        "indigestible_records": [],
+        "error_listings": [],
     }
 
 
@@ -236,6 +259,7 @@ def push_to_bigquery(
     dataset_id: str,
     rows_by_table: dict[str, list[dict[str, Any]]],
     credentials_json: str | None = None,
+    write_disposition: str | None = None,
 ) -> None:
     try:
         from google.cloud import bigquery
@@ -273,7 +297,10 @@ def push_to_bigquery(
                 client.update_table(existing, ["schema"])
         if rows:
             LOGGER.info("db_batch_load_started table=%s rows=%d", table_ref, len(rows))
-            load_job = client.load_table_from_json(rows, table_ref, job_config=bigquery.LoadJobConfig(schema=schema))
+            load_config = bigquery.LoadJobConfig(schema=schema)
+            if write_disposition:
+                load_config.write_disposition = write_disposition
+            load_job = client.load_table_from_json(rows, table_ref, job_config=load_config)
             load_job.result()
             if load_job.errors:
                 LOGGER.error("db_batch_load_failed table=%s rows=%d error_count=%d errors=%s", table_ref, len(rows), len(load_job.errors), load_job.errors)
@@ -299,12 +326,19 @@ def clear_dataset_tables(
         client = bigquery.Client(project=project_id)
 
     dataset_ref = f"{project_id}.{dataset_id}"
-    table_refs = [table.reference for table in client.list_tables(dataset_ref)]
+    preserved_tables = {"us_zipcodes", "field_catalog", "source_types", "workflow_templates"}
+    table_refs = [table.reference for table in client.list_tables(dataset_ref) if table.table_id not in preserved_tables]
     LOGGER.warning("db_clear_started dataset=%s table_count=%d", dataset_ref, len(table_refs))
-    deleted: list[str] = []
+    soft_deleted: list[str] = []
+    soft_delete_tables = {"businesses", "listings", "error_listings"}
     for table_ref in table_refs:
-        client.delete_table(table_ref, not_found_ok=True)
-        deleted.append(table_ref.table_id)
-        LOGGER.warning("db_table_deleted dataset=%s table=%s", dataset_ref, table_ref.table_id)
-    LOGGER.warning("db_clear_succeeded dataset=%s deleted_count=%d", dataset_ref, len(deleted))
-    return deleted
+        if table_ref.table_id not in soft_delete_tables:
+            continue
+        client.query(f"ALTER TABLE `{dataset_ref}.{table_ref.table_id}` ADD COLUMN IF NOT EXISTS is_deleted BOOL").result()
+        client.query(f"ALTER TABLE `{dataset_ref}.{table_ref.table_id}` ADD COLUMN IF NOT EXISTS deleted_on TIMESTAMP").result()
+        query = f"UPDATE `{dataset_ref}.{table_ref.table_id}` SET is_deleted = TRUE, deleted_on = CURRENT_TIMESTAMP() WHERE is_deleted IS NOT TRUE"
+        client.query(query).result()
+        soft_deleted.append(table_ref.table_id)
+        LOGGER.warning("db_table_soft_deleted dataset=%s table=%s", dataset_ref, table_ref.table_id)
+    LOGGER.warning("db_clear_succeeded dataset=%s soft_deleted_count=%d", dataset_ref, len(soft_deleted))
+    return soft_deleted

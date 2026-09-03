@@ -1,0 +1,7 @@
+{
+  "project_id": "your-google-cloud-project",
+  "credentials_json": "service-account.json",
+  "bronze_dataset_id": "birdeye_bronze_listings",
+  "silver_dataset_id": "birdeye_silver_listings",
+  "gold_dataset_id": "birdeye_gold_listings"
+}
