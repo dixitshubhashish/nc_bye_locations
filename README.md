@@ -1,6 +1,6 @@
 # Competitive Whitespace Prototype
 
-Python-only prototype for Birdeye's competitive whitespace assessment. It separates source-specific acquisition from a unified restaurant/location model, loads relational tables, and produces ZIP-level whitespace candidates.
+Python-only prototype for Birdeye's competitive whitespace assessment. It separates source-specific acquisition from a unified restaurant/location model, stages/pushes unified BigQuery tables, and produces ZIP-level whitespace candidates.
 
 ## Run
 

@@ -8,7 +8,6 @@ import socketserver
 from whitespace_tool.analysis import analyze_whitespace
 from whitespace_tool.config import load_config
 from whitespace_tool.data_quality import run_quality_checks
-from whitespace_tool.database import connect, load_demographics as load_demographics_table, load_restaurants
 from whitespace_tool.io import write_csv, write_demographics_csv, write_json
 from whitespace_tool.models import utc_now_iso
 from whitespace_tool.sources.csv_locations import load_location_sources
@@ -48,17 +47,6 @@ def run_analysis(config_path: str, output_dir: str) -> None:
         },
     )
     print(f"Wrote {len(location_rows)} location rows and {len(whitespace_rows)} whitespace ZIP rows to {out}")
-
-
-def build_db(config_path: str, db_path: str) -> None:
-    config = load_config(config_path)
-    locations = load_location_sources(config)
-    demographics = load_demographics(config)
-    conn = connect(db_path)
-    with conn:
-        load_demographics_table(conn, demographics)
-        load_restaurants(conn, locations)
-    print(f"Wrote relational tables to {db_path}")
 
 
 def fetch_census(year: int, output_path: str, api_key: str | None) -> None:
@@ -144,10 +132,6 @@ def main() -> None:
     analyze_parser.add_argument("--config", default="configs/demo.json", help="Path to a JSON run configuration")
     analyze_parser.add_argument("--output-dir", default="outputs/demo", help="Directory for generated CSV/JSON outputs")
 
-    db_parser = subparsers.add_parser("build-db", help="Build SQLite RDBMS tables from configured sources")
-    db_parser.add_argument("--config", default="configs/demo.json", help="Path to a JSON run configuration")
-    db_parser.add_argument("--db", default="outputs/demo/whitespace.db", help="SQLite database path")
-
     census_parser = subparsers.add_parser("fetch-census", help="Fetch all ACS ZIP/ZCTA demographics")
     census_parser.add_argument("--year", type=int, default=2024, help="ACS 5-year API year")
     census_parser.add_argument("--output", default="data/us_zips_acs.csv", help="Output CSV path")
@@ -175,9 +159,7 @@ def main() -> None:
     mapper_ui_parser.add_argument("--port", type=int, default=8765)
 
     args = parser.parse_args()
-    if args.command == "build-db":
-        build_db(args.config, args.db)
-    elif args.command == "fetch-census":
+    if args.command == "fetch-census":
         fetch_census(args.year, args.output, args.api_key)
     elif args.command == "fetch-public-zips":
         fetch_public_zips(args.config, args.output, args.limit)
