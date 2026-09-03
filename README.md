@@ -2,35 +2,39 @@
 
 Python-only prototype for Birdeye's competitive whitespace assessment. It separates source-specific acquisition from a unified restaurant/location model, stages/pushes unified BigQuery tables, and produces ZIP-level whitespace candidates.
 
-Known assumptions and gaps are tracked in `ASSUMPTIONS_AND_GAPS.md`.
+Known assumptions and gaps are tracked in `docs/assumptions_and_gaps.md`.
 
 ## Run
 
 ```bash
-.venv/bin/python -m whitespace_tool analyze --config configs/demo.json --output-dir outputs/demo
-.venv/bin/python -m whitespace_tool quality-check --config configs/demo.json --output-dir outputs/demo
-.venv/bin/python -m whitespace_tool push-bigquery --config configs/demo.json --stage-dir outputs/bigquery --dry-run
+.venv/bin/python -m whitespace_tool analyze --config config/demo.json --output-dir outputs/demo
+.venv/bin/python -m whitespace_tool quality-check --config config/demo.json --output-dir outputs/demo
+.venv/bin/python -m whitespace_tool push-bigquery --config config/demo.json --stage-dir outputs/bigquery --dry-run
 ```
 
 Fetch the first-module ZIP base table from BigQuery public data:
 
 ```bash
-.venv/bin/python -m whitespace_tool fetch-public-zips --config configuration/public_us_zips_bigquery.json --output data/us_zips_bigquery.csv
+.venv/bin/python -m whitespace_tool fetch-public-zips --config config/connections/public_us_zips_bigquery.json --output data/source_files/us_zips_bigquery.csv
 ```
 
 Current tested fetch result: 33,791 ZIP geography rows. Known missing ACS fields from the public join are surfaced by quality checks: 868 rows missing population, 1,348 missing median age, and 2,948 missing median household income. The generated full CSV is optional export/debug output; analysis reads ZIP demographics from BigQuery.
 
-Launch the local mapper UI for adding a new brand source:
+Launch the local workflow-template UI for adding a new brand source:
 
 ```bash
-python3 -m whitespace_tool mapper-ui
+python3 -m whitespace_tool workflow-ui
 ```
 
-Open `http://127.0.0.1:8765/mapper.html`, upload a source, map source columns/paths to the generic target fields, then choose `Save`. The server validates required mappings, stores a scrubbed mapper config in `mapper_configs`, and writes the normalized rows to `restaurants` and `source_observations`.
+Open `http://127.0.0.1:8765/workflow_templates.html`, upload a source, map source columns/paths to the generic target fields, then choose `Save`. The server validates required mappings, stores the workflow template, and writes bronze rows.
 
 Mapper requests and BigQuery failures are recorded in the daily rotating `logs/mapper.log` file. Save errors include a request ID in the UI response so the matching traceback can be found in that log. Set `MAPPER_LOG_DIR` to change the log directory.
 
-Every parsed source type (CSV, Excel, JSON, XML, and GET API JSON) uses the shared validators in `whitespace_tool/data_validation/`. Rows with invalid mapped types or missing mandatory location values are written to `indigestible_records`; valid rows are written to the digestible location tables.
+The Workflow Templates view includes `Clear Saved Data`, a destructive action that requires confirmation and removes every table or view returned from the configured storage dataset. It does not delete the dataset itself, and every deletion is logged.
+
+Every parsed source type (CSV, Excel, JSON, XML, and GET API JSON) uses the shared validators in `whitespace_tool/data_validation/`. Rows with invalid mapped types or missing mandatory location values are written to `indigestible_records`; valid rows are written to the bronze location tables.
+
+The medallion datasets are `birdeye_bronze_listings`, `birdeye_silver_listings`, and `birdeye_gold_listings`. The current mapper writes only to the bronze dataset.
 
 Supported mapper inputs:
 
@@ -41,15 +45,15 @@ Supported mapper inputs:
 - XML
 - GET API with JSON response
 
-Each input type is handled by a separate Python backend module under `whitespace_tool/source_preview/`. Excel files expose sheet names in the UI so the user can choose which sheet to map.
+Each input type is handled by a separate Python adapter under `whitespace_tool/source_adapters/`. Excel files expose sheet names in the UI so the user can choose which source to use.
 
 The demo config uses small sample files for brand locations only. ZIP geography and demographics are read from BigQuery public datasets.
 
-For a current/realtime-oriented run, start from `configs/live_bigquery.json`. It keeps ZIP demographics in BigQuery, requires live location sources where available, and marks snapshot sources so quality checks surface staleness instead of silently treating old extracts as current.
+For a current/realtime-oriented run, start from `config/live_bigquery.json`. It keeps ZIP demographics in BigQuery, requires live location sources where available, and marks snapshot sources so quality checks surface staleness instead of silently treating old extracts as current.
 
 ```bash
-python3 -m whitespace_tool quality-check --config configs/live_bigquery.json --output-dir outputs/live
-python3 -m whitespace_tool analyze --config configs/live_bigquery.json --output-dir outputs/live
+python3 -m whitespace_tool quality-check --config config/live_bigquery.json --output-dir outputs/live
+python3 -m whitespace_tool analyze --config config/live_bigquery.json --output-dir outputs/live
 ```
 
 To push directly to BigQuery, install `google-cloud-bigquery`, authenticate with Google Application Default Credentials, then run the same `push-bigquery` command without `--dry-run`.
@@ -57,26 +61,26 @@ To push directly to BigQuery, install `google-cloud-bigquery`, authenticate with
 To test the Birdeye BigQuery connection with a service account JSON:
 
 ```bash
-cp configuration/bigquery_connection.example.json configuration/bigquery_connection.json
+cp config/connections/bigquery_connection.example.json config/connections/bigquery_connection.json
 python3 -m pip install google-cloud-bigquery google-auth
-python3 scripts/test_bigquery_connection.py
+python3 scripts/test_storage_connection.py
 ```
 
-Put the downloaded service account file at `configuration/keen-device-610-2af9b27dfda3.json`, or edit `credentials_json` in `configuration/bigquery_connection.json`. That local config and credential file are ignored by git.
+Put the downloaded service account file at `config/connections/keen-device-610-2af9b27dfda3.json`, or edit `credentials_json` in `config/connections/bigquery_connection.json`. That local config and credential file are ignored by git.
 
-`configs/live_bigquery.json` uses a `demographics_source` of type `bigquery` and the same warehouse target: `keen-device-610.birdeye_interview`. If you are not using Application Default Credentials, set `credentials_json` in the config or pass `--credentials-json` when pushing warehouse tables.
+`config/live_bigquery.json` uses a `demographics_source` of type `bigquery` and the configured bronze dataset. If you are not using Application Default Credentials, set `credentials_json` in the config or pass `--credentials-json` when pushing warehouse tables.
 
 ## Approach
 
-1. Fetch ZIP/ZCTA geography and demographics from BigQuery public data into the unified `us_zips` shape. The current join uses `bigquery-public-data.geo_us_boundaries.zip_codes` for city/county/state/lat/lon and `bigquery-public-data.census_bureau_acs.zip_codes_2018_5yr` for population, income, age, poverty, labor, and housing fields.
+1. Fetch ZIP/ZCTA geography and demographics from BigQuery public data into the unified `us_zipcodes` shape. The current join uses `bigquery-public-data.geo_us_boundaries.zip_codes` for city/county/state/lat/lon and `bigquery-public-data.census_bureau_acs.zip_codes_2018_5yr` for population, income, age, poverty, labor, and housing fields.
 2. Keep one source file per brand shape, with source freshness declared in config:
    - `whitespace_tool/sources/dominos_api.py` for a Domino's API JSON response.
    - `whitespace_tool/sources/pizza_hut_kaggle.py` for a Kaggle-style Pizza Hut CSV.
    - `whitespace_tool/sources/little_caesars_json.py` for Little Caesars JSON objects.
-3. Use mapper JSON files in `configs/mappers/` to translate each source into the internal schema. Adding a field or changing a source column should be a mapper edit, not analysis rewrites.
+3. Use workflow template JSON files in `config/workflow_templates/` to translate each source into the internal schema. Adding a field or changing a source column should be a template edit, not analysis rewrites.
 4. Run all data quality checks through `whitespace_tool/data_quality.py`: brand coverage, duplicate source keys, required fields, ZIP validity, ZIP-to-demographic joins, missing demographic metrics, coordinate sanity, source tier, sample-file usage, and stale `observed_at` timestamps.
-5. Push unified tables to BigQuery using `whitespace_tool/warehouse_bigquery.py`. BigQuery DDL is in `bigquery_schema.sql`; load-ready JSONL and schema files are written to `outputs/bigquery/` during dry runs.
-6. Run whitespace analysis from config. The current demo defines similar population profile as z-score distance over `population` and `median_age`; this lives in `configs/demo.json`.
+5. Push unified tables to BigQuery using `whitespace_tool/warehouse_bigquery.py`. Bronze DDL is in `database/bronze_schema.sql`; load-ready JSONL and schema files are written to `outputs/bigquery/` during dry runs.
+6. Run whitespace analysis from config. The current demo defines similar population profile as z-score distance over `population` and `median_age`; this lives in `config/demo.json`.
 
 ## Outputs
 

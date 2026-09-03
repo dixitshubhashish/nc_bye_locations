@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from whitespace_tool.mapper import get_nested, optional_date, optional_float, optional_int
+from whitespace_tool.normalization import get_nested, optional_date, optional_float, optional_int
 
 
 FIELD_VALIDATORS = {

@@ -10,7 +10,7 @@ def load_config(path: str) -> dict[str, Any]:
     config_path = Path(path)
     if not config_path.exists():
         raise SystemExit(
-            f"Missing {config_path}. Copy configuration/bigquery_connection.example.json "
+            f"Missing {config_path}. Copy config/connections/bigquery_connection.example.json "
             f"to {config_path}, then set your service account JSON path."
         )
     with config_path.open("r", encoding="utf-8") as fh:
@@ -53,7 +53,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Test BigQuery service account connection")
     parser.add_argument(
         "--config",
-        default="configuration/bigquery_connection.json",
+        default="config/connections/bigquery_connection.json",
         help="Path to BigQuery connection config JSON",
     )
     args = parser.parse_args()

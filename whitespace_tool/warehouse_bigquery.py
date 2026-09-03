@@ -9,19 +9,11 @@ from uuid import uuid4
 from whitespace_tool.models import LocationRecord, ZipDemographics
 
 
-LOGGER = logging.getLogger("whitespace_tool.mapper")
+LOGGER = logging.getLogger("whitespace_tool.workflow")
 
 
 TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
-    "states": [
-        {"name": "state_code", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "state_name", "type": "STRING", "mode": "NULLABLE"},
-    ],
-    "cities": [
-        {"name": "city_name", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "state_code", "type": "STRING", "mode": "REQUIRED"},
-    ],
-    "us_zips": [
+    "us_zipcodes": [
         {"name": "zip_code", "type": "STRING", "mode": "REQUIRED"},
         {"name": "city_name", "type": "STRING", "mode": "NULLABLE"},
         {"name": "county", "type": "STRING", "mode": "NULLABLE"},
@@ -40,11 +32,24 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "housing_units", "type": "FLOAT", "mode": "NULLABLE"},
         {"name": "source", "type": "STRING", "mode": "REQUIRED"},
     ],
-    "brands": [
-        {"name": "brand_name", "type": "STRING", "mode": "REQUIRED"},
+    "businesses": [
+        {"name": "business_id", "type": "STRING", "mode": "REQUIRED", "default": "GENERATE_UUID()"},
+        {"name": "name", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "slug", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "description", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "logo_url", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "website_url", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "status", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "created_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
+        {"name": "updated_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
+        {"name": "meta_title", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "meta_description", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "country_of_origin", "type": "STRING", "mode": "NULLABLE"},
     ],
-    "restaurants": [
-        {"name": "brand_name", "type": "STRING", "mode": "REQUIRED"},
+    "listings": [
+        {"name": "listing_id", "type": "STRING", "mode": "REQUIRED", "default": "GENERATE_UUID()"},
+        {"name": "business_id", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "source_type_id", "type": "STRING", "mode": "REQUIRED"},
         {"name": "location_key", "type": "STRING", "mode": "REQUIRED"},
         {"name": "name", "type": "STRING", "mode": "REQUIRED"},
         {"name": "address", "type": "STRING", "mode": "REQUIRED"},
@@ -85,52 +90,27 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "foot_traffic_score", "type": "FLOAT", "mode": "NULLABLE"},
         {"name": "parking_availability", "type": "STRING", "mode": "NULLABLE"},
     ],
-    "source_observations": [
-        {"name": "brand_name", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "location_key", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "source_name", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "source_location_id", "type": "STRING", "mode": "NULLABLE"},
-        {"name": "observed_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
-        {"name": "raw_payload", "type": "JSON", "mode": "NULLABLE"},
+    "workflow_templates": [
+        {"name": "workflow_template_id", "type": "STRING", "mode": "REQUIRED", "default": "GENERATE_UUID()"},
+        {"name": "business_id", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "name", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "components", "type": "JSON", "mode": "REQUIRED"},
+        {"name": "archived_components", "type": "JSON", "mode": "NULLABLE"},
+        {"name": "created_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
+        {"name": "updated_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
     ],
-    "reviews": [
-        {"name": "brand_name", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "location_key", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "review_source", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "rating", "type": "FLOAT", "mode": "NULLABLE"},
-        {"name": "review_count", "type": "INTEGER", "mode": "NULLABLE"},
-        {"name": "observed_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
-    ],
-    "analysis_runs": [
-        {"name": "analysis_run_id", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "run_name", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "subject_brand_name", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "config_json", "type": "JSON", "mode": "REQUIRED"},
-        {"name": "generated_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
-    ],
-    "mapper_configs": [
-        {"name": "event_id", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "mapper_id", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "brand_name", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "source_name", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "source_type", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "field_count", "type": "INTEGER", "mode": "REQUIRED"},
-        {"name": "config_json", "type": "JSON", "mode": "REQUIRED"},
+    "source_types": [
+        {"name": "source_type_id", "type": "STRING", "mode": "REQUIRED", "default": "GENERATE_UUID()"},
+        {"name": "name", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "data_format", "type": "JSON", "mode": "REQUIRED"},
         {"name": "created_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
     ],
     "indigestible_records": [
         {"name": "event_id", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "source_name", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "source_type_id", "type": "STRING", "mode": "REQUIRED"},
         {"name": "row_number", "type": "INTEGER", "mode": "REQUIRED"},
         {"name": "errors", "type": "JSON", "mode": "REQUIRED"},
         {"name": "raw_record", "type": "JSON", "mode": "REQUIRED"},
-    ],
-    "whitespace_candidates": [
-        {"name": "analysis_run_id", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "zip_code", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "whitespace_type", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "similarity_distance", "type": "FLOAT", "mode": "REQUIRED"},
-        {"name": "competitors_present", "type": "STRING", "mode": "NULLABLE"},
     ],
 }
 
@@ -154,48 +134,9 @@ def build_table_rows(
     whitespace_rows: list[dict[str, Any]] | None = None,
     summary: dict[str, Any] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
-    states = sorted({row.state for row in locations if row.state})
-    cities = sorted({(row.city, row.state) for row in locations if row.city and row.state})
-    brands = sorted({row.brand for row in locations})
-    zip_city_state = {}
-    for row in locations:
-        zip_city_state.setdefault(row.zip5, (row.city, row.state))
-
-    generated_at = None
-    analysis_run_id = None
-    analysis_runs: list[dict[str, Any]] = []
-    whitespace_candidates: list[dict[str, Any]] = []
-    if config is not None and whitespace_rows is not None:
-        from whitespace_tool.models import utc_now_iso
-
-        generated_at = utc_now_iso()
-        analysis_run_id = f"run_{uuid4().hex}"
-        config_for_storage = _scrub_config(config)
-        analysis_runs.append(
-            {
-                "analysis_run_id": analysis_run_id,
-                "run_name": config.get("run_name", "competitive_whitespace"),
-                "subject_brand_name": config["subject_brand"],
-                "config_json": json.dumps(config_for_storage, sort_keys=True),
-                "generated_at": generated_at,
-            }
-        )
-        whitespace_candidates = [
-            {
-                "analysis_run_id": analysis_run_id,
-                "zip_code": row["zip_code"],
-                "whitespace_type": row["whitespace_type"],
-                "similarity_distance": row["similarity_distance"],
-                "competitors_present": row["competitors_present"],
-            }
-            for row in whitespace_rows
-        ]
-
+    zip_city_state = {row.zip5: (row.city, row.state) for row in locations}
     return {
-        "states": [{"state_code": state, "state_name": None} for state in states],
-        "cities": [{"city_name": city, "state_code": state} for city, state in cities],
-        "brands": [{"brand_name": brand} for brand in brands],
-        "us_zips": [
+        "us_zipcodes": [
             {
                 "zip_code": demo.zip_code,
                 "city_name": demo.city or zip_city_state.get(demo.zip_code, (None, None))[0],
@@ -217,9 +158,12 @@ def build_table_rows(
             }
             for demo in demographics.values()
         ],
-        "restaurants": [
+        "businesses": [],
+        "listings": [
             {
-                "brand_name": row.brand,
+                "listing_id": str(uuid4()),
+                "business_id": getattr(row, "business_id", row.brand),
+                "source_type_id": getattr(row, "source_type_id", ""),
                 "location_key": row.location_id,
                 "name": row.name,
                 "address": row.address,
@@ -262,21 +206,9 @@ def build_table_rows(
             }
             for row in locations
         ],
-        "source_observations": [
-            {
-                "brand_name": row.brand,
-                "location_key": row.location_id,
-                "source_name": row.source,
-                "source_location_id": row.location_id,
-                "observed_at": row.observed_at,
-                "raw_payload": json.dumps(row.raw, sort_keys=True),
-            }
-            for row in locations
-        ],
-        "reviews": [],
-        "analysis_runs": analysis_runs,
-        "whitespace_candidates": whitespace_candidates,
-        "mapper_configs": [],
+        "workflow_templates": [],
+        "source_types": [],
+        "indigestible_records": [],
     }
 
 
@@ -321,7 +253,7 @@ def push_to_bigquery(
 
     for table_name, rows in rows_by_table.items():
         schema = [
-            bigquery.SchemaField(field["name"], field["type"], mode=field["mode"])
+            bigquery.SchemaField(field["name"], field["type"], mode=field["mode"], default_value_expression=field.get("default"))
             for field in TABLE_SCHEMAS[table_name]
         ]
         table_ref = f"{project_id}.{dataset_id}.{table_name}"
@@ -340,8 +272,39 @@ def push_to_bigquery(
                 existing.schema = list(existing.schema) + missing_fields
                 client.update_table(existing, ["schema"])
         if rows:
-            errors = client.insert_rows_json(table_ref, rows)
-            if errors:
-                LOGGER.error("db_insert_failed table=%s rows=%d error_count=%d errors=%s", table_ref, len(rows), len(errors), errors)
-                raise RuntimeError(f"BigQuery insert errors for {table_name}: {errors}")
-            LOGGER.info("db_insert_succeeded table=%s rows=%d", table_ref, len(rows))
+            LOGGER.info("db_batch_load_started table=%s rows=%d", table_ref, len(rows))
+            load_job = client.load_table_from_json(rows, table_ref, job_config=bigquery.LoadJobConfig(schema=schema))
+            load_job.result()
+            if load_job.errors:
+                LOGGER.error("db_batch_load_failed table=%s rows=%d error_count=%d errors=%s", table_ref, len(rows), len(load_job.errors), load_job.errors)
+                raise RuntimeError(f"Batch load errors for {table_name}: {load_job.errors}")
+            LOGGER.info("db_batch_load_succeeded table=%s rows=%d job_id=%s", table_ref, len(rows), load_job.job_id)
+
+
+def clear_dataset_tables(
+    project_id: str,
+    dataset_id: str,
+    credentials_json: str | None = None,
+) -> list[str]:
+    try:
+        from google.cloud import bigquery
+        from google.oauth2 import service_account
+    except ImportError as exc:
+        raise RuntimeError("Install the storage client dependencies before clearing saved data.") from exc
+
+    if credentials_json:
+        credentials = service_account.Credentials.from_service_account_file(credentials_json)
+        client = bigquery.Client(project=project_id, credentials=credentials)
+    else:
+        client = bigquery.Client(project=project_id)
+
+    dataset_ref = f"{project_id}.{dataset_id}"
+    table_refs = [table.reference for table in client.list_tables(dataset_ref)]
+    LOGGER.warning("db_clear_started dataset=%s table_count=%d", dataset_ref, len(table_refs))
+    deleted: list[str] = []
+    for table_ref in table_refs:
+        client.delete_table(table_ref, not_found_ok=True)
+        deleted.append(table_ref.table_id)
+        LOGGER.warning("db_table_deleted dataset=%s table=%s", dataset_ref, table_ref.table_id)
+    LOGGER.warning("db_clear_succeeded dataset=%s deleted_count=%d", dataset_ref, len(deleted))
+    return deleted

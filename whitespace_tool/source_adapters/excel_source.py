@@ -5,7 +5,7 @@ import re
 import zipfile
 from xml.etree import ElementTree
 
-from whitespace_tool.source_preview.common import preview_payload
+from whitespace_tool.source_adapters.common import preview_payload
 
 
 def _strip_namespace(tag: str) -> str:

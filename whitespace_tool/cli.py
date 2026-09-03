@@ -81,7 +81,7 @@ def push_bigquery(
     config = load_config(config_path)
     warehouse = config.get("warehouse", {})
     project_id = project_id or warehouse.get("project_id")
-    dataset_id = dataset_id or warehouse.get("dataset_id")
+    dataset_id = dataset_id or warehouse.get("bronze_dataset_id", warehouse.get("dataset_id"))
     credentials_json = credentials_json or warehouse.get("credentials_json")
     if credentials_json:
         credentials_path = Path(credentials_json)
@@ -107,8 +107,8 @@ def push_bigquery(
     print(f"Pushed unified tables to BigQuery dataset {project_id}.{dataset_id}")
 
 
-def serve_mapper_ui(host: str, port: int) -> None:
-    from whitespace_tool.mapper_server import serve
+def serve_workflow_ui(host: str, port: int) -> None:
+    from whitespace_tool.workflow_server import serve
 
     serve(host, port)
 
@@ -118,29 +118,29 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command")
 
     analyze_parser = subparsers.add_parser("analyze", help="Run whitespace analysis outputs")
-    analyze_parser.add_argument("--config", default="configs/demo.json", help="Path to a JSON run configuration")
+    analyze_parser.add_argument("--config", default="config/demo.json", help="Path to a JSON run configuration")
     analyze_parser.add_argument("--output-dir", default="outputs/demo", help="Directory for generated CSV/JSON outputs")
 
     public_zips_parser = subparsers.add_parser("fetch-public-zips", help="Fetch ZIP geography + ACS fields from BigQuery public data")
-    public_zips_parser.add_argument("--config", default="configuration/public_us_zips_bigquery.json")
+    public_zips_parser.add_argument("--config", default="config/connections/public_us_zips_bigquery.json")
     public_zips_parser.add_argument("--output", default="data/us_zips_bigquery.csv")
     public_zips_parser.add_argument("--limit", type=int, default=None, help="Optional row limit for inspection")
 
     quality_parser = subparsers.add_parser("quality-check", help="Run data quality checks in one module")
-    quality_parser.add_argument("--config", default="configs/demo.json", help="Path to a JSON run configuration")
+    quality_parser.add_argument("--config", default="config/demo.json", help="Path to a JSON run configuration")
     quality_parser.add_argument("--output-dir", default="outputs/demo", help="Directory for quality reports")
 
     bq_parser = subparsers.add_parser("push-bigquery", help="Stage or push unified tables to BigQuery")
-    bq_parser.add_argument("--config", default="configs/demo.json", help="Path to a JSON run configuration")
+    bq_parser.add_argument("--config", default="config/demo.json", help="Path to a JSON run configuration")
     bq_parser.add_argument("--project-id", default=None, help="Google Cloud project id; falls back to config warehouse.project_id")
     bq_parser.add_argument("--dataset-id", default=None, help="BigQuery dataset id; falls back to config warehouse.dataset_id")
     bq_parser.add_argument("--stage-dir", default="outputs/bigquery", help="Local JSONL/schema staging directory")
     bq_parser.add_argument("--dry-run", action="store_true", help="Write BigQuery files locally without pushing")
     bq_parser.add_argument("--credentials-json", default=None, help="Optional service-account JSON path; ADC also works")
 
-    mapper_ui_parser = subparsers.add_parser("mapper-ui", help="Serve local CSV/JSON mapper UI")
-    mapper_ui_parser.add_argument("--host", default="127.0.0.1")
-    mapper_ui_parser.add_argument("--port", type=int, default=8765)
+    workflow_ui_parser = subparsers.add_parser("workflow-ui", help="Serve the no-code workflow template UI")
+    workflow_ui_parser.add_argument("--host", default="127.0.0.1")
+    workflow_ui_parser.add_argument("--port", type=int, default=8765)
 
     args = parser.parse_args()
     if args.command == "fetch-public-zips":
@@ -156,10 +156,10 @@ def main() -> None:
             args.dry_run,
             args.credentials_json,
         )
-    elif args.command == "mapper-ui":
-        serve_mapper_ui(args.host, args.port)
+    elif args.command == "workflow-ui":
+        serve_workflow_ui(args.host, args.port)
     else:
-        run_analysis(getattr(args, "config", "configs/demo.json"), getattr(args, "output_dir", "outputs/demo"))
+        run_analysis(getattr(args, "config", "config/demo.json"), getattr(args, "output_dir", "outputs/demo"))
 
 
 if __name__ == "__main__":

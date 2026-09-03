@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 from xml.etree import ElementTree
 
-from whitespace_tool.source_preview.common import preview_payload
+from whitespace_tool.source_adapters.common import preview_payload
 
 
 def _strip_namespace(tag: str) -> str:

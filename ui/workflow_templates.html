@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Brand Source Mapper</title>
+  <title>Competitive Whitespace Tool</title>
   <style>
     :root {
       --bg: #f6f7f4;
@@ -37,6 +37,65 @@
       align-items: center;
       justify-content: space-between;
       gap: 16px;
+    }
+
+    .top-tabs {
+      display: flex;
+      gap: 6px;
+    }
+
+    .top-tab {
+      background: #ffffff;
+      color: var(--ink);
+      border-color: var(--line);
+    }
+
+    .top-tab.active {
+      background: var(--ink);
+      color: #ffffff;
+    }
+
+    header.reporting-active #productTitle,
+    header.reporting-active #resetMappingBtn,
+    header.reporting-active #clearDataBtn { visibility: hidden; }
+
+    .reporting-view {
+      height: calc(100vh - 71px);
+      padding: 0;
+    }
+
+    .reporting-frame { width: 100%; height: 100%; border: 0; display: block; }
+
+    .progress-wrap {
+      position: sticky;
+      top: 0;
+      z-index: 4;
+      padding: 10px 24px;
+      border-bottom: 1px solid var(--line);
+      background: #ffffff;
+    }
+
+    .progress-track {
+      height: 8px;
+      overflow: hidden;
+      border-radius: 4px;
+      background: #e8ece8;
+    }
+
+    .progress-fill {
+      width: 0;
+      height: 100%;
+      background: var(--accent);
+      transition: width 180ms ease;
+    }
+
+    .progress-label {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
     }
 
     h1 {
@@ -123,6 +182,17 @@
       flex-wrap: wrap;
       margin-top: 14px;
     }
+
+    .action-feedback {
+      min-height: 20px;
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .action-feedback.ok { color: var(--ok); }
+    .action-feedback.error { color: var(--error); }
 
     .mapping-grid {
       display: grid;
@@ -389,7 +459,7 @@
 <body>
   <div id="loginScreen" class="login-screen">
     <div class="login-box">
-      <h1>Brand Source Mapper</h1>
+      <h1 id="productTitle">Competitive Whitespace Tool</h1>
       <label for="loginUser">Username</label>
       <input id="loginUser" autocomplete="username" value="admin">
       <label for="loginPassword">Password</label>
@@ -407,9 +477,19 @@
 
   <div id="appShell" class="hidden">
     <header>
-      <h1>Brand Source Mapper</h1>
-      <button class="secondary" id="resetMappingBtn" type="button">Reset to Default Mapping</button>
+      <h1>Competitive Whitespace Tool</h1>
+      <nav class="top-tabs" aria-label="Primary navigation">
+        <button class="top-tab active" data-view="mapperView" type="button">Workflow Templates</button>
+        <button class="top-tab" data-view="reportingView" type="button">Reporting</button>
+      </nav>
+      <button class="secondary" id="resetMappingBtn" type="button">Reset Template</button>
+      <button class="secondary" id="clearDataBtn" type="button">Clear Saved Data</button>
     </header>
+    <div id="mapperView">
+    <div class="progress-wrap" aria-live="polite">
+      <div class="progress-label"><span id="progressMessage">Ready</span><span id="progressValue">0%</span></div>
+      <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
+    </div>
     <main>
     <aside>
       <div class="panel">
@@ -428,8 +508,23 @@
         <input id="fileInput" type="file" accept=".csv,.xlsx,.xls,.json,.xml,application/json,text/csv,application/xml,text/xml">
         </div>
 
-        <label for="brandName">Brand name</label>
-        <input id="brandName" placeholder="Example: Domino's">
+        <label for="brandSelect">Business</label>
+        <select id="brandSelect" aria-label="Select business">
+          <option value="">Select an existing business</option>
+          <option value="__create_new__">Create New Business</option>
+        </select>
+        <div id="newBrandFields" class="field-group hidden">
+          <label for="newBrandName">Name</label><input id="newBrandName">
+          <label for="newBrandSlug">Slug</label><input id="newBrandSlug">
+          <label for="newBrandDescription">Description</label><textarea id="newBrandDescription"></textarea>
+          <label for="newBrandLogo">Logo URL</label><input id="newBrandLogo" type="url">
+          <label for="newBrandWebsite">Website URL</label><input id="newBrandWebsite" type="url">
+          <label for="newBrandStatus">Status</label><select id="newBrandStatus"><option value="active">Active</option><option value="inactive">Inactive</option></select>
+          <label for="newBrandMetaTitle">Meta Title</label><input id="newBrandMetaTitle">
+          <label for="newBrandMetaDescription">Meta Description</label><textarea id="newBrandMetaDescription"></textarea>
+          <label for="newBrandOrigin">Country of Origin</label><input id="newBrandOrigin">
+          <button id="createBrandBtn" type="button">Save Brand</button>
+        </div>
 
         <label for="sourceName">Source name</label>
         <input id="sourceName" placeholder="Example: dominos_store_locator_api">
@@ -496,12 +591,13 @@
       </div>
 
       <div class="panel">
-        <h2>Mapper JSON</h2>
+        <h2>Workflow Template</h2>
         <textarea id="mapperOutput" spellcheck="false"></textarea>
         <div class="button-row">
-          <button id="saveBtn">Save</button>
+          <button id="saveBtn">Save Mapping Template</button>
           <button class="secondary" id="copyBtn">Copy</button>
         </div>
+        <div id="copyFeedback" class="action-feedback" role="status" aria-live="polite"></div>
       </div>
 
       <div class="panel">
@@ -520,7 +616,7 @@
       <div id="status" class="status">Upload a source file or enter a GET JSON API URL to begin.</div>
 
       <div class="panel">
-        <h2>Field Mapping</h2>
+        <h2>Template Components</h2>
         <div class="mapping-grid" id="mappingGrid"></div>
       </div>
 
@@ -533,47 +629,51 @@
       <div id="entityPreview" class="hidden"></div>
     </section>
     </main>
+    </div>
+    <section id="reportingView" class="reporting-view hidden">
+      <iframe class="reporting-frame" title="Reporting dashboard" src="https://lookerstudio.google.com/embed/reporting/1f6e8f3c-2c43-4a55-9f4a-8a4b3f9e2d10/page/p_abc123"></iframe>
+    </section>
   </div>
 
   <script>
     const mappingTargets = [
-      { key: "location_id", table: "restaurants", field: "location_key", label: "Location ID / Store ID", required: false, hints: ["locationid", "storeid", "store_id", "id", "number"] },
-      { key: "name", table: "restaurants", field: "name", label: "Restaurant Name", required: true, hints: ["name", "restaurantname", "storename", "displayname"] },
-      { key: "address", table: "restaurants", field: "address", label: "Street Address", required: true, hints: ["address", "addressdescription", "line1", "street"] },
-      { key: "city", table: "restaurants", field: "city_name", label: "City", required: true, hints: ["city", "town"] },
-      { key: "town", table: "restaurants", field: "town", label: "Town", required: false, hints: ["town", "locality"] },
-      { key: "state", table: "restaurants", field: "state_code", label: "State", required: true, hints: ["state", "region", "province", "state_code"] },
-      { key: "province", table: "restaurants", field: "province", label: "Province", required: false, hints: ["province", "region"] },
-      { key: "postal_code", table: "restaurants", field: "zip_code", label: "ZIP Code", required: true, hints: ["zip", "zipcode", "zip_code", "postalcode", "postal_code"] },
-      { key: "country", table: "restaurants", field: "country", label: "Country", required: false, hints: ["country", "countrycode"] },
-      { key: "latitude", table: "restaurants", field: "latitude", label: "Latitude", required: false, hints: ["lat", "latitude"] },
-      { key: "longitude", table: "restaurants", field: "longitude", label: "Longitude", required: false, hints: ["lng", "lon", "longitude"] },
-      { key: "franchise_name", table: "restaurants", field: "franchise_name", label: "Franchise Name", required: false, hints: ["franchise", "franchisename"] },
-      { key: "concept_type", table: "restaurants", field: "concept_type", label: "Concept Type", required: false, hints: ["concept", "concepttype"] },
-      { key: "cuisine_type", table: "restaurants", field: "cuisine_type", label: "Cuisine Type", required: false, hints: ["cuisine", "cuisinetype"] },
-      { key: "neighborhood", table: "restaurants", field: "neighborhood", label: "Neighborhood", required: false, hints: ["neighborhood"] },
-      { key: "district", table: "restaurants", field: "district", label: "District", required: false, hints: ["district"] },
-      { key: "phone_number", table: "restaurants", field: "phone_number", label: "Phone Number", required: false, hints: ["phone", "phonenumber", "telephone"] },
-      { key: "website_url", table: "restaurants", field: "website_url", label: "Website URL", required: false, hints: ["website", "websiteurl", "url"] },
-      { key: "google_maps_link", table: "restaurants", field: "google_maps_link", label: "Google Maps Link", required: false, hints: ["googlemaps", "mapsurl", "mapslink"] },
-      { key: "social_media_handles", table: "restaurants", field: "social_media_handles", label: "Social Media Handles", required: false, hints: ["social", "socialmedia", "handles"] },
-      { key: "operating_hours", table: "restaurants", field: "operating_hours", label: "Operating Hours", required: false, hints: ["hours", "operatinghours", "openhours"] },
-      { key: "seating_capacity", table: "restaurants", field: "seating_capacity", label: "Seating Capacity", required: false, hints: ["seating", "capacity", "seatingcapacity"] },
-      { key: "service_types", table: "restaurants", field: "service_types", label: "Service Types", required: false, hints: ["service", "servicetype", "services"] },
-      { key: "opening_date", table: "restaurants", field: "opening_date", label: "Opening Date", required: false, hints: ["openingdate", "opendate"] },
-      { key: "status", table: "restaurants", field: "status", label: "Status", required: false, hints: ["status", "storestatus"] },
-      { key: "annual_revenue", table: "restaurants", field: "annual_revenue", label: "Annual Revenue", required: false, hints: ["revenue", "annualrevenue"] },
-      { key: "average_ticket_size", table: "restaurants", field: "average_ticket_size", label: "Average Ticket Size", required: false, hints: ["ticket", "averageticket", "averageticketsize"] },
-      { key: "daily_footfall", table: "restaurants", field: "daily_footfall", label: "Daily Footfall", required: false, hints: ["dailyfootfall", "dailytraffic"] },
-      { key: "monthly_footfall", table: "restaurants", field: "monthly_footfall", label: "Monthly Footfall", required: false, hints: ["monthlyfootfall", "monthlytraffic"] },
-      { key: "rental_cost", table: "restaurants", field: "rental_cost", label: "Rental Cost", required: false, hints: ["rent", "rentalcost"] },
-      { key: "lease_cost", table: "restaurants", field: "lease_cost", label: "Lease Cost", required: false, hints: ["lease", "leasecost"] },
-      { key: "population_density", table: "restaurants", field: "population_density", label: "Population Density", required: false, hints: ["density", "populationdensity"] },
-      { key: "average_household_income", table: "restaurants", field: "average_household_income", label: "Average Household Income", required: false, hints: ["income", "householdincome", "averagehouseholdincome"] },
-      { key: "competitor_count", table: "restaurants", field: "competitor_count", label: "Competitor Count", required: false, hints: ["competitors", "competitorcount"] },
-      { key: "foot_traffic_score", table: "restaurants", field: "foot_traffic_score", label: "Foot Traffic Score", required: false, hints: ["foottraffic", "foottrafficscore"] },
-      { key: "parking_availability", table: "restaurants", field: "parking_availability", label: "Parking Availability", required: false, hints: ["parking", "parkingavailability"] },
-      { key: "observed_at", table: "source_observations", field: "observed_at", label: "Observed At", required: false, hints: ["observed_at", "updatedat", "updated_at", "last_seen"] }
+      { key: "location_id", table: "listings", field: "location_key", label: "Location ID / Store ID", required: false, hints: ["locationid", "storeid", "store_id", "id", "number"] },
+      { key: "name", table: "listings", field: "name", label: "Restaurant Name", required: true, hints: ["name", "restaurantname", "storename", "displayname"] },
+      { key: "address", table: "listings", field: "address", label: "Street Address", required: true, hints: ["address", "addressdescription", "line1", "street"] },
+      { key: "city", table: "listings", field: "city_name", label: "City", required: true, hints: ["city", "town"] },
+      { key: "town", table: "listings", field: "town", label: "Town", required: false, hints: ["town", "locality"] },
+      { key: "state", table: "listings", field: "state_code", label: "State", required: true, hints: ["state", "region", "province", "state_code"] },
+      { key: "province", table: "listings", field: "province", label: "Province", required: false, hints: ["province", "region"] },
+      { key: "postal_code", table: "listings", field: "zip_code", label: "ZIP Code", required: true, hints: ["zip", "zipcode", "zip_code", "postalcode", "postal_code"] },
+      { key: "country", table: "listings", field: "country", label: "Country", required: false, hints: ["country", "countrycode"] },
+      { key: "latitude", table: "listings", field: "latitude", label: "Latitude", required: false, hints: ["lat", "latitude"] },
+      { key: "longitude", table: "listings", field: "longitude", label: "Longitude", required: false, hints: ["lng", "lon", "longitude"] },
+      { key: "franchise_name", table: "listings", field: "franchise_name", label: "Franchise Name", required: false, hints: ["franchise", "franchisename"] },
+      { key: "concept_type", table: "listings", field: "concept_type", label: "Concept Type", required: false, hints: ["concept", "concepttype"] },
+      { key: "cuisine_type", table: "listings", field: "cuisine_type", label: "Cuisine Type", required: false, hints: ["cuisine", "cuisinetype"] },
+      { key: "neighborhood", table: "listings", field: "neighborhood", label: "Neighborhood", required: false, hints: ["neighborhood"] },
+      { key: "district", table: "listings", field: "district", label: "District", required: false, hints: ["district"] },
+      { key: "phone_number", table: "listings", field: "phone_number", label: "Phone Number", required: false, hints: ["phone", "phonenumber", "telephone"] },
+      { key: "website_url", table: "listings", field: "website_url", label: "Website URL", required: false, hints: ["website", "websiteurl", "url"] },
+      { key: "google_maps_link", table: "listings", field: "google_maps_link", label: "Google Maps Link", required: false, hints: ["googlemaps", "mapsurl", "mapslink"] },
+      { key: "social_media_handles", table: "listings", field: "social_media_handles", label: "Social Media Handles", required: false, hints: ["social", "socialmedia", "handles"] },
+      { key: "operating_hours", table: "listings", field: "operating_hours", label: "Operating Hours", required: false, hints: ["hours", "operatinghours", "openhours"] },
+      { key: "seating_capacity", table: "listings", field: "seating_capacity", label: "Seating Capacity", required: false, hints: ["seating", "capacity", "seatingcapacity"] },
+      { key: "service_types", table: "listings", field: "service_types", label: "Service Types", required: false, hints: ["service", "servicetype", "services"] },
+      { key: "opening_date", table: "listings", field: "opening_date", label: "Opening Date", required: false, hints: ["openingdate", "opendate"] },
+      { key: "status", table: "listings", field: "status", label: "Status", required: false, hints: ["status", "storestatus"] },
+      { key: "annual_revenue", table: "listings", field: "annual_revenue", label: "Annual Revenue", required: false, hints: ["revenue", "annualrevenue"] },
+      { key: "average_ticket_size", table: "listings", field: "average_ticket_size", label: "Average Ticket Size", required: false, hints: ["ticket", "averageticket", "averageticketsize"] },
+      { key: "daily_footfall", table: "listings", field: "daily_footfall", label: "Daily Footfall", required: false, hints: ["dailyfootfall", "dailytraffic"] },
+      { key: "monthly_footfall", table: "listings", field: "monthly_footfall", label: "Monthly Footfall", required: false, hints: ["monthlyfootfall", "monthlytraffic"] },
+      { key: "rental_cost", table: "listings", field: "rental_cost", label: "Rental Cost", required: false, hints: ["rent", "rentalcost"] },
+      { key: "lease_cost", table: "listings", field: "lease_cost", label: "Lease Cost", required: false, hints: ["lease", "leasecost"] },
+      { key: "population_density", table: "listings", field: "population_density", label: "Population Density", required: false, hints: ["density", "populationdensity"] },
+      { key: "average_household_income", table: "listings", field: "average_household_income", label: "Average Household Income", required: false, hints: ["income", "householdincome", "averagehouseholdincome"] },
+      { key: "competitor_count", table: "listings", field: "competitor_count", label: "Competitor Count", required: false, hints: ["competitors", "competitorcount"] },
+      { key: "foot_traffic_score", table: "listings", field: "foot_traffic_score", label: "Foot Traffic Score", required: false, hints: ["foottraffic", "foottrafficscore"] },
+      { key: "parking_availability", table: "listings", field: "parking_availability", label: "Parking Availability", required: false, hints: ["parking", "parkingavailability"] },
+      { key: "observed_at", table: "listings", field: "first_observed_at", label: "Observed At", required: false, hints: ["observed_at", "updatedat", "updated_at", "last_seen"] }
     ];
 
     const primaryMappingKeys = new Set(mappingTargets.slice(0, 20).map((target) => target.key));
@@ -584,7 +684,9 @@
     let resolvedRecordPath = "";
     let mappingSelections = {};
     let autoMappedKeys = new Set();
+    let learnedSuggestions = {};
     let sourceParsed = false;
+    let selectedBrand = null;
 
     const el = (id) => document.getElementById(id);
 
@@ -623,6 +725,19 @@
     function setStatus(message, type = "") {
       el("status").className = `status ${type}`;
       el("status").textContent = message;
+    }
+
+    function setProgress(percent, message) {
+      const boundedPercent = Math.max(0, Math.min(100, percent));
+      el("progressFill").style.width = `${boundedPercent}%`;
+      el("progressValue").textContent = `${boundedPercent}%`;
+      el("progressMessage").textContent = message;
+    }
+
+    function switchView(viewId) {
+      document.querySelectorAll("[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === viewId));
+      ["mapperView", "reportingView"].forEach((id) => el(id).classList.toggle("hidden", id !== viewId));
+      el("appShell").querySelector("header").classList.toggle("reporting-active", viewId === "reportingView");
     }
 
     function inferSourceType(fileName) {
@@ -739,6 +854,8 @@
     }
 
     function suggestField(target, usedFields = new Set()) {
+      const learned = learnedSuggestions[target.key]?.source;
+      if (learned && sourceFields.includes(learned) && !usedFields.has(learned)) return learned;
       const normalizedFields = sourceFields.map((field) => ({ field, clean: normalizeName(field) }));
       for (const hint of target.hints) {
         const exact = normalizedFields.find((entry) => entry.clean === normalizeName(hint));
@@ -844,7 +961,8 @@
         if (select.value) fields[select.dataset.field] = select.value;
       });
       const mapper = {
-        brand: el("brandName").value.trim(),
+        brand: selectedBrand?.name || "",
+        business_id: selectedBrand?.business_id || "",
         source_name: el("sourceName").value.trim(),
         source_type: el("sourceType").value,
         fields
@@ -863,6 +981,38 @@
         };
       }
       return mapper;
+    }
+
+    async function loadBrands(search = "") {
+      try {
+        const response = await fetch(`/api/brands?search=${encodeURIComponent(search)}`);
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not load brands.");
+        const brands = result.brands || [];
+        el("brandSelect").innerHTML = '<option value="">Select an existing business</option>' + brands.map((brand) => `<option value="${escapeHtml(brand.business_id)}">${escapeHtml(brand.name)}</option>`).join("") + '<option value="__create_new__">Create New Business</option>';
+        el("brandSelect").dataset.brands = JSON.stringify(brands);
+      } catch (error) {
+        setStatus(error.message, "error");
+      }
+    }
+
+    async function createNewBrand() {
+      const name = el("newBrandName").value.trim();
+      if (!name) { setStatus("Brand name is required.", "warn"); return; }
+      try {
+        const response = await fetch("/api/brands", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
+          name, slug: el("newBrandSlug").value.trim(), description: el("newBrandDescription").value.trim(), logo_url: el("newBrandLogo").value.trim(), website_url: el("newBrandWebsite").value.trim(), status: el("newBrandStatus").value, meta_title: el("newBrandMetaTitle").value.trim(), meta_description: el("newBrandMetaDescription").value.trim(), country_of_origin: el("newBrandOrigin").value.trim()
+        }) });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not create brand.");
+        selectedBrand = result.brand;
+        el("brandSelect").value = selectedBrand.business_id;
+        await loadBrands(selectedBrand.name);
+        el("brandSelect").value = selectedBrand.business_id;
+        el("newBrandFields").classList.add("hidden");
+        setStatus(`Brand ${selectedBrand.name} is ready for mapping.`, "ok");
+        updateOutput();
+      } catch (error) { setStatus(error.message, "error"); }
     }
 
     function normalizedRows() {
@@ -905,8 +1055,9 @@
       const visibleTargets = mappingTargets.filter((item) => primaryMappingKeys.has(item.key) || optionalMappingKeys.has(item.key));
       const mappedSourceFields = new Set(Object.values(mappingSelections).filter(Boolean));
       const entityNames = {
-        restaurants: "Restaurant Locations",
-        source_observations: "Source History"
+        listings: "Listings",
+        workflow_templates: "Workflow Templates",
+        source_types: "Source Types"
       };
       const groupedTargets = visibleTargets.reduce((groups, item) => {
         (groups[item.table] ||= []).push(item);
@@ -997,6 +1148,17 @@
         sourceRows = result.rows || [];
         sourceFields = [...new Set((result.fields || []).filter((field) => field !== null && field !== undefined && String(field).trim()))];
         sourceParsed = true;
+        learnedSuggestions = {};
+        try {
+          const learningResponse = await fetch("/api/learning", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ source_type: sourceType, source_fields: sourceFields })
+          });
+          if (learningResponse.ok) learnedSuggestions = (await learningResponse.json()).suggestions || {};
+        } catch (learningError) {
+          learnedSuggestions = {};
+        }
         resolvedRecordPath = result.record_path || "";
         mappingSelections = {};
         autoMappedKeys = new Set();
@@ -1043,16 +1205,37 @@
 
     async function saveMapper() {
       const mapper = getMapper();
-      setStatus("Validating and saving rows...", "");
+      setStatus("Validating...", "");
+      setProgress(10, "Validating records");
       try {
+        setProgress(35, `Preparing ${sourceRows.length} records`);
         const response = await fetch("/api/save", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ mapper, rows: sourceRows, source_fields: sourceFields })
         });
         const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "Could not save mapper.");
-        setStatus(`Saved ${result.mapped_rows} rows. ${result.indigestible_rows} rows held for review. Event: ${result.event_id}`, "ok");
+        if (!response.ok) throw new Error(result.error || "Could not save workflow template.");
+        setProgress(100, "Processing complete");
+        setStatus(`Processing complete: ${result.mapped_rows} of ${result.total_rows} records processed successfully; ${result.indigestible_rows} rejected records are available under event ${result.event_id}.`, "ok");
+      } catch (error) {
+        setProgress(0, "Save failed");
+        setStatus(error.message, "error");
+      }
+    }
+
+    async function clearSavedData() {
+      if (!window.confirm("Clear all saved tables in the configured dataset? This cannot be undone.")) return;
+      setStatus("Clearing saved data...", "warn");
+      try {
+        const response = await fetch("/api/clear", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}"
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not clear saved data.");
+        setStatus(`Saved data cleared. ${result.deleted_count} tables removed.`, "ok");
       } catch (error) {
         setStatus(error.message, "error");
       }
@@ -1076,15 +1259,39 @@
     el("authType").addEventListener("change", updateAuthVisibility);
     el("saveBtn").addEventListener("click", saveMapper);
     el("resetMappingBtn").addEventListener("click", resetMapping);
+    el("clearDataBtn").addEventListener("click", clearSavedData);
+    document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
     el("addOptionalFieldBtn").addEventListener("click", () => {
       const key = el("optionalFieldSelect").value;
       if (!key || primaryMappingKeys.has(key) || optionalMappingKeys.has(key)) return;
       optionalMappingKeys.add(key);
       renderMappings();
     });
-    el("copyBtn").addEventListener("click", () => navigator.clipboard.writeText(el("mapperOutput").value));
+    el("copyBtn").addEventListener("click", async () => {
+      const feedback = el("copyFeedback");
+      try {
+        await navigator.clipboard.writeText(el("mapperOutput").value);
+        feedback.className = "action-feedback ok";
+        feedback.textContent = "Workflow template copied to clipboard.";
+      } catch (error) {
+        feedback.className = "action-feedback error";
+        feedback.textContent = "Could not copy workflow template.";
+      }
+    });
     el("resetBtn").addEventListener("click", () => location.reload());
-    el("brandName").addEventListener("input", updateOutput);
+    el("brandSelect").addEventListener("change", (event) => {
+      if (event.target.value === "__create_new__") {
+        selectedBrand = null;
+        el("newBrandFields").classList.remove("hidden");
+        updateOutput();
+        return;
+      }
+      const brands = JSON.parse(event.target.dataset.brands || "[]");
+      selectedBrand = brands.find((brand) => brand.business_id === event.target.value) || null;
+      el("newBrandFields").classList.add("hidden");
+      updateOutput();
+    });
+    el("createBrandBtn").addEventListener("click", createNewBrand);
     el("sourceName").addEventListener("input", updateOutput);
     el("fileInput").addEventListener("change", () => {
       sourceParsed = false;
@@ -1112,6 +1319,7 @@
     addPairRow("queryParams", "limit", "100");
     addPairRow("customHeaders", "Accept", "application/json");
     updateSourceVisibility();
+    loadBrands();
     restoreRememberedLogin();
   </script>
 </body>

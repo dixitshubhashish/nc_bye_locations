@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import io
 
-from whitespace_tool.source_preview.common import preview_payload
+from whitespace_tool.source_adapters.common import preview_payload
 
 
 def preview(content: bytes, record_path: str | None = None) -> dict:

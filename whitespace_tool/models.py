@@ -8,6 +8,8 @@ from typing import Any
 @dataclass(frozen=True)
 class LocationRecord:
     brand: str
+    business_id: str | None
+    source_type_id: str | None
     location_id: str
     name: str
     address: str

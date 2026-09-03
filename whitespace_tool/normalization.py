@@ -76,6 +76,8 @@ def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name:
 
     return LocationRecord(
         brand=brand,
+        business_id=str(mapper.get("business_id") or "") or None,
+        source_type_id=str(mapper.get("source_type_id") or "") or None,
         location_id=location_id,
         name=str(get_nested(row, fields.get("name", ""), "")).strip(),
         address=str(get_nested(row, fields.get("address", ""), "")).strip(),
