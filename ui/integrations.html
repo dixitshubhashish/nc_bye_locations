@@ -155,6 +155,18 @@
     }
 
     .template-progress strong { color: var(--accent); font-size: 18px; }
+    .predefined-template-list { display: grid; gap: 8px; margin: 10px 0 18px; }
+    .predefined-template {
+      width: 100%;
+      text-align: left;
+      border: 1px solid var(--line);
+      background: #ffffff;
+      color: var(--ink);
+      border-radius: 8px;
+      padding: 10px;
+    }
+    .predefined-template strong { display: block; font-size: 13px; }
+    .predefined-template span { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.35; }
     .mapping-percentage.low { color: #c43b54; }
     .mapping-percentage.medium { color: #b97816; }
     .mapping-percentage.high { color: #147d63; }
@@ -838,7 +850,7 @@
       </label>
       <div class="button-row">
         <button id="loginBtn" class="reference-login-button" type="button">Login</button>
-        <button id="loginTestBigQueryBtn" class="secondary" type="button">Test BigQuery</button>
+        <button id="loginTestBigQueryBtn" class="secondary" type="button">Test DB Connection</button>
       </div>
       <div id="loginStatus" class="status hidden"></div>
       <div id="loginBigQueryStatus" class="status hidden"></div>
@@ -876,9 +888,13 @@
       <div class="panel">
         <h2>Source</h2>
         <div class="button-row">
-          <button class="secondary" id="testBigQueryBtn" type="button">Test BigQuery Connection</button>
+          <button class="secondary" id="testBigQueryBtn" type="button">Test DB Connection</button>
         </div>
         <div id="bigQueryStatus" class="status hidden"></div>
+        <h2>Predefined Brand Templates</h2>
+        <div id="predefinedTemplates" class="predefined-template-list">
+          <div class="status">Loading templates...</div>
+        </div>
         <label for="sourceType">Source format</label>
         <select id="sourceType">
           <option value="csv">CSV</option>
@@ -890,8 +906,15 @@
         </select>
 
         <div class="field-group file-field">
-        <label for="fileInput">Upload source file</label>
-        <input id="fileInput" type="file" accept=".csv,.xlsx,.xls,.json,.xml,application/json,text/csv,application/xml,text/xml">
+        <label for="sourceInputMode">Source input</label>
+        <select id="sourceInputMode">
+          <option value="file">Upload file</option>
+          <option value="url">Public URL</option>
+        </select>
+        <label for="fileInput" class="file-upload-control">Upload source file</label>
+        <input id="fileInput" class="file-upload-control" type="file" accept=".csv,.xlsx,.xls,.json,.xml,application/json,text/csv,application/xml,text/xml">
+        <label for="sourceUrl" class="source-url-control hidden">Public source URL</label>
+        <input id="sourceUrl" class="source-url-control hidden" type="url" placeholder="https://example.com/locations.json">
         </div>
 
         <label for="brandSelect">Business</label>
@@ -1252,8 +1275,13 @@ result = json.loads(await response.string())</textarea>
     let reportingBrands = [];
     const draftStorageKey = "competitive_whitespace_mapping_draft";
     const loginSessionStorageKey = "competitive_whitespace_login_session";
+    const mappingSessionStorageKey = "competitive_whitespace_mapping_session";
 
     const el = (id) => document.getElementById(id);
+
+    function newSessionId() {
+      return window.crypto?.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
 
     function normalizeName(value) {
       return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -1466,11 +1494,16 @@ result = json.loads(await response.string())</textarea>
 
     function saveDraft() {
       if (!sourceParsed) return;
+      const sessionId = sessionStorage.getItem(mappingSessionStorageKey);
+      if (!sessionId) return;
       const draft = {
+        sessionId,
         sourceType: el("sourceType").value,
         brandSelect: el("brandSelect").value,
         selectedBrand,
         sourceName: el("sourceName").value,
+        sourceInputMode: el("sourceInputMode").value,
+        sourceUrl: el("sourceUrl").value,
         recordPath: el("recordPath").value,
         jsonRecordPaths,
         sheetName: el("sheetName").value,
@@ -1493,8 +1526,18 @@ result = json.loads(await response.string())</textarea>
 
     function restoreDraft() {
       try {
+        const activeSession = sessionStorage.getItem(loginSessionStorageKey) === "true";
+        const sessionId = sessionStorage.getItem(mappingSessionStorageKey);
+        if (!activeSession || !sessionId) {
+          sessionStorage.removeItem(draftStorageKey);
+          return;
+        }
         const draft = JSON.parse(sessionStorage.getItem(draftStorageKey) || "null");
         if (!draft || !Array.isArray(draft.sourceRows)) return;
+        if (draft.sessionId !== sessionId) {
+          sessionStorage.removeItem(draftStorageKey);
+          return;
+        }
         sourceRows = draft.sourceRows || [];
         sourceFields = draft.sourceFields || [];
         sourceParsed = sourceRows.length > 0;
@@ -1508,6 +1551,8 @@ result = json.loads(await response.string())</textarea>
         activeTemplateId = draft.activeTemplateId || "";
         el("sourceType").value = draft.sourceType || "csv";
         el("sourceName").value = draft.sourceName || "";
+        el("sourceInputMode").value = draft.sourceInputMode || "file";
+        el("sourceUrl").value = draft.sourceUrl || "";
         el("recordPath").value = draft.recordPath || "";
         el("sheetName").value = draft.sheetName || "";
         el("apiUrl").value = draft.apiUrl || "";
@@ -1690,6 +1735,44 @@ result = json.loads(await response.string())</textarea>
       setStatus(`Loaded ${template.name}. Edit the fields, then save the updated template.`, "ok");
     }
 
+    function applyPredefinedTemplate(template) {
+      const mapper = template.mapper || {};
+      activeTemplateId = "";
+      mappingSelections = { ...(mapper.fields || {}) };
+      optionalMappingKeys = new Set(Object.keys(mappingSelections).filter((key) => !primaryMappingKeys.has(key)));
+      hiddenMappingKeys = new Set();
+      autoMappedKeys = new Set();
+      selectedBrand = null;
+      el("brandSelect").value = "";
+      el("sourceType").value = mapper.source_type || template.source_type || "csv";
+      el("sourceName").value = mapper.source_name || template.source_name || "";
+      el("recordPath").value = mapper.record_path || template.record_path || "";
+      updateSourceVisibility();
+      renderMappings();
+      updateOutput();
+      setStatus(`Loaded predefined ${template.brand} template. Add or preview the matching source, then save when ready.`, "ok");
+    }
+
+    async function loadPredefinedTemplates() {
+      const target = el("predefinedTemplates");
+      try {
+        const response = await fetch("/api/predefined-templates");
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not load predefined templates.");
+        target.innerHTML = (result.templates || []).map((template, index) => `
+          <button class="predefined-template" type="button" data-template-index="${index}">
+            <strong>${escapeHtml(template.brand)}</strong>
+            <span>${escapeHtml(template.notes || template.source_name || "")}</span>
+          </button>
+        `).join("");
+        target.querySelectorAll("button[data-template-index]").forEach((button) => {
+          button.addEventListener("click", () => applyPredefinedTemplate(result.templates[Number(button.dataset.templateIndex)]));
+        });
+      } catch (error) {
+        target.innerHTML = `<div class="status error">${escapeHtml(error.message)}</div>`;
+      }
+    }
+
     async function saveEditedTemplate() {
       const response = await fetch("/api/templates/save", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workflow_template_id: activeTemplateId, components: { mapper: getMapper() } }) });
       const result = await response.json();
@@ -1735,11 +1818,11 @@ result = json.loads(await response.string())</textarea>
 
     async function runBigQueryConnectionTest(target) {
       target.className = "status";
-      target.textContent = "Testing BigQuery connection...";
+      target.textContent = "Testing DB connection...";
       try {
         const response = await fetch("/api/storage/test");
         const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "BigQuery connection failed.");
+        if (!response.ok) throw new Error(result.error || "DB connection failed.");
         target.className = "status ok";
         target.textContent = `Connected to ${result.dataset} using ${result.credentials}.`;
       } catch (error) {
@@ -1836,11 +1919,14 @@ result = json.loads(await response.string())</textarea>
       const isPythonConnector = sourceType === "python_editor";
       const isExcel = sourceType === "excel";
       const hasRecordPath = ["json", "xml", "api_get_json", "python_editor"].includes(sourceType);
+      const isFileSource = !isApi && !isPythonConnector;
 
       document.querySelectorAll(".api-field").forEach((field) => field.classList.toggle("hidden", !isApi));
       document.querySelectorAll(".python-connector-field").forEach((field) => field.classList.toggle("hidden", !isPythonConnector));
       document.querySelectorAll(".excel-field").forEach((field) => field.classList.toggle("hidden", !isExcel));
       document.querySelectorAll(".file-field").forEach((field) => field.classList.toggle("hidden", isApi || isPythonConnector));
+      document.querySelectorAll(".file-upload-control").forEach((field) => field.classList.toggle("hidden", !isFileSource || el("sourceInputMode").value !== "file"));
+      document.querySelectorAll(".source-url-control").forEach((field) => field.classList.toggle("hidden", !isFileSource || el("sourceInputMode").value !== "url"));
       document.querySelectorAll(".record-field").forEach((field) => field.classList.toggle("hidden", !hasRecordPath));
       document.querySelectorAll(".json-record-path-field").forEach((field) => field.classList.toggle("hidden", sourceType !== "json"));
 
@@ -1866,6 +1952,8 @@ result = json.loads(await response.string())</textarea>
         if (el("rememberLogin").checked) localStorage.setItem("mapper_login_remembered", "true");
         else localStorage.removeItem("mapper_login_remembered");
         sessionStorage.setItem(loginSessionStorageKey, "true");
+        sessionStorage.setItem(mappingSessionStorageKey, newSessionId());
+        sessionStorage.removeItem(draftStorageKey);
         el("loginScreen").classList.add("hidden");
         el("appShell").classList.remove("hidden");
         loadAppData();
@@ -1878,7 +1966,7 @@ result = json.loads(await response.string())</textarea>
     async function loadAppData() {
       if (appDataLoaded) return;
       appDataLoaded = true;
-      await Promise.allSettled([loadFieldRegistry(), loadBrands(), loadTemplateFilters()]);
+      await Promise.allSettled([loadFieldRegistry(), loadBrands(), loadTemplateFilters(), loadPredefinedTemplates()]);
     }
 
     function restoreRememberedLogin() {
@@ -1890,6 +1978,21 @@ result = json.loads(await response.string())</textarea>
         el("appShell").classList.remove("hidden");
         loadAppData();
       }
+    }
+
+    function resetLoginSessionFromLaunch() {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("fresh") !== "1") return;
+      localStorage.removeItem("mapper_login_remembered");
+      sessionStorage.removeItem(loginSessionStorageKey);
+      sessionStorage.removeItem(mappingSessionStorageKey);
+      sessionStorage.removeItem(draftStorageKey);
+      el("loginScreen").classList.remove("hidden");
+      el("appShell").classList.add("hidden");
+      params.delete("fresh");
+      const nextQuery = params.toString();
+      const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`;
+      window.history.replaceState({}, "", nextUrl);
     }
 
     async function prepareReferenceData() {
@@ -2044,6 +2147,9 @@ result = json.loads(await response.string())</textarea>
         fields,
         aliases: customAliases
       };
+      if (el("sourceInputMode").value === "url" && el("sourceUrl").value.trim()) {
+        mapper.source_url = el("sourceUrl").value.trim();
+      }
       const recordPath = el("recordPath").value.trim() || resolvedRecordPath;
       if (recordPath && ["json", "xml", "excel", "api_get_json", "python_editor"].includes(el("sourceType").value)) {
         mapper.record_path = recordPath;
@@ -2240,6 +2346,18 @@ result = json.loads(await response.string())</textarea>
         } else if (sourceType === "python_editor") {
           payload.source_type = "json";
           payload.content_base64 = textToBase64(await runPythonConnector());
+        } else if (el("sourceInputMode").value === "url") {
+          const sourceUrl = el("sourceUrl").value.trim();
+          if (!sourceUrl) throw new Error("Enter a public source URL.");
+          const sourceResponse = await fetch("/api/source-url", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ url: sourceUrl })
+          });
+          const sourceResult = await sourceResponse.json();
+          if (!sourceResponse.ok) throw new Error(sourceResult.error || "Could not fetch the public source URL.");
+          payload.file_name = sourceResult.file_name || "remote_source";
+          payload.content_base64 = sourceResult.content_base64;
         } else {
           if (!file) throw new Error("Choose a source file.");
           sourceType = inferSourceType(file.name);
@@ -2390,6 +2508,8 @@ result = json.loads(await response.string())</textarea>
     function logout() {
       localStorage.removeItem("mapper_login_remembered");
       sessionStorage.removeItem(loginSessionStorageKey);
+      sessionStorage.removeItem(mappingSessionStorageKey);
+      sessionStorage.removeItem(draftStorageKey);
       el("loginPassword").value = "";
       el("loginStatus").className = "status hidden";
       el("appShell").classList.add("hidden");
@@ -2503,6 +2623,7 @@ result = json.loads(await response.string())</textarea>
       setStatus("Source changed. Ready to review fields.", "");
       updateSourceVisibility();
     });
+    el("sourceInputMode").addEventListener("change", updateSourceVisibility);
     el("jsonRecordPath").addEventListener("change", () => {
       el("recordPath").value = el("jsonRecordPath").value;
       parseSource();
@@ -2545,6 +2666,7 @@ result = json.loads(await response.string())</textarea>
     });
     document.querySelector("#brandDisclaimer").textContent = window.APP_CONSTANTS.trademarkDisclaimer;
     updateSourceVisibility();
+    resetLoginSessionFromLaunch();
     restoreRememberedLogin();
     prepareReferenceData();
   </script>
