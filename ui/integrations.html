@@ -2914,13 +2914,9 @@ result = json.loads(await response.string())`;
 
     function restoreRememberedLogin() {
       const remembered = localStorage.getItem("mapper_login_remembered") === "true";
-      const activeSession = sessionStorage.getItem(loginSessionStorageKey) === "true";
-      if (remembered || activeSession) {
-        el("rememberLogin").checked = remembered;
-        el("loginScreen").classList.add("hidden");
-        el("appShell").classList.remove("hidden");
-        loadAppData();
-      }
+      el("rememberLogin").checked = remembered;
+      sessionStorage.removeItem(loginSessionStorageKey);
+      sessionStorage.removeItem(mappingSessionStorageKey);
     }
 
     function resetLoginSessionFromLaunch() {
