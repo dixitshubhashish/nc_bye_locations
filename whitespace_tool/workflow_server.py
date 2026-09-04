@@ -939,9 +939,17 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
 
 def clear_saved_data() -> dict[str, Any]:
     project_id, dataset_id, credentials_json = _warehouse_settings()
-    deleted = clear_dataset_tables(project_id, dataset_id, credentials_json)
+    clear_result = clear_dataset_tables(project_id, dataset_id, credentials_json)
+    deleted = clear_result["soft_deleted_tables"]
+    truncated = clear_result["truncated_tables"]
     ZIP_REFERENCE_CACHE.pop((project_id, dataset_id), None)
-    return {"dataset": f"{project_id}.{dataset_id}", "deleted_tables": deleted, "deleted_count": len(deleted)}
+    return {
+        "dataset": f"{project_id}.{dataset_id}",
+        "deleted_tables": deleted,
+        "deleted_count": len(deleted),
+        "truncated_tables": truncated,
+        "truncated_count": len(truncated),
+    }
 
 
 def make_handler(ui_dir: Path):

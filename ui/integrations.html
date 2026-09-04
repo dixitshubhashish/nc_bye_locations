@@ -2433,7 +2433,7 @@ result = json.loads(await response.string())</textarea>
         });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not clear saved data.");
-        setStatus(`Saved data archived. ${result.deleted_count} data tables marked deleted.`, "ok");
+        setStatus(`Saved data cleared. ${result.deleted_count} tables marked deleted, ${result.truncated_count || 0} tables truncated.`, "ok");
       } catch (error) {
         setStatus(error.message, "error");
       }
