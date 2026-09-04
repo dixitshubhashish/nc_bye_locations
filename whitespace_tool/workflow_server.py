@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import base64
+from functools import lru_cache
 import json
 import http.server
 import logging
 import os
 from pathlib import Path
 import socketserver
+from time import perf_counter
 from typing import Any
 from uuid import uuid4
 import re
@@ -23,7 +25,7 @@ from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows, 
 from whitespace_tool.storage_config import load_storage_config
 
 
-SUPPORTED_SOURCE_TYPES = {"csv", "excel", "json", "xml", "api_get_json", "python_api_connector"}
+SUPPORTED_SOURCE_TYPES = {"csv", "excel", "json", "xml", "api_get_json", "python_editor"}
 MINIMUM_US_ZIP_REFERENCE_ROWS = 30000
 
 
@@ -49,6 +51,7 @@ def _build_logger() -> logging.Logger:
 
 
 LOGGER = _build_logger()
+ZIP_REFERENCE_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 
 
 def _json_response(handler: http.server.BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
@@ -58,6 +61,15 @@ def _json_response(handler: http.server.BaseHTTPRequestHandler, status: int, pay
     handler.send_header("content-length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def authenticate(data: dict[str, Any]) -> dict[str, bool]:
+    expected_user = os.environ.get("WORKFLOW_LOGIN_USER", "admin")
+    expected_password = os.environ.get("WORKFLOW_LOGIN_PASSWORD", "birdeye")
+    valid = data.get("username", "") == expected_user and data.get("password", "") == expected_password
+    if not valid:
+        raise ValueError("Invalid username or password.")
+    return {"authenticated": True}
 
 
 def preview_source(payload: dict[str, Any]) -> dict[str, Any]:
@@ -73,11 +85,9 @@ def preview_source(payload: dict[str, Any]) -> dict[str, Any]:
             payload.get("query_params"),
             payload.get("auth"),
         )
-    if source_type == "python_api_connector":
-        code = str(payload.get("python_code", "")).strip()
-        if not code:
-            raise ValueError("Enter Python connector code before parsing")
-        return python_connector_source.preview(code, record_path)
+    if source_type == "python_editor":
+        content = base64.b64decode(payload["content_base64"])
+        return python_connector_source.preview(content, record_path)
 
     file_name = payload.get("file_name", "")
     content = base64.b64decode(payload["content_base64"])
@@ -108,21 +118,36 @@ def field_catalog() -> list[dict[str, Any]]:
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
     _ensure_dataset(client, project_id, dataset_id)
-    table_ref = f"{project_id}.{dataset_id}.field_catalog"
-    schema = [bigquery.SchemaField(field["name"], field["type"], mode=field["mode"], default_value_expression=field.get("default")) for field in TABLE_SCHEMAS["field_catalog"]]
+    table_ref = f"{project_id}.{dataset_id}.field_catalogs"
+    schema = [bigquery.SchemaField(field["name"], field["type"], mode=field["mode"], default_value_expression=field.get("default")) for field in TABLE_SCHEMAS["field_catalogs"]]
+    created = False
     try:
-        client.get_table(table_ref)
+        existing_table = client.get_table(table_ref)
     except Exception as exc:
         if getattr(exc, "code", None) != 404:
             raise
         client.create_table(bigquery.Table(table_ref, schema=schema))
+        created = True
+    else:
+        existing_names = {field.name for field in existing_table.schema}
+        if "business_id" not in existing_names:
+            client.query(f"ALTER TABLE `{table_ref}` ADD COLUMN business_id STRING").result()
+    if created:
+        legacy_ref = f"{project_id}.{dataset_id}.field_catalog"
+        try:
+            client.get_table(legacy_ref)
+        except Exception as exc:
+            if getattr(exc, "code", None) != 404:
+                raise
+        else:
+            client.query(f"INSERT INTO `{table_ref}` (field_id, business_id, slug, label, table_name, field_name, data_type, required, hints, aliases, is_custom, created_at, updated_at) SELECT field_id, NULL, slug, label, table_name, field_name, data_type, required, hints, aliases, is_custom, created_at, updated_at FROM `{legacy_ref}`").result()
     rows = [dict(row) for row in client.query(f"SELECT * FROM `{table_ref}` ORDER BY is_custom, label").result()]
     if not rows:
         now = utc_now_iso()
         seed = []
         for field in load_field_registry():
             seed.append({
-                "field_id": str(uuid4()),
+                "field_id": str(uuid4()), "business_id": None,
                 "slug": field["key"], "label": field["label"], "table_name": field["table"], "field_name": field["field"],
                 "data_type": field["type"], "required": field.get("required", False), "hints": json.dumps(field.get("hints", [])),
                 "aliases": json.dumps([]), "is_custom": False, "created_at": now, "updated_at": now,
@@ -156,7 +181,7 @@ def add_field_alias(data: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Standard field and source label are required")
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
-    table_ref = f"{project_id}.{dataset_id}.field_catalog"
+    table_ref = f"{project_id}.{dataset_id}.field_catalogs"
     current_query = f"SELECT aliases FROM `{table_ref}` WHERE slug = @slug LIMIT 1"
     current_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("slug", "STRING", field_key)])
     current = list(client.query(current_query, job_config=current_config).result())
@@ -178,15 +203,18 @@ def create_custom_field(data: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Field label is required")
     if str(data.get("password", "")) != "54321":
         raise ValueError("Administrative password required")
+    business_id = str(data.get("business_id", "")).strip()
+    if not business_id:
+        raise ValueError("Select a business before adding a custom field")
     slug = re.sub(r"[^a-z0-9]+", "_", str(data.get("slug") or label.lower())).strip("_")
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
     catalog = field_catalog()
-    if any(row["key"] == slug for row in catalog):
+    if any(row["key"] == slug and row.get("business_id") in {None, business_id} for row in catalog):
         raise ValueError("A field with this slug already exists")
-    table_ref = f"{project_id}.{dataset_id}.field_catalog"
+    table_ref = f"{project_id}.{dataset_id}.field_catalogs"
     now = utc_now_iso()
-    field = {"field_id": str(uuid4()), "slug": slug, "label": label, "table_name": "listings", "field_name": slug, "data_type": data.get("type", "string"), "required": False, "hints": json.dumps([slug]), "aliases": json.dumps([]), "is_custom": True, "created_at": now, "updated_at": now}
+    field = {"field_id": str(uuid4()), "business_id": business_id, "slug": slug, "label": label, "table_name": "listings", "field_name": slug, "data_type": data.get("type", "string"), "required": False, "hints": json.dumps([slug]), "aliases": json.dumps([]), "is_custom": True, "created_at": now, "updated_at": now}
     errors = client.insert_rows_json(table_ref, [field])
     if errors:
         raise RuntimeError(f"Custom field could not be saved: {errors}")
@@ -258,16 +286,27 @@ def _load_mapped_zip_demographics(zip_codes: set[str]) -> dict[str, Any]:
 def prepare_zipcodes() -> dict[str, Any]:
     from google.cloud import bigquery
 
+    started_at = perf_counter()
     project_id, dataset_id, credentials_json = _warehouse_settings()
+    cache_key = (project_id, dataset_id)
+    cached = ZIP_REFERENCE_CACHE.get(cache_key)
+    if cached:
+        LOGGER.info("zip_reference_timing phase=cache_hit elapsed_ms=%.1f", (perf_counter() - started_at) * 1000)
+        return dict(cached)
     client = _bigquery_client(project_id, credentials_json)
     table_ref = f"{project_id}.{dataset_id}.us_zipcodes"
+    metadata_started_at = perf_counter()
     _ensure_dataset(client, project_id, dataset_id)
     try:
         existing = client.get_table(table_ref)
-        count = next(iter(client.query(f"SELECT COUNT(*) AS total FROM `{table_ref}`").result()))["total"]
-        if count >= MINIMUM_US_ZIP_REFERENCE_ROWS:
-            LOGGER.info("zip_reference_ready table=%s rows=%d", table_ref, count)
-            return {"status": "ready", "rows": int(count), "loaded": False}
+        row_count = existing.num_rows or 0
+        LOGGER.info("zip_reference_timing phase=metadata_check elapsed_ms=%.1f rows=%d", (perf_counter() - metadata_started_at) * 1000, row_count)
+        if row_count >= MINIMUM_US_ZIP_REFERENCE_ROWS:
+            LOGGER.info("zip_reference_ready table=%s rows=%d", table_ref, row_count)
+            result = {"status": "ready", "rows": int(row_count), "loaded": False}
+            ZIP_REFERENCE_CACHE[cache_key] = result
+            LOGGER.info("zip_reference_timing phase=ready_total elapsed_ms=%.1f", (perf_counter() - started_at) * 1000)
+            return dict(result)
     except Exception as exc:
         if getattr(exc, "code", None) != 404:
             raise
@@ -278,13 +317,21 @@ def prepare_zipcodes() -> dict[str, Any]:
     source = config.get("demographics_source", {})
     source_project_id, source_credentials_json = resolve_bigquery_connection(source, {"_config_dir": str(config_path.parent)})
     LOGGER.info("zip_reference_load_started table=%s", table_ref)
+    query_started_at = perf_counter()
     demographics = fetch_bigquery_demographics(source_project_id, source["query"], source.get("name", "public_demographics"), source_credentials_json)
+    LOGGER.info("zip_reference_timing phase=source_query elapsed_ms=%.1f rows=%d", (perf_counter() - query_started_at) * 1000, len(demographics))
     rows = {"us_zipcodes": build_table_rows([], demographics)["us_zipcodes"]}
+    load_started_at = perf_counter()
     push_to_bigquery(project_id, dataset_id, rows, credentials_json, write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE)
+    LOGGER.info("zip_reference_timing phase=table_load elapsed_ms=%.1f rows=%d", (perf_counter() - load_started_at) * 1000, len(rows["us_zipcodes"]))
     LOGGER.info("zip_reference_load_succeeded table=%s rows=%d", table_ref, len(rows["us_zipcodes"]))
-    return {"status": "ready", "rows": len(rows["us_zipcodes"]), "loaded": True}
+    result = {"status": "ready", "rows": len(rows["us_zipcodes"]), "loaded": True}
+    ZIP_REFERENCE_CACHE[cache_key] = result
+    LOGGER.info("zip_reference_timing phase=rebuild_total elapsed_ms=%.1f", (perf_counter() - started_at) * 1000)
+    return dict(result)
 
 
+@lru_cache(maxsize=8)
 def _bigquery_client(project_id: str, credentials_json: str | None):
     from google.cloud import bigquery
     from google.oauth2 import service_account
@@ -605,6 +652,7 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
 def clear_saved_data() -> dict[str, Any]:
     project_id, dataset_id, credentials_json = _warehouse_settings()
     deleted = clear_dataset_tables(project_id, dataset_id, credentials_json)
+    ZIP_REFERENCE_CACHE.pop((project_id, dataset_id), None)
     return {"dataset": f"{project_id}.{dataset_id}", "deleted_tables": deleted, "deleted_count": len(deleted)}
 
 
@@ -675,7 +723,7 @@ def make_handler(ui_dir: Path):
             super().do_GET()
 
         def do_POST(self) -> None:
-            if self.path not in {"/api/preview", "/api/sheets", "/api/save", "/api/clear", "/api/brands", "/api/learning", "/api/reprocess", "/api/field-alias", "/api/custom-field", "/api/templates/save"}:
+            if self.path not in {"/api/login", "/api/preview", "/api/sheets", "/api/save", "/api/clear", "/api/brands", "/api/learning", "/api/reprocess", "/api/field-alias", "/api/custom-field", "/api/templates/save"}:
                 _json_response(self, 404, {"error": "Not found"})
                 return
             request_id = uuid4().hex
@@ -684,7 +732,9 @@ def make_handler(ui_dir: Path):
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
                 payload["event_id"] = request_id
                 LOGGER.info("request_started request_id=%s endpoint=%s content_length=%d", request_id, self.path, length)
-                if self.path == "/api/sheets":
+                if self.path == "/api/login":
+                    _json_response(self, 200, authenticate(payload))
+                elif self.path == "/api/sheets":
                     _json_response(self, 200, source_sheets(payload))
                 elif self.path == "/api/save":
                     _json_response(self, 200, save_mapper(payload))

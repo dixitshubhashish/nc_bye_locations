@@ -33,14 +33,16 @@ def preview_payload(rows: list[dict[str, Any]], record_path: str | None = None, 
     }
 
 
-def find_record_arrays(value: Any, prefix: str = "") -> list[tuple[str, list[Any]]]:
+def find_record_arrays(value: Any, prefix: str = "", max_depth: int | None = None) -> list[tuple[str, list[Any]]]:
     found: list[tuple[str, list[Any]]] = []
     if isinstance(value, list):
         found.append((prefix, value))
     elif isinstance(value, dict):
+        if max_depth is not None and prefix and len(prefix.split(".")) >= max_depth:
+            return found
         for key, child in value.items():
             path = f"{prefix}.{key}" if prefix else str(key)
-            found.extend(find_record_arrays(child, path))
+            found.extend(find_record_arrays(child, path, max_depth))
     return found
 
 
