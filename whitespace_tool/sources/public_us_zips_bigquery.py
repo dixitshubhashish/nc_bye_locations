@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +8,7 @@ from google.oauth2 import service_account
 
 from whitespace_tool.models import ZipDemographics
 from whitespace_tool.sources.demographics import _number
+from whitespace_tool.storage_config import load_storage_config
 
 
 DEFAULT_QUERY = """
@@ -37,26 +37,15 @@ ORDER BY z.zip_code
 """
 
 
-def _load_credentials(config_path: Path, config: dict[str, Any]):
-    credentials_json = config.get("credentials_json")
-    if not credentials_json:
-        return None
-    credentials_path = Path(credentials_json)
-    if not credentials_path.is_absolute():
-        credentials_path = config_path.parent.parent / credentials_path
-    return service_account.Credentials.from_service_account_file(str(credentials_path))
-
-
 def fetch_from_bigquery(config_path: str | Path, limit: int | None = None) -> dict[str, ZipDemographics]:
-    path = Path(config_path)
-    with path.open("r", encoding="utf-8") as fh:
-        config = json.load(fh)
+    config = load_storage_config(config_path)
 
     query = config.get("public_us_zips_query") or DEFAULT_QUERY
     if limit:
         query = f"SELECT * FROM ({query}) LIMIT {int(limit)}"
 
-    credentials = _load_credentials(path, config)
+    credentials_json = config.get("credentials_json")
+    credentials = service_account.Credentials.from_service_account_file(credentials_json) if credentials_json else None
     client = bigquery.Client(project=config["project_id"], credentials=credentials)
 
     rows: dict[str, ZipDemographics] = {}

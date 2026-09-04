@@ -9,7 +9,7 @@ DEFAULT_STORAGE_CONFIG = Path("config/connections/storage.json")
 
 
 def load_storage_config(path: str | Path = DEFAULT_STORAGE_CONFIG) -> dict[str, Any]:
-    config_path = Path(path)
+    config_path = Path(path).resolve()
     with config_path.open("r", encoding="utf-8") as handle:
         config = json.load(handle)
     credentials_json = config.get("credentials_json")

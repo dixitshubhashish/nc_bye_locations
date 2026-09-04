@@ -12,18 +12,18 @@ from uuid import uuid4
 import re
 from logging.handlers import TimedRotatingFileHandler
 
-from whitespace_tool.source_adapters import api_get_source, csv_source, excel_source, json_source, xml_source
+from whitespace_tool.source_adapters import api_get_source, csv_source, excel_source, json_source, python_connector_source, xml_source
 from whitespace_tool.data_validation import validate_normalized_location, validate_source_row
 from whitespace_tool.normalization import normalize_location
 from whitespace_tool.models import utc_now_iso
 from whitespace_tool.learning import suggest_from_templates
 from whitespace_tool.field_registry import load_field_registry
-from whitespace_tool.sources.demographics import fetch_bigquery_demographics
+from whitespace_tool.sources.demographics import fetch_bigquery_demographics, resolve_bigquery_connection
 from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows, clear_dataset_tables, push_to_bigquery
 from whitespace_tool.storage_config import load_storage_config
 
 
-SUPPORTED_SOURCE_TYPES = {"csv", "excel", "json", "xml", "api_get_json"}
+SUPPORTED_SOURCE_TYPES = {"csv", "excel", "json", "xml", "api_get_json", "python_api_connector"}
 MINIMUM_US_ZIP_REFERENCE_ROWS = 30000
 
 
@@ -73,6 +73,11 @@ def preview_source(payload: dict[str, Any]) -> dict[str, Any]:
             payload.get("query_params"),
             payload.get("auth"),
         )
+    if source_type == "python_api_connector":
+        code = str(payload.get("python_code", "")).strip()
+        if not code:
+            raise ValueError("Enter Python connector code before parsing")
+        return python_connector_source.preview(code, record_path)
 
     file_name = payload.get("file_name", "")
     content = base64.b64decode(payload["content_base64"])
@@ -239,14 +244,12 @@ def _load_mapped_zip_demographics(zip_codes: set[str]) -> dict[str, Any]:
     source = config.get("demographics_source", {})
     if source.get("type") != "bigquery" or not zip_codes:
         return {}
-    credentials_json = source.get("credentials_json")
-    if credentials_json and not Path(credentials_json).is_absolute():
-        credentials_json = str(config_path.parent / credentials_json)
+    project_id, credentials_json = resolve_bigquery_connection(source, {"_config_dir": str(config_path.parent)})
     quoted_zips = ", ".join(f"'{zip_code}'" for zip_code in sorted(zip_codes))
     query = f"SELECT * FROM ({source['query'].rstrip(';')}) AS public_zips WHERE zip_code IN ({quoted_zips})"
     LOGGER.info("zip_lookup_started source=%s zip_count=%d", source.get("name", "public_demographics"), len(zip_codes))
     demographics = fetch_bigquery_demographics(
-        source["project_id"], query, source.get("name", "public_demographics"), credentials_json
+        project_id, query, source.get("name", "public_demographics"), credentials_json
     )
     LOGGER.info("zip_lookup_succeeded requested=%d matched=%d", len(zip_codes), len(demographics))
     return demographics
@@ -273,11 +276,9 @@ def prepare_zipcodes() -> dict[str, Any]:
     with config_path.open("r", encoding="utf-8") as handle:
         config = json.load(handle)
     source = config.get("demographics_source", {})
-    credentials_json = source.get("credentials_json")
-    if credentials_json and not Path(credentials_json).is_absolute():
-        credentials_json = str(config_path.parent / credentials_json)
+    source_project_id, source_credentials_json = resolve_bigquery_connection(source, {"_config_dir": str(config_path.parent)})
     LOGGER.info("zip_reference_load_started table=%s", table_ref)
-    demographics = fetch_bigquery_demographics(source["project_id"], source["query"], source.get("name", "public_demographics"), credentials_json)
+    demographics = fetch_bigquery_demographics(source_project_id, source["query"], source.get("name", "public_demographics"), source_credentials_json)
     rows = {"us_zipcodes": build_table_rows([], demographics)["us_zipcodes"]}
     push_to_bigquery(project_id, dataset_id, rows, credentials_json, write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE)
     LOGGER.info("zip_reference_load_succeeded table=%s rows=%d", table_ref, len(rows["us_zipcodes"]))

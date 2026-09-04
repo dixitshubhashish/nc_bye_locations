@@ -15,7 +15,7 @@ Known assumptions and gaps are tracked in `docs/assumptions_and_gaps.md`.
 Fetch the first-module ZIP base table from BigQuery public data:
 
 ```bash
-.venv/bin/python -m whitespace_tool fetch-public-zips --config config/connections/public_us_zips_bigquery.json --output data/source_files/us_zips_bigquery.csv
+.venv/bin/python -m whitespace_tool fetch-public-zips --config config/connections/storage.json --output data/source_files/us_zips_bigquery.csv
 ```
 
 Current tested fetch result: 33,791 ZIP geography rows. Known missing ACS fields from the public join are surfaced by quality checks: 868 rows missing population, 1,348 missing median age, and 2,948 missing median household income. The generated full CSV is optional export/debug output; analysis reads ZIP demographics from BigQuery.
@@ -61,14 +61,14 @@ To push directly to BigQuery, install `google-cloud-bigquery`, authenticate with
 To test the Birdeye BigQuery connection with a service account JSON:
 
 ```bash
-cp config/connections/bigquery_connection.example.json config/connections/bigquery_connection.json
+cp config/connections/storage.example.json config/connections/storage.json
 python3 -m pip install google-cloud-bigquery google-auth
 python3 scripts/test_storage_connection.py
 ```
 
-Put the downloaded service account file at `config/connections/keen-device-610-2af9b27dfda3.json`, or edit `credentials_json` in `config/connections/bigquery_connection.json`. That local config and credential file are ignored by git.
+Put the downloaded service account file at `config/connections/keen-device-610-2af9b27dfda3.json`, or edit `credentials_json` in `config/connections/storage.json`. That local config and credential file are ignored by git.
 
-`config/live_bigquery.json` uses a `demographics_source` of type `bigquery` and the configured bronze dataset. If you are not using Application Default Credentials, set `credentials_json` in the config or pass `--credentials-json` when pushing warehouse tables.
+`config/live_bigquery.json` uses a `demographics_source` of type `bigquery` and the configured bronze dataset. If you are not using Application Default Credentials, set `credentials_json` in `config/connections/storage.json` or pass `--credentials-json` when pushing warehouse tables.
 
 ## Approach
 
