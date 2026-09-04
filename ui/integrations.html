@@ -155,18 +155,6 @@
     }
 
     .template-progress strong { color: var(--accent); font-size: 18px; }
-    .predefined-template-list { display: grid; gap: 8px; margin: 10px 0 18px; }
-    .predefined-template {
-      width: 100%;
-      text-align: left;
-      border: 1px solid var(--line);
-      background: #ffffff;
-      color: var(--ink);
-      border-radius: 8px;
-      padding: 10px;
-    }
-    .predefined-template strong { display: block; font-size: 13px; }
-    .predefined-template span { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.35; }
     .mapping-percentage.low { color: #c43b54; }
     .mapping-percentage.medium { color: #b97816; }
     .mapping-percentage.high { color: #147d63; }
@@ -891,10 +879,6 @@
           <button class="secondary" id="testBigQueryBtn" type="button">Test DB Connection</button>
         </div>
         <div id="bigQueryStatus" class="status hidden"></div>
-        <h2>Predefined Brand Templates</h2>
-        <div id="predefinedTemplates" class="predefined-template-list">
-          <div class="status">Loading templates...</div>
-        </div>
         <label for="sourceType">Source format</label>
         <select id="sourceType">
           <option value="csv">CSV</option>
@@ -1735,44 +1719,6 @@ result = json.loads(await response.string())</textarea>
       setStatus(`Loaded ${template.name}. Edit the fields, then save the updated template.`, "ok");
     }
 
-    function applyPredefinedTemplate(template) {
-      const mapper = template.mapper || {};
-      activeTemplateId = "";
-      mappingSelections = { ...(mapper.fields || {}) };
-      optionalMappingKeys = new Set(Object.keys(mappingSelections).filter((key) => !primaryMappingKeys.has(key)));
-      hiddenMappingKeys = new Set();
-      autoMappedKeys = new Set();
-      selectedBrand = null;
-      el("brandSelect").value = "";
-      el("sourceType").value = mapper.source_type || template.source_type || "csv";
-      el("sourceName").value = mapper.source_name || template.source_name || "";
-      el("recordPath").value = mapper.record_path || template.record_path || "";
-      updateSourceVisibility();
-      renderMappings();
-      updateOutput();
-      setStatus(`Loaded predefined ${template.brand} template. Add or preview the matching source, then save when ready.`, "ok");
-    }
-
-    async function loadPredefinedTemplates() {
-      const target = el("predefinedTemplates");
-      try {
-        const response = await fetch("/api/predefined-templates");
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "Could not load predefined templates.");
-        target.innerHTML = (result.templates || []).map((template, index) => `
-          <button class="predefined-template" type="button" data-template-index="${index}">
-            <strong>${escapeHtml(template.brand)}</strong>
-            <span>${escapeHtml(template.notes || template.source_name || "")}</span>
-          </button>
-        `).join("");
-        target.querySelectorAll("button[data-template-index]").forEach((button) => {
-          button.addEventListener("click", () => applyPredefinedTemplate(result.templates[Number(button.dataset.templateIndex)]));
-        });
-      } catch (error) {
-        target.innerHTML = `<div class="status error">${escapeHtml(error.message)}</div>`;
-      }
-    }
-
     async function saveEditedTemplate() {
       const response = await fetch("/api/templates/save", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workflow_template_id: activeTemplateId, components: { mapper: getMapper() } }) });
       const result = await response.json();
@@ -1966,7 +1912,7 @@ result = json.loads(await response.string())</textarea>
     async function loadAppData() {
       if (appDataLoaded) return;
       appDataLoaded = true;
-      await Promise.allSettled([loadFieldRegistry(), loadBrands(), loadTemplateFilters(), loadPredefinedTemplates()]);
+      await Promise.allSettled([loadFieldRegistry(), loadBrands(), loadTemplateFilters()]);
     }
 
     function restoreRememberedLogin() {
