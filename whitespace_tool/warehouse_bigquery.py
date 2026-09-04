@@ -300,7 +300,7 @@ def push_to_bigquery(
         part_spec = TABLE_PARTITION_SPECS.get(table_name)
         if part_spec:
             table.time_partitioning = bigquery.TimePartitioning(
-                type_=getattr(bigquery.TimePartitionType, part_spec["type"], bigquery.TimePartitionType.DAY),
+                type_=part_spec["type"],
                 field=part_spec["field"]
             )
         cluster_fields = TABLE_CLUSTER_SPECS.get(table_name)

@@ -923,9 +923,9 @@
   <div id="loadingOverlay" class="loading-overlay hidden" role="dialog" aria-modal="true" aria-live="assertive">
     <div class="loading-spinner-circle"></div>
     <div id="loadingOverlayMessage" class="loading-overlay-message">Executing operation...</div>
-    <div class="loading-overlay-sub">All database writes follow SQL ACID transaction rules.</div>
-    <button id="loadingCancelBtn" class="loading-cancel-btn" type="button" title="Cancel transaction and rollback changes">
-      ✕ Cancel & Rollback Transaction
+    <div class="loading-overlay-sub">Your records are being processed safely.</div>
+    <button id="loadingCancelBtn" class="loading-cancel-btn" type="button" title="Cancel this operation">
+      ✕ Cancel
     </button>
   </div>
   <div id="loginScreen" class="login-screen">
@@ -944,7 +944,7 @@
       </label>
       <div class="button-row">
         <button id="loginBtn" class="reference-login-button" type="button">Login</button>
-        <button id="loginTestBigQueryBtn" class="secondary" type="button">Test DB Connection</button>
+        <button id="loginTestBigQueryBtn" class="secondary" type="button">Check Readiness</button>
       </div>
       <div id="loginStatus" class="status hidden"></div>
       <div id="loginBigQueryStatus" class="status hidden"></div>
@@ -980,9 +980,9 @@
     <main>
     <aside>
       <div class="panel">
-        <h2>Source &amp; Database Controls</h2>
+        <h2>Source Controls</h2>
         <div class="button-row" style="flex-wrap: wrap; gap: 6px;">
-          <button class="secondary" id="testBigQueryBtn" type="button">Test DB Connection</button>
+          <button class="secondary" id="testBigQueryBtn" type="button">Check Readiness</button>
           <button class="secondary" id="showExistingBrandsBtn" type="button">🏢 Show Existing Brands</button>
           <button class="secondary" id="clearDemoDataBtn" type="button" style="color: var(--error); border-color: var(--error);">🗑️ Clear Demo Data</button>
         </div>
@@ -1193,10 +1193,10 @@ else:
       </div>
 
       <div class="panel">
-        <h2>Silver Enrichment</h2>
-        <div class="mapping-note">Refresh normalized location and ZIP enrichment tables from saved bronze data.</div>
+        <h2>Location Enrichment</h2>
+        <div class="mapping-note">Refresh normalized locations and ZIP enrichment from saved records.</div>
         <div class="button-row">
-          <button class="secondary" id="silverEnrichBtn" type="button">Enrich Bronze to Silver</button>
+          <button class="secondary" id="silverEnrichBtn" type="button">Refresh Enrichment</button>
         </div>
         <div id="silverEnrichStatus" class="action-feedback" role="status" aria-live="polite"></div>
       </div>
@@ -1418,7 +1418,7 @@ else:
   </div>
   <dialog id="dangerDialog" class="danger-dialog">
     <h2>DANGER</h2>
-    <p>This will delete user-entered businesses, listings, and rejected records from the active storage area. ZIP reference data, standard fields, source types, and workflow templates will be preserved.</p>
+    <p>This will delete user-entered businesses, listings, and rejected records from the active workspace. ZIP reference data, standard fields, source formats, and workflow templates will be preserved.</p>
     <div class="button-row">
       <button id="confirmClearBtn" type="button">Delete Data</button>
       <button class="secondary" id="cancelClearBtn" type="button">Cancel</button>
@@ -1518,6 +1518,14 @@ else:
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;");
+    }
+
+    function productSafeError(message, fallback = "Something went wrong. Please try again.") {
+      const text = String(message || "");
+      if (/(bigquery|dataset|project_id|dataset_id|credentials|service account|google|sql|warehouse|bronze|silver|table|module named)/i.test(text)) {
+        return fallback;
+      }
+      return text || fallback;
     }
 
     function formatNumber(value) {
@@ -2233,7 +2241,7 @@ result = json.loads(await response.string())`;
         }
         hideLoadingOverlay();
         if (typeof onCancel === "function") onCancel();
-        setStatus("Operation cancelled. Transaction rolled back with no side-effects (ACID compliant).", "warn");
+        setStatus("Operation cancelled. No records were changed.", "warn");
       };
     }
 
@@ -2526,7 +2534,7 @@ result = json.loads(await response.string())`;
         el("reportContent").classList.remove("hidden");
         reportLoaded = true;
       } catch (error) {
-        status.textContent = error.message;
+        status.textContent = productSafeError(error.message, "Could not load reporting data.");
       }
     }
 
@@ -2575,7 +2583,7 @@ result = json.loads(await response.string())`;
         });
       } catch (error) {
         target.className = "status error";
-        target.textContent = error.message;
+        target.textContent = productSafeError(error.message, "Could not load review records.");
       }
     }
 
@@ -2634,7 +2642,7 @@ result = json.loads(await response.string())`;
         await loadRejectedRecords();
         setStatus(`Record #${currentEditingRecord.row_number} reprocessed successfully! ${result.mapped_rows} accepted into Bronze/Silver.`, "ok");
       } catch (error) {
-        alert("Reprocessing failed: " + error.message);
+        alert(productSafeError(error.message, "Could not reprocess this record."));
       }
     });
 
@@ -2665,11 +2673,11 @@ result = json.loads(await response.string())`;
           return;
         }
         target.className = "";
-        target.innerHTML = `<table><thead><tr><th>Template</th><th>Business ID</th><th>Created</th><th>Updated</th><th>Action</th></tr></thead><tbody>${result.templates.map((template) => `<tr><td>${escapeHtml(template.name)}</td><td>${escapeHtml(template.business_id)}</td><td>${escapeHtml(template.created_at)}</td><td>${escapeHtml(template.updated_at)}</td><td><button type="button" data-load-template="${escapeHtml(template.workflow_template_id)}">Load</button></td></tr>`).join("")}</tbody></table>`;
+        target.innerHTML = `<table><thead><tr><th>Template</th><th>Business</th><th>Created</th><th>Updated</th><th>Action</th></tr></thead><tbody>${result.templates.map((template) => `<tr><td>${escapeHtml(template.name)}</td><td>${escapeHtml(template.business_id)}</td><td>${escapeHtml(template.created_at)}</td><td>${escapeHtml(template.updated_at)}</td><td><button type="button" data-load-template="${escapeHtml(template.workflow_template_id)}">Load</button></td></tr>`).join("")}</tbody></table>`;
         target.querySelectorAll("button[data-load-template]").forEach((button) => button.addEventListener("click", () => loadTemplateIntoEditor(result.templates.find((template) => template.workflow_template_id === button.dataset.loadTemplate))));
       } catch (error) {
         target.className = "status error";
-        target.textContent = error.message;
+        target.textContent = productSafeError(error.message, "Could not load workflow templates.");
       }
     }
 
@@ -2714,7 +2722,7 @@ result = json.loads(await response.string())`;
         if (sourceParsed) renderMappings();
         if (result.warning) setStatus(result.warning, "warn");
       } catch (error) {
-        setStatus(error.message, "error");
+        setStatus(productSafeError(error.message, "Could not load field definitions."), "error");
       }
     }
 
@@ -2730,16 +2738,16 @@ result = json.loads(await response.string())`;
 
     async function runBigQueryConnectionTest(target) {
       target.className = "status";
-      target.textContent = "Testing DB connection...";
+      target.textContent = "Checking readiness...";
       try {
         const response = await fetch("/api/storage/test");
         const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "DB connection failed.");
+        if (!response.ok) throw new Error("The workspace is not ready yet.");
         target.className = "status ok";
-        target.textContent = `Connected to ${result.dataset} using ${result.credentials}.`;
+        target.textContent = "Workspace is ready.";
       } catch (error) {
         target.className = "status error";
-        target.textContent = error.message;
+        target.textContent = "The workspace is not ready yet.";
       }
     }
 
@@ -2902,7 +2910,7 @@ result = json.loads(await response.string())`;
         loadAppData();
       } catch (error) {
         status.className = "status error";
-        status.textContent = error.message;
+        status.textContent = productSafeError(error.message, "Invalid username or password.");
       }
     }
 
@@ -2927,9 +2935,9 @@ result = json.loads(await response.string())`;
       const loginButton = el("loginBtn");
       loginButton.className = "reference-login-button";
       try {
-        // Lightweight network ping tests DB/Server connectivity instantly (<5ms)
+        // Lightweight readiness ping keeps the login screen responsive.
         const pingRes = await fetch("/api/ping");
-        if (!pingRes.ok) throw new Error("Could not ping database service");
+        if (!pingRes.ok) throw new Error("Could not check readiness");
         
         // Login button turns GREEN instantly!
         loginButton.className = "reference-login-button ready";
@@ -3133,7 +3141,7 @@ result = json.loads(await response.string())`;
         el("brandSelect").dataset.brands = JSON.stringify(brands);
         if (selectedBrand) el("brandSelect").value = selectedBrand.business_id;
       } catch (error) {
-        setStatus(error.message, "error");
+        setStatus(productSafeError(error.message, "Could not load businesses."), "error");
       }
     }
 
@@ -3153,7 +3161,7 @@ result = json.loads(await response.string())`;
         el("newBrandFields").classList.add("hidden");
         setStatus(`Brand ${selectedBrand.name} is ready for mapping.`, "ok");
         updateOutput();
-      } catch (error) { setStatus(error.message, "error"); }
+      } catch (error) { setStatus(productSafeError(error.message, "Could not create business."), "error"); }
     }
 
     function normalizedRows() {
@@ -3366,7 +3374,7 @@ result = json.loads(await response.string())`;
         sourceRows = [];
         sourceFields = [];
         sourceParsed = false;
-        setStatus(error.message, "error");
+        setStatus(productSafeError(error.message, "Preview failed."), "error");
       }
     }
 
@@ -3395,7 +3403,7 @@ result = json.loads(await response.string())`;
           setStatus(`Loaded ${sheets.length} Excel sheet${sheets.length === 1 ? "" : "s"}.`, "ok");
         }
       } catch (error) {
-        setStatus(error.message, "error");
+        setStatus(productSafeError(error.message, "Could not load sheets."), "error");
       }
     }
 
@@ -3425,7 +3433,7 @@ result = json.loads(await response.string())`;
         setStatus(`Processing complete: ${result.mapped_rows} of ${result.total_rows} records processed successfully; ${result.error_listings} records need review.`, "ok");
       } catch (error) {
         hideProgress();
-        setStatus(error.message, "error");
+        setStatus(productSafeError(error.message, "Could not save workflow template."), "error");
       }
     }
 
@@ -3448,16 +3456,16 @@ result = json.loads(await response.string())`;
         });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not clear saved data.");
-        setStatus(`Saved data cleared. ${result.deleted_count} tables marked deleted, ${result.truncated_count || 0} tables truncated.`, "ok");
+        setStatus("Saved data cleared.", "ok");
       } catch (error) {
-        setStatus(error.message, "error");
+        setStatus(productSafeError(error.message, "Could not clear saved data."), "error");
       }
     }
 
     async function enrichSilverLayer() {
       const target = el("silverEnrichStatus");
       target.className = "action-feedback";
-      target.textContent = "Building silver enrichment...";
+      target.textContent = "Refreshing enrichment...";
       try {
         const response = await fetch("/api/silver/enrich", {
           method: "POST",
@@ -3465,12 +3473,12 @@ result = json.loads(await response.string())`;
           body: "{}"
         });
         const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "Could not build silver enrichment.");
+        if (!response.ok) throw new Error(result.error || "Could not refresh enrichment.");
         target.className = "action-feedback ok";
-        target.textContent = `Silver updated: ${result.rows} rows in ${result.enriched_table}; views: ${(result.views || []).join(", ")}.`;
+        target.textContent = `Enrichment refreshed for ${result.rows} records.`;
       } catch (error) {
         target.className = "action-feedback error";
-        target.textContent = error.message;
+        target.textContent = productSafeError(error.message, "Could not refresh enrichment.");
       }
     }
 
@@ -3520,7 +3528,7 @@ result = json.loads(await response.string())`;
         el("aliasPassword").value = "";
         updateOptionalFieldPicker();
         setCustomFieldFeedback(`Custom field ${result.field.label} saved.`, "ok");
-      } catch (error) { setCustomFieldFeedback(error.message, "error"); }
+      } catch (error) { setCustomFieldFeedback(productSafeError(error.message, "Could not save custom field."), "error"); }
     }
 
     async function toggleShowExistingBrands() {
@@ -3537,7 +3545,7 @@ result = json.loads(await response.string())`;
         if (!response.ok) throw new Error(result.error || "Could not fetch active businesses.");
         const brands = result.brands || [];
         if (!brands.length) {
-          box.innerHTML = `<div style="color: var(--muted);">No existing businesses found in database.</div>`;
+          box.innerHTML = `<div style="color: var(--muted);">No existing businesses found.</div>`;
           return;
         }
         const optionsHtml = brands.map(b => `<option value="${escapeHtml(b.business_id)}">${escapeHtml(b.name)} (ID: ${escapeHtml(b.business_id)})</option>`).join('');
