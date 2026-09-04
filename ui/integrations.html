@@ -203,6 +203,7 @@
     .python-function-options { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
     .python-function-options label { display: inline-flex; align-items: center; gap: 6px; width: auto; margin: 0; font-weight: 700; }
     .python-function-options input { width: auto; }
+    .locked-demo input:not([type="radio"]), .locked-demo textarea, .locked-demo select { background: #eef1f4; color: #5f6b76; cursor: not-allowed; }
 
     .connector-output { min-height: 150px; margin-top: 8px; }
 
@@ -892,6 +893,20 @@
           <option value="api_get_json">GET API JSON</option>
           <option value="python_editor">Python Editor</option>
         </select>
+        <div class="field-group csv-function-field hidden">
+          <label>CSV source</label>
+          <div class="python-function-options" role="radiogroup" aria-label="CSV source">
+            <label><input type="radio" name="csvFunction" value="new" checked> New</label>
+            <label><input type="radio" name="csvFunction" value="pizza_hut"> Pizza Hut USA</label>
+          </div>
+        </div>
+        <div class="field-group json-function-field hidden">
+          <label>JSON source</label>
+          <div class="python-function-options" role="radiogroup" aria-label="JSON source">
+            <label><input type="radio" name="jsonFunction" value="new" checked> New</label>
+            <label><input type="radio" name="jsonFunction" value="la_city"> LA City demo</label>
+          </div>
+        </div>
 
         <div class="field-group file-field">
         <label for="sourceInputMode">Source input</label>
@@ -900,7 +915,7 @@
           <option value="url">Public URL</option>
         </select>
         <label for="fileInput" class="file-upload-control">Upload source file</label>
-        <input id="fileInput" class="file-upload-control" type="file" accept=".csv,.xlsx,.xls,.json,.xml,application/json,text/csv,application/xml,text/xml">
+        <input id="fileInput" class="file-upload-control" type="file" accept=".csv,.xlsx,.xls,.json,.geojson,.xml,application/json,application/geo+json,text/csv,application/xml,text/xml">
         <label for="sourceUrl" class="source-url-control hidden">Public source URL</label>
         <input id="sourceUrl" class="source-url-control hidden" type="url" placeholder="https://example.com/locations.json">
         </div>
@@ -1038,6 +1053,15 @@ result = json.loads(await response.string())</textarea>
         <div class="button-row">
           <a class="json-viewer-link" data-json-viewer-link target="_blank" rel="noopener noreferrer">Copy JSON &amp; Open Viewer</a>
         </div>
+      </div>
+
+      <div class="panel">
+        <h2>Silver Enrichment</h2>
+        <div class="mapping-note">Refresh normalized location and ZIP enrichment tables from saved bronze data.</div>
+        <div class="button-row">
+          <button class="secondary" id="silverEnrichBtn" type="button">Enrich Bronze to Silver</button>
+        </div>
+        <div id="silverEnrichStatus" class="action-feedback" role="status" aria-live="polite"></div>
       </div>
 
     </aside>
@@ -1257,6 +1281,8 @@ result = json.loads(await response.string())</textarea>
     let learnedSuggestions = {};
     let sourceParsed = false;
     let selectedBrand = null;
+    let csvFunctionMode = "new";
+    let jsonFunctionMode = "new";
     let customAliases = {};
     let lastSaveEventId = "";
     let activeTemplateId = "";
@@ -1393,23 +1419,36 @@ result = json.loads(await response.string())</textarea>
 
     function dominosPythonCode() {
       const limit = window.APP_CONSTANTS.dominosZipFetchLimit || 1;
+      const storesPerZip = window.APP_CONSTANTS.dominosStoresPerZipLimit || 1;
+      const maxWorkers = window.APP_CONSTANTS.dominosMaxWorkers || 8;
       const orderType = encodeURIComponent(window.APP_CONSTANTS.dominosOrderType || "Delivery");
       return `from pyodide.http import pyfetch
 import json
 
-response = await pyfetch("/api/dominos-source?limit=${limit}&type=${orderType}")
+response = await pyfetch("/api/dominos-source?limit=${limit}&stores_per_zip=${storesPerZip}&max_workers=${maxWorkers}&type=${orderType}")
 if response.status != 200:
     raise RuntimeError(await response.string())
 
 result = json.loads(await response.string())`;
     }
 
-    function applyDominosPythonFunction() {
-      el("sourceType").value = "python_editor";
-      el("sourceName").value = "dominos_store_locator";
-      el("recordPath").value = "Stores";
-      el("pythonPackages").value = "";
-      setConnectorCode(dominosPythonCode());
+    function fillDominosBrand() {
+      const brand = window.APP_CONSTANTS.dominosBrand || {};
+      selectedBrand = null;
+      el("brandSelect").value = "__create_new__";
+      el("newBrandFields").classList.remove("hidden");
+      setLockedValue("newBrandName", brand.name);
+      setLockedValue("newBrandSlug", brand.slug);
+      setLockedValue("newBrandDescription", brand.description);
+      setLockedValue("newBrandLogo", "");
+      setLockedValue("newBrandWebsite", brand.websiteUrl);
+      setLockedValue("newBrandStatus", brand.status || "active");
+      setLockedValue("newBrandMetaTitle", brand.metaTitle);
+      setLockedValue("newBrandMetaDescription", brand.metaDescription);
+      setLockedValue("newBrandOrigin", brand.countryOfOrigin);
+    }
+
+    function setDominosMappings() {
       mappingSelections = {
         location_id: "StoreID",
         name: "StoreName",
@@ -1424,14 +1463,169 @@ result = json.loads(await response.string())`;
       optionalMappingKeys = new Set(["location_id", "latitude", "longitude", "observed_at"]);
       hiddenMappingKeys = new Set();
       autoMappedKeys = new Set(Object.keys(mappingSelections));
+    }
+
+    function setDominosLocked(locked) {
+      ["sourceType", "brandSelect", "sourceName", "recordPath", "pythonPackages"].forEach((id) => { el(id).disabled = locked; });
+      ["newBrandName", "newBrandSlug", "newBrandDescription", "newBrandLogo", "newBrandWebsite", "newBrandStatus", "newBrandMetaTitle", "newBrandMetaDescription", "newBrandOrigin"].forEach((id) => { el(id).disabled = locked; });
+      document.querySelectorAll("select[data-field]").forEach((select) => { select.disabled = locked; });
+      document.querySelectorAll("button[data-remove-field]").forEach((button) => { button.disabled = locked; });
+      el("addOptionalFieldBtn").disabled = locked || el("addOptionalFieldBtn").disabled;
+      document.querySelector("aside .panel").classList.toggle("locked-demo", locked);
+      el("mappingGrid").classList.toggle("locked-demo", locked);
+    }
+
+    function applyDominosPythonFunction() {
+      el("sourceType").value = "python_editor";
+      el("sourceName").value = "dominos_store_locator";
+      el("recordPath").value = "Stores";
+      el("pythonPackages").value = "";
+      setConnectorCode(dominosPythonCode());
+      fillDominosBrand();
+      setDominosMappings();
       renderMappings();
       updateOutput();
       updateSourceVisibility();
-      setStatus("Domino's Python function is ready. Click Parse Source to fetch ZIPs and map the Stores array.", "ok");
+      setDominosLocked(true);
+      setStatus("Domino's Python function is locked in. Save the Domino's brand once, then click Parse Source to fetch all ZIPs.", "ok");
     }
 
     function updatePythonFunctionSelection(value) {
       if (value === "dominos") applyDominosPythonFunction();
+      else setDominosLocked(false);
+    }
+
+    function setLockedValue(id, value) {
+      el(id).value = value || "";
+    }
+
+    function setPresetLocked(locked, controlIds) {
+      controlIds.forEach((id) => { el(id).disabled = locked; });
+      ["newBrandName", "newBrandSlug", "newBrandDescription", "newBrandLogo", "newBrandWebsite", "newBrandStatus", "newBrandMetaTitle", "newBrandMetaDescription", "newBrandOrigin"].forEach((id) => { el(id).disabled = locked; });
+      document.querySelectorAll("select[data-field]").forEach((select) => { select.disabled = locked; });
+      document.querySelectorAll("button[data-remove-field]").forEach((button) => { button.disabled = locked; });
+      el("addOptionalFieldBtn").disabled = locked || el("addOptionalFieldBtn").disabled;
+      document.querySelector("aside .panel").classList.toggle("locked-demo", locked);
+      el("mappingGrid").classList.toggle("locked-demo", locked);
+    }
+
+    function fillBrandFromConfig(brand) {
+      selectedBrand = null;
+      el("brandSelect").value = "__create_new__";
+      el("newBrandFields").classList.remove("hidden");
+      setLockedValue("newBrandName", brand.name);
+      setLockedValue("newBrandSlug", brand.slug);
+      setLockedValue("newBrandDescription", brand.description);
+      setLockedValue("newBrandLogo", "");
+      setLockedValue("newBrandWebsite", brand.websiteUrl);
+      setLockedValue("newBrandStatus", brand.status || "active");
+      setLockedValue("newBrandMetaTitle", brand.metaTitle);
+      setLockedValue("newBrandMetaDescription", brand.metaDescription);
+      setLockedValue("newBrandOrigin", brand.countryOfOrigin);
+    }
+
+    function setPizzaHutMappings() {
+      mappingSelections = {
+        location_id: "id",
+        name: "address",
+        address: "address",
+        city: "city",
+        state: "state",
+        postal_code: "zip",
+        phone_number: "phone",
+        latitude: "latitude",
+        longitude: "longitude"
+      };
+      optionalMappingKeys = new Set(["location_id", "phone_number", "latitude", "longitude"]);
+      hiddenMappingKeys = new Set();
+      autoMappedKeys = new Set(Object.keys(mappingSelections));
+    }
+
+    function setPizzaHutLocked(locked) {
+      setPresetLocked(locked, ["sourceType", "brandSelect", "sourceInputMode", "sourceUrl", "sourceName", "recordPath"]);
+    }
+
+    function applyPizzaHutCsvDemo() {
+      csvFunctionMode = "pizza_hut";
+      el("sourceType").value = "csv";
+      el("sourceInputMode").value = "url";
+      el("sourceUrl").value = window.APP_CONSTANTS.pizzaHutCsvDemoUrl || "";
+      el("sourceName").value = "pizza_hut_locations_csv";
+      el("recordPath").value = "";
+      fillBrandFromConfig(window.APP_CONSTANTS.pizzaHutBrand || {});
+      setPizzaHutMappings();
+      updateSourceVisibility();
+      renderMappings();
+      setPizzaHutLocked(true);
+      updateOutput();
+      setStatus("Pizza Hut CSV demo is locked in. Save the Pizza Hut brand once, then click Parse Source.", "ok");
+    }
+
+    function resetCsvDemoLock() {
+      csvFunctionMode = "new";
+      setPizzaHutLocked(false);
+    }
+
+    function updateCsvFunctionSelection(value) {
+      if (value === "pizza_hut") applyPizzaHutCsvDemo();
+      else resetCsvDemoLock();
+    }
+
+    function fillLaCityDemoBrand() {
+      const brand = window.APP_CONSTANTS.laCityJsonDemoBrand || {};
+      fillBrandFromConfig(brand);
+    }
+
+    function setLaCityDemoLocked(locked) {
+      ["sourceType", "brandSelect", "sourceInputMode", "sourceUrl", "sourceName", "recordPath"].forEach((id) => { el(id).disabled = locked; });
+      ["newBrandName", "newBrandSlug", "newBrandDescription", "newBrandLogo", "newBrandWebsite", "newBrandStatus", "newBrandMetaTitle", "newBrandMetaDescription", "newBrandOrigin"].forEach((id) => { el(id).disabled = locked; });
+      document.querySelectorAll("select[data-field]").forEach((select) => { select.disabled = locked; });
+      document.querySelectorAll("button[data-remove-field]").forEach((button) => { button.disabled = locked; });
+      el("addOptionalFieldBtn").disabled = locked || el("addOptionalFieldBtn").disabled;
+      document.querySelector("aside .panel").classList.toggle("locked-demo", locked);
+      el("mappingGrid").classList.toggle("locked-demo", locked);
+    }
+
+    function setLaCityDemoMappings() {
+      mappingSelections = {
+        location_id: "facility_id",
+        name: "facility_name",
+        address: "facility_address",
+        city: "facility_city",
+        state: "facility_state",
+        postal_code: "facility_zip",
+        status: "program_status",
+        observed_at: "activity_date"
+      };
+      optionalMappingKeys = new Set(["location_id", "status", "observed_at"]);
+      hiddenMappingKeys = new Set();
+      autoMappedKeys = new Set(Object.keys(mappingSelections));
+    }
+
+    function applyLaCityJsonDemo() {
+      jsonFunctionMode = "la_city";
+      el("sourceType").value = "json";
+      el("sourceInputMode").value = "url";
+      el("sourceUrl").value = window.APP_CONSTANTS.laCityJsonDemoUrl || "";
+      el("sourceName").value = "la_city_restaurant_inspections_json";
+      el("recordPath").value = "";
+      fillLaCityDemoBrand();
+      setLaCityDemoMappings();
+      updateSourceVisibility();
+      renderMappings();
+      setLaCityDemoLocked(true);
+      updateOutput();
+      setStatus("LA City JSON demo is locked in. Save the test brand once, then click Parse Source.", "ok");
+    }
+
+    function resetJsonDemoLock() {
+      jsonFunctionMode = "new";
+      setLaCityDemoLocked(false);
+    }
+
+    function updateJsonFunctionSelection(value) {
+      if (value === "la_city") applyLaCityJsonDemo();
+      else resetJsonDemoLock();
     }
 
     function initializeConnectorEditor() {
@@ -1534,6 +1728,8 @@ result = json.loads(await response.string())`;
       const draft = {
         sessionId,
         sourceType: el("sourceType").value,
+        csvFunction: document.querySelector("input[name='csvFunction']:checked")?.value || "new",
+        jsonFunction: document.querySelector("input[name='jsonFunction']:checked")?.value || "new",
         brandSelect: el("brandSelect").value,
         selectedBrand,
         sourceName: el("sourceName").value,
@@ -1585,7 +1781,13 @@ result = json.loads(await response.string())`;
         hiddenMappingKeys = new Set(draft.hiddenMappingKeys || []);
         customAliases = draft.customAliases || {};
         activeTemplateId = draft.activeTemplateId || "";
+        csvFunctionMode = draft.csvFunction || "new";
+        jsonFunctionMode = draft.jsonFunction || "new";
         el("sourceType").value = draft.sourceType || "csv";
+        const csvFunctionOption = document.querySelector(`input[name='csvFunction'][value="${CSS.escape(csvFunctionMode)}"]`);
+        if (csvFunctionOption) csvFunctionOption.checked = true;
+        const jsonFunctionOption = document.querySelector(`input[name='jsonFunction'][value="${CSS.escape(jsonFunctionMode)}"]`);
+        if (jsonFunctionOption) jsonFunctionOption.checked = true;
         el("sourceName").value = draft.sourceName || "";
         el("sourceInputMode").value = draft.sourceInputMode || "file";
         el("sourceUrl").value = draft.sourceUrl || "";
@@ -1603,6 +1805,9 @@ result = json.loads(await response.string())`;
         populateJsonRecordPaths(jsonRecordPaths);
         selectedBrand = draft.selectedBrand || null;
         renderMappings();
+        setPizzaHutLocked(csvFunctionMode === "pizza_hut");
+        setLaCityDemoLocked(jsonFunctionMode === "la_city");
+        setDominosLocked((draft.pythonFunction || "new") === "dominos");
         renderTable("sourcePreview", sourceRows.slice(0, 10).map((row) => flattenObject(row)));
         setStatus("Draft restored. Review the mapping before saving.", "ok");
       } catch (error) {
@@ -1835,9 +2040,29 @@ result = json.loads(await response.string())`;
     function inferSourceType(fileName) {
       const lower = fileName.toLowerCase();
       if (lower.endsWith(".xlsx") || lower.endsWith(".xls")) return "excel";
-      if (lower.endsWith(".json")) return "json";
+      if (lower.endsWith(".json") || lower.endsWith(".geojson")) return "json";
       if (lower.endsWith(".xml")) return "xml";
       return "csv";
+    }
+
+    const sourceFileAccept = {
+      csv: ".csv,text/csv",
+      excel: ".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel",
+      json: ".json,.geojson,application/json,application/geo+json",
+      xml: ".xml,application/xml,text/xml"
+    };
+
+    function updateFileAccept() {
+      el("fileInput").accept = sourceFileAccept[el("sourceType").value] || "";
+    }
+
+    function validateSelectedFileType(file) {
+      const selectedType = el("sourceType").value;
+      if (!sourceFileAccept[selectedType]) return;
+      const inferredType = inferSourceType(file.name);
+      if (inferredType !== selectedType) {
+        throw new Error(`Selected source format is ${selectedType.toUpperCase()}. Choose a matching ${selectedType === "json" ? "JSON or GeoJSON" : selectedType.toUpperCase()} file.`);
+      }
     }
 
     function populateJsonRecordPaths(paths) {
@@ -1919,10 +2144,14 @@ result = json.loads(await response.string())`;
       const isApi = sourceType === "api_get_json";
       const isPythonConnector = sourceType === "python_editor";
       const isExcel = sourceType === "excel";
+      const isJson = sourceType === "json";
+      const isCsv = sourceType === "csv";
       const hasRecordPath = ["json", "xml", "api_get_json", "python_editor"].includes(sourceType);
       const isFileSource = !isApi && !isPythonConnector;
 
       document.querySelectorAll(".api-field").forEach((field) => field.classList.toggle("hidden", !isApi));
+      document.querySelectorAll(".csv-function-field").forEach((field) => field.classList.toggle("hidden", !isCsv));
+      document.querySelectorAll(".json-function-field").forEach((field) => field.classList.toggle("hidden", !isJson));
       document.querySelectorAll(".python-connector-field").forEach((field) => field.classList.toggle("hidden", !isPythonConnector));
       document.querySelectorAll(".excel-field").forEach((field) => field.classList.toggle("hidden", !isExcel));
       document.querySelectorAll(".file-field").forEach((field) => field.classList.toggle("hidden", isApi || isPythonConnector));
@@ -1933,6 +2162,7 @@ result = json.loads(await response.string())`;
 
       document.querySelector("main").classList.toggle("connector-active", isPythonConnector);
 
+      updateFileAccept();
       el("fileInput").disabled = isApi || isPythonConnector;
       el("apiUrl").disabled = !isApi;
       el("sheetName").disabled = !isExcel || !el("sheetName").options.length;
@@ -2361,8 +2591,7 @@ result = json.loads(await response.string())`;
           payload.content_base64 = sourceResult.content_base64;
         } else {
           if (!file) throw new Error("Choose a source file.");
-          sourceType = inferSourceType(file.name);
-          el("sourceType").value = sourceType;
+          validateSelectedFileType(file);
           payload.source_type = sourceType;
           payload.file_name = file.name;
           payload.content_base64 = await fileToBase64(file);
@@ -2397,10 +2626,16 @@ result = json.loads(await response.string())`;
         mappingSelections = {};
         activeTemplateId = "";
         autoMappedKeys = new Set();
+        if (csvFunctionMode === "pizza_hut") setPizzaHutMappings();
+        if (jsonFunctionMode === "la_city") setLaCityDemoMappings();
+        if (document.querySelector("input[name='pythonFunction']:checked")?.value === "dominos") setDominosMappings();
         sessionStorage.removeItem(draftStorageKey);
         if (resolvedRecordPath && !el("recordPath").value.trim()) el("recordPath").value = resolvedRecordPath;
         if (sourceType === "excel" && resolvedRecordPath) el("sheetName").value = resolvedRecordPath;
         renderMappings();
+        if (csvFunctionMode === "pizza_hut") setPizzaHutLocked(true);
+        if (jsonFunctionMode === "la_city") setLaCityDemoLocked(true);
+        if (document.querySelector("input[name='pythonFunction']:checked")?.value === "dominos") setDominosLocked(true);
         renderTable("sourcePreview", sourceRows.slice(0, 10).map((row) => flattenObject(row)));
       } catch (error) {
         sourceRows = [];
@@ -2494,6 +2729,26 @@ result = json.loads(await response.string())`;
       }
     }
 
+    async function enrichSilverLayer() {
+      const target = el("silverEnrichStatus");
+      target.className = "action-feedback";
+      target.textContent = "Building silver enrichment...";
+      try {
+        const response = await fetch("/api/silver/enrich", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}"
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not build silver enrichment.");
+        target.className = "action-feedback ok";
+        target.textContent = `Silver updated: ${result.rows} rows in ${result.enriched_table}; views: ${(result.views || []).join(", ")}.`;
+      } catch (error) {
+        target.className = "action-feedback error";
+        target.textContent = error.message;
+      }
+    }
+
     function resetMapping() {
       activeTemplateId = "";
       mappingSelections = {};
@@ -2560,6 +2815,7 @@ result = json.loads(await response.string())`;
     el("resetMappingBtn").addEventListener("click", resetMapping);
     el("restartMappingBtn").addEventListener("click", restartMapping);
     el("clearDataBtn").addEventListener("click", clearSavedData);
+    el("silverEnrichBtn").addEventListener("click", enrichSilverLayer);
     el("logoutBtn").addEventListener("click", logout);
     el("confirmClearBtn").addEventListener("click", async () => {
       el("dangerDialog").close();
@@ -2611,20 +2867,41 @@ result = json.loads(await response.string())`;
     el("fileInput").addEventListener("change", () => {
       sourceParsed = false;
       setStatus("Source changed. Ready to review fields.", "");
-      const file = el("fileInput").files[0];
-      if (file) el("sourceType").value = inferSourceType(file.name);
-      el("sourceType").dispatchEvent(new Event("change"));
       loadExcelSheets();
     });
     el("sheetName").addEventListener("change", () => {
       el("recordPath").value = el("sheetName").value;
     });
     el("sourceType").addEventListener("change", () => {
+      if (el("sourceType").value !== "csv") {
+        const newCsvOption = document.querySelector("input[name='csvFunction'][value='new']");
+        if (newCsvOption) newCsvOption.checked = true;
+        resetCsvDemoLock();
+      }
+      if (el("sourceType").value !== "json") {
+        const newJsonOption = document.querySelector("input[name='jsonFunction'][value='new']");
+        if (newJsonOption) newJsonOption.checked = true;
+        resetJsonDemoLock();
+      }
+      if (el("sourceType").value !== "python_editor") {
+        const newPythonOption = document.querySelector("input[name='pythonFunction'][value='new']");
+        if (newPythonOption) newPythonOption.checked = true;
+        setDominosLocked(false);
+      }
       sourceParsed = false;
       setStatus("Source changed. Ready to review fields.", "");
+      el("fileInput").value = "";
+      el("sheetName").innerHTML = "";
+      el("recordPath").value = "";
       updateSourceVisibility();
     });
     el("sourceInputMode").addEventListener("change", updateSourceVisibility);
+    document.querySelectorAll("input[name='csvFunction']").forEach((input) => {
+      input.addEventListener("change", () => updateCsvFunctionSelection(input.value));
+    });
+    document.querySelectorAll("input[name='jsonFunction']").forEach((input) => {
+      input.addEventListener("change", () => updateJsonFunctionSelection(input.value));
+    });
     document.querySelectorAll("input[name='pythonFunction']").forEach((input) => {
       input.addEventListener("change", () => updatePythonFunctionSelection(input.value));
     });

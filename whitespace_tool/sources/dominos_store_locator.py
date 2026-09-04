@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import pickle
 from pathlib import Path
@@ -77,29 +78,49 @@ def _stores_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return [store for store in stores if isinstance(store, dict)]
 
 
-def fetch_for_zips(zip_codes: list[str], order_type: str = "Carryout", cache_dir: str | Path | None = None) -> dict[str, Any]:
+def fetch_for_zips(
+    zip_codes: list[str],
+    order_type: str = "Carryout",
+    cache_dir: str | Path | None = None,
+    stores_per_zip: int | None = None,
+    max_workers: int = 8,
+) -> dict[str, Any]:
     observed_at = utc_now_iso()
     stores_by_id: dict[str, dict[str, Any]] = {}
     errors = []
-    for zip_code in zip_codes:
+    worker_count = max(1, min(max_workers, max(len(zip_codes), 1)))
+
+    def fetch_one(zip_code: str) -> tuple[str, dict[str, Any] | None, str | None]:
         try:
-            payload = fetch_zip(zip_code, order_type=order_type, cache_dir=cache_dir)
+            return zip_code, fetch_zip(zip_code, order_type=order_type, cache_dir=cache_dir), None
         except Exception as exc:
-            errors.append({"zip_code": zip_code, "error": str(exc)})
-            continue
-        for store in _stores_from_payload(payload):
-            store_id = str(store.get("StoreID") or store.get("StoreId") or store.get("store_id") or "").strip()
-            if not store_id:
+            return zip_code, None, str(exc)
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [executor.submit(fetch_one, zip_code) for zip_code in zip_codes]
+        for future in as_completed(futures):
+            zip_code, payload, error = future.result()
+            if error or payload is None:
+                errors.append({"zip_code": zip_code, "error": error or "Unknown error"})
                 continue
-            normalized = dict(store)
-            normalized["ObservedAt"] = observed_at
-            stores_by_id[store_id] = normalized
+            stores = _stores_from_payload(payload)
+            if stores_per_zip:
+                stores = stores[:stores_per_zip]
+            for store in stores:
+                store_id = str(store.get("StoreID") or store.get("StoreId") or store.get("store_id") or "").strip()
+                if not store_id:
+                    continue
+                normalized = dict(store)
+                normalized["ObservedAt"] = observed_at
+                stores_by_id[store_id] = normalized
     return {
         "source": "unofficial_dominos_store_locator",
         "locator_url": LOCATOR_URL,
         "order_type": order_type,
         "observed_at": observed_at,
         "zip_count": len(zip_codes),
+        "stores_per_zip": stores_per_zip,
+        "max_workers": worker_count,
         "Stores": sorted(stores_by_id.values(), key=lambda row: str(row.get("StoreID") or "")),
         "errors": errors,
     }
