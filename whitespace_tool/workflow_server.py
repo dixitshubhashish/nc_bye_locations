@@ -362,6 +362,22 @@ def _ensure_dataset(client: Any, project_id: str, dataset_id: str) -> None:
     client.create_dataset(bigquery.Dataset(f"{project_id}.{dataset_id}"), exists_ok=True)
 
 
+def test_storage_connection() -> dict[str, Any]:
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    _ensure_dataset(client, project_id, dataset_id)
+    probe = list(client.query("SELECT 1 AS ok").result())
+    if not probe or probe[0]["ok"] != 1:
+        raise RuntimeError("BigQuery probe query did not return the expected result")
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "dataset_id": dataset_id,
+        "dataset": f"{project_id}.{dataset_id}",
+        "credentials": "service_account" if credentials_json else "application_default",
+    }
+
+
 def _ensure_businesses_table(client: Any, project_id: str, dataset_id: str) -> None:
     from google.cloud import bigquery
 
@@ -915,6 +931,12 @@ def make_handler(ui_dir: Path):
             if self.path == "/api/prepare":
                 try:
                     _json_response(self, 200, prepare_zipcodes())
+                except Exception as exc:
+                    _json_response(self, 400, {"error": str(exc)})
+                return
+            if self.path == "/api/storage/test":
+                try:
+                    _json_response(self, 200, test_storage_connection())
                 except Exception as exc:
                     _json_response(self, 400, {"error": str(exc)})
                 return

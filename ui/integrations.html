@@ -864,6 +864,10 @@
     <aside>
       <div class="panel">
         <h2>Source</h2>
+        <div class="button-row">
+          <button class="secondary" id="testBigQueryBtn" type="button">Test BigQuery Connection</button>
+        </div>
+        <div id="bigQueryStatus" class="status hidden"></div>
         <label for="sourceType">Source format</label>
         <select id="sourceType">
           <option value="csv">CSV</option>
@@ -1708,6 +1712,22 @@ result = json.loads(await response.string())</textarea>
       }
     }
 
+    async function testBigQueryConnection() {
+      const target = el("bigQueryStatus");
+      target.className = "status";
+      target.textContent = "Testing BigQuery connection...";
+      try {
+        const response = await fetch("/api/storage/test");
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "BigQuery connection failed.");
+        target.className = "status ok";
+        target.textContent = `Connected to ${result.dataset} using ${result.credentials}.`;
+      } catch (error) {
+        target.className = "status error";
+        target.textContent = error.message;
+      }
+    }
+
     function inferSourceType(fileName) {
       const lower = fileName.toLowerCase();
       if (lower.endsWith(".xlsx") || lower.endsWith(".xls")) return "excel";
@@ -2383,6 +2403,7 @@ result = json.loads(await response.string())</textarea>
     }
 
     el("parseBtn").addEventListener("click", parseSource);
+    el("testBigQueryBtn").addEventListener("click", testBigQueryConnection);
     el("runPythonConnectorBtn").addEventListener("click", parseSource);
     el("expandPythonConnectorBtn").addEventListener("click", openConnectorEditor);
     el("minimizePythonConnectorBtn").addEventListener("click", minimizeConnectorEditor);
