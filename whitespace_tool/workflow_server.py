@@ -23,6 +23,7 @@ from whitespace_tool.models import utc_now_iso
 from whitespace_tool.learning import suggest_from_templates
 from whitespace_tool.field_registry import load_field_registry
 from whitespace_tool.sources.demographics import fetch_bigquery_demographics, resolve_bigquery_connection
+from whitespace_tool.sources.dominos_overpass import fetch_for_zips as fetch_dominos_from_overpass
 from whitespace_tool.sources.dominos_store_locator import fetch_for_zips
 from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows, clear_dataset_tables, push_to_bigquery
 from whitespace_tool.storage_config import load_dotenv, load_storage_config
@@ -316,6 +317,14 @@ def _warehouse_settings() -> tuple[str, str, str | None]:
     return storage_config["project_id"], storage_config["bronze_dataset_id"], storage_config.get("credentials_json")
 
 
+def _medallion_settings() -> tuple[str, str, str, str | None]:
+    storage_config = load_storage_config(os.environ.get("WORKFLOW_STORAGE_CONFIG", "config/connections/storage.json"))
+    if not storage_config.get("project_id") or not storage_config.get("bronze_dataset_id"):
+        raise ValueError("Storage project and bronze dataset are missing from the configuration")
+    silver_dataset_id = storage_config.get("silver_dataset_id") or "birdeye_silver_listings"
+    return storage_config["project_id"], storage_config["bronze_dataset_id"], silver_dataset_id, storage_config.get("credentials_json")
+
+
 def _load_mapped_zip_demographics(zip_codes: set[str]) -> dict[str, Any]:
     config_path = Path(os.environ.get("WORKFLOW_CONFIG", "config/demo.json"))
     with config_path.open("r", encoding="utf-8") as handle:
@@ -395,15 +404,42 @@ def _dominos_zip_codes(client: Any, project_id: str, dataset_id: str, limit: int
     return [str(row["zip_code"]).zfill(5)[:5] for row in client.query(query, job_config=job_config).result()]
 
 
-def dominos_source(limit: int | None = 1, order_type: str = "Delivery") -> dict[str, Any]:
+def dominos_source(
+    limit: int | None = 1,
+    order_type: str = "Delivery",
+    stores_per_zip: int | None = 1,
+    max_workers: int = 8,
+    one_per_zip: bool = False,
+    provider: str = "auto",
+) -> dict[str, Any]:
     prepare_zipcodes()
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
     safe_limit = max(1, min(int(limit or 0), 50000)) if limit else None
     safe_order_type = order_type if order_type in {"Delivery", "Carryout"} else "Delivery"
     zip_codes = _dominos_zip_codes(client, project_id, dataset_id, safe_limit)
-    result = fetch_for_zips(zip_codes, order_type=safe_order_type)
+    safe_stores_per_zip = max(1, min(int(stores_per_zip or 0), 1000)) if stores_per_zip else None
+    safe_max_workers = max(1, min(int(max_workers or 1), 24))
+    safe_provider = provider if provider in {"auto", "dominos", "osm"} else "auto"
+    if safe_provider == "osm":
+        result = fetch_dominos_from_overpass(zip_codes, one_per_zip=one_per_zip, max_workers=min(safe_max_workers, 8))
+    else:
+        result = fetch_for_zips(
+            zip_codes,
+            order_type=safe_order_type,
+            stores_per_zip=safe_stores_per_zip,
+            one_per_zip=one_per_zip,
+            max_workers=safe_max_workers,
+        )
+        if safe_provider == "auto" and not result["Stores"] and result["errors"]:
+            fallback = fetch_dominos_from_overpass(zip_codes, one_per_zip=one_per_zip, max_workers=min(safe_max_workers, 8))
+            fallback["primary_errors"] = result["errors"]
+            result = fallback
     result["requested_zip_limit"] = safe_limit
+    result["requested_stores_per_zip"] = safe_stores_per_zip
+    result["requested_max_workers"] = safe_max_workers
+    result["requested_one_per_zip"] = one_per_zip
+    result["requested_provider"] = safe_provider
     result["dedupe_key"] = "StoreID"
     return result
 
@@ -595,6 +631,99 @@ def list_source_types() -> dict[str, Any]:
 
 def _csv_param(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def build_silver_layer() -> dict[str, Any]:
+    project_id, bronze_dataset_id, silver_dataset_id, credentials_json = _medallion_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    _ensure_dataset(client, project_id, bronze_dataset_id)
+    _ensure_dataset(client, project_id, silver_dataset_id)
+    bronze_ref = f"{project_id}.{bronze_dataset_id}"
+    silver_ref = f"{project_id}.{silver_dataset_id}"
+    enriched_table = f"{silver_ref}.listings_enriched"
+    top_view = f"{silver_ref}.vw_brand_location_top10"
+    brand_zip_view = f"{silver_ref}.vw_brand_zip_income"
+    query = f"""
+    CREATE OR REPLACE TABLE `{enriched_table}` AS
+    SELECT
+      l.listing_id,
+      l.business_id,
+      COALESCE(b.name, l.business_id) AS brand_name,
+      l.source_type_id,
+      l.location_key,
+      l.name,
+      l.address,
+      COALESCE(NULLIF(TRIM(l.city_name), ''), z.city_name) AS city_name,
+      z.county AS county,
+      COALESCE(NULLIF(UPPER(TRIM(l.state_code)), ''), z.state_code) AS state_code,
+      z.state_name AS state_name,
+      REGEXP_EXTRACT(CAST(l.zip_code AS STRING), r'(\\d{{5}})') AS zip_code,
+      CASE
+        WHEN LOWER(TRIM(COALESCE(l.country, ''))) IN ('', 'us', 'u.s.', 'u.s.a.', 'usa', 'united states', 'united states of america') THEN 'United States'
+        ELSE INITCAP(TRIM(l.country))
+      END AS country,
+      COALESCE(l.latitude, z.latitude) AS latitude,
+      COALESCE(l.longitude, z.longitude) AS longitude,
+      l.phone_number,
+      l.website_url,
+      l.status,
+      l.first_observed_at,
+      l.last_observed_at,
+      z.population,
+      z.median_household_income,
+      z.median_age,
+      z.households,
+      z.income_per_capita,
+      z.poverty,
+      CURRENT_TIMESTAMP() AS silver_updated_at
+    FROM `{bronze_ref}.listings` l
+    LEFT JOIN `{bronze_ref}.businesses` b
+      ON l.business_id = b.business_id
+      AND b.is_deleted IS NOT TRUE
+    LEFT JOIN `{bronze_ref}.us_zipcodes` z
+      ON REGEXP_EXTRACT(CAST(l.zip_code AS STRING), r'(\\d{{5}})') = z.zip_code
+    WHERE l.is_deleted IS NOT TRUE
+    """
+    client.query(query).result()
+    client.query(f"""
+    CREATE OR REPLACE VIEW `{top_view}` AS
+    SELECT
+      brand_name,
+      name,
+      address,
+      city_name,
+      county,
+      state_code,
+      country,
+      zip_code,
+      median_household_income,
+      population
+    FROM `{enriched_table}`
+    """).result()
+    client.query(f"""
+    CREATE OR REPLACE VIEW `{brand_zip_view}` AS
+    SELECT
+      brand_name,
+      zip_code,
+      city_name,
+      county,
+      state_code,
+      country,
+      COUNT(*) AS location_count,
+      MAX(population) AS population,
+      MAX(median_household_income) AS median_household_income,
+      MAX(income_per_capita) AS income_per_capita
+    FROM `{enriched_table}`
+    GROUP BY brand_name, zip_code, city_name, county, state_code, country
+    """).result()
+    table = client.get_table(enriched_table)
+    return {
+        "bronze_dataset": bronze_ref,
+        "silver_dataset": silver_ref,
+        "enriched_table": enriched_table,
+        "views": [top_view, brand_zip_view],
+        "rows": int(table.num_rows or 0),
+    }
 
 
 def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, Any]:
@@ -1047,7 +1176,12 @@ def make_handler(ui_dir: Path):
                     raw_limit = params.get("limit", ["1"])[0]
                     limit = None if raw_limit == "all" else int(raw_limit or "1")
                     order_type = params.get("type", ["Delivery"])[0]
-                    _json_response(self, 200, dominos_source(limit, order_type))
+                    raw_stores_per_zip = params.get("stores_per_zip", ["1"])[0]
+                    stores_per_zip = None if raw_stores_per_zip == "all" else int(raw_stores_per_zip or "1")
+                    max_workers = int(params.get("max_workers", ["8"])[0] or "8")
+                    one_per_zip = params.get("one_per_zip", ["false"])[0].lower() in {"1", "true", "yes"}
+                    provider = params.get("provider", ["auto"])[0]
+                    _json_response(self, 200, dominos_source(limit, order_type, stores_per_zip, max_workers, one_per_zip, provider))
                 except Exception as exc:
                     _json_response(self, 400, {"error": str(exc)})
                 return
@@ -1078,7 +1212,7 @@ def make_handler(ui_dir: Path):
             super().do_GET()
 
         def do_POST(self) -> None:
-            if self.path not in {"/api/login", "/api/preview", "/api/source-url", "/api/sheets", "/api/save", "/api/clear", "/api/brands", "/api/learning", "/api/reprocess", "/api/field-alias", "/api/custom-field", "/api/templates/save"}:
+            if self.path not in {"/api/login", "/api/preview", "/api/source-url", "/api/sheets", "/api/save", "/api/clear", "/api/brands", "/api/learning", "/api/reprocess", "/api/field-alias", "/api/custom-field", "/api/templates/save", "/api/silver/enrich"}:
                 _json_response(self, 404, {"error": "Not found"})
                 return
             request_id = uuid4().hex
@@ -1109,6 +1243,8 @@ def make_handler(ui_dir: Path):
                     _json_response(self, 200, create_custom_field(payload))
                 elif self.path == "/api/templates/save":
                     _json_response(self, 200, save_template_version(payload))
+                elif self.path == "/api/silver/enrich":
+                    _json_response(self, 200, build_silver_layer())
                 else:
                     _json_response(self, 200, preview_source(payload))
             except Exception as exc:

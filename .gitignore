@@ -4,6 +4,7 @@ logs/
 .DS_Store
 .venv/
 .env
+.refact/
 outputs/
 data/us_zips_bigquery.csv
 config/connections/storage.json
