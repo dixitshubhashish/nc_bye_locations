@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import unittest
+from unittest.mock import patch
 
 from whitespace_tool.analysis import dedupe_locations
 from whitespace_tool.data_quality import run_quality_checks
@@ -13,7 +14,7 @@ from whitespace_tool.source_adapters import csv_source
 from whitespace_tool.source_adapters import json_source
 from whitespace_tool.source_adapters import xml_source
 from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows
-from whitespace_tool.workflow_server import REQUIRED_MAPPER_FIELDS, validate_mapper
+from whitespace_tool.workflow_server import REQUIRED_MAPPER_FIELDS, save_mapper, validate_mapper
 
 
 VALID_MAPPER = {
@@ -221,6 +222,29 @@ class CsvWorkflowTests(unittest.TestCase):
         self.assertEqual(listing["business_id"], "business-123")
         self.assertEqual(listing["source_type_id"], "source-csv")
         self.assertEqual(set(rows), {"us_zipcodes", "businesses", "listings", "workflow_templates", "source_types", "error_listings"})
+
+    def test_save_mapper_routes_bad_rows_to_error_listings_without_halting_valid_rows(self) -> None:
+        captured_rows = {}
+        rows = [
+            VALID_ROW,
+            {**VALID_ROW, "store_id": "bad-coords", "latitude": "not-a-latitude"},
+            ["unexpected", "row", "shape"],
+        ]
+
+        def fake_push(_project_id, _dataset_id, rows_by_table, _credentials_json):
+            captured_rows.update(rows_by_table)
+
+        with patch("whitespace_tool.workflow_server.field_catalog", side_effect=RuntimeError("catalog unavailable")):
+            with patch("whitespace_tool.workflow_server._load_mapped_zip_demographics", side_effect=RuntimeError("zip enrichment unavailable")):
+                with patch("whitespace_tool.workflow_server._warehouse_settings", return_value=("project", "dataset", None)):
+                    with patch("whitespace_tool.workflow_server.push_to_bigquery", side_effect=fake_push):
+                        result = save_mapper({"mapper": VALID_MAPPER, "rows": rows, "source_fields": list(VALID_ROW)})
+
+        self.assertEqual(result["total_rows"], 3)
+        self.assertEqual(result["mapped_rows"], 1)
+        self.assertEqual(result["error_listings"], 2)
+        self.assertEqual(len(captured_rows["listings"]), 1)
+        self.assertEqual(len(captured_rows["error_listings"]), 2)
 
     def test_standard_and_optional_fields_keep_expected_modes(self) -> None:
         required = {field["name"] for field in TABLE_SCHEMAS["listings"] if field["mode"] == "REQUIRED"}

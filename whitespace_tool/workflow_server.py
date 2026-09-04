@@ -204,16 +204,13 @@ def predefined_templates() -> dict[str, Any]:
 
 def mapper_targets_with_status() -> dict[str, Any]:
     try:
-        return {"fields": field_catalog(), "source": "bigquery"}
+        return {"fields": field_catalog(), "source": "managed"}
     except Exception as exc:
         LOGGER.exception("field_catalog_fallback error=%s", exc)
         return {
             "fields": load_field_registry(),
-            "source": "local_registry",
-            "warning": (
-                "BigQuery field catalog is unavailable, so local default fields were loaded. "
-                f"Storage error: {exc}"
-            ),
+            "source": "default",
+            "warning": "Default field definitions were loaded.",
         }
 
 
@@ -571,13 +568,10 @@ def test_storage_connection() -> dict[str, Any]:
     _ensure_dataset(client, project_id, dataset_id)
     probe = list(client.query("SELECT 1 AS ok").result())
     if not probe or probe[0]["ok"] != 1:
-        raise RuntimeError("BigQuery probe query did not return the expected result")
+        raise RuntimeError("Workspace readiness check did not return the expected result")
     return {
         "ok": True,
-        "project_id": project_id,
-        "dataset_id": dataset_id,
-        "dataset": f"{project_id}.{dataset_id}",
-        "credentials": "service_account" if credentials_json else "application_default",
+        "status": "ready",
     }
 
 
@@ -1358,6 +1352,35 @@ def reprocess_rejected(data: dict[str, Any]) -> dict[str, Any]:
     return save_mapper({"mapper": mapper, "rows": rows, "source_fields": source_fields})
 
 
+def _safe_json_dumps(value: Any) -> str:
+    try:
+        return json.dumps(value, sort_keys=True)
+    except (TypeError, ValueError):
+        return json.dumps(str(value))
+
+
+def _row_error_listing(
+    event_id: str,
+    business_id: str,
+    source_type_id: str,
+    index: int,
+    row: Any,
+    row_errors: list[dict[str, Any]],
+    observed_at: str,
+) -> dict[str, Any]:
+    return {
+        "event_id": event_id,
+        "business_id": business_id,
+        "source_type_id": source_type_id,
+        "row_number": index + 1,
+        "errors": _safe_json_dumps(row_errors),
+        "raw_record": _safe_json_dumps(row),
+        "observed_at": observed_at,
+        "is_deleted": False,
+        "deleted_on": None,
+    }
+
+
 def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
     mapper = payload.get("mapper")
     rows = payload.get("rows")
@@ -1378,7 +1401,11 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
 
     source_name = str(mapper["source_name"]).strip()
     source_type_id = str(mapper.get("source_type_id", "")).strip() or ensure_source_type(str(mapper.get("source_type", "unknown")))
-    field_definitions = field_catalog()
+    try:
+        field_definitions = field_catalog()
+    except Exception as exc:
+        LOGGER.warning("field_catalog_unavailable_using_defaults error=%s", exc)
+        field_definitions = load_field_registry()
     business_id = str(mapper.get("business_id", "")).strip()
     if not business_id:
         raise ValueError("Select an existing business or create a new business before saving")
@@ -1389,35 +1416,52 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
     error_listings = []
     for index, row in enumerate(rows):
         observed_at = utc_now_iso()
-        row_errors = validate_source_row(row, mapper)
-        location = normalize_location(row, mapper, source_name, index)
-        if location is not None:
-            observed_at = location.observed_at
-        if location is None:
-            row_errors.append({"field": "required_location", "reason": "missing brand or ZIP Code"})
-        elif any(not str(getattr(location, field) or "").strip() for field in REQUIRED_LOCATION_VALUES):
-            row_errors.append({"field": "required_location", "reason": "missing mandatory value"})
-        if location is not None:
-            row_errors.extend(validate_normalized_location(location, field_definitions))
-        if row_errors:
-            error_listings.append({
-                "event_id": event_id,
-                "business_id": business_id,
-                "source_type_id": source_type_id,
-                "row_number": index + 1,
-                "errors": json.dumps(row_errors, sort_keys=True),
-                "raw_record": json.dumps(row, sort_keys=True),
-                "observed_at": observed_at,
-                "is_deleted": False,
-                "deleted_on": None,
+        row_errors: list[dict[str, Any]] = []
+        location = None
+        try:
+            if not isinstance(row, dict):
+                raise ValueError("Row must be an object with named fields")
+            row_errors = validate_source_row(row, mapper)
+            location = normalize_location(row, mapper, source_name, index)
+            if location is not None:
+                observed_at = location.observed_at
+            if location is None:
+                row_errors.append({
+                    "field": "required_location",
+                    "reason": "missing brand or ZIP Code",
+                    "hint": "Map a business name or provide a fixed business selection, and include a valid ZIP code.",
+                    "value": "",
+                })
+            elif any(not str(getattr(location, field) or "").strip() for field in REQUIRED_LOCATION_VALUES):
+                row_errors.append({
+                    "field": "required_location",
+                    "reason": "missing mandatory value",
+                    "hint": "Required location fields must be present before the row can be saved.",
+                    "value": "",
+                })
+            if location is not None:
+                row_errors.extend(validate_normalized_location(location, field_definitions))
+        except Exception as exc:
+            LOGGER.exception("row_validation_failed event_id=%s row_number=%d", event_id, index + 1)
+            row_errors.append({
+                "field": "row",
+                "reason": "row could not be processed",
+                "hint": "This row has an unexpected shape or value and was moved to review.",
+                "value": str(exc),
             })
+        if row_errors:
+            error_listings.append(_row_error_listing(event_id, business_id, source_type_id, index, row, row_errors, observed_at))
         elif location is not None:
             locations.append(location)
     project_id, dataset_id, credentials_json = _warehouse_settings()
 
     mapper_id = f"mapper_{uuid4().hex}"
     config_json = _scrub_mapper(mapper)
-    demographics = _load_mapped_zip_demographics({location.zip5 for location in locations})
+    try:
+        demographics = _load_mapped_zip_demographics({location.zip5 for location in locations})
+    except Exception as exc:
+        LOGGER.warning("zip_enrichment_lookup_failed_continuing error=%s", exc)
+        demographics = {}
     rows_by_table = build_table_rows(locations, demographics)
     rows_by_table["businesses"] = []
     for record in error_listings:
