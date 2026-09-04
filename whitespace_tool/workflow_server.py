@@ -109,8 +109,23 @@ def source_sheets(payload: dict[str, Any]) -> dict[str, Any]:
     return {"sheets": excel_source.list_sheets(content, file_name)}
 
 
+def mapper_targets_with_status() -> dict[str, Any]:
+    try:
+        return {"fields": field_catalog(), "source": "bigquery"}
+    except Exception as exc:
+        LOGGER.exception("field_catalog_fallback error=%s", exc)
+        return {
+            "fields": load_field_registry(),
+            "source": "local_registry",
+            "warning": (
+                "BigQuery field catalog is unavailable, so local default fields were loaded. "
+                f"Storage error: {exc}"
+            ),
+        }
+
+
 def mapper_targets() -> list[dict[str, Any]]:
-    return field_catalog()
+    return mapper_targets_with_status()["fields"]
 
 
 def field_catalog() -> list[dict[str, Any]]:
@@ -345,6 +360,22 @@ def _ensure_dataset(client: Any, project_id: str, dataset_id: str) -> None:
     from google.cloud import bigquery
 
     client.create_dataset(bigquery.Dataset(f"{project_id}.{dataset_id}"), exists_ok=True)
+
+
+def test_storage_connection() -> dict[str, Any]:
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    _ensure_dataset(client, project_id, dataset_id)
+    probe = list(client.query("SELECT 1 AS ok").result())
+    if not probe or probe[0]["ok"] != 1:
+        raise RuntimeError("BigQuery probe query did not return the expected result")
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "dataset_id": dataset_id,
+        "dataset": f"{project_id}.{dataset_id}",
+        "credentials": "service_account" if credentials_json else "application_default",
+    }
 
 
 def _ensure_businesses_table(client: Any, project_id: str, dataset_id: str) -> None:
@@ -890,14 +921,22 @@ def make_handler(ui_dir: Path):
 
         def do_GET(self) -> None:
             if self.path == "/api/schema":
-                _json_response(self, 200, {"targets": mapper_targets()})
+                result = mapper_targets_with_status()
+                _json_response(self, 200, {"targets": result["fields"], "source": result["source"], "warning": result.get("warning")})
                 return
             if self.path == "/api/field-registry":
-                _json_response(self, 200, {"fields": mapper_targets()})
+                result = mapper_targets_with_status()
+                _json_response(self, 200, result)
                 return
             if self.path == "/api/prepare":
                 try:
                     _json_response(self, 200, prepare_zipcodes())
+                except Exception as exc:
+                    _json_response(self, 400, {"error": str(exc)})
+                return
+            if self.path == "/api/storage/test":
+                try:
+                    _json_response(self, 200, test_storage_connection())
                 except Exception as exc:
                     _json_response(self, 400, {"error": str(exc)})
                 return
@@ -996,5 +1035,5 @@ def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
     handler = make_handler(ui_dir)
     socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer((host, port), handler) as httpd:
-        print(f"Workflow UI running at http://{host}:{port}/integrations.html")
+        print(f"Workflow UI running at http://{host}:{port}/")
         httpd.serve_forever()

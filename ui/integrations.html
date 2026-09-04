@@ -736,8 +736,17 @@
       height: 30px;
       max-width: none;
     }
-    .login-brand .brand-icon-crop { width: 38px; height: 38px; flex-basis: 38px; }
-    .login-brand .brand-logo-image { height: 38px; }
+    .login-brand .brand-icon-crop {
+      width: min(240px, 100%);
+      height: 46px;
+      flex: 0 1 240px;
+      overflow: visible;
+    }
+    .login-brand .brand-logo-image {
+      height: 46px;
+      max-width: 100%;
+      object-fit: contain;
+    }
     .app-footer .brand-icon-crop { width: 27px; height: 27px; flex-basis: 27px; }
     .app-footer .brand-logo-image { height: 27px; }
     .brand-mark {
@@ -829,8 +838,10 @@
       </label>
       <div class="button-row">
         <button id="loginBtn" class="reference-login-button" type="button">Login</button>
+        <button id="loginTestBigQueryBtn" class="secondary" type="button">Test BigQuery</button>
       </div>
       <div id="loginStatus" class="status hidden"></div>
+      <div id="loginBigQueryStatus" class="status hidden"></div>
     </div>
   </div>
 
@@ -864,6 +875,10 @@
     <aside>
       <div class="panel">
         <h2>Source</h2>
+        <div class="button-row">
+          <button class="secondary" id="testBigQueryBtn" type="button">Test BigQuery Connection</button>
+        </div>
+        <div id="bigQueryStatus" class="status hidden"></div>
         <label for="sourceType">Source format</label>
         <select id="sourceType">
           <option value="csv">CSV</option>
@@ -1698,12 +1713,38 @@ result = json.loads(await response.string())</textarea>
     async function loadFieldRegistry() {
       try {
         const response = await fetch("/api/field-registry");
-        if (!response.ok) throw new Error("Could not load field definitions.");
         const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not load field definitions.");
         if (Array.isArray(result.fields) && result.fields.length) mappingTargets = result.fields;
         if (sourceParsed) renderMappings();
+        if (result.warning) setStatus(result.warning, "warn");
       } catch (error) {
         setStatus(error.message, "error");
+      }
+    }
+
+    async function testBigQueryConnection() {
+      const target = el("bigQueryStatus");
+      await runBigQueryConnectionTest(target);
+    }
+
+    async function testLoginBigQueryConnection() {
+      const target = el("loginBigQueryStatus");
+      await runBigQueryConnectionTest(target);
+    }
+
+    async function runBigQueryConnectionTest(target) {
+      target.className = "status";
+      target.textContent = "Testing BigQuery connection...";
+      try {
+        const response = await fetch("/api/storage/test");
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "BigQuery connection failed.");
+        target.className = "status ok";
+        target.textContent = `Connected to ${result.dataset} using ${result.credentials}.`;
+      } catch (error) {
+        target.className = "status error";
+        target.textContent = error.message;
       }
     }
 
@@ -2382,6 +2423,8 @@ result = json.loads(await response.string())</textarea>
     }
 
     el("parseBtn").addEventListener("click", parseSource);
+    el("testBigQueryBtn").addEventListener("click", testBigQueryConnection);
+    el("loginTestBigQueryBtn").addEventListener("click", testLoginBigQueryConnection);
     el("runPythonConnectorBtn").addEventListener("click", parseSource);
     el("expandPythonConnectorBtn").addEventListener("click", openConnectorEditor);
     el("minimizePythonConnectorBtn").addEventListener("click", minimizeConnectorEditor);
