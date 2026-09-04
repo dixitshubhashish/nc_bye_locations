@@ -29,7 +29,8 @@ def preview_payload(rows: list[dict[str, Any]], record_path: str | None = None, 
         "record_path": record_path or "",
         "record_count": len(rows),
         "fields": collect_fields(rows),
-        "rows": rows[:limit],
+        "rows": rows,
+        "preview_rows": rows[:limit],
     }
 
 
