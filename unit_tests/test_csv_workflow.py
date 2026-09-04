@@ -136,6 +136,42 @@ class CsvWorkflowTests(unittest.TestCase):
         self.assertNotIn("level1.too_deep.level3.level4", result["record_paths"])
         self.assertIn("details.location.coordinates.latitude", result["fields"])
 
+    def test_geojson_feature_collection_promotes_properties_and_point_coordinates(self) -> None:
+        content = b"""{
+          "type": "FeatureCollection",
+          "features": [{
+            "type": "Feature",
+            "id": "store-1",
+            "properties": {
+              "name": "Geo Pizza",
+              "address": "1 Map Lane",
+              "city": "Raleigh",
+              "state": "NC",
+              "postal_code": "27601"
+            },
+            "geometry": { "type": "Point", "coordinates": [-78.6382, 35.7796] }
+          }]
+        }"""
+
+        result = json_source.preview(content)
+
+        self.assertEqual(result["record_path"], "features")
+        self.assertIn("features", result["record_paths"])
+        self.assertTrue({"name", "address", "city", "state", "postal_code", "latitude", "longitude", "geometry_type"} <= set(result["fields"]))
+        self.assertEqual(result["rows"][0]["name"], "Geo Pizza")
+        self.assertEqual(result["rows"][0]["longitude"], -78.6382)
+        self.assertEqual(result["rows"][0]["latitude"], 35.7796)
+
+    def test_geojson_features_record_path_is_mapper_friendly(self) -> None:
+        content = b'{"features":[{"type":"Feature","properties":{"store_id":"10","name":"Point Store"},"geometry":{"type":"Point","coordinates":[-80.1,35.2]}}]}'
+
+        result = json_source.preview(content, "features")
+
+        self.assertEqual(result["record_path"], "features")
+        self.assertEqual(result["rows"][0]["store_id"], "10")
+        self.assertEqual(result["rows"][0]["latitude"], 35.2)
+        self.assertEqual(result["rows"][0]["longitude"], -80.1)
+
 
 if __name__ == "__main__":
     unittest.main()
