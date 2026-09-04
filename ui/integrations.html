@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Competitive Whitespace Tool</title>
+  <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.0/min/vs/loader.js"></script>
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.27.0/full/pyodide.js"></script>
   <style>
     :root {
       --bg: #f6f7f4;
@@ -113,6 +115,23 @@
     .advanced-template textarea {
       font-size: 18px;
     }
+
+    .connector-editor {
+      height: 280px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+
+    .connector-output { min-height: 150px; margin-top: 8px; }
+
+    main.connector-active { grid-template-columns: minmax(420px, 520px) minmax(0, 1fr); }
+    .connector-editor-dialog { width: min(1200px, calc(100vw - 48px)); height: min(800px, calc(100vh - 48px)); border: 0; border-radius: 8px; padding: 0; }
+    .connector-editor-dialog::backdrop { background: rgba(31, 41, 51, 0.48); }
+    .connector-editor-dialog-content { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100%; padding: 20px; background: var(--panel); }
+    .connector-editor-dialog-header { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding-bottom: 16px; }
+    .connector-editor-dialog-title { margin: 0; font-size: 18px; }
+    .connector-editor-dialog .connector-editor { height: 100%; }
 
     .progress-wrap {
       position: sticky;
@@ -511,7 +530,7 @@
     }
 
     @media (max-width: 900px) {
-      main { grid-template-columns: 1fr; }
+      main, main.connector-active { grid-template-columns: 1fr; }
       aside { border-right: 0; border-bottom: 1px solid var(--line); }
       .mapping-grid { grid-template-columns: 1fr; }
       .mapping-head { display: none; }
@@ -570,6 +589,7 @@
           <option value="json">JSON</option>
           <option value="xml">XML</option>
           <option value="api_get_json">GET API JSON</option>
+          <option value="python_api_connector">Python API Connector</option>
         </select>
 
         <div class="field-group file-field">
@@ -653,6 +673,23 @@
         <button class="secondary" id="addHeaderBtn" type="button">Add Header</button>
         </div>
 
+        <div class="field-group python-connector-field hidden">
+          <label for="pythonConnectorCode">Python connector</label>
+          <textarea id="pythonConnectorCode" class="hidden" spellcheck="false">from pyodide.http import pyfetch
+import json
+
+response = await pyfetch("https://cdn.jsdelivr.net/npm/vega-datasets@2/data/cars.json")
+result = json.loads(await response.string())</textarea>
+          <div id="pythonConnectorEditor" class="connector-editor" aria-label="Python connector editor"></div>
+          <div class="mapping-note">Write Python that assigns a JSON-compatible list or object to <code>result</code>. The code runs in this browser, then its JSON output is sent to the standard mapping workflow.</div>
+          <div class="button-row">
+            <button class="secondary" id="runPythonConnectorBtn" type="button">Run and Parse JSON</button>
+            <button class="secondary" id="expandPythonConnectorBtn" type="button">Open Full Editor</button>
+          </div>
+          <textarea id="pythonConnectorOutput" class="connector-output" readonly spellcheck="false" placeholder="Generated JSON preview appears here."></textarea>
+          <div id="pythonConnectorFeedback" class="action-feedback" role="status" aria-live="polite"></div>
+        </div>
+
         <div class="button-row">
           <button id="parseBtn">Parse Source</button>
           <button class="secondary" id="resetBtn">Reset</button>
@@ -715,6 +752,15 @@
     </section>
     </main>
     </div>
+    <dialog id="pythonConnectorDialog" class="connector-editor-dialog">
+      <div class="connector-editor-dialog-content">
+        <div class="connector-editor-dialog-header">
+          <h2 class="connector-editor-dialog-title">Python API Connector</h2>
+          <button class="secondary" id="minimizePythonConnectorBtn" type="button">Minimize Editor</button>
+        </div>
+        <div id="pythonConnectorDialogHost"></div>
+      </div>
+    </dialog>
     <section id="reportingView" class="reporting-view hidden">
       <iframe class="reporting-frame" title="Reporting dashboard" src="https://lookerstudio.google.com/embed/reporting/1f6e8f3c-2c43-4a55-9f4a-8a4b3f9e2d10/page/p_abc123"></iframe>
     </section>
@@ -802,6 +848,8 @@
     let customAliases = {};
     let lastSaveEventId = "";
     let activeTemplateId = "";
+    let connectorEditor = null;
+    let pyodideRuntimePromise = null;
     const draftStorageKey = "competitive_whitespace_mapping_draft";
     const loginSessionStorageKey = "competitive_whitespace_login_session";
 
@@ -849,6 +897,97 @@
       el("customFieldFeedback").textContent = message;
     }
 
+    function setConnectorFeedback(message, type = "") {
+      el("pythonConnectorFeedback").className = `action-feedback ${type}`;
+      el("pythonConnectorFeedback").textContent = message;
+    }
+
+    function getConnectorCode() {
+      return connectorEditor ? connectorEditor.getValue() : el("pythonConnectorCode").value;
+    }
+
+    function setConnectorCode(code) {
+      if (connectorEditor) connectorEditor.setValue(code);
+      else el("pythonConnectorCode").value = code;
+    }
+
+    function initializeConnectorEditor() {
+      if (!window.require) {
+        setConnectorFeedback("Code editor could not be loaded. Check your network connection.", "error");
+        return;
+      }
+      window.require.config({ paths: { vs: "https://cdn.jsdelivr.net/npm/monaco-editor@0.52.0/min/vs" } });
+      window.require(["vs/editor/editor.main"], () => {
+        connectorEditor = monaco.editor.create(el("pythonConnectorEditor"), {
+          value: el("pythonConnectorCode").value,
+          language: "python",
+          theme: "vs",
+          automaticLayout: true,
+          minimap: { enabled: false },
+          fontSize: 13,
+          tabSize: 4,
+          insertSpaces: true,
+          scrollBeyondLastLine: false
+        });
+        connectorEditor.onDidChangeModelContent(() => saveDraft());
+        restoreDraft();
+      });
+    }
+
+    function openConnectorEditor() {
+      const dialog = el("pythonConnectorDialog");
+      if (!connectorEditor || typeof dialog.showModal !== "function") return;
+      el("pythonConnectorDialogHost").appendChild(el("pythonConnectorEditor"));
+      dialog.showModal();
+      connectorEditor.layout();
+      connectorEditor.focus();
+    }
+
+    function minimizeConnectorEditor() {
+      const dialog = el("pythonConnectorDialog");
+      if (!connectorEditor) return;
+      document.querySelector(".python-connector-field").insertBefore(el("pythonConnectorEditor"), document.querySelector(".python-connector-field .mapping-note"));
+      dialog.close();
+      connectorEditor.layout();
+    }
+
+    function textToBase64(value) {
+      const bytes = new TextEncoder().encode(value);
+      let binary = "";
+      bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+      return btoa(binary);
+    }
+
+    async function loadConnectorPackages(pyodide, code) {
+      if (/^\s*(?:from\s+requests\s+import|import\s+requests\b)/m.test(code)) {
+        setConnectorFeedback("Loading requests for the Python connector...", "");
+        await pyodide.loadPackage("requests");
+      }
+    }
+
+    async function runPythonConnector() {
+      const code = getConnectorCode().trim();
+      if (!code) throw new Error("Enter Python code before running the connector.");
+      setConnectorFeedback("Loading browser Python runtime...", "");
+      pyodideRuntimePromise ||= window.loadPyodide ? window.loadPyodide() : Promise.reject(new Error("Browser Python runtime could not be loaded."));
+      const pyodide = await pyodideRuntimePromise;
+      await loadConnectorPackages(pyodide, code);
+      setConnectorFeedback("Running Python connector...", "");
+      const output = await pyodide.runPythonAsync(`${code}\n\nimport json\njson.dumps(result)`);
+      let value;
+      try {
+        value = JSON.parse(output);
+      } catch (error) {
+        throw new Error("Python result must be JSON-compatible.");
+      }
+      if (!Array.isArray(value) && (!value || typeof value !== "object")) {
+        throw new Error("Python result must be a JSON object or list of objects.");
+      }
+      el("pythonConnectorOutput").value = JSON.stringify(value, null, 2).slice(0, 50000);
+      setConnectorFeedback("JSON output is ready for mapping.", "ok");
+      return JSON.stringify(value);
+    }
+
     function setProgress(percent, message) {
       const boundedPercent = Math.max(0, Math.min(100, percent));
       el("saveProgress").classList.remove("hidden");
@@ -874,6 +1013,7 @@
         sheetName: el("sheetName").value,
         apiUrl: el("apiUrl").value,
         authType: el("authType").value,
+        pythonConnectorCode: getConnectorCode(),
         sourceRows,
         sourceFields,
         resolvedRecordPath,
@@ -907,6 +1047,7 @@
         el("sheetName").value = draft.sheetName || "";
         el("apiUrl").value = draft.apiUrl || "";
         el("authType").value = draft.authType || "none";
+        setConnectorCode(draft.pythonConnectorCode || getConnectorCode());
         updateAuthVisibility();
         updateSourceVisibility();
         selectedBrand = draft.selectedBrand || null;
@@ -1113,15 +1254,18 @@
     function updateSourceVisibility() {
       const sourceType = el("sourceType").value;
       const isApi = sourceType === "api_get_json";
+      const isPythonConnector = sourceType === "python_api_connector";
       const isExcel = sourceType === "excel";
-      const hasRecordPath = ["json", "xml", "api_get_json"].includes(sourceType);
+      const hasRecordPath = ["json", "xml", "api_get_json", "python_api_connector"].includes(sourceType);
 
       document.querySelectorAll(".api-field").forEach((field) => field.classList.toggle("hidden", !isApi));
+      document.querySelectorAll(".python-connector-field").forEach((field) => field.classList.toggle("hidden", !isPythonConnector));
       document.querySelectorAll(".excel-field").forEach((field) => field.classList.toggle("hidden", !isExcel));
-      document.querySelectorAll(".file-field").forEach((field) => field.classList.toggle("hidden", isApi));
+      document.querySelectorAll(".file-field").forEach((field) => field.classList.toggle("hidden", isApi || isPythonConnector));
       document.querySelectorAll(".record-field").forEach((field) => field.classList.toggle("hidden", !hasRecordPath));
+      document.querySelector("main").classList.toggle("connector-active", isPythonConnector);
 
-      el("fileInput").disabled = isApi;
+      el("fileInput").disabled = isApi || isPythonConnector;
       el("apiUrl").disabled = !isApi;
       el("sheetName").disabled = !isExcel || !el("sheetName").options.length;
       updateAuthVisibility();
@@ -1205,7 +1349,8 @@
       `;
       const visibleTargets = getVisibleTargets();
       const usedFields = new Set();
-      visibleTargets.forEach((target) => {
+      const suggestionTargets = [...visibleTargets.filter((target) => target.required), ...visibleTargets.filter((target) => !target.required)];
+      suggestionTargets.forEach((target) => {
         if (!Object.prototype.hasOwnProperty.call(mappingSelections, target.key)) {
           const selected = suggestField(target, usedFields);
           mappingSelections[target.key] = selected;
@@ -1307,7 +1452,7 @@
         aliases: customAliases
       };
       const recordPath = el("recordPath").value.trim() || resolvedRecordPath;
-      if (recordPath && ["json", "xml", "excel", "api_get_json"].includes(el("sourceType").value)) {
+      if (recordPath && ["json", "xml", "excel", "api_get_json", "python_api_connector"].includes(el("sourceType").value)) {
         mapper.record_path = recordPath;
       }
       if (el("sourceType").value === "api_get_json") {
@@ -1318,6 +1463,9 @@
           headers: collectPairs("customHeaders"),
           auth: collectAuth()
         };
+      }
+      if (el("sourceType").value === "python_api_connector") {
+        mapper.python_connector = { code: getConnectorCode() };
       }
       return mapper;
     }
@@ -1472,6 +1620,9 @@
           payload.query_params = collectPairs("queryParams");
           payload.headers = Object.fromEntries(collectPairs("customHeaders").map((pair) => [pair.key, pair.value]));
           payload.auth = collectAuth();
+        } else if (sourceType === "python_api_connector") {
+          payload.source_type = "json";
+          payload.content_base64 = textToBase64(await runPythonConnector());
         } else {
           if (!file) throw new Error("Choose a source file.");
           sourceType = inferSourceType(file.name);
@@ -1648,6 +1799,9 @@
     }
 
     el("parseBtn").addEventListener("click", parseSource);
+    el("runPythonConnectorBtn").addEventListener("click", parseSource);
+    el("expandPythonConnectorBtn").addEventListener("click", openConnectorEditor);
+    el("minimizePythonConnectorBtn").addEventListener("click", minimizeConnectorEditor);
     el("loginBtn").addEventListener("click", login);
     el("loginPassword").addEventListener("keydown", (event) => {
       if (event.key === "Enter") login();
@@ -1732,6 +1886,7 @@
     });
     addPairRow("queryParams", "limit", "100");
     addPairRow("customHeaders", "Accept", "application/json");
+    initializeConnectorEditor();
     updateSourceVisibility();
     loadFieldRegistry();
     loadBrands();

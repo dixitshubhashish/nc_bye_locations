@@ -12,7 +12,7 @@ from uuid import uuid4
 import re
 from logging.handlers import TimedRotatingFileHandler
 
-from whitespace_tool.source_adapters import api_get_source, csv_source, excel_source, json_source, xml_source
+from whitespace_tool.source_adapters import api_get_source, csv_source, excel_source, json_source, python_connector_source, xml_source
 from whitespace_tool.data_validation import validate_normalized_location, validate_source_row
 from whitespace_tool.normalization import normalize_location
 from whitespace_tool.models import utc_now_iso
@@ -23,7 +23,7 @@ from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows, 
 from whitespace_tool.storage_config import load_storage_config
 
 
-SUPPORTED_SOURCE_TYPES = {"csv", "excel", "json", "xml", "api_get_json"}
+SUPPORTED_SOURCE_TYPES = {"csv", "excel", "json", "xml", "api_get_json", "python_api_connector"}
 MINIMUM_US_ZIP_REFERENCE_ROWS = 30000
 
 
@@ -73,6 +73,11 @@ def preview_source(payload: dict[str, Any]) -> dict[str, Any]:
             payload.get("query_params"),
             payload.get("auth"),
         )
+    if source_type == "python_api_connector":
+        code = str(payload.get("python_code", "")).strip()
+        if not code:
+            raise ValueError("Enter Python connector code before parsing")
+        return python_connector_source.preview(code, record_path)
 
     file_name = payload.get("file_name", "")
     content = base64.b64decode(payload["content_base64"])
