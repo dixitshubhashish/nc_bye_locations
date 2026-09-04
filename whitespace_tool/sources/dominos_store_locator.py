@@ -4,9 +4,11 @@ import argparse
 import json
 import pickle
 from pathlib import Path
+from time import sleep
 from typing import Any
 from urllib.parse import urlencode
 import urllib.request
+from urllib.error import HTTPError, URLError
 
 from whitespace_tool.models import utc_now_iso
 
@@ -43,12 +45,25 @@ def fetch_zip(zip_code: str, order_type: str = "Carryout", cache_dir: str | Path
     request = urllib.request.Request(
         f"{LOCATOR_URL}?{query}",
         headers={
-            "accept": "application/json",
-            "user-agent": "Mozilla/5.0 competitive-whitespace-prototype",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Referer": "https://order.dominos.com/",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "X-DPZ-Market": "UNITED_STATES",
         },
     )
-    with urllib.request.urlopen(request, timeout=60) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            break
+        except (HTTPError, URLError, TimeoutError) as exc:
+            last_error = exc
+            if attempt == 2:
+                raise
+            sleep(1.5 * (attempt + 1))
+    else:
+        raise RuntimeError(f"Domino's locator request failed: {last_error}")
     _write_cached(cache_path, zip_code, order_type, payload)
     return payload
 

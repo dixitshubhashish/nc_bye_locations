@@ -200,6 +200,10 @@
       overflow: hidden;
     }
 
+    .python-function-options { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
+    .python-function-options label { display: inline-flex; align-items: center; gap: 6px; width: auto; margin: 0; font-weight: 700; }
+    .python-function-options input { width: auto; }
+
     .connector-output { min-height: 150px; margin-top: 8px; }
 
     main.connector-active { grid-template-columns: minmax(420px, 520px) minmax(0, 1fr); }
@@ -983,6 +987,10 @@
 
         <div class="field-group python-connector-field hidden">
           <label for="pythonConnectorCode">Python editor</label>
+          <div class="python-function-options" role="radiogroup" aria-label="Python function">
+            <label><input type="radio" name="pythonFunction" value="new" checked> New</label>
+            <label><input type="radio" name="pythonFunction" value="dominos"> Domino's Pizza</label>
+          </div>
           <textarea id="pythonConnectorCode" class="hidden" spellcheck="false">from pyodide.http import pyfetch
 import json
 
@@ -1383,6 +1391,49 @@ result = json.loads(await response.string())</textarea>
       else el("pythonConnectorCode").value = code;
     }
 
+    function dominosPythonCode() {
+      const limit = window.APP_CONSTANTS.dominosZipFetchLimit || 1;
+      const orderType = encodeURIComponent(window.APP_CONSTANTS.dominosOrderType || "Delivery");
+      return `from pyodide.http import pyfetch
+import json
+
+response = await pyfetch("/api/dominos-source?limit=${limit}&type=${orderType}")
+if response.status != 200:
+    raise RuntimeError(await response.string())
+
+result = json.loads(await response.string())`;
+    }
+
+    function applyDominosPythonFunction() {
+      el("sourceType").value = "python_editor";
+      el("sourceName").value = "dominos_store_locator";
+      el("recordPath").value = "Stores";
+      el("pythonPackages").value = "";
+      setConnectorCode(dominosPythonCode());
+      mappingSelections = {
+        location_id: "StoreID",
+        name: "StoreName",
+        address: "AddressDescription",
+        city: "City",
+        state: "Region",
+        postal_code: "PostalCode",
+        latitude: "Latitude",
+        longitude: "Longitude",
+        observed_at: "ObservedAt"
+      };
+      optionalMappingKeys = new Set(["location_id", "latitude", "longitude", "observed_at"]);
+      hiddenMappingKeys = new Set();
+      autoMappedKeys = new Set(Object.keys(mappingSelections));
+      renderMappings();
+      updateOutput();
+      updateSourceVisibility();
+      setStatus("Domino's Python function is ready. Click Parse Source to fetch ZIPs and map the Stores array.", "ok");
+    }
+
+    function updatePythonFunctionSelection(value) {
+      if (value === "dominos") applyDominosPythonFunction();
+    }
+
     function initializeConnectorEditor() {
       if (!window.require) {
         setConnectorFeedback("Code editor could not be loaded. Check your network connection.", "error");
@@ -1493,6 +1544,7 @@ result = json.loads(await response.string())</textarea>
         sheetName: el("sheetName").value,
         apiUrl: el("apiUrl").value,
         authType: el("authType").value,
+        pythonFunction: document.querySelector("input[name='pythonFunction']:checked")?.value || "new",
         pythonConnectorCode: getConnectorCode(),
         pythonPackages: el("pythonPackages").value,
         sourceRows,
@@ -1541,6 +1593,9 @@ result = json.loads(await response.string())</textarea>
         el("sheetName").value = draft.sheetName || "";
         el("apiUrl").value = draft.apiUrl || "";
         el("authType").value = draft.authType || "none";
+        const pythonFunction = draft.pythonFunction || "new";
+        const pythonFunctionOption = document.querySelector(`input[name='pythonFunction'][value="${CSS.escape(pythonFunction)}"]`);
+        if (pythonFunctionOption) pythonFunctionOption.checked = true;
         setConnectorCode(draft.pythonConnectorCode || getConnectorCode());
         el("pythonPackages").value = draft.pythonPackages || "";
         updateAuthVisibility();
@@ -2570,6 +2625,9 @@ result = json.loads(await response.string())</textarea>
       updateSourceVisibility();
     });
     el("sourceInputMode").addEventListener("change", updateSourceVisibility);
+    document.querySelectorAll("input[name='pythonFunction']").forEach((input) => {
+      input.addEventListener("change", () => updatePythonFunctionSelection(input.value));
+    });
     el("jsonRecordPath").addEventListener("change", () => {
       el("recordPath").value = el("jsonRecordPath").value;
       parseSource();
