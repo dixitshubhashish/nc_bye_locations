@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: birdeye-whitespace-tool
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m whitespace_tool workflow-ui --host 0.0.0.0
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: WORKFLOW_CONFIG
+        value: config/demo.json
+      - key: WORKFLOW_LOGIN_USER
+        sync: false
+      - key: WORKFLOW_LOGIN_PASSWORD
+        sync: false
+      - key: BIGQUERY_PROJECT_ID
+        sync: false
+      - key: BIGQUERY_BRONZE_DATASET_ID
+        value: birdeye_bronze_listings
+      - key: BIGQUERY_SILVER_DATASET_ID
+        value: birdeye_silver_listings
+      - key: BIGQUERY_GOLD_DATASET_ID
+        value: birdeye_gold_listings
+      - key: REPORTING_LISTINGS_TABLE
+        sync: false
+      - key: GOOGLE_APPLICATION_CREDENTIALS_JSON
+        sync: false

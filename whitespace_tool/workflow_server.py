@@ -500,6 +500,228 @@ def list_source_types() -> dict[str, Any]:
     return {"source_types": [dict(row) for row in rows]}
 
 
+def _csv_param(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    from google.cloud import bigquery
+
+    params = params or {}
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    source_table = os.environ.get("REPORTING_LISTINGS_TABLE") or f"{project_id}.{dataset_id}.listings"
+    if source_table.count(".") == 1:
+        source_table = f"{project_id}.{source_table}"
+    table_ref = f"`{source_table}`"
+    zip_ref = f"`{project_id}.{dataset_id}.us_zipcodes`"
+    main_brands = _csv_param(params.get("main_brands", [""])[0])
+    competitor_brands = _csv_param(params.get("competitor_brands", [""])[0])
+    selected_brands = sorted(set(main_brands + competitor_brands))
+    state_filter = str(params.get("state", [""])[0]).strip().upper()
+    county_filter = str(params.get("county", [""])[0]).strip()
+    city_filter = str(params.get("city", [""])[0]).strip()
+    zip_filter = str(params.get("zip", [""])[0]).strip()
+    query_params: list[Any] = [
+        bigquery.ArrayQueryParameter("selected_brands", "STRING", selected_brands),
+        bigquery.ArrayQueryParameter("main_brands", "STRING", main_brands),
+        bigquery.ArrayQueryParameter("competitor_brands", "STRING", competitor_brands),
+        bigquery.ScalarQueryParameter("state", "STRING", state_filter),
+        bigquery.ScalarQueryParameter("county", "STRING", county_filter),
+        bigquery.ScalarQueryParameter("city", "STRING", city_filter),
+        bigquery.ScalarQueryParameter("zip", "STRING", zip_filter),
+    ]
+    job_config = bigquery.QueryJobConfig(query_parameters=query_params)
+    base_cte = f"""
+    WITH base AS (
+      SELECT
+        l.*,
+        COALESCE(b.name, l.business_id) AS brand,
+        z.county,
+        z.population
+      FROM {table_ref} l
+      LEFT JOIN `{project_id}.{dataset_id}.businesses` b
+        ON l.business_id = b.business_id
+      LEFT JOIN {zip_ref} z
+        ON l.zip_code = z.zip_code
+      WHERE l.is_deleted IS NOT TRUE
+        AND (ARRAY_LENGTH(@selected_brands) = 0 OR COALESCE(b.name, l.business_id) IN UNNEST(@selected_brands))
+        AND (@state = '' OR UPPER(COALESCE(l.state_code, '')) = @state)
+        AND (@county = '' OR LOWER(COALESCE(z.county, '')) = LOWER(@county))
+        AND (@city = '' OR LOWER(COALESCE(l.city_name, '')) = LOWER(@city))
+        AND (@zip = '' OR COALESCE(l.zip_code, '') = @zip)
+    )
+    """
+
+    totals_query = base_cte + """
+    SELECT
+      COUNT(*) AS total_locations,
+      COUNT(DISTINCT brand) AS total_brands,
+      COUNT(DISTINCT state_code) AS total_states,
+      COUNT(DISTINCT city_name) AS total_cities,
+      COUNT(DISTINCT zip_code) AS total_zips,
+      MAX(last_observed_at) AS last_updated
+    FROM base
+    """
+    top_states_query = base_cte + """
+    SELECT
+      COALESCE(state_code, '') AS state,
+      COUNT(*) AS locations,
+      COUNT(DISTINCT city_name) AS cities,
+      COUNT(DISTINCT brand) AS brands
+    FROM base
+    GROUP BY state
+    ORDER BY locations DESC
+    LIMIT 10
+    """
+    top_cities_query = base_cte + """
+    SELECT
+      COALESCE(city_name, '') AS city,
+      COALESCE(state_code, '') AS state,
+      COALESCE(county, '') AS county,
+      COUNT(*) AS locations
+    FROM base
+    GROUP BY city, state, county
+    ORDER BY locations DESC
+    LIMIT 10
+    """
+    brand_query = base_cte + """
+    SELECT
+      brand,
+      COUNT(*) AS locations,
+      COUNT(DISTINCT state_code) AS states,
+      COUNT(DISTINCT county) AS counties,
+      COUNT(DISTINCT city_name) AS cities,
+      COUNT(DISTINCT zip_code) AS zips
+    FROM base
+    GROUP BY brand
+    ORDER BY locations DESC
+    LIMIT 10
+    """
+    filter_options_query = f"""
+    WITH base AS (
+      SELECT COALESCE(b.name, l.business_id) AS brand, l.state_code, l.city_name, l.zip_code, z.county
+      FROM {table_ref} l
+      LEFT JOIN `{project_id}.{dataset_id}.businesses` b ON l.business_id = b.business_id
+      LEFT JOIN {zip_ref} z ON l.zip_code = z.zip_code
+      WHERE l.is_deleted IS NOT TRUE
+    )
+    SELECT
+      ARRAY_AGG(DISTINCT brand IGNORE NULLS ORDER BY brand) AS brands,
+      ARRAY_AGG(DISTINCT state_code IGNORE NULLS ORDER BY state_code) AS states,
+      ARRAY_AGG(DISTINCT county IGNORE NULLS ORDER BY county LIMIT 500) AS counties,
+      ARRAY_AGG(DISTINCT city_name IGNORE NULLS ORDER BY city_name LIMIT 500) AS cities,
+      ARRAY_AGG(DISTINCT zip_code IGNORE NULLS ORDER BY zip_code LIMIT 500) AS zips
+    FROM base
+    """
+    gap_query = base_cte + """
+    , grouped AS (
+      SELECT
+        state_code AS state,
+        county,
+        city_name AS city,
+        zip_code,
+        ARRAY_AGG(DISTINCT brand IGNORE NULLS ORDER BY brand) AS brands_present,
+        COUNTIF(brand IN UNNEST(@main_brands)) AS main_locations,
+        COUNTIF(brand IN UNNEST(@competitor_brands)) AS competitor_locations
+      FROM base
+      GROUP BY state, county, city, zip_code
+    )
+    SELECT
+      state,
+      county,
+      city,
+      zip_code,
+      competitor_locations,
+      ARRAY_TO_STRING(brands_present, ', ') AS brands_present
+    FROM grouped
+    WHERE ARRAY_LENGTH(@main_brands) > 0
+      AND ARRAY_LENGTH(@competitor_brands) > 0
+      AND main_locations = 0
+      AND competitor_locations > 0
+    ORDER BY competitor_locations DESC, state, county, city, zip_code
+    LIMIT 100
+    """
+    sample_query = base_cte + """
+    SELECT
+      name,
+      address,
+      city_name AS city,
+      state_code AS state,
+      county,
+      zip_code,
+      phone_number,
+      latitude,
+      longitude,
+      country,
+      last_observed_at
+    FROM base
+    ORDER BY last_observed_at DESC, name
+    LIMIT 10
+    """
+
+    try:
+        totals = dict(next(iter(client.query(totals_query, job_config=job_config).result())))
+        top_states = [dict(row) for row in client.query(top_states_query, job_config=job_config).result()]
+        top_cities = [dict(row) for row in client.query(top_cities_query, job_config=job_config).result()]
+        brands = [dict(row) for row in client.query(brand_query, job_config=job_config).result()]
+        gaps = [dict(row) for row in client.query(gap_query, job_config=job_config).result()]
+        filter_options = dict(next(iter(client.query(filter_options_query).result())))
+        sample_records = [dict(row) for row in client.query(sample_query, job_config=job_config).result()]
+    except Exception as exc:
+        if getattr(exc, "code", None) == 404:
+            return {
+                "source_table": source_table,
+                "totals": {},
+                "top_states": [],
+                "top_cities": [],
+                "brands": [],
+                "gaps": [],
+                "filter_options": {"brands": [], "states": [], "counties": [], "cities": [], "zips": []},
+                "states_without_locations": [],
+                "sample_records": [],
+                "message": "No reporting data found yet. Save mapped listings first.",
+            }
+        raise
+
+    state_codes = {
+        "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL",
+        "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT",
+        "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI",
+        "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY", "DC",
+    }
+    present_states = {row["state"] for row in top_states if row.get("state")}
+    all_present_query = base_cte + "SELECT DISTINCT state_code AS state FROM base"
+    present_states.update(row["state"] for row in client.query(all_present_query, job_config=job_config).result() if row.get("state"))
+    states_without_locations = sorted(state_codes - present_states)
+
+    for row in [totals, *top_states, *top_cities, *brands, *gaps, *sample_records]:
+        for key, value in list(row.items()):
+            if hasattr(value, "isoformat"):
+                row[key] = value.isoformat()
+    filter_options = {key: list(value or []) for key, value in filter_options.items()}
+
+    return {
+        "source_table": source_table,
+        "filters": {
+            "main_brands": main_brands,
+            "competitor_brands": competitor_brands,
+            "state": state_filter,
+            "county": county_filter,
+            "city": city_filter,
+            "zip": zip_filter,
+        },
+        "filter_options": filter_options,
+        "totals": totals,
+        "top_states": top_states,
+        "top_cities": top_cities,
+        "brands": brands,
+        "gaps": gaps,
+        "states_without_locations": states_without_locations,
+        "sample_records": sample_records,
+    }
+
+
 def save_template_version(data: dict[str, Any]) -> dict[str, Any]:
     from google.cloud import bigquery
 
@@ -700,6 +922,13 @@ def make_handler(ui_dir: Path):
             if self.path == "/api/source-types":
                 try:
                     _json_response(self, 200, list_source_types())
+                except Exception as exc:
+                    _json_response(self, 400, {"error": str(exc)})
+                return
+            if self.path == "/api/reporting":
+                from urllib.parse import parse_qs, urlsplit
+                try:
+                    _json_response(self, 200, reporting_summary(parse_qs(urlsplit(self.path).query)))
                 except Exception as exc:
                     _json_response(self, 400, {"error": str(exc)})
                 return

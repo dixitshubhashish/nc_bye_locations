@@ -75,11 +75,52 @@
     header.reporting-active #clearDataBtn { visibility: hidden; }
 
     .reporting-view {
-      height: calc(100vh - 71px);
-      padding: 0;
+      padding: 24px;
     }
 
-    .reporting-frame { width: 100%; height: 100%; border: 0; display: block; }
+    .report-shell {
+      max-width: 1180px;
+      margin: 0 auto;
+    }
+
+    .report-hero {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      align-items: flex-start;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 18px;
+      margin-bottom: 18px;
+    }
+
+    .report-hero h1 {
+      margin: 0 0 6px;
+      color: var(--ink);
+      font-size: 30px;
+      line-height: 1.15;
+      letter-spacing: 0;
+    }
+
+    .report-hero p { margin: 0; color: var(--muted); max-width: 780px; }
+    .report-source { color: var(--muted); font-size: 12px; margin-top: 8px; overflow-wrap: anywhere; }
+    .report-filters { display: grid; grid-template-columns: 1.2fr 1.2fr 1fr; gap: 14px; margin: 18px 0; align-items: start; }
+    .report-filter-group { border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 12px; }
+    .report-filter-group h2 { margin: 0 0 8px; font-size: 14px; color: var(--ink); }
+    .report-checks { display: grid; gap: 6px; max-height: 150px; overflow: auto; }
+    .report-checks label { display: flex; gap: 7px; align-items: center; color: var(--ink); font-weight: 650; }
+    .report-checks input { width: auto; }
+    .report-geo-filters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .report-geo-filters input { width: 100%; }
+    .report-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 16px 0 22px; }
+    .report-metric { border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 14px; min-height: 88px; }
+    .report-metric strong { display: block; font-size: 28px; line-height: 1.1; color: var(--navy, var(--ink)); }
+    .report-metric span { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; }
+    .report-section { margin-top: 24px; }
+    .report-section h2 { margin: 0 0 10px; color: var(--ink); font-size: 20px; }
+    .report-columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
+    .report-empty-states { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    .report-empty-states span { border: 1px solid var(--line); border-radius: 999px; padding: 5px 9px; background: #ffffff; color: var(--muted); font-weight: 700; }
+    .report-status { border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 16px; color: var(--muted); }
 
     .review-view { padding: 24px; }
     .review-toolbar { display: flex; gap: 8px; max-width: 620px; margin-bottom: 16px; }
@@ -1024,7 +1065,70 @@ result = json.loads(await response.string())</textarea>
       </div>
     </dialog>
     <section id="reportingView" class="reporting-view hidden">
-      <iframe class="reporting-frame" title="Reporting dashboard" data-reporting-src></iframe>
+      <div class="report-shell">
+        <div class="report-hero">
+          <div>
+            <h1>Location Intelligence Report</h1>
+            <p>Current location coverage from the configured reporting table. This view defaults to raw bronze listings and can later point to a silver or gold BigQuery view.</p>
+            <div id="reportSource" class="report-source"></div>
+          </div>
+          <button id="refreshReportBtn" type="button">Refresh</button>
+        </div>
+        <div id="reportStatus" class="report-status">Open Reporting to load the latest summary.</div>
+        <div class="report-filters">
+          <div class="report-filter-group">
+            <h2>Main Brand</h2>
+            <div id="mainBrandChecks" class="report-checks"></div>
+          </div>
+          <div class="report-filter-group">
+            <h2>Competitor Brand</h2>
+            <div id="competitorBrandChecks" class="report-checks"></div>
+          </div>
+          <div class="report-filter-group">
+            <h2>Geography</h2>
+            <div class="report-geo-filters">
+              <input id="reportStateFilter" placeholder="State">
+              <input id="reportCountyFilter" placeholder="County">
+              <input id="reportCityFilter" placeholder="City">
+              <input id="reportZipFilter" placeholder="ZIP Code">
+            </div>
+          </div>
+        </div>
+        <div id="reportContent" class="hidden">
+          <div class="report-grid">
+            <div class="report-metric"><strong id="reportLocations">0</strong><span>Locations</span></div>
+            <div class="report-metric"><strong id="reportBrands">0</strong><span>Brands</span></div>
+            <div class="report-metric"><strong id="reportStates">0</strong><span>States</span></div>
+            <div class="report-metric"><strong id="reportCities">0</strong><span>Cities</span></div>
+          </div>
+          <div class="report-columns">
+            <section class="report-section">
+              <h2>Top States and Territories</h2>
+              <div id="reportTopStates"></div>
+            </section>
+            <section class="report-section">
+              <h2>Cities with the Most Locations</h2>
+              <div id="reportTopCities"></div>
+            </section>
+          </div>
+          <section class="report-section">
+            <h2>Brand Comparison</h2>
+            <div id="reportBrandsTable"></div>
+          </section>
+          <section class="report-section">
+            <h2>Mapped Gaps</h2>
+            <div id="reportGapsTable"></div>
+          </section>
+          <section class="report-section">
+            <h2>States without Locations</h2>
+            <div id="reportEmptyStates" class="report-empty-states"></div>
+          </section>
+          <section class="report-section">
+            <h2>Sample Records</h2>
+            <div id="reportSampleRecords"></div>
+          </section>
+        </div>
+      </div>
     </section>
     <section id="reviewView" class="review-view hidden">
       <h2>Review Records</h2>
@@ -1129,6 +1233,8 @@ result = json.loads(await response.string())</textarea>
     let connectorEditor = null;
     let pyodideRuntimePromise = null;
     let appDataLoaded = false;
+    let reportLoaded = false;
+    let reportingBrands = [];
     const draftStorageKey = "competitive_whitespace_mapping_draft";
     const loginSessionStorageKey = "competitive_whitespace_login_session";
 
@@ -1144,6 +1250,66 @@ result = json.loads(await response.string())</textarea>
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;");
+    }
+
+    function formatNumber(value) {
+      const number = Number(value || 0);
+      return Number.isFinite(number) ? number.toLocaleString() : "0";
+    }
+
+    function renderSimpleTable(targetId, columns, rows) {
+      const target = el(targetId);
+      if (!rows.length) {
+        target.innerHTML = '<div class="report-status">No records available.</div>';
+        return;
+      }
+      target.innerHTML = `<table><thead><tr>${columns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr>${columns.map((column) => `<td>${escapeHtml(column.format ? column.format(row[column.key], row) : row[column.key])}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+    }
+
+    function checkedValues(name) {
+      return [...document.querySelectorAll(`input[name="${name}"]:checked`)].map((input) => input.value);
+    }
+
+    function renderBrandChecks(containerId, name, brands, checkedBrands) {
+      const selected = new Set(checkedBrands || []);
+      el(containerId).innerHTML = brands.length
+        ? brands.map((brand) => `<label><input type="checkbox" name="${name}" value="${escapeHtml(brand)}" ${selected.has(brand) ? "checked" : ""}>${escapeHtml(brand)}</label>`).join("")
+        : '<div class="report-status">No brands available.</div>';
+      el(containerId).querySelectorAll("input").forEach((input) => input.addEventListener("change", () => {
+        reportLoaded = false;
+        loadReporting();
+      }));
+    }
+
+    function syncReportingFilters(result) {
+      const brands = result.filter_options?.brands || [];
+      if (brands.join("|") !== reportingBrands.join("|")) {
+        reportingBrands = brands;
+        const currentMain = checkedValues("mainBrand");
+        const currentCompetitors = checkedValues("competitorBrand");
+        const defaultMain = currentMain.length ? currentMain : brands.slice(0, 1);
+        const defaultCompetitors = currentCompetitors.length ? currentCompetitors : brands.slice(1);
+        renderBrandChecks("mainBrandChecks", "mainBrand", brands, defaultMain);
+        renderBrandChecks("competitorBrandChecks", "competitorBrand", brands, defaultCompetitors);
+      }
+    }
+
+    function reportingQueryString() {
+      const params = new URLSearchParams();
+      const mainBrands = checkedValues("mainBrand");
+      const competitorBrands = checkedValues("competitorBrand");
+      if (mainBrands.length) params.set("main_brands", mainBrands.join(","));
+      if (competitorBrands.length) params.set("competitor_brands", competitorBrands.join(","));
+      [
+        ["state", "reportStateFilter"],
+        ["county", "reportCountyFilter"],
+        ["city", "reportCityFilter"],
+        ["zip", "reportZipFilter"]
+      ].forEach(([key, id]) => {
+        const value = el(id).value.trim();
+        if (value) params.set(key, value);
+      });
+      return params.toString();
     }
 
     function flattenObject(value, prefix = "", output = {}) {
@@ -1349,6 +1515,82 @@ result = json.loads(await response.string())</textarea>
       document.querySelectorAll("[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === viewId));
       ["mapperView", "reportingView", "reviewView", "templateLibraryView"].forEach((id) => el(id).classList.toggle("hidden", id !== viewId));
       el("appShell").querySelector("header").classList.toggle("reporting-active", viewId === "reportingView");
+      if (viewId === "reportingView" && !reportLoaded) loadReporting();
+    }
+
+    async function loadReporting() {
+      const status = el("reportStatus");
+      status.classList.remove("hidden");
+      status.textContent = "Loading report...";
+      el("reportContent").classList.add("hidden");
+      try {
+        const hadBrandFilters = checkedValues("mainBrand").length > 0 || checkedValues("competitorBrand").length > 0;
+        const queryString = reportingQueryString();
+        const response = await fetch(`/api/reporting${queryString ? `?${queryString}` : ""}`);
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not load reporting data.");
+        el("reportSource").textContent = `Source: ${result.source_table || "not configured"}`;
+        syncReportingFilters(result);
+        if (!hadBrandFilters && reportingBrands.length) return loadReporting();
+        if (result.message) {
+          status.textContent = result.message;
+          return;
+        }
+        const totals = result.totals || {};
+        el("reportLocations").textContent = formatNumber(totals.total_locations);
+        el("reportBrands").textContent = formatNumber(totals.total_brands);
+        el("reportStates").textContent = formatNumber(totals.total_states);
+        el("reportCities").textContent = formatNumber(totals.total_cities);
+        renderSimpleTable("reportTopStates", [
+          { key: "state", label: "State / Territory" },
+          { key: "locations", label: "Number of Locations", format: formatNumber },
+          { key: "cities", label: "Cities", format: formatNumber },
+          { key: "brands", label: "Brands", format: formatNumber }
+        ], result.top_states || []);
+        renderSimpleTable("reportTopCities", [
+          { key: "city", label: "City" },
+          { key: "state", label: "State / Territory" },
+          { key: "locations", label: "Number of Locations", format: formatNumber }
+        ], result.top_cities || []);
+        renderSimpleTable("reportBrandsTable", [
+          { key: "brand", label: "Brand" },
+          { key: "locations", label: "Number of Locations", format: formatNumber },
+          { key: "states", label: "Number of States", format: formatNumber },
+          { key: "counties", label: "Number of Counties", format: formatNumber },
+          { key: "cities", label: "Number of Cities", format: formatNumber },
+          { key: "zips", label: "Number of ZIPs", format: formatNumber }
+        ], result.brands || []);
+        renderSimpleTable("reportGapsTable", [
+          { key: "state", label: "State" },
+          { key: "county", label: "County" },
+          { key: "city", label: "City" },
+          { key: "zip_code", label: "ZIP Code" },
+          { key: "competitor_locations", label: "Competitor Locations", format: formatNumber },
+          { key: "brands_present", label: "Brands Present" }
+        ], result.gaps || []);
+        const emptyStates = result.states_without_locations || [];
+        el("reportEmptyStates").innerHTML = emptyStates.length
+          ? emptyStates.map((state) => `<span>${escapeHtml(state)}</span>`).join("")
+          : '<div class="report-status">Every tracked state has at least one location.</div>';
+        renderSimpleTable("reportSampleRecords", [
+          { key: "name", label: "Name" },
+          { key: "address", label: "Street" },
+          { key: "city", label: "City" },
+          { key: "state", label: "State" },
+          { key: "county", label: "County" },
+          { key: "zip_code", label: "Zip Code" },
+          { key: "phone_number", label: "Phone" },
+          { key: "latitude", label: "Latitude" },
+          { key: "longitude", label: "Longitude" },
+          { key: "country", label: "Country" },
+          { key: "last_observed_at", label: "Last Updated" }
+        ], result.sample_records || []);
+        status.classList.add("hidden");
+        el("reportContent").classList.remove("hidden");
+        reportLoaded = true;
+      } catch (error) {
+        status.textContent = error.message;
+      }
     }
 
     async function loadRejectedRecords() {
@@ -2233,7 +2475,22 @@ result = json.loads(await response.string())</textarea>
     addPairRow("customHeaders", "Accept", "application/json");
     initializeConnectorEditor();
     document.querySelectorAll("[data-logo-src]").forEach((image) => { image.src = window.APP_CONSTANTS[image.dataset.logoSrc]; });
-    document.querySelector("[data-reporting-src]").src = window.APP_CONSTANTS.reportingEmbedUrl;
+    el("refreshReportBtn").addEventListener("click", () => {
+      reportLoaded = false;
+      loadReporting();
+    });
+    ["reportStateFilter", "reportCountyFilter", "reportCityFilter", "reportZipFilter"].forEach((id) => {
+      el(id).addEventListener("change", () => {
+        reportLoaded = false;
+        loadReporting();
+      });
+      el(id).addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          reportLoaded = false;
+          loadReporting();
+        }
+      });
+    });
     document.querySelector("[data-json-viewer-link]").href = window.APP_CONSTANTS.jsonViewerUrl;
     document.querySelector("[data-json-viewer-link]").addEventListener("click", async (event) => {
       try {
