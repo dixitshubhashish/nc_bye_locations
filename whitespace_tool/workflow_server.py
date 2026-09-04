@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import socketserver
 from time import perf_counter
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import urllib.request
 from typing import Any
 from uuid import uuid4
@@ -33,6 +33,8 @@ from whitespace_tool.sqlite_cache import cache_zipcodes, get_cached_query, set_c
 SUPPORTED_SOURCE_TYPES = {"csv", "excel", "json", "xml", "api_get_json", "python_editor"}
 MINIMUM_US_ZIP_REFERENCE_ROWS = 30000
 MAX_REMOTE_SOURCE_BYTES = 25 * 1024 * 1024
+MIN_REMOTE_SOURCE_ROW_LIMIT = 500
+REMOTE_SOURCE_ROW_LIMITS = (50000, 25000, 10000, 5000, 2500, 1000, MIN_REMOTE_SOURCE_ROW_LIMIT)
 
 
 def _build_logger() -> logging.Logger:
@@ -123,18 +125,64 @@ def source_sheets(payload: dict[str, Any]) -> dict[str, Any]:
     return {"sheets": excel_source.list_sheets(content, file_name)}
 
 
-def fetch_public_source(payload: dict[str, Any]) -> dict[str, str]:
+def _remote_source_request(url: str) -> tuple[bytes, str]:
+    request = urllib.request.Request(url, headers={"User-Agent": "CompetitiveWhitespaceTool/1.0"})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return response.read(MAX_REMOTE_SOURCE_BYTES + 1), Path(urlsplit(url).path).name or "remote_source"
+
+
+def _is_socrata_url(parsed_url: Any) -> bool:
+    host = parsed_url.netloc.lower()
+    path = parsed_url.path.lower()
+    return (
+        host.endswith("data.lacity.org")
+        or host.endswith("socrata.com")
+        or "/resource/" in path
+        or path.endswith("/query.json")
+    )
+
+
+def _with_socrata_limit(url: str, row_limit: int) -> str:
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query.setdefault("$limit", str(row_limit))
+    query.setdefault("limit", str(row_limit))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+def fetch_public_source(payload: dict[str, Any]) -> dict[str, Any]:
     url = str(payload.get("url", "")).strip()
     parsed = urlsplit(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("Source URL must be a public HTTP or HTTPS URL")
-    request = urllib.request.Request(url, headers={"User-Agent": "CompetitiveWhitespaceTool/1.0"})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        content = response.read(MAX_REMOTE_SOURCE_BYTES + 1)
-        file_name = Path(parsed.path).name or "remote_source"
+    content, file_name = _remote_source_request(url)
+    limited_url = ""
+    limited_rows = 0
+    if len(content) > MAX_REMOTE_SOURCE_BYTES and _is_socrata_url(parsed):
+        for row_limit in REMOTE_SOURCE_ROW_LIMITS:
+            candidate_url = _with_socrata_limit(url, row_limit)
+            candidate_content, candidate_file_name = _remote_source_request(candidate_url)
+            if len(candidate_content) <= MAX_REMOTE_SOURCE_BYTES:
+                content = candidate_content
+                file_name = candidate_file_name
+                limited_url = candidate_url
+                limited_rows = row_limit
+                break
     if len(content) > MAX_REMOTE_SOURCE_BYTES:
-        raise ValueError("Remote source exceeds the 25 MB limit")
-    return {"content_base64": base64.b64encode(content).decode("ascii"), "file_name": file_name}
+        raise ValueError(
+            "Remote source exceeds the 25 MB limit. "
+            f"Automatic limiting will not load fewer than {MIN_REMOTE_SOURCE_ROW_LIMIT} rows; "
+            "use a source URL with a filter before loading it."
+        )
+    response = {"content_base64": base64.b64encode(content).decode("ascii"), "file_name": file_name}
+    if limited_url:
+        response.update({
+            "limited": True,
+            "limited_url": limited_url,
+            "limited_rows": limited_rows,
+            "warning": f"Remote source exceeded 25 MB, so the mapper loaded the first {limited_rows} rows from a limited source URL.",
+        })
+    return response
 
 
 def predefined_templates() -> dict[str, Any]:
@@ -640,6 +688,7 @@ def create_brand(data: dict[str, Any]) -> dict[str, Any]:
     result = list(client.query(lookup, job_config=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("slug", "STRING", slug)])).result())
     if not result:
         raise RuntimeError("Brand was created but its database-generated ID could not be read back")
+    invalidate_cache()
     return {"brand": dict(result[0])}
 
 
@@ -713,6 +762,28 @@ def build_silver_layer() -> dict[str, Any]:
     PARTITION BY DATE(COALESCE(first_observed_at, CURRENT_TIMESTAMP()))
     CLUSTER BY state_code, zip_code, business_id
     AS
+    WITH normalized_listings AS (
+      SELECT
+        *,
+        REGEXP_EXTRACT(CAST(zip_code AS STRING), r'(\\d{{5}})') AS normalized_zip_code,
+        LOWER(TRIM(city_name)) AS normalized_city_name,
+        UPPER(TRIM(state_code)) AS normalized_state_code
+      FROM `{bronze_ref}.listings`
+      WHERE is_deleted IS NOT TRUE
+    ),
+    city_geos AS (
+      SELECT
+        LOWER(TRIM(city_name)) AS normalized_city_name,
+        UPPER(TRIM(state_code)) AS normalized_state_code,
+        AVG(latitude) AS latitude,
+        AVG(longitude) AS longitude
+      FROM `{bronze_ref}.us_zipcodes`
+      WHERE city_name IS NOT NULL
+        AND state_code IS NOT NULL
+        AND latitude IS NOT NULL
+        AND longitude IS NOT NULL
+      GROUP BY normalized_city_name, normalized_state_code
+    )
     SELECT
       l.listing_id,
       l.business_id,
@@ -725,31 +796,60 @@ def build_silver_layer() -> dict[str, Any]:
       z.county AS county,
       COALESCE(z.state_code, NULLIF(UPPER(TRIM(l.state_code)), '')) AS state_code,
       z.state_name AS state_name,
-      REGEXP_EXTRACT(CAST(l.zip_code AS STRING), r'(\\d{{5}})') AS zip_code,
+      l.normalized_zip_code AS zip_code,
       'United States' AS country,
-      COALESCE(l.latitude, z.latitude) AS latitude,
-      COALESCE(l.longitude, z.longitude) AS longitude,
+      COALESCE(l.latitude, z.latitude, cg.latitude) AS latitude,
+      COALESCE(l.longitude, z.longitude, cg.longitude) AS longitude,
+      CASE
+        WHEN l.latitude IS NOT NULL AND l.longitude IS NOT NULL THEN 'source_listing'
+        WHEN z.latitude IS NOT NULL AND z.longitude IS NOT NULL THEN 'zip_centroid'
+        WHEN cg.latitude IS NOT NULL AND cg.longitude IS NOT NULL THEN 'city_state_centroid'
+        ELSE 'unresolved'
+      END AS coordinate_source,
+      CASE
+        WHEN l.latitude IS NOT NULL AND l.longitude IS NOT NULL THEN 1.0
+        WHEN z.latitude IS NOT NULL AND z.longitude IS NOT NULL THEN 0.75
+        WHEN cg.latitude IS NOT NULL AND cg.longitude IS NOT NULL THEN 0.55
+        ELSE 0.0
+      END AS coordinate_confidence,
+      ARRAY_TO_STRING(
+        ARRAY(
+          SELECT part
+          FROM UNNEST([
+            NULLIF(TRIM(l.address), ''),
+            NULLIF(TRIM(l.city_name), ''),
+            NULLIF(TRIM(l.state_code), ''),
+            l.normalized_zip_code
+          ]) AS part
+          WHERE part IS NOT NULL
+        ),
+        ', '
+      ) AS geocode_query,
       l.phone_number,
       l.first_observed_at,
       l.last_observed_at,
       z.population,
       z.median_household_income,
       z.median_age,
+      z.income_per_capita,
       CURRENT_TIMESTAMP() AS silver_updated_at
-    FROM `{bronze_ref}.listings` l
+    FROM normalized_listings l
     LEFT JOIN `{bronze_ref}.businesses` b
       ON l.business_id = b.business_id
       AND b.is_deleted IS NOT TRUE
     LEFT JOIN `{bronze_ref}.us_zipcodes` z
-      ON REGEXP_EXTRACT(CAST(l.zip_code AS STRING), r'(\\d{{5}})') = z.zip_code
+      ON l.normalized_zip_code = z.zip_code
+    LEFT JOIN city_geos cg
+      ON COALESCE(l.normalized_city_name, LOWER(TRIM(z.city_name))) = cg.normalized_city_name
+      AND COALESCE(l.normalized_state_code, UPPER(TRIM(z.state_code))) = cg.normalized_state_code
     WHERE l.is_deleted IS NOT TRUE
       AND (
         COALESCE(l.country, 'US') IN ('', 'us', 'u.s.', 'u.s.a.', 'usa', 'united states', 'united states of america', 'United States')
       )
       AND (
-        COALESCE(l.latitude, z.latitude) IS NULL OR (
-          COALESCE(l.latitude, z.latitude) BETWEEN 13.0 AND 72.0 AND (
-            (COALESCE(l.longitude, z.longitude) BETWEEN -180.0 AND -64.0) OR (COALESCE(l.longitude, z.longitude) BETWEEN 144.0 AND 146.0)
+        COALESCE(l.latitude, z.latitude, cg.latitude) IS NULL OR (
+          COALESCE(l.latitude, z.latitude, cg.latitude) BETWEEN 13.0 AND 72.0 AND (
+            (COALESCE(l.longitude, z.longitude, cg.longitude) BETWEEN -180.0 AND -64.0) OR (COALESCE(l.longitude, z.longitude, cg.longitude) BETWEEN 144.0 AND 146.0)
           )
         )
       )
@@ -766,6 +866,10 @@ def build_silver_layer() -> dict[str, Any]:
       state_code,
       country,
       zip_code,
+      latitude,
+      longitude,
+      coordinate_source,
+      coordinate_confidence,
       median_household_income,
       population
     FROM `{enriched_table}`
@@ -861,6 +965,8 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         l.phone_number,
         COALESCE(l.latitude, z.latitude) AS latitude,
         COALESCE(l.longitude, z.longitude) AS longitude,
+        COALESCE(l.coordinate_source, CASE WHEN l.latitude IS NOT NULL AND l.longitude IS NOT NULL THEN 'source_listing' WHEN z.latitude IS NOT NULL AND z.longitude IS NOT NULL THEN 'zip_centroid' ELSE 'unresolved' END) AS coordinate_source,
+        COALESCE(l.coordinate_confidence, CASE WHEN l.latitude IS NOT NULL AND l.longitude IS NOT NULL THEN 1.0 WHEN z.latitude IS NOT NULL AND z.longitude IS NOT NULL THEN 0.75 ELSE 0.0 END) AS coordinate_confidence,
         COALESCE(l.country, 'United States') AS country,
         l.last_observed_at
       FROM {zip_ref} z
@@ -1282,8 +1388,11 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
     locations = []
     error_listings = []
     for index, row in enumerate(rows):
+        observed_at = utc_now_iso()
         row_errors = validate_source_row(row, mapper)
         location = normalize_location(row, mapper, source_name, index)
+        if location is not None:
+            observed_at = location.observed_at
         if location is None:
             row_errors.append({"field": "required_location", "reason": "missing brand or ZIP Code"})
         elif any(not str(getattr(location, field) or "").strip() for field in REQUIRED_LOCATION_VALUES):
@@ -1298,6 +1407,7 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
                 "row_number": index + 1,
                 "errors": json.dumps(row_errors, sort_keys=True),
                 "raw_record": json.dumps(row, sort_keys=True),
+                "observed_at": observed_at,
                 "is_deleted": False,
                 "deleted_on": None,
             })
@@ -1321,6 +1431,7 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
     }]
     rows_by_table["error_listings"] = error_listings
     push_to_bigquery(project_id, dataset_id, rows_by_table, credentials_json)
+    invalidate_cache()
     LOGGER.info(
         "save_succeeded mapper_id=%s dataset=%s mapped_rows=%d mapped_fields=%d",
         mapper_id,
@@ -1337,6 +1448,7 @@ def clear_saved_data() -> dict[str, Any]:
     deleted = clear_result["soft_deleted_tables"]
     truncated = clear_result["truncated_tables"]
     ZIP_REFERENCE_CACHE.pop((project_id, dataset_id), None)
+    invalidate_cache()
     return {
         "dataset": f"{project_id}.{dataset_id}",
         "deleted_tables": deleted,

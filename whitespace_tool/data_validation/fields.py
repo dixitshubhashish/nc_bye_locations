@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from whitespace_tool.normalization import get_nested, optional_date, optional_float, optional_int
+from whitespace_tool.normalization import get_nested, optional_date, optional_float, optional_int, optional_timestamp
 from whitespace_tool.field_registry import load_field_registry
 
 
-FIELD_VALIDATORS = {
+VALIDATORS_BY_FIELD = {
     "latitude": optional_float,
     "longitude": optional_float,
     "seating_capacity": optional_int,
@@ -21,11 +21,21 @@ FIELD_VALIDATORS = {
     "competitor_count": optional_int,
     "foot_traffic_score": optional_float,
     "opening_date": optional_date,
+    "observed_at": optional_timestamp,
 }
 
-FIELD_VALIDATORS = {field["key"]: FIELD_VALIDATORS[field["type"] == "date" and "opening_date" or field["key"]]
-                    for field in load_field_registry()
-                    if field["key"] in FIELD_VALIDATORS}
+VALIDATORS_BY_TYPE = {
+    "date": optional_date,
+    "float": optional_float,
+    "integer": optional_int,
+    "timestamp": optional_timestamp,
+}
+
+FIELD_VALIDATORS = {
+    field["key"]: VALIDATORS_BY_TYPE.get(field["type"], VALIDATORS_BY_FIELD[field["key"]])
+    for field in load_field_registry()
+    if field["key"] in VALIDATORS_BY_FIELD
+}
 
 
 def validate_source_row(row: dict[str, Any], mapper: dict[str, Any]) -> list[dict[str, str]]:
@@ -67,10 +77,11 @@ def validate_normalized_location(location: Any, registry: list[dict[str, Any]]) 
             continue
         expected = field.get("type")
         valid = (
-            expected in {"string", "timestamp"} and isinstance(value, str)
+            expected == "string" and isinstance(value, str)
             or expected == "float" and isinstance(value, (int, float))
             or expected == "integer" and isinstance(value, int)
-            or expected == "date" and isinstance(value, str)
+            or expected == "date" and isinstance(value, str) and optional_date(value) is not None
+            or expected == "timestamp" and isinstance(value, str) and optional_timestamp(value) is not None
         )
         if not valid:
             errors.append({

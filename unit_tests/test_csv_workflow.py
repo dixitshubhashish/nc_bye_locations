@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import dataclasses
 import unittest
 
+from whitespace_tool.analysis import dedupe_locations
+from whitespace_tool.data_quality import run_quality_checks
 from whitespace_tool.data_validation import validate_normalized_location, validate_source_row
 from whitespace_tool.field_registry import load_field_registry
 from whitespace_tool.models import LocationRecord
-from whitespace_tool.normalization import clean_zip, normalize_location, optional_date, optional_float, optional_int
+from whitespace_tool.normalization import clean_zip, normalize_location, optional_date, optional_float, optional_int, optional_timestamp
 from whitespace_tool.source_adapters import csv_source
 from whitespace_tool.source_adapters import json_source
 from whitespace_tool.source_adapters import xml_source
@@ -84,11 +87,26 @@ class CsvWorkflowTests(unittest.TestCase):
         self.assertIsNone(optional_int("bad"))
         self.assertEqual(optional_date("2024-04-12"), "2024-04-12")
         self.assertIsNone(optional_date("0"))
+        self.assertEqual(optional_timestamp("2024-04-12T10:00:00Z"), "2024-04-12T10:00:00+00:00")
+        self.assertIsNone(optional_timestamp("not-a-timestamp"))
 
     def test_invalid_optional_values_are_rejected(self) -> None:
-        row = {**VALID_ROW, "opened_on": "0", "seats": "unknown"}
-        errors = validate_source_row(row, VALID_MAPPER)
-        self.assertEqual({error["field"] for error in errors}, {"opening_date", "seating_capacity"})
+        row = {**VALID_ROW, "opened_on": "0", "seats": "unknown", "observed": "not-a-timestamp"}
+        mapper = {**VALID_MAPPER, "fields": {**VALID_MAPPER["fields"], "observed_at": "observed"}}
+        errors = validate_source_row(row, mapper)
+        self.assertEqual({error["field"] for error in errors}, {"opening_date", "seating_capacity", "observed_at"})
+
+    def test_field_validator_registry_is_explicit_and_type_driven(self) -> None:
+        from whitespace_tool.data_validation.fields import FIELD_VALIDATORS
+
+        self.assertIn("opening_date", FIELD_VALIDATORS)
+        self.assertIn("latitude", FIELD_VALIDATORS)
+        self.assertIn("seating_capacity", FIELD_VALIDATORS)
+        self.assertIn("observed_at", FIELD_VALIDATORS)
+        self.assertIsNone(FIELD_VALIDATORS["opening_date"]("0"))
+        self.assertEqual(FIELD_VALIDATORS["latitude"]("$1,250.50"), 1250.5)
+        self.assertEqual(FIELD_VALIDATORS["seating_capacity"]("42.0"), 42)
+        self.assertIsNone(FIELD_VALIDATORS["observed_at"]("0"))
 
     def test_missing_required_mapping_is_reported(self) -> None:
         mapper = {**VALID_MAPPER, "fields": {"name": "store_name"}}
@@ -114,6 +132,84 @@ class CsvWorkflowTests(unittest.TestCase):
         assert location is not None
         errors = validate_normalized_location(location, load_field_registry())
         self.assertEqual(errors, [])
+
+    def test_normalized_validation_rejects_invalid_observed_at(self) -> None:
+        location = normalize_location(VALID_ROW, VALID_MAPPER, "example_csv", 0)
+        self.assertIsNotNone(location)
+        assert location is not None
+        bad_location = dataclasses.replace(location, observed_at="not-a-timestamp")
+        errors = validate_normalized_location(bad_location, load_field_registry())
+        self.assertTrue(any(error["field"] == "observed_at" for error in errors))
+
+    def test_dedupe_uses_standard_location_identity_fields(self) -> None:
+        location = normalize_location(VALID_ROW, VALID_MAPPER, "example_csv", 0)
+        self.assertIsNotNone(location)
+        assert location is not None
+
+        same_identity = dataclasses.replace(
+            location,
+            brand=f" {location.brand.upper()} ",
+            name=location.name.upper(),
+            address=location.address.upper(),
+            city=location.city.upper(),
+            state=location.state.lower(),
+        )
+        changed_name_same_place = dataclasses.replace(location, name="Example Pizza Midtown")
+        different_place = dataclasses.replace(
+            location,
+            location_id="store-002",
+            name="Example Pizza North",
+            address="900 Capital Boulevard",
+            latitude=35.8123,
+            longitude=-78.6211,
+        )
+
+        self.assertEqual(dedupe_locations([location, same_identity]), [location])
+        self.assertEqual(dedupe_locations([location, changed_name_same_place]), [location])
+        self.assertEqual(len(dedupe_locations([location, different_place])), 2)
+
+    def test_dedupe_drops_fuzzy_address_and_coordinate_matches(self) -> None:
+        location = normalize_location(VALID_ROW, VALID_MAPPER, "example_csv", 0)
+        self.assertIsNotNone(location)
+        assert location is not None
+        fuzzy_duplicate = dataclasses.replace(
+            location,
+            location_id="store-001-alt",
+            address="1 Main St.",
+            latitude=35.77961,
+            longitude=-78.63819,
+        )
+        same_address_far_away = dataclasses.replace(
+            location,
+            location_id="store-003",
+            latitude=35.9000,
+            longitude=-78.9000,
+        )
+
+        self.assertEqual(dedupe_locations([location, fuzzy_duplicate]), [location])
+        self.assertEqual(len(dedupe_locations([location, same_address_far_away])), 2)
+
+    def test_quality_duplicate_check_uses_standard_location_identity_fields(self) -> None:
+        location = normalize_location(VALID_ROW, VALID_MAPPER, "example_csv", 0)
+        self.assertIsNotNone(location)
+        assert location is not None
+        different_place = dataclasses.replace(
+            location,
+            location_id="store-002",
+            name="Example Pizza North",
+            address="900 Capital Boulevard",
+            latitude=35.8123,
+            longitude=-78.6211,
+        )
+        duplicate = dataclasses.replace(location, address=location.address.upper())
+        config = {"subject_brand": "Example Pizza", "competitor_brands": [], "freshness_policy": {}}
+
+        no_duplicate_result = run_quality_checks([location, different_place], {}, config)
+        self.assertFalse(any(issue["check"] == "duplicate_location_keys" for issue in no_duplicate_result["issues"]))
+
+        duplicate_result = run_quality_checks([location, duplicate], {}, config)
+        duplicate_issue = next(issue for issue in duplicate_result["issues"] if issue["check"] == "duplicate_location_keys")
+        self.assertEqual(duplicate_issue["sample"][0]["postal_code"], "27601")
 
     def test_bronze_listing_payload_contains_generated_id_and_foreign_keys(self) -> None:
         location = normalize_location(VALID_ROW, VALID_MAPPER, "example_csv", 0)

@@ -54,12 +54,12 @@ The Workflow Templates screen also includes predefined templates for Domino's, P
 ## Key System Enhancements & Architecture Features
 
 ### 1. High-Performance SQLite Sidecar Cache (`sqlite_cache.py`)
-- Integrated a WAL-mode SQLite local cache (`data/cache/whitespace_cache.db`) for high-frequency queries (ZIP geography, brand lists, reporting summaries).
+- Integrated a WAL-mode SQLite local cache (`.cache/whitespace_cache.db`) for high-frequency queries (ZIP geography, brand lists, reporting summaries).
 - Reduces repeat query latency from ~13.5 seconds to sub-millisecond execution (<1ms - 3.4ms).
 - Invalidates reporting caches automatically whenever new listings or workflows are saved.
 
 ### 2. BigQuery Partitioning & Clustering
-- `listings`, `error_listings`, and `listings_enriched` tables are partitioned daily by `ingested_at` (`DAY` partition).
+- `listings` and `listings_enriched` are partitioned daily by `first_observed_at`; `error_listings` is partitioned daily by `observed_at`.
 - Clustered by `(state_code, zip_code, business_id)` to optimize geographic filtering and whitespace analytical queries.
 - Restored `source_types` BigQuery table schema and seed records to support seamless template saving and metadata tracking.
 
@@ -177,4 +177,3 @@ This repo also includes `render.yaml`, so Render can pre-fill the build/start co
 The sample data is not authoritative; it exists to demonstrate architecture. For submission quality, I would pull Domino's from the store API, Pizza Hut from the freshest available public extract or locator-derived source, and Little Caesars from current JSON source objects, then compare counts by state/ZIP against each brand's public locator or another reference. Raw payloads are preserved in `source_observations` so every normalized restaurant can be traced back to its source and observed timestamp.
 
 Known gaps: no address geocoding, no fuzzy duplicate resolution across conflicting source IDs, no incremental diff report yet, and no real review ingestion. The schema reserves `reviews`, `analysis_runs`, and `whitespace_candidates` for those next steps.
-

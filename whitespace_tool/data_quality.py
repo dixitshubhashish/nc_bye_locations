@@ -5,6 +5,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
+from whitespace_tool.analysis import dedupe_location_key, is_fuzzy_duplicate_location
 from whitespace_tool.models import LocationRecord, ZipDemographics
 
 
@@ -89,10 +90,42 @@ def run_quality_checks(
     if missing_by_brand:
         issues.append(_issue("error", "brand_coverage", "Configured brands with no records", len(missing_by_brand), missing_by_brand))
 
-    duplicate_keys = Counter((row.brand, row.location_id) for row in locations)
-    duplicates = [f"{brand}:{location_id}" for (brand, location_id), count in duplicate_keys.items() if count > 1]
+    exact_duplicate_keys = Counter(dedupe_location_key(row) for row in locations)
+    duplicates: list[Any] = [
+        {
+            "brand": key[0],
+            "location_id": key[1],
+            "name": key[2],
+            "address": key[3],
+            "city": key[4],
+            "state": key[5],
+            "postal_code": key[6],
+            "latitude": key[7],
+            "longitude": key[8],
+            "count": count,
+        }
+        for key, count in exact_duplicate_keys.items()
+        if count > 1
+    ]
+    fuzzy_duplicates = []
+    fuzzy_kept: list[LocationRecord] = []
+    for row in locations:
+        duplicate_of = next((existing for existing in fuzzy_kept if is_fuzzy_duplicate_location(existing, row)), None)
+        if duplicate_of:
+            fuzzy_duplicates.append({
+                "brand": row.brand,
+                "location_id": row.location_id,
+                "duplicate_of": duplicate_of.location_id,
+                "address": row.address,
+                "matched_address": duplicate_of.address,
+                "latitude": row.latitude,
+                "longitude": row.longitude,
+            })
+            continue
+        fuzzy_kept.append(row)
+    duplicates.extend(fuzzy_duplicates)
     if duplicates:
-        issues.append(_issue("warning", "duplicate_location_keys", "Duplicate brand/location_id pairs", len(duplicates), duplicates[:10]))
+        issues.append(_issue("warning", "duplicate_location_keys", "Duplicate standard or fuzzy location identities", len(duplicates), duplicates[:10]))
 
     missing_required: dict[str, int] = defaultdict(int)
     for row in locations:

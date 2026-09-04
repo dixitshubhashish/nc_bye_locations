@@ -42,9 +42,16 @@ class SilverEnrichmentTests(unittest.TestCase):
         self.assertIn("CREATE OR REPLACE TABLE `project.silver.listings_enriched`", sql)
         self.assertIn("CREATE OR REPLACE VIEW `project.silver.vw_brand_location_top10`", sql)
         self.assertIn("CREATE OR REPLACE VIEW `project.silver.vw_brand_zip_income`", sql)
-        self.assertIn("REGEXP_EXTRACT(CAST(l.zip_code AS STRING)", sql)
+        self.assertIn("REGEXP_EXTRACT(CAST(zip_code AS STRING)", sql)
         self.assertIn("United States", sql)
         self.assertIn("median_household_income", sql)
+        self.assertIn("z.income_per_capita", sql)
+        self.assertIn("city_geos AS", sql)
+        self.assertIn("COALESCE(l.latitude, z.latitude, cg.latitude) AS latitude", sql)
+        self.assertIn("COALESCE(l.normalized_city_name, LOWER(TRIM(z.city_name))) = cg.normalized_city_name", sql)
+        self.assertIn("coordinate_source", sql)
+        self.assertIn("coordinate_confidence", sql)
+        self.assertIn("geocode_query", sql)
 
 
 if __name__ == "__main__":

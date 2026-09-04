@@ -131,6 +131,7 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "row_number", "type": "INTEGER", "mode": "REQUIRED"},
         {"name": "errors", "type": "JSON", "mode": "REQUIRED"},
         {"name": "raw_record", "type": "JSON", "mode": "REQUIRED"},
+        {"name": "observed_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
         {"name": "is_deleted", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "deleted_on", "type": "TIMESTAMP", "mode": "NULLABLE"},
     ],
@@ -139,7 +140,6 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
 TABLE_PARTITION_SPECS: dict[str, dict[str, Any]] = {
     "listings": {"field": "first_observed_at", "type": "DAY"},
     "error_listings": {"field": "observed_at", "type": "DAY"},
-    "listings_enriched": {"field": "first_observed_at", "type": "DAY"},
 }
 
 TABLE_CLUSTER_SPECS: dict[str, list[str]] = {
@@ -147,7 +147,6 @@ TABLE_CLUSTER_SPECS: dict[str, list[str]] = {
     "us_zipcodes": ["state_code", "county", "zip_code"],
     "error_listings": ["business_id", "source_type_id"],
     "businesses": ["status", "slug"],
-    "listings_enriched": ["state_code", "zip_code", "business_id"],
 }
 
 

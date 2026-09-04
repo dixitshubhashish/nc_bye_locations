@@ -69,6 +69,17 @@ def optional_date(value: Any) -> str | None:
     return None
 
 
+def optional_timestamp(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.isoformat()
+
+
 def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name: str, index: int) -> LocationRecord | None:
     fields = mapper["fields"]
     brand = str(mapper.get("brand") or get_nested(row, fields.get("brand", "brand"))).strip()

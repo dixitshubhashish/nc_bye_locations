@@ -13,7 +13,7 @@ This document tracks known assumptions, data gaps, and deliberate tradeoffs in t
   - 868 rows missing population.
   - 1,348 rows missing median age.
   - 2,948 rows missing median household income.
-- ZIP-level latitude/longitude uses the BigQuery geography table internal point, not a restaurant-level geocode.
+- Missing listing latitude/longitude is enriched from ZIP centroid first, then city/state centroid as a lower-confidence close-proximity estimate. This is not a rooftop geocode.
 - City/county/state values describe ZIP geography and may not perfectly match postal preferred city names or business addresses.
 
 ## Brand Location Data
@@ -32,7 +32,7 @@ This document tracks known assumptions, data gaps, and deliberate tradeoffs in t
 - Excel files expose sheet names in the UI so the user can choose which sheet to map.
 - Nested JSON paths are supported with dot notation.
 - A missing `location_id` is generated from brand, ZIP, and row number. This is acceptable for demo continuity but weaker for long-term change tracking.
-- Source-specific raw payloads are preserved in `source_observations` for traceability.
+- Source-specific raw payloads are preserved on listing rows and error-listing rows for traceability.
 - Current standard location fields are:
   - brand
   - location_id
@@ -47,8 +47,8 @@ This document tracks known assumptions, data gaps, and deliberate tradeoffs in t
 
 ## Deduplication
 
-- Deduplication is currently simple: brand, source location ID, address, and ZIP.
-- It does not yet perform fuzzy address matching.
+- Deduplication first uses the current standard location identity: brand, location_id, name, address, city, state, postal_code, latitude, and longitude.
+- It also drops later rows as fuzzy duplicates when brand/state/ZIP/city match, address similarity is at least 70%, and latitude/longitude are effectively the same.
 - It does not yet resolve conflicts where two sources identify the same physical store with different IDs.
 - It does not yet use phone number, website URL, geospatial distance, or normalized address tokens for matching.
 
@@ -67,9 +67,11 @@ This document tracks known assumptions, data gaps, and deliberate tradeoffs in t
 - BigQuery is the only database/warehouse target.
 - Local generated JSONL files are dry-run/staging artifacts, not the source of truth.
 - Bronze table definitions are in `database/bronze_schema.sql`.
-- BigQuery insert logic currently creates tables if missing and inserts JSON rows.
+- BigQuery insert logic currently creates tables if missing, adds missing columns on existing tables, and inserts JSON rows.
 - There is no production-grade merge/upsert strategy yet.
-- There is no partitioning or clustering strategy yet.
+- Bronze `listings` and `error_listings` are partitioned and clustered in code when new tables are created. Existing tables may need a migration if they were created before those settings existed.
+- Silver enrichment creates a partitioned and clustered `listings_enriched` table through SQL.
+- Silver enrichment adds `coordinate_source`, `coordinate_confidence`, and `geocode_query` so approximate coordinates can be distinguished from source-provided coordinates.
 - There is no table versioning or backfill strategy yet.
 
 ## Data Quality
@@ -98,7 +100,7 @@ This document tracks known assumptions, data gaps, and deliberate tradeoffs in t
 - Incremental diff reporting between runs.
 - BigQuery merge/upsert jobs.
 - Market definitions beyond ZIP prefix filtering and all-US.
-- Map visualization.
+- Map visualization is available in the Reporting tab, but it is still ZIP/listing coordinate based rather than drive-time or trade-area based.
 - Automated source coverage benchmarking against locator counts.
 
 ## Current Positioning

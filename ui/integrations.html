@@ -1531,7 +1531,10 @@ else:
         target.innerHTML = '<div class="report-status">No records available.</div>';
         return;
       }
-      target.innerHTML = `<table><thead><tr>${columns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr>${columns.map((column) => `<td>${escapeHtml(column.format ? column.format(row[column.key], row) : row[column.key])}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+      target.innerHTML = `<table><thead><tr>${columns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr>${columns.map((column) => {
+        const value = column.format ? column.format(row[column.key], row) : row[column.key];
+        return `<td>${column.html ? value : escapeHtml(value)}</td>`;
+      }).join("")}</tr>`).join("")}</tbody></table>`;
     }
 
     function checkedValues(name) {
@@ -2421,6 +2424,7 @@ result = json.loads(await response.string())`;
           {
             key: "pct",
             label: "Store Share",
+            html: true,
             format: (v, row) => {
               const pct = ((row.locations / totalLocs) * 100).toFixed(1);
               return `<div style="display: flex; align-items: center; gap: 8px;">
@@ -2462,6 +2466,7 @@ result = json.loads(await response.string())`;
           {
             key: "locations",
             label: "Number of Locations",
+            html: true,
             format: (v, row) => {
               if (!primaryRow || row.brand === primaryRow.brand) return formatNumber(v);
               const diff = row.locations - primaryRow.locations;
@@ -2473,6 +2478,7 @@ result = json.loads(await response.string())`;
           {
             key: "states",
             label: "Number of States",
+            html: true,
             format: (v, row) => {
               if (!primaryRow || row.brand === primaryRow.brand) return formatNumber(v);
               const diff = row.states - primaryRow.states;
@@ -3308,6 +3314,7 @@ result = json.loads(await response.string())`;
           });
           const sourceResult = await sourceResponse.json();
           if (!sourceResponse.ok) throw new Error(sourceResult.error || "Could not fetch the public source URL.");
+          if (sourceResult.warning) setStatus(sourceResult.warning, "warn");
           payload.file_name = sourceResult.file_name || "remote_source";
           payload.content_base64 = sourceResult.content_base64;
         } else {
@@ -3674,7 +3681,7 @@ result = json.loads(await response.string())`;
         ["sourcePreview", "entityPreview"].forEach((id) => el(id).classList.toggle("hidden", id !== button.dataset.tab));
       });
     });
-    addPairRow("queryParams", "limit", "100");
+    addPairRow("queryParams", "limit", "500");
     addPairRow("customHeaders", "Accept", "application/json");
     initializeConnectorEditor();
     const fallbackBirdeyeDarkSvg = "data:image/svg+xml;utf8," + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 60" width="240" height="60"><rect width="240" height="60" fill="none"/><g transform="translate(10, 10)"><path d="M 6 22 C 6 8 18 3 24 3 C 30 3 42 8 42 22 C 42 36 30 41 24 41 C 18 41 6 36 6 22 Z" fill="#0b70f0"/><ellipse cx="24" cy="22" rx="10" ry="10" fill="#ffffff"/><circle cx="24" cy="22" r="5" fill="#1d2b4f"/><path d="M 2 22 C 14 36 34 36 46 22 C 34 8 14 8 2 22 Z" fill="none" stroke="#0b70f0" stroke-width="3" stroke-linecap="round"/><text x="56" y="31" font-family="system-ui, -apple-system, sans-serif" font-weight="800" font-size="28" fill="#1d2b4f">Birdeye</text></g></svg>`);

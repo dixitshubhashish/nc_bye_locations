@@ -2,25 +2,85 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from difflib import SequenceMatcher
 from statistics import mean, pstdev
 from typing import Any
 
 from whitespace_tool.models import LocationRecord, ZipDemographics
 
+FUZZY_ADDRESS_MATCH_THRESHOLD = 0.70
+FUZZY_COORDINATE_TOLERANCE = 0.0005
+
+
+def _dedupe_text(value: object) -> str:
+    return str(value or "").strip().casefold()
+
+
+def _dedupe_coordinate(value: float | None) -> str:
+    if value is None:
+        return ""
+    return f"{float(value):.6f}"
+
+
+def dedupe_location_key(record: LocationRecord) -> tuple[str, str, str, str, str, str, str, str, str]:
+    return (
+        _dedupe_text(record.brand),
+        _dedupe_text(record.location_id),
+        _dedupe_text(record.name),
+        _dedupe_text(record.address),
+        _dedupe_text(record.city),
+        _dedupe_text(record.state),
+        _dedupe_text(record.zip5),
+        _dedupe_coordinate(record.latitude),
+        _dedupe_coordinate(record.longitude),
+    )
+
+
+def _fuzzy_bucket(record: LocationRecord) -> tuple[str, str, str, str]:
+    return (
+        _dedupe_text(record.brand),
+        _dedupe_text(record.state),
+        _dedupe_text(record.zip5),
+        _dedupe_text(record.city),
+    )
+
+
+def _addresses_match(left: LocationRecord, right: LocationRecord) -> bool:
+    left_address = _dedupe_text(left.address)
+    right_address = _dedupe_text(right.address)
+    if not left_address or not right_address:
+        return False
+    return SequenceMatcher(None, left_address, right_address).ratio() >= FUZZY_ADDRESS_MATCH_THRESHOLD
+
+
+def _coordinates_match(left: LocationRecord, right: LocationRecord) -> bool:
+    if left.latitude is None or left.longitude is None or right.latitude is None or right.longitude is None:
+        return False
+    return (
+        abs(left.latitude - right.latitude) <= FUZZY_COORDINATE_TOLERANCE
+        and abs(left.longitude - right.longitude) <= FUZZY_COORDINATE_TOLERANCE
+    )
+
+
+def is_fuzzy_duplicate_location(left: LocationRecord, right: LocationRecord) -> bool:
+    return _fuzzy_bucket(left) == _fuzzy_bucket(right) and _addresses_match(left, right) and _coordinates_match(left, right)
+
 
 def dedupe_locations(records: list[LocationRecord]) -> list[LocationRecord]:
-    seen: set[tuple[str, str, str, str]] = set()
+    seen: set[tuple[str, str, str, str, str, str, str, str, str]] = set()
+    fuzzy_buckets: dict[tuple[str, str, str, str], list[LocationRecord]] = defaultdict(list)
     deduped: list[LocationRecord] = []
     for record in records:
-        key = (
-            record.brand.lower(),
-            record.location_id.lower(),
-            record.address.lower(),
-            record.zip5,
-        )
+        key = dedupe_location_key(record)
         if key in seen:
             continue
+
+        bucket = _fuzzy_bucket(record)
+        if any(is_fuzzy_duplicate_location(existing, record) for existing in fuzzy_buckets[bucket]):
+            continue
+
         seen.add(key)
+        fuzzy_buckets[bucket].append(record)
         deduped.append(record)
     return deduped
 

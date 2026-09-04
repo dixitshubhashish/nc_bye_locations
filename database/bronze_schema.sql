@@ -121,8 +121,8 @@ CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.error_listings` (
   row_number INT64 NOT NULL,
   errors JSON NOT NULL,
   raw_record JSON NOT NULL,
+  observed_at TIMESTAMP NOT NULL,
   is_deleted BOOL DEFAULT FALSE,
   deleted_on TIMESTAMP
 );
-
 
