@@ -1,0 +1,26 @@
+[
+  {
+    "brand": "Domino's",
+    "source_name": "dominos_store_locator",
+    "source_type": "json",
+    "record_path": "Stores",
+    "template_path": "config/workflow_templates/dominos_api.json",
+    "notes": "Unofficial Domino's first-party store locator JSON shape."
+  },
+  {
+    "brand": "Pizza Hut",
+    "source_name": "pizza_hut_locations",
+    "source_type": "csv",
+    "record_path": "",
+    "template_path": "config/workflow_templates/pizza_hut_kaggle.json",
+    "notes": "CSV-style public/snapshot location extract shape."
+  },
+  {
+    "brand": "Little Caesars",
+    "source_name": "little_caesars_locations",
+    "source_type": "json",
+    "record_path": "locations",
+    "template_path": "config/workflow_templates/little_caesars_json.json",
+    "notes": "Nested JSON location object shape."
+  }
+]

@@ -115,6 +115,15 @@ def serve_workflow_ui(host: str, port: int) -> None:
     serve(host, port)
 
 
+def fetch_dominos(zip_file: str, output: str, cache_dir: str, order_type: str) -> None:
+    from whitespace_tool.sources.dominos_store_locator import fetch_for_zips, _read_zip_codes
+
+    zip_codes = _read_zip_codes(zip_file)
+    result = fetch_for_zips(zip_codes, order_type=order_type, cache_dir=cache_dir)
+    write_json(output, result)
+    print(f"Wrote {len(result['Stores'])} Domino's stores from {len(zip_codes)} ZIPs to {output}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Competitive whitespace analysis prototype")
     subparsers = parser.add_subparsers(dest="command")
@@ -144,6 +153,12 @@ def main() -> None:
     workflow_ui_parser.add_argument("--host", default="127.0.0.1")
     workflow_ui_parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8765")))
 
+    dominos_parser = subparsers.add_parser("fetch-dominos", help="Fetch unofficial Domino's store-locator JSON by ZIP code")
+    dominos_parser.add_argument("--zip-file", required=True, help="Text file with one ZIP code per line")
+    dominos_parser.add_argument("--output", default="outputs/dominos_store_locator.json")
+    dominos_parser.add_argument("--cache-dir", default="outputs/cache/dominos_locator")
+    dominos_parser.add_argument("--type", default="Carryout", choices=["Carryout", "Delivery"])
+
     args = parser.parse_args()
     if args.command == "fetch-public-zips":
         fetch_public_zips(args.config, args.output, args.limit)
@@ -160,6 +175,8 @@ def main() -> None:
         )
     elif args.command == "workflow-ui":
         serve_workflow_ui(args.host, args.port)
+    elif args.command == "fetch-dominos":
+        fetch_dominos(args.zip_file, args.output, args.cache_dir, args.type)
     else:
         serve_workflow_ui("127.0.0.1", int(os.environ.get("PORT", "8765")))
 

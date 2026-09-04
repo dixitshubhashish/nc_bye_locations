@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import socketserver
 from time import perf_counter
+from urllib.parse import urlsplit
+import urllib.request
 from typing import Any
 from uuid import uuid4
 import re
@@ -27,6 +29,7 @@ from whitespace_tool.storage_config import load_dotenv, load_storage_config
 
 SUPPORTED_SOURCE_TYPES = {"csv", "excel", "json", "xml", "api_get_json", "python_editor"}
 MINIMUM_US_ZIP_REFERENCE_ROWS = 30000
+MAX_REMOTE_SOURCE_BYTES = 25 * 1024 * 1024
 
 
 def _build_logger() -> logging.Logger:
@@ -107,6 +110,37 @@ def source_sheets(payload: dict[str, Any]) -> dict[str, Any]:
     content = base64.b64decode(payload["content_base64"])
     file_name = payload.get("file_name", "")
     return {"sheets": excel_source.list_sheets(content, file_name)}
+
+
+def fetch_public_source(payload: dict[str, Any]) -> dict[str, str]:
+    url = str(payload.get("url", "")).strip()
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("Source URL must be a public HTTP or HTTPS URL")
+    request = urllib.request.Request(url, headers={"User-Agent": "CompetitiveWhitespaceTool/1.0"})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        content = response.read(MAX_REMOTE_SOURCE_BYTES + 1)
+        file_name = Path(parsed.path).name or "remote_source"
+    if len(content) > MAX_REMOTE_SOURCE_BYTES:
+        raise ValueError("Remote source exceeds the 25 MB limit")
+    return {"content_base64": base64.b64encode(content).decode("ascii"), "file_name": file_name}
+
+
+def predefined_templates() -> dict[str, Any]:
+    template_index_path = Path("config/predefined_brand_templates.json")
+    with template_index_path.open("r", encoding="utf-8") as handle:
+        templates = json.load(handle)
+    for template in templates:
+        with Path(template["template_path"]).open("r", encoding="utf-8") as handle:
+            mapper = json.load(handle)
+        template["mapper"] = {
+            "brand": template["brand"],
+            "source_name": template["source_name"],
+            "source_type": template["source_type"],
+            "record_path": template.get("record_path", mapper.get("record_path", "")),
+            "fields": mapper.get("fields", {}),
+        }
+    return {"templates": templates}
 
 
 def mapper_targets_with_status() -> dict[str, Any]:
@@ -934,6 +968,12 @@ def make_handler(ui_dir: Path):
                 except Exception as exc:
                     _json_response(self, 400, {"error": str(exc)})
                 return
+            if self.path == "/api/predefined-templates":
+                try:
+                    _json_response(self, 200, predefined_templates())
+                except Exception as exc:
+                    _json_response(self, 400, {"error": str(exc)})
+                return
             if self.path == "/api/storage/test":
                 try:
                     _json_response(self, 200, test_storage_connection())
@@ -992,7 +1032,7 @@ def make_handler(ui_dir: Path):
             super().do_GET()
 
         def do_POST(self) -> None:
-            if self.path not in {"/api/login", "/api/preview", "/api/sheets", "/api/save", "/api/clear", "/api/brands", "/api/learning", "/api/reprocess", "/api/field-alias", "/api/custom-field", "/api/templates/save"}:
+            if self.path not in {"/api/login", "/api/preview", "/api/source-url", "/api/sheets", "/api/save", "/api/clear", "/api/brands", "/api/learning", "/api/reprocess", "/api/field-alias", "/api/custom-field", "/api/templates/save"}:
                 _json_response(self, 404, {"error": "Not found"})
                 return
             request_id = uuid4().hex
@@ -1003,6 +1043,8 @@ def make_handler(ui_dir: Path):
                 LOGGER.info("request_started request_id=%s endpoint=%s content_length=%d", request_id, self.path, length)
                 if self.path == "/api/login":
                     _json_response(self, 200, authenticate(payload))
+                elif self.path == "/api/source-url":
+                    _json_response(self, 200, fetch_public_source(payload))
                 elif self.path == "/api/sheets":
                     _json_response(self, 200, source_sheets(payload))
                 elif self.path == "/api/save":

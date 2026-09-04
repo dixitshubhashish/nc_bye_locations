@@ -48,6 +48,16 @@ Supported mapper inputs:
 
 Each input type is handled by a separate Python adapter under `whitespace_tool/source_adapters/`. Excel files expose sheet names in the UI so the user can choose which source to use.
 
+The Workflow Templates screen also includes predefined templates for Domino's, Pizza Hut, and Little Caesars. These load known mapping templates into the mapper so each brand workflow can be solved and validated one at a time.
+
+Domino's can be explored through the unofficial first-party store locator endpoint used by community wrappers. The fetcher scans a ZIP list, caches raw ZIP responses with pickle, deduplicates by store ID, and writes mapper-ready JSON under a `Stores` array:
+
+```bash
+.venv/bin/python -m whitespace_tool fetch-dominos --zip-file data/source_files/us_zips.txt --output outputs/dominos_store_locator.json
+```
+
+This is not an official Domino's public API, so failures or schema changes should be treated as source-quality signals rather than silently trusted.
+
 The Python Editor runs user-authored Python in a browser Pyodide runtime. Scripts may import standard-library modules and supported Pyodide packages, and can fetch or transform data as needed. Assign the final JSON-compatible object or list to `result`; that value is validated and passed into the same mapping workflow as every other source. The server receives only the resulting JSON and does not execute the script.
 
 The demo config uses small sample files for brand locations only. ZIP geography and demographics are read from BigQuery public datasets.
