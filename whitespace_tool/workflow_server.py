@@ -23,6 +23,7 @@ from whitespace_tool.models import utc_now_iso
 from whitespace_tool.learning import suggest_from_templates
 from whitespace_tool.field_registry import load_field_registry
 from whitespace_tool.sources.demographics import fetch_bigquery_demographics, resolve_bigquery_connection
+from whitespace_tool.sources.dominos_overpass import fetch_for_zips as fetch_dominos_from_overpass
 from whitespace_tool.sources.dominos_store_locator import fetch_for_zips
 from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows, clear_dataset_tables, push_to_bigquery
 from whitespace_tool.storage_config import load_dotenv, load_storage_config
@@ -408,6 +409,8 @@ def dominos_source(
     order_type: str = "Delivery",
     stores_per_zip: int | None = 1,
     max_workers: int = 8,
+    one_per_zip: bool = False,
+    provider: str = "auto",
 ) -> dict[str, Any]:
     prepare_zipcodes()
     project_id, dataset_id, credentials_json = _warehouse_settings()
@@ -417,10 +420,26 @@ def dominos_source(
     zip_codes = _dominos_zip_codes(client, project_id, dataset_id, safe_limit)
     safe_stores_per_zip = max(1, min(int(stores_per_zip or 0), 1000)) if stores_per_zip else None
     safe_max_workers = max(1, min(int(max_workers or 1), 24))
-    result = fetch_for_zips(zip_codes, order_type=safe_order_type, stores_per_zip=safe_stores_per_zip, max_workers=safe_max_workers)
+    safe_provider = provider if provider in {"auto", "dominos", "osm"} else "auto"
+    if safe_provider == "osm":
+        result = fetch_dominos_from_overpass(zip_codes, one_per_zip=one_per_zip, max_workers=min(safe_max_workers, 8))
+    else:
+        result = fetch_for_zips(
+            zip_codes,
+            order_type=safe_order_type,
+            stores_per_zip=safe_stores_per_zip,
+            one_per_zip=one_per_zip,
+            max_workers=safe_max_workers,
+        )
+        if safe_provider == "auto" and not result["Stores"] and result["errors"]:
+            fallback = fetch_dominos_from_overpass(zip_codes, one_per_zip=one_per_zip, max_workers=min(safe_max_workers, 8))
+            fallback["primary_errors"] = result["errors"]
+            result = fallback
     result["requested_zip_limit"] = safe_limit
     result["requested_stores_per_zip"] = safe_stores_per_zip
     result["requested_max_workers"] = safe_max_workers
+    result["requested_one_per_zip"] = one_per_zip
+    result["requested_provider"] = safe_provider
     result["dedupe_key"] = "StoreID"
     return result
 
@@ -1160,7 +1179,9 @@ def make_handler(ui_dir: Path):
                     raw_stores_per_zip = params.get("stores_per_zip", ["1"])[0]
                     stores_per_zip = None if raw_stores_per_zip == "all" else int(raw_stores_per_zip or "1")
                     max_workers = int(params.get("max_workers", ["8"])[0] or "8")
-                    _json_response(self, 200, dominos_source(limit, order_type, stores_per_zip, max_workers))
+                    one_per_zip = params.get("one_per_zip", ["false"])[0].lower() in {"1", "true", "yes"}
+                    provider = params.get("provider", ["auto"])[0]
+                    _json_response(self, 200, dominos_source(limit, order_type, stores_per_zip, max_workers, one_per_zip, provider))
                 except Exception as exc:
                     _json_response(self, 400, {"error": str(exc)})
                 return

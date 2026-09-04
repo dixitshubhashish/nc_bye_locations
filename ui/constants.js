@@ -7,6 +7,7 @@ window.APP_CONSTANTS = Object.freeze({
   dominosZipFetchLimit: "all",
   dominosStoresPerZipLimit: 1,
   dominosMaxWorkers: 8,
+  dominosProvider: "auto",
   dominosOrderType: "Delivery",
   dominosBrand: {
     name: "Domino's Pizza",

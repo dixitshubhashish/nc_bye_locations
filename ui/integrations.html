@@ -1421,11 +1421,12 @@ result = json.loads(await response.string())</textarea>
       const limit = window.APP_CONSTANTS.dominosZipFetchLimit || 1;
       const storesPerZip = window.APP_CONSTANTS.dominosStoresPerZipLimit || 1;
       const maxWorkers = window.APP_CONSTANTS.dominosMaxWorkers || 8;
+      const provider = encodeURIComponent(window.APP_CONSTANTS.dominosProvider || "auto");
       const orderType = encodeURIComponent(window.APP_CONSTANTS.dominosOrderType || "Delivery");
       return `from pyodide.http import pyfetch
 import json
 
-response = await pyfetch("/api/dominos-source?limit=${limit}&stores_per_zip=${storesPerZip}&max_workers=${maxWorkers}&type=${orderType}")
+response = await pyfetch("/api/dominos-source?limit=${limit}&stores_per_zip=${storesPerZip}&one_per_zip=true&max_workers=${maxWorkers}&provider=${provider}&type=${orderType}")
 if response.status != 200:
     raise RuntimeError(await response.string())
 
