@@ -309,11 +309,34 @@ def push_to_bigquery(
             LOGGER.info("db_batch_load_succeeded table=%s rows=%d job_id=%s", table_ref, len(rows), load_job.job_id)
 
 
+def _clear_dataset_tables_with_client(client: Any, dataset_ref: str) -> dict[str, list[str]]:
+    preserved_tables = {"us_zipcodes", "field_catalogs", "field_catalog", "source_types", "workflow_templates"}
+    table_refs = [table.reference for table in client.list_tables(dataset_ref) if table.table_id not in preserved_tables]
+    LOGGER.warning("db_clear_started dataset=%s table_count=%d", dataset_ref, len(table_refs))
+    soft_deleted: list[str] = []
+    truncated: list[str] = []
+    soft_delete_tables = {"businesses", "listings", "error_listings"}
+    for table_ref in table_refs:
+        if table_ref.table_id in soft_delete_tables:
+            client.query(f"ALTER TABLE `{dataset_ref}.{table_ref.table_id}` ADD COLUMN IF NOT EXISTS is_deleted BOOL").result()
+            client.query(f"ALTER TABLE `{dataset_ref}.{table_ref.table_id}` ADD COLUMN IF NOT EXISTS deleted_on TIMESTAMP").result()
+            query = f"UPDATE `{dataset_ref}.{table_ref.table_id}` SET is_deleted = TRUE, deleted_on = CURRENT_TIMESTAMP() WHERE is_deleted IS NOT TRUE"
+            client.query(query).result()
+            soft_deleted.append(table_ref.table_id)
+            LOGGER.warning("db_table_soft_deleted dataset=%s table=%s", dataset_ref, table_ref.table_id)
+            continue
+        client.query(f"TRUNCATE TABLE `{dataset_ref}.{table_ref.table_id}`").result()
+        truncated.append(table_ref.table_id)
+        LOGGER.warning("db_table_truncated dataset=%s table=%s", dataset_ref, table_ref.table_id)
+    LOGGER.warning("db_clear_succeeded dataset=%s soft_deleted_count=%d truncated_count=%d", dataset_ref, len(soft_deleted), len(truncated))
+    return {"soft_deleted_tables": soft_deleted, "truncated_tables": truncated}
+
+
 def clear_dataset_tables(
     project_id: str,
     dataset_id: str,
     credentials_json: str | None = None,
-) -> list[str]:
+) -> dict[str, list[str]]:
     try:
         from google.cloud import bigquery
         from google.oauth2 import service_account
@@ -327,19 +350,4 @@ def clear_dataset_tables(
         client = bigquery.Client(project=project_id)
 
     dataset_ref = f"{project_id}.{dataset_id}"
-    preserved_tables = {"us_zipcodes", "field_catalogs", "field_catalog", "source_types", "workflow_templates"}
-    table_refs = [table.reference for table in client.list_tables(dataset_ref) if table.table_id not in preserved_tables]
-    LOGGER.warning("db_clear_started dataset=%s table_count=%d", dataset_ref, len(table_refs))
-    soft_deleted: list[str] = []
-    soft_delete_tables = {"businesses", "listings", "error_listings"}
-    for table_ref in table_refs:
-        if table_ref.table_id not in soft_delete_tables:
-            continue
-        client.query(f"ALTER TABLE `{dataset_ref}.{table_ref.table_id}` ADD COLUMN IF NOT EXISTS is_deleted BOOL").result()
-        client.query(f"ALTER TABLE `{dataset_ref}.{table_ref.table_id}` ADD COLUMN IF NOT EXISTS deleted_on TIMESTAMP").result()
-        query = f"UPDATE `{dataset_ref}.{table_ref.table_id}` SET is_deleted = TRUE, deleted_on = CURRENT_TIMESTAMP() WHERE is_deleted IS NOT TRUE"
-        client.query(query).result()
-        soft_deleted.append(table_ref.table_id)
-        LOGGER.warning("db_table_soft_deleted dataset=%s table=%s", dataset_ref, table_ref.table_id)
-    LOGGER.warning("db_clear_succeeded dataset=%s soft_deleted_count=%d", dataset_ref, len(soft_deleted))
-    return soft_deleted
+    return _clear_dataset_tables_with_client(client, dataset_ref)
