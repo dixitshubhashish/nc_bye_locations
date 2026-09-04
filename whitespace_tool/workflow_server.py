@@ -23,6 +23,7 @@ from whitespace_tool.models import utc_now_iso
 from whitespace_tool.learning import suggest_from_templates
 from whitespace_tool.field_registry import load_field_registry
 from whitespace_tool.sources.demographics import fetch_bigquery_demographics, resolve_bigquery_connection
+from whitespace_tool.sources.dominos_store_locator import fetch_for_zips
 from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows, clear_dataset_tables, push_to_bigquery
 from whitespace_tool.storage_config import load_dotenv, load_storage_config
 
@@ -379,6 +380,32 @@ def prepare_zipcodes() -> dict[str, Any]:
     ZIP_REFERENCE_CACHE[cache_key] = result
     LOGGER.info("zip_reference_timing phase=rebuild_total elapsed_ms=%.1f", (perf_counter() - started_at) * 1000)
     return dict(result)
+
+
+def _dominos_zip_codes(client: Any, project_id: str, dataset_id: str, limit: int | None) -> list[str]:
+    from google.cloud import bigquery
+
+    table_ref = f"{project_id}.{dataset_id}.us_zipcodes"
+    limit_sql = "LIMIT @limit" if limit else ""
+    query = f"SELECT zip_code FROM `{table_ref}` WHERE zip_code IS NOT NULL ORDER BY zip_code {limit_sql}"
+    params = []
+    if limit:
+        params.append(bigquery.ScalarQueryParameter("limit", "INT64", limit))
+    job_config = bigquery.QueryJobConfig(query_parameters=params)
+    return [str(row["zip_code"]).zfill(5)[:5] for row in client.query(query, job_config=job_config).result()]
+
+
+def dominos_source(limit: int | None = 1, order_type: str = "Delivery") -> dict[str, Any]:
+    prepare_zipcodes()
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    safe_limit = max(1, min(int(limit or 0), 50000)) if limit else None
+    safe_order_type = order_type if order_type in {"Delivery", "Carryout"} else "Delivery"
+    zip_codes = _dominos_zip_codes(client, project_id, dataset_id, safe_limit)
+    result = fetch_for_zips(zip_codes, order_type=safe_order_type)
+    result["requested_zip_limit"] = safe_limit
+    result["dedupe_key"] = "StoreID"
+    return result
 
 
 @lru_cache(maxsize=8)
@@ -1010,6 +1037,17 @@ def make_handler(ui_dir: Path):
             if self.path == "/api/source-types":
                 try:
                     _json_response(self, 200, list_source_types())
+                except Exception as exc:
+                    _json_response(self, 400, {"error": str(exc)})
+                return
+            if self.path.startswith("/api/dominos-source"):
+                from urllib.parse import parse_qs, urlsplit
+                params = parse_qs(urlsplit(self.path).query)
+                try:
+                    raw_limit = params.get("limit", ["1"])[0]
+                    limit = None if raw_limit == "all" else int(raw_limit or "1")
+                    order_type = params.get("type", ["Delivery"])[0]
+                    _json_response(self, 200, dominos_source(limit, order_type))
                 except Exception as exc:
                     _json_response(self, 400, {"error": str(exc)})
                 return
