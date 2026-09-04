@@ -42,7 +42,7 @@ def _write_cached(cache_dir: Path, zip_code: str, order_type: str, payload: dict
 
 
 class DominosLocatorSession:
-    def __init__(self, min_interval_seconds: float = 0.35, retries: int = 4) -> None:
+    def __init__(self, min_interval_seconds: float = 0.05, retries: int = 2) -> None:
         self.cookie_jar = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cookie_jar))
         self.min_interval_seconds = min_interval_seconds

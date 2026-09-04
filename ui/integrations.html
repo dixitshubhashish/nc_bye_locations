@@ -9,6 +9,9 @@
   <script>document.getElementById("appFavicon").href = window.APP_CONSTANTS.birdeyeFaviconUrl;</script>
   <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.0/min/vs/loader.js"></script>
   <script src="https://cdn.jsdelivr.net/pyodide/v0.27.0/full/pyodide.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
   <style>
     :root {
       --bg: #f6f7f4;
@@ -25,8 +28,10 @@
 
     * { box-sizing: border-box; }
 
-    body {
+    html, body {
       margin: 0;
+      padding: 0;
+      min-width: 1280px;
       background: var(--bg);
       color: var(--ink);
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -120,7 +125,32 @@
     .report-columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
     .report-empty-states { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
     .report-empty-states span { border: 1px solid var(--line); border-radius: 999px; padding: 5px 9px; background: #ffffff; color: var(--muted); font-weight: 700; }
-    .report-status { border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 16px; color: var(--muted); }
+    .report-status {
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--accent);
+      background: #ffffff;
+      border-radius: 8px;
+      padding: 12px 16px;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .report-status .spinner {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 2px solid var(--line);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
 
     .review-view { padding: 24px; }
     .review-toolbar { display: flex; gap: 8px; max-width: 620px; margin-bottom: 16px; }
@@ -203,7 +233,6 @@
     .python-function-options { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
     .python-function-options label { display: inline-flex; align-items: center; gap: 6px; width: auto; margin: 0; font-weight: 700; }
     .python-function-options input { width: auto; }
-    .locked-demo input:not([type="radio"]), .locked-demo textarea, .locked-demo select { background: #eef1f4; color: #5f6b76; cursor: not-allowed; }
 
     .connector-output { min-height: 150px; margin-top: 8px; }
 
@@ -214,6 +243,66 @@
     .connector-editor-dialog-header { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding-bottom: 16px; }
     .connector-editor-dialog-title { margin: 0; font-size: 18px; }
     .connector-editor-dialog .connector-editor { height: 100%; }
+
+    .loading-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      z-index: 9999;
+      background: rgba(15, 23, 42, 0.65);
+      backdrop-filter: blur(4px);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: #ffffff;
+      font-family: inherit;
+    }
+    .loading-overlay.hidden { display: none !important; }
+    .loading-spinner-circle {
+      width: 56px;
+      height: 56px;
+      border: 5px solid rgba(255, 255, 255, 0.2);
+      border-top-color: #38bdf8;
+      border-radius: 50%;
+      animation: spinCircle 0.8s linear infinite;
+      margin-bottom: 20px;
+    }
+    @keyframes spinCircle {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    .loading-overlay-message {
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 8px;
+      letter-spacing: -0.01em;
+    }
+    .loading-overlay-sub {
+      font-size: 12px;
+      color: #94a3b8;
+      margin-bottom: 20px;
+    }
+    .loading-cancel-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 18px;
+      background: rgba(239, 68, 68, 0.2);
+      border: 1px solid #ef4444;
+      color: #fca5a5;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 150ms ease, color 150ms ease;
+    }
+    .loading-cancel-btn:hover {
+      background: #ef4444;
+      color: #ffffff;
+    }
 
     .progress-wrap {
       position: sticky;
@@ -364,8 +453,9 @@
     }
 
     select.auto-mapped {
-      border-color: #d98aa8;
-      background: #fff0f5;
+      border-color: #fca5a5;
+      background: #fef2f2;
+      color: #991b1b;
     }
 
     .mapping-note {
@@ -477,11 +567,12 @@
     }
 
     .login-box {
-      width: min(420px, 100%);
+      width: min(520px, 100%);
       background: #ffffff;
       border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 22px;
+      border-radius: 12px;
+      padding: 32px 36px;
+      box-shadow: 0 16px 40px rgba(15, 23, 42, 0.08);
     }
 
     .field-group.hidden { display: none; }
@@ -729,51 +820,53 @@
       line-height: 1;
     }
     .brand-icon-crop {
-      display: block;
-      width: 30px;
-      height: 30px;
-      flex: 0 0 30px;
-      overflow: hidden;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: 32px;
+      overflow: visible;
     }
     .brand-logo-image {
       display: block;
       width: auto;
-      height: 30px;
-      max-width: none;
+      height: 32px;
+      max-height: 100%;
+      object-fit: contain;
+    }
+    .login-brand {
+      justify-content: center;
+      margin-bottom: 22px;
+      color: var(--navy);
+      font-size: 22px;
     }
     .login-brand .brand-icon-crop {
-      width: min(240px, 100%);
-      height: 46px;
-      flex: 0 1 240px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: auto;
+      max-width: 100%;
+      height: 52px;
+      flex: 0 1 auto;
       overflow: visible;
     }
     .login-brand .brand-logo-image {
-      height: 46px;
+      height: 52px;
+      width: auto;
       max-width: 100%;
       object-fit: contain;
     }
-    .app-footer .brand-icon-crop { width: 27px; height: 27px; flex-basis: 27px; }
-    .app-footer .brand-logo-image { height: 27px; }
-    .brand-mark {
-      position: relative;
-      display: inline-block;
-      width: 27px;
-      height: 17px;
-      border: 3px solid currentColor;
-      border-radius: 75% 15%;
-      transform: rotate(45deg);
+    .birdeye-full-logo {
+      display: block;
+      width: auto;
+      height: 42px;
+      max-width: 100%;
     }
-    .brand-mark::after {
-      content: "";
-      position: absolute;
-      width: 5px;
-      height: 5px;
-      top: 3px;
-      left: 8px;
-      border-radius: 50%;
-      background: currentColor;
+    header .birdeye-full-logo text, .app-footer .birdeye-full-logo text {
+      fill: #ffffff !important;
     }
-    .login-brand { margin-bottom: 22px; color: var(--navy); font-size: 22px; }
+    header .birdeye-full-logo path[stroke="#1d2b4f"], .app-footer .birdeye-full-logo path[stroke="#1d2b4f"] {
+      stroke: #60a5fa !important;
+    }
     .reference-login-button { background: #ffffff; border-color: #c43b54; color: #c43b54; transition: color 180ms ease, border-color 180ms ease, background 180ms ease; }
     .reference-login-button:hover { background: #fff5f6; border-color: #a92d45; color: #a92d45; }
     .reference-login-button.ready { border-color: #147d63; color: #147d63; }
@@ -827,10 +920,18 @@
   </style>
 </head>
 <body>
+  <div id="loadingOverlay" class="loading-overlay hidden" role="dialog" aria-modal="true" aria-live="assertive">
+    <div class="loading-spinner-circle"></div>
+    <div id="loadingOverlayMessage" class="loading-overlay-message">Executing operation...</div>
+    <div class="loading-overlay-sub">All database writes follow SQL ACID transaction rules.</div>
+    <button id="loadingCancelBtn" class="loading-cancel-btn" type="button" title="Cancel transaction and rollback changes">
+      ✕ Cancel & Rollback Transaction
+    </button>
+  </div>
   <div id="loginScreen" class="login-screen">
     <div class="login-box">
       <div class="brand-lockup login-brand" aria-label="Birdeye brand reference">
-        <span class="brand-icon-crop"><img class="brand-logo-image" data-logo-src="birdeyeLogoUrl" alt="Birdeye"></span>
+        <span class="brand-icon-crop"><img class="brand-logo-image" data-logo-src="birdeyeLogoDarkUrl" alt="Birdeye"></span>
       </div>
       <h1 id="productTitle">Competitive Whitespace Tool</h1>
       <label for="loginUser">Username</label>
@@ -854,7 +955,7 @@
     <header>
       <div class="app-title">
         <div class="brand-lockup" aria-label="Birdeye brand reference">
-          <span class="brand-icon-crop"><img class="brand-logo-image" data-logo-src="birdeyeLogoUrl" alt="Birdeye"></span>
+          <span class="brand-icon-crop"><img class="brand-logo-image" data-logo-src="birdeyeLogoLightUrl" alt="Birdeye"></span>
         </div>
         <h1>Competitive Whitespace Tool</h1>
       </div>
@@ -879,11 +980,14 @@
     <main>
     <aside>
       <div class="panel">
-        <h2>Source</h2>
-        <div class="button-row">
+        <h2>Source &amp; Database Controls</h2>
+        <div class="button-row" style="flex-wrap: wrap; gap: 6px;">
           <button class="secondary" id="testBigQueryBtn" type="button">Test DB Connection</button>
+          <button class="secondary" id="showExistingBrandsBtn" type="button">🏢 Show Existing Brands</button>
+          <button class="secondary" id="clearDemoDataBtn" type="button" style="color: var(--error); border-color: var(--error);">🗑️ Clear Demo Data</button>
         </div>
         <div id="bigQueryStatus" class="status hidden"></div>
+        <div id="existingBrandsDialog" style="display: none; border: 1px solid var(--line); background: #f8fafc; border-radius: 6px; padding: 10px; margin-top: 8px; font-size: 12px;"></div>
         <label for="sourceType">Source format</label>
         <select id="sourceType">
           <option value="csv">CSV</option>
@@ -898,6 +1002,7 @@
           <div class="python-function-options" role="radiogroup" aria-label="CSV source">
             <label><input type="radio" name="csvFunction" value="new" checked> New</label>
             <label><input type="radio" name="csvFunction" value="pizza_hut"> Pizza Hut USA</label>
+            <label><input type="radio" name="csvFunction" value="global_hotels"> Global Hotels (Mixed Edge-Cases)</label>
           </div>
         </div>
         <div class="field-group json-function-field hidden">
@@ -905,6 +1010,13 @@
           <div class="python-function-options" role="radiogroup" aria-label="JSON source">
             <label><input type="radio" name="jsonFunction" value="new" checked> New</label>
             <label><input type="radio" name="jsonFunction" value="la_city"> LA City demo</label>
+          </div>
+        </div>
+        <div class="field-group api-function-field hidden">
+          <label>API source</label>
+          <div class="python-function-options" role="radiogroup" aria-label="API source">
+            <label><input type="radio" name="apiFunction" value="new" checked> New</label>
+            <label><input type="radio" name="apiFunction" value="little_caesars"> Little Caesars GET API</label>
           </div>
         </div>
 
@@ -1006,15 +1118,40 @@
             <label><input type="radio" name="pythonFunction" value="new" checked> New</label>
             <label><input type="radio" name="pythonFunction" value="dominos"> Domino's Pizza</label>
           </div>
-          <textarea id="pythonConnectorCode" class="hidden" spellcheck="false">from pyodide.http import pyfetch
+          <textarea id="pythonConnectorCode" class="hidden" spellcheck="false"># Open-Source US Restaurant Locations Connector Demo
+# --------------------------------------------------
+# Expected Output assigned to `result`:
+# A list of dicts (or dict with a record key) containing restaurant records:
+# [
+#   {
+#     "store_number": "101",
+#     "restaurant_name": "Sample Bistro",
+#     "address": "100 Main St",
+#     "city": "Raleigh",
+#     "state_code": "NC",
+#     "zip_code": "27601",
+#     "lat": 35.7796,
+#     "lng": -78.6382
+#   }
+# ]
+
+from pyodide.http import pyfetch
 import json
 
-response = await pyfetch("https://cdn.jsdelivr.net/npm/vega-datasets@2/data/cars.json")
-result = json.loads(await response.string())</textarea>
+# Fetch public processed US restaurant location JSON data
+url = "https://raw.githubusercontent.com/dixitshubhashish/nc_bye_locations/main/little_caesars_locations.json"
+response = await pyfetch(url)
+
+if response.status == 200:
+    data = json.loads(await response.string())
+    # Extract records and assign to `result`
+    result = data.get("locations", data)
+else:
+    result = []</textarea>
           <div id="pythonConnectorEditor" class="connector-editor" aria-label="Python editor"></div>
-          <label for="pythonPackages">Pyodide packages (optional)</label>
-          <input id="pythonPackages" placeholder="Example: pandas, beautifulsoup4">
-          <div class="mapping-note">Write any Python supported by the browser runtime. Assign the final JSON-compatible object or list to <code>result</code>. Add supported Pyodide package names above when needed.</div>
+          <label for="pythonPackages">Pyodide packages to install (comma-separated for multiple)</label>
+          <input id="pythonPackages" placeholder="e.g. pandas, numpy, beautifulsoup4, requests">
+          <div class="mapping-note">Enter third-party libraries separated by commas (e.g. <code>pandas, numpy, beautifulsoup4</code>). Write standard Python in the editor and assign your final list or dictionary of location records to <code>result</code>.</div>
           <div class="button-row">
             <button class="secondary" id="runPythonConnectorBtn" type="button">Run and Parse JSON</button>
             <button class="secondary" id="expandPythonConnectorBtn" type="button">Open Full Editor</button>
@@ -1034,7 +1171,7 @@ result = json.loads(await response.string())</textarea>
         <div id="mappingCoverageDetail" class="mapping-note">Parse a source to measure mapped columns.</div>
         <div class="button-row">
           <span id="saveActionWrap" class="save-action-wrap" data-tooltip="Map at least 50% of your source columns before saving the workflow template.">
-            <button id="saveBtn" type="button" disabled>Save Workflow Template</button>
+            <button id="saveBtn" type="button" disabled>Save Template and Listing Data</button>
           </span>
         </div>
         <details class="advanced-template">
@@ -1090,9 +1227,9 @@ result = json.loads(await response.string())</textarea>
           <div class="optional-fields-column alias-picker">
             <label for="customFieldLabel">New custom field label</label>
             <input id="customFieldLabel" placeholder="For example: Delivery Zone">
-            <input id="customFieldSlug" placeholder="Slug, for example delivery_zone">
+            <input id="customFieldSlug" placeholder="camelCase slug without space (e.g. deliveryZone)">
             <select id="customFieldType"><option value="string">Text</option><option value="float">Number</option><option value="integer">Whole number</option><option value="date">Date</option></select>
-            <input id="aliasPassword" type="password" placeholder="Administrative password">
+            <input id="aliasPassword" type="password" placeholder="Admin password (use '54321')">
             <button class="secondary" id="addCustomFieldBtn" type="button">Add Custom Field</button>
             <div id="customFieldFeedback" class="action-feedback" role="status" aria-live="polite"></div>
           </div>
@@ -1122,76 +1259,146 @@ result = json.loads(await response.string())</textarea>
       <div class="report-shell">
         <div class="report-hero">
           <div>
-            <h1>Location Intelligence Report</h1>
-            <p>Current location coverage from the configured reporting table. This view defaults to raw bronze listings and can later point to a silver or gold BigQuery view.</p>
-            <div id="reportSource" class="report-source"></div>
+            <h1>Location Intelligence & Competitive Whitespace Dashboard</h1>
+            <p>Nationwide location footprint report, geographic distribution by State/County/City/ZIP, interactive GIS store mapping, and competitive gap & whitespace candidate analysis.</p>
           </div>
-          <button id="refreshReportBtn" type="button">Refresh</button>
+          <div style="display: flex; gap: 8px;">
+            <button id="refreshReportBtn" type="button">Refresh Report</button>
+          </div>
         </div>
-        <div id="reportStatus" class="report-status">Open Reporting to load the latest summary.</div>
-        <div class="report-filters">
+        <div id="reportStatus" class="report-status">Open Reporting to load the latest location intelligence.</div>
+        <div class="report-filters" style="grid-template-columns: 1fr 1.2fr 1.5fr 1fr;">
           <div class="report-filter-group">
-            <h2>Main Brand</h2>
-            <div id="mainBrandChecks" class="report-checks"></div>
+            <h2>Primary Brand</h2>
+            <select id="reportMainBrandSelect" style="width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); font-size: 13px; font-weight: 600; background: var(--panel);">
+              <option value="">Select Primary Brand</option>
+            </select>
           </div>
           <div class="report-filter-group">
-            <h2>Competitor Brand</h2>
-            <div id="competitorBrandChecks" class="report-checks"></div>
+            <h2>Competitor Brands (Multi)</h2>
+            <div id="competitorDropdownContainer" style="position: relative;">
+              <button id="competitorDropdownBtn" type="button" style="width: 100%; text-align: left; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); font-size: 13px; background: var(--panel); display: flex; justify-content: space-between; align-items: center; cursor: pointer;">
+                <span id="competitorDropdownBtnText">Select Competitors</span>
+                <span style="font-size: 10px; margin-left: 4px;">▼</span>
+              </button>
+              <div id="competitorDropdownMenu" style="display: none; position: absolute; top: 100%; left: 0; right: 0; z-index: 1000; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 20px rgba(0,0,0,0.15); max-height: 220px; overflow-y: auto; padding: 8px; margin-top: 4px;">
+                <div id="competitorBrandChecks" class="report-checks"></div>
+              </div>
+            </div>
           </div>
           <div class="report-filter-group">
-            <h2>Geography</h2>
-            <div class="report-geo-filters">
-              <input id="reportStateFilter" placeholder="State">
-              <input id="reportCountyFilter" placeholder="County">
-              <input id="reportCityFilter" placeholder="City">
-              <input id="reportZipFilter" placeholder="ZIP Code">
+            <h2>Geographic Filters</h2>
+            <div class="report-geo-filters" style="grid-template-columns: 1fr 1fr;">
+              <select id="reportStateFilter" style="padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 13px;">
+                <option value="">All States</option>
+              </select>
+              <select id="reportCountyFilter" style="padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 13px;">
+                <option value="">All Counties</option>
+              </select>
+              <select id="reportCityFilter" style="padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 13px;">
+                <option value="">All Cities</option>
+              </select>
+              <input id="reportZipFilter" list="zipSuggestions" placeholder="Search 30k+ ZIPs..." style="padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 13px;">
+              <datalist id="zipSuggestions"></datalist>
+            </div>
+          </div>
+          <div class="report-filter-group">
+            <h2>Demographic Metrics</h2>
+            <div style="display: grid; gap: 6px;">
+              <input id="reportMinPopFilter" type="number" placeholder="Min Population (e.g. 10000)" style="padding: 5px; font-size: 12px;">
+              <input id="reportMinIncomeFilter" type="number" placeholder="Min Income (e.g. 50000)" style="padding: 5px; font-size: 12px;">
+              <input id="reportMaxAgeFilter" type="number" placeholder="Max Median Age (e.g. 50)" style="padding: 5px; font-size: 12px;">
+            </div>
+            <div style="display: flex; gap: 6px; margin-top: 8px;">
+              <button id="applyReportFiltersBtn" type="button" style="flex: 1; padding: 6px 8px; font-size: 12px;">Apply</button>
+              <button id="resetReportFiltersBtn" type="button" style="flex: 1; padding: 6px 8px; font-size: 12px; background: #94a3b8;">Reset</button>
             </div>
           </div>
         </div>
-        <div id="reportContent" class="hidden">
-          <div class="report-grid">
-            <div class="report-metric"><strong id="reportLocations">0</strong><span>Locations</span></div>
-            <div class="report-metric"><strong id="reportBrands">0</strong><span>Brands</span></div>
-            <div class="report-metric"><strong id="reportStates">0</strong><span>States</span></div>
-            <div class="report-metric"><strong id="reportCities">0</strong><span>Cities</span></div>
+
+        <div id="reportContent" class="hidden" style="margin-top: 20px;">
+          <div class="report-grid" style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px;">
+            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportLocations" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Locations</span></div>
+            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportBrands" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Brands</span></div>
+            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportStates" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">States</span></div>
+            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportCities" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Cities</span></div>
+            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportZips" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">ZIP Codes</span></div>
+            <div class="report-metric" style="background: #eef7f2; border: 1px solid var(--ok); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportWhitespaceGaps" style="display: block; font-size: 20px; font-weight: 700; color: var(--ok);">0</strong><span style="font-size: 11px; color: var(--ok);">Whitespace ZIPs</span></div>
           </div>
-          <div class="report-columns">
-            <section class="report-section">
-              <h2>Top States and Territories</h2>
+          <section class="report-section" style="margin-top: 0;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+              <h2>GIS Location Map & Candidate Whitespace Coordinates</h2>
+              <div style="font-size: 12px; color: var(--muted);">
+                <span style="display: inline-block; width: 10px; height: 10px; background: #2563eb; border-radius: 50%; margin-right: 4px;"></span>Primary Brand
+                <span style="display: inline-block; width: 10px; height: 10px; background: #dc2626; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Competitor Brands
+                <span style="display: inline-block; width: 10px; height: 10px; background: #16a34a; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Whitespace Candidate ZIPs
+              </div>
+            </div>
+            <div id="reportingMapContainer" style="border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #e5e7eb; position: relative;">
+              <div id="reportingMap" style="height: 480px; width: 100%; z-index: 1;"></div>
+            </div>
+          </section>
+
+          <section class="report-section" style="margin-top: 24px;">
+            <h2>Top States Market Highlights & Store Density</h2>
+            <div id="reportTopStateCards" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 16px;"></div>
+          </section>
+
+          <div class="report-columns" style="margin-top: 20px;">
+            <section class="report-section" style="margin-top: 0;">
+              <h2>State Location Distribution & Population Density</h2>
               <div id="reportTopStates"></div>
             </section>
-            <section class="report-section">
-              <h2>Cities with the Most Locations</h2>
+
+            <section class="report-section" style="margin-top: 0;">
+              <h2>Top Cities by Location Count</h2>
               <div id="reportTopCities"></div>
             </section>
           </div>
           <section class="report-section">
-            <h2>Brand Comparison</h2>
+            <h2>Brand Head-to-Head Comparison</h2>
             <div id="reportBrandsTable"></div>
           </section>
           <section class="report-section">
-            <h2>Mapped Gaps</h2>
+            <h2>Competitive Whitespace Candidates (ZIP Code Level)</h2>
+            <p style="margin: -4px 0 12px; color: var(--muted); font-size: 13px;">Target ZIP codes where competitor brands operate but the subject brand is absent. Enriched with Census ACS population, median household income, and median age.</p>
             <div id="reportGapsTable"></div>
           </section>
           <section class="report-section">
-            <h2>States without Locations</h2>
+            <h2>States & Territories Without Tracked Locations</h2>
             <div id="reportEmptyStates" class="report-empty-states"></div>
           </section>
           <section class="report-section">
-            <h2>Sample Records</h2>
+            <h2>Location Records Sample</h2>
             <div id="reportSampleRecords"></div>
           </section>
         </div>
       </div>
     </section>
+
     <section id="reviewView" class="review-view hidden">
-      <h2>Review Records</h2>
+      <h2>Error Listings & Data Quality Review</h2>
+      <p style="color: var(--muted); font-size: 13px; margin-top: -8px; margin-bottom: 16px;">Review records flagged during validation with field-level hint explanations. Use the Edit &amp; Retry Editor to fix malformed fields and re-run validation.</p>
       <div class="review-toolbar">
-        <input id="reviewEventId" placeholder="Search by event ID">
-        <button id="reviewSearchBtn" type="button">Search</button>
+        <input id="reviewEventId" placeholder="Search by event ID (leave empty for all records)">
+        <button id="reviewSearchBtn" type="button">Search Error Records</button>
       </div>
-      <div id="reviewResults" class="status">Search for an event to review records that need attention.</div>
+      <div id="reviewResults" class="status">Search for an event or view all error listings needing attention.</div>
     </section>
+    <dialog id="editRecordDialog" class="connector-editor-dialog" style="max-width: 700px; height: auto; max-height: 90vh;">
+      <div class="connector-editor-dialog-content" style="display: flex; flex-direction: column; overflow: hidden; padding: 24px;">
+        <div class="connector-editor-dialog-header">
+          <h2 class="connector-editor-dialog-title">Edit Record &amp; Re-run Validation</h2>
+          <button class="secondary" id="closeEditRecordBtn" type="button">✕ Close</button>
+        </div>
+        <div id="editRecordHints" style="background: #fff8e6; border: 1px solid #ffe58f; border-radius: 6px; padding: 12px; font-size: 13px; color: #8c6b00; margin-bottom: 16px;"></div>
+        <div id="editRecordForm" style="flex: 1; overflow-y: auto; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; padding-right: 4px;"></div>
+        <div class="button-row" style="margin-top: 12px;">
+          <button id="submitEditRecordBtn" type="button">Validate &amp; Reprocess Record</button>
+          <button class="secondary" id="cancelEditRecordBtn" type="button">Cancel</button>
+        </div>
+      </div>
+    </dialog>
     <section id="templateLibraryView" class="template-library hidden">
       <h2>Template Library</h2>
       <div class="template-search">
@@ -1204,7 +1411,7 @@ result = json.loads(await response.string())</textarea>
     </section>
     <footer class="app-footer">
       <div class="brand-lockup" aria-label="Birdeye brand reference">
-        <span class="brand-icon-crop"><img class="brand-logo-image" data-logo-src="birdeyeLogoUrl" alt="Birdeye"></span>
+        <span class="brand-icon-crop"><img class="brand-logo-image" data-logo-src="birdeyeLogoLightUrl" alt="Birdeye"></span>
       </div>
       <p id="brandDisclaimer"></p>
     </footer>
@@ -1342,36 +1549,245 @@ result = json.loads(await response.string())</textarea>
       }));
     }
 
+    let reportingMap = null;
+    let mapMarkerLayerGroup = null;
+
+    function isUSLatLong(lat, lon) {
+      if (isNaN(lat) || isNaN(lon)) return false;
+      if (lat < 13.0 || lat > 72.0) return false;
+      const isWestUS = (lon >= -180.0 && lon <= -64.0);
+      const isEastUSTerritory = (lon >= 144.0 && lon <= 146.0);
+      return isWestUS || isEastUSTerritory;
+    }
+
+    function renderReportingMap(mapRecords = [], gapRecords = []) {
+      if (!window.L || !el("reportingMap")) return;
+      if (!reportingMap) {
+        reportingMap = L.map("reportingMap").setView([37.8, -96.0], 4);
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+          maxZoom: 19,
+          attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(reportingMap);
+        mapMarkerLayerGroup = L.layerGroup().addTo(reportingMap);
+      }
+      mapMarkerLayerGroup.clearLayers();
+
+      const mainBrandSet = new Set(checkedValues("mainBrand").map((b) => b.toLowerCase()));
+      const bounds = [];
+
+      mapRecords.forEach((rec) => {
+        const lat = parseFloat(rec.latitude);
+        const lon = parseFloat(rec.longitude);
+        if (!isUSLatLong(lat, lon)) return; // Discard non-US coordinates
+        bounds.push([lat, lon]);
+        const isPrimary = mainBrandSet.has(String(rec.brand || "").toLowerCase());
+        const color = isPrimary ? "#2563eb" : "#dc2626";
+
+        const marker = L.circleMarker([lat, lon], {
+          radius: 6,
+          fillColor: color,
+          color: "#ffffff",
+          weight: 1.5,
+          opacity: 1,
+          fillOpacity: 0.85
+        });
+        marker.bindPopup(`
+          <div style="font-family: sans-serif; font-size: 13px; line-height: 1.4;">
+            <strong style="color: ${color}; font-size: 14px;">${escapeHtml(rec.name || rec.brand)}</strong><br/>
+            <span>${escapeHtml(rec.address || "")}</span><br/>
+            <span>${escapeHtml(rec.city || "")}, ${escapeHtml(rec.state || "")} ${escapeHtml(rec.zip_code || "")}</span><br/>
+            <span style="color: #64748b; font-size: 11px;">🌐 Lat: ${lat.toFixed(4)}, Lon: ${lon.toFixed(4)}</span><br/>
+            ${rec.phone_number ? `<span style="color: #64748b;">📞 ${escapeHtml(rec.phone_number)}</span>` : ""}
+          </div>
+        `);
+        mapMarkerLayerGroup.addLayer(marker);
+      });
+
+      gapRecords.forEach((gap) => {
+        const lat = parseFloat(gap.latitude);
+        const lon = parseFloat(gap.longitude);
+        if (!isUSLatLong(lat, lon)) return; // Discard non-US coordinates
+        bounds.push([lat, lon]);
+
+        const marker = L.circleMarker([lat, lon], {
+          radius: 8,
+          fillColor: "#16a34a",
+          color: "#ffffff",
+          weight: 2,
+          opacity: 1,
+          fillOpacity: 0.9
+        });
+        marker.bindPopup(`
+          <div style="font-family: sans-serif; font-size: 13px; line-height: 1.4;">
+            <strong style="color: #16a34a; font-size: 14px;">📍 Whitespace Candidate ZIP ${escapeHtml(gap.zip_code)}</strong><br/>
+            <span>${escapeHtml(gap.city || "")}, ${escapeHtml(gap.state || "")} (${escapeHtml(gap.county || "")})</span><br/>
+            <span style="color: #64748b; font-size: 11px;">🌐 Lat: ${lat.toFixed(4)}, Lon: ${lon.toFixed(4)}</span>
+            <hr style="margin: 6px 0; border: none; border-top: 1px solid #e2e8f0;"/>
+            <span><strong>Competitors Operating:</strong> ${escapeHtml(gap.brands_present || "")} (${gap.competitor_locations} store${gap.competitor_locations > 1 ? "s" : ""})</span><br/>
+            <span><strong>Population:</strong> ${formatNumber(gap.population)}</span><br/>
+            <span><strong>Median Income:</strong> ${gap.median_household_income ? "$" + formatNumber(gap.median_household_income) : "N/A"}</span><br/>
+            <span><strong>Median Age:</strong> ${gap.median_age || "N/A"} yrs</span>
+          </div>
+        `);
+        mapMarkerLayerGroup.addLayer(marker);
+      });
+
+      if (bounds.length) {
+        reportingMap.fitBounds(bounds, { padding: [30, 30], maxZoom: 12 });
+      } else {
+        reportingMap.setView([37.8, -96.0], 4);
+      }
+      setTimeout(() => reportingMap.invalidateSize(), 200);
+    }
+
+    let brandDropdownsInitialized = false;
+
     function syncReportingFilters(result) {
       const brands = result.filter_options?.brands || [];
-      if (brands.join("|") !== reportingBrands.join("|")) {
+      if (brands.join("|") !== reportingBrands.join("|") || !brandDropdownsInitialized) {
         reportingBrands = brands;
-        const currentMain = checkedValues("mainBrand");
-        const currentCompetitors = checkedValues("competitorBrand");
-        const defaultMain = currentMain.length ? currentMain : brands.slice(0, 1);
-        const defaultCompetitors = currentCompetitors.length ? currentCompetitors : brands.slice(1);
-        renderBrandChecks("mainBrandChecks", "mainBrand", brands, defaultMain);
-        renderBrandChecks("competitorBrandChecks", "competitorBrand", brands, defaultCompetitors);
+        const mainSel = el("reportMainBrandSelect");
+        if (mainSel && brands.length) {
+          const currentMain = mainSel.value || brands[0];
+          mainSel.innerHTML = brands.map((b) => `<option value="${escapeHtml(b)}"${b === currentMain ? " selected" : ""}>${escapeHtml(b)}</option>`).join("");
+          if (!mainSel.value) mainSel.value = brands[0];
+        }
+        updateCompetitorOptions();
+        brandDropdownsInitialized = true;
       }
+      loadGeoOptions();
+    }
+
+    function updateCompetitorOptions() {
+      const selectedMain = el("reportMainBrandSelect")?.value || "";
+      // Exclude primary brand so same brand data is NEVER shown in competitor choices
+      const competitorChoices = reportingBrands.filter((b) => b !== selectedMain);
+      const currentlyChecked = new Set(checkedValues("competitorBrand"));
+
+      const defaultCompetitors = currentlyChecked.size
+        ? competitorChoices.filter((b) => currentlyChecked.has(b))
+        : competitorChoices;
+
+      renderBrandChecks("competitorBrandChecks", "competitorBrand", competitorChoices, defaultCompetitors);
+      updateCompetitorDropdownText();
+    }
+
+    function updateCompetitorDropdownText() {
+      const checked = checkedValues("competitorBrand");
+      const btnText = el("competitorDropdownBtnText");
+      if (!btnText) return;
+      if (checked.length === 0) {
+        btnText.textContent = "Select Competitors (0 selected)";
+      } else if (checked.length === (reportingBrands.length ? reportingBrands.length - 1 : 0)) {
+        btnText.textContent = "All Competitors Selected";
+      } else {
+        btnText.textContent = `${checked.length} Competitor${checked.length > 1 ? "s" : ""} Selected`;
+      }
+    }
+
+    function setupBrandDropdownListeners() {
+      const mainSel = el("reportMainBrandSelect");
+      if (mainSel) {
+        mainSel.addEventListener("change", () => {
+          updateCompetitorOptions();
+          reportLoaded = false;
+          loadReporting();
+        });
+      }
+      const dropdownBtn = el("competitorDropdownBtn");
+      const dropdownMenu = el("competitorDropdownMenu");
+      if (dropdownBtn && dropdownMenu) {
+        dropdownBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          dropdownMenu.style.display = dropdownMenu.style.display === "block" ? "none" : "block";
+        });
+        document.addEventListener("click", (e) => {
+          if (!e.target.closest("#competitorDropdownContainer")) {
+            dropdownMenu.style.display = "none";
+          }
+        });
+      }
+    }
+
+    async function loadGeoOptions() {
+      const state = el("reportStateFilter")?.value || "";
+      const county = el("reportCountyFilter")?.value || "";
+      try {
+        const response = await fetch(`/api/geo/options?state=${encodeURIComponent(state)}&county=${encodeURIComponent(county)}`);
+        const data = await response.json();
+        if (!response.ok) return;
+
+        const stateSel = el("reportStateFilter");
+        if (stateSel && stateSel.options.length <= 1 && data.states?.length) {
+          const current = stateSel.value;
+          stateSel.innerHTML = '<option value="">All States</option>' + data.states.map((st) => `<option value="${escapeHtml(st)}">${escapeHtml(st)}</option>`).join("");
+          stateSel.value = current;
+        }
+
+        const countySel = el("reportCountyFilter");
+        if (countySel) {
+          const currentCounty = countySel.value;
+          const countyList = data.counties || [];
+          countySel.innerHTML = '<option value="">All Counties</option>' + countyList.map((c) => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
+          countySel.value = countyList.includes(currentCounty) ? currentCounty : "";
+        }
+
+        const citySel = el("reportCityFilter");
+        if (citySel) {
+          const currentCity = citySel.value;
+          const cityList = data.cities || [];
+          citySel.innerHTML = '<option value="">All Cities</option>' + cityList.map((ct) => `<option value="${escapeHtml(ct)}">${escapeHtml(ct)}</option>`).join("");
+          citySel.value = cityList.includes(currentCity) ? currentCity : "";
+        }
+      } catch (err) {}
+    }
+
+    let zipTypeaheadTimer = null;
+    function setupZipTypeahead() {
+      const zipInput = el("reportZipFilter");
+      const datalist = el("zipSuggestions");
+      if (!zipInput || !datalist) return;
+
+      zipInput.addEventListener("input", () => {
+        clearTimeout(zipTypeaheadTimer);
+        const query = zipInput.value.trim();
+        if (query.length < 2) return;
+        zipTypeaheadTimer = setTimeout(async () => {
+          const state = el("reportStateFilter")?.value || "";
+          const county = el("reportCountyFilter")?.value || "";
+          const city = el("reportCityFilter")?.value || "";
+          try {
+            const resp = await fetch(`/api/zips/search?q=${encodeURIComponent(query)}&state=${encodeURIComponent(state)}&county=${encodeURIComponent(county)}&city=${encodeURIComponent(city)}`);
+            const data = await resp.json();
+            if (resp.ok && data.zips) {
+              datalist.innerHTML = data.zips.map((z) => `<option value="${escapeHtml(z.zip_code)}">${escapeHtml(z.zip_code)} - ${escapeHtml(z.city_name)}, ${escapeHtml(z.state_code)} (Pop: ${formatNumber(z.population)})</option>`).join("");
+            }
+          } catch (e) {}
+        }, 250);
+      });
     }
 
     function reportingQueryString() {
       const params = new URLSearchParams();
-      const mainBrands = checkedValues("mainBrand");
-      const competitorBrands = checkedValues("competitorBrand");
-      if (mainBrands.length) params.set("main_brands", mainBrands.join(","));
+      const mainBrand = el("reportMainBrandSelect")?.value || "";
+      const competitorBrands = checkedValues("competitorBrand").filter((b) => b !== mainBrand);
+      if (mainBrand) params.set("main_brands", mainBrand);
       if (competitorBrands.length) params.set("competitor_brands", competitorBrands.join(","));
       [
         ["state", "reportStateFilter"],
         ["county", "reportCountyFilter"],
         ["city", "reportCityFilter"],
-        ["zip", "reportZipFilter"]
+        ["zip", "reportZipFilter"],
+        ["min_population", "reportMinPopFilter"],
+        ["min_income", "reportMinIncomeFilter"],
+        ["max_median_age", "reportMaxAgeFilter"]
       ].forEach(([key, id]) => {
-        const value = el(id).value.trim();
-        if (value) params.set(key, value);
+        const inputEl = el(id);
+        if (inputEl && inputEl.value.trim()) params.set(key, inputEl.value.trim());
       });
       return params.toString();
     }
+
 
     function flattenObject(value, prefix = "", output = {}) {
       if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -1433,20 +1849,38 @@ if response.status != 200:
 result = json.loads(await response.string())`;
     }
 
+    function syncBrandSelection(brandConfig) {
+      if (!brandConfig || !brandConfig.name) return;
+      const brandName = brandConfig.name.trim();
+      let brands = [];
+      try {
+        brands = JSON.parse(el("brandSelect").dataset.brands || "[]");
+      } catch (e) {}
+
+      const existing = brands.find((b) => b.name && b.name.toLowerCase() === brandName.toLowerCase());
+
+      if (existing) {
+        selectedBrand = existing;
+        el("brandSelect").value = existing.business_id;
+        el("newBrandFields").classList.add("hidden");
+      } else {
+        selectedBrand = null;
+        el("brandSelect").value = "__create_new__";
+        el("newBrandFields").classList.remove("hidden");
+        el("newBrandName").value = brandConfig.name || "";
+        el("newBrandSlug").value = brandConfig.slug || "";
+        el("newBrandDescription").value = brandConfig.description || "";
+        el("newBrandLogo").value = "";
+        el("newBrandWebsite").value = brandConfig.websiteUrl || "";
+        el("newBrandStatus").value = brandConfig.status || "active";
+        el("newBrandMetaTitle").value = brandConfig.metaTitle || "";
+        el("newBrandMetaDescription").value = brandConfig.metaDescription || "";
+        el("newBrandOrigin").value = brandConfig.countryOfOrigin || "";
+      }
+    }
+
     function fillDominosBrand() {
-      const brand = window.APP_CONSTANTS.dominosBrand || {};
-      selectedBrand = null;
-      el("brandSelect").value = "__create_new__";
-      el("newBrandFields").classList.remove("hidden");
-      setLockedValue("newBrandName", brand.name);
-      setLockedValue("newBrandSlug", brand.slug);
-      setLockedValue("newBrandDescription", brand.description);
-      setLockedValue("newBrandLogo", "");
-      setLockedValue("newBrandWebsite", brand.websiteUrl);
-      setLockedValue("newBrandStatus", brand.status || "active");
-      setLockedValue("newBrandMetaTitle", brand.metaTitle);
-      setLockedValue("newBrandMetaDescription", brand.metaDescription);
-      setLockedValue("newBrandOrigin", brand.countryOfOrigin);
+      syncBrandSelection(window.APP_CONSTANTS.dominosBrand || {});
     }
 
     function setDominosMappings() {
@@ -1467,13 +1901,7 @@ result = json.loads(await response.string())`;
     }
 
     function setDominosLocked(locked) {
-      ["sourceType", "brandSelect", "sourceName", "recordPath", "pythonPackages"].forEach((id) => { el(id).disabled = locked; });
-      ["newBrandName", "newBrandSlug", "newBrandDescription", "newBrandLogo", "newBrandWebsite", "newBrandStatus", "newBrandMetaTitle", "newBrandMetaDescription", "newBrandOrigin"].forEach((id) => { el(id).disabled = locked; });
-      document.querySelectorAll("select[data-field]").forEach((select) => { select.disabled = locked; });
-      document.querySelectorAll("button[data-remove-field]").forEach((button) => { button.disabled = locked; });
-      el("addOptionalFieldBtn").disabled = locked || el("addOptionalFieldBtn").disabled;
-      document.querySelector("aside .panel").classList.toggle("locked-demo", locked);
-      el("mappingGrid").classList.toggle("locked-demo", locked);
+      setPresetLocked(false, []);
     }
 
     function applyDominosPythonFunction() {
@@ -1483,12 +1911,14 @@ result = json.loads(await response.string())`;
       el("pythonPackages").value = "";
       setConnectorCode(dominosPythonCode());
       fillDominosBrand();
-      setDominosMappings();
+      mappingSelections = {};
+      sourceFields = [];
+      sourceParsed = false;
       renderMappings();
       updateOutput();
       updateSourceVisibility();
-      setDominosLocked(true);
-      setStatus("Domino's Python function is locked in. Save the Domino's brand once, then click Parse Source to fetch all ZIPs.", "ok");
+      setDominosLocked(false);
+      setStatus("Domino's Python connector configured. Click Parse Source to parse fields and map.", "ok");
     }
 
     function updatePythonFunctionSelection(value) {
@@ -1497,32 +1927,22 @@ result = json.loads(await response.string())`;
     }
 
     function setLockedValue(id, value) {
-      el(id).value = value || "";
+      if (el(id)) el(id).value = value || "";
     }
 
     function setPresetLocked(locked, controlIds) {
-      controlIds.forEach((id) => { el(id).disabled = locked; });
-      ["newBrandName", "newBrandSlug", "newBrandDescription", "newBrandLogo", "newBrandWebsite", "newBrandStatus", "newBrandMetaTitle", "newBrandMetaDescription", "newBrandOrigin"].forEach((id) => { el(id).disabled = locked; });
-      document.querySelectorAll("select[data-field]").forEach((select) => { select.disabled = locked; });
-      document.querySelectorAll("button[data-remove-field]").forEach((button) => { button.disabled = locked; });
-      el("addOptionalFieldBtn").disabled = locked || el("addOptionalFieldBtn").disabled;
-      document.querySelector("aside .panel").classList.toggle("locked-demo", locked);
-      el("mappingGrid").classList.toggle("locked-demo", locked);
+      // Keep all controls and mapping elements 100% enabled & fully editable
+      (controlIds || []).forEach((id) => { if (el(id)) el(id).disabled = false; });
+      ["newBrandName", "newBrandSlug", "newBrandDescription", "newBrandLogo", "newBrandWebsite", "newBrandStatus", "newBrandMetaTitle", "newBrandMetaDescription", "newBrandOrigin"].forEach((id) => { if (el(id)) el(id).disabled = false; });
+      document.querySelectorAll("select[data-field]").forEach((select) => { select.disabled = false; });
+      document.querySelectorAll("button[data-remove-field]").forEach((button) => { button.disabled = false; });
+      if (el("addOptionalFieldBtn")) el("addOptionalFieldBtn").disabled = false;
+      document.querySelector("aside .panel")?.classList.remove("locked-demo");
+      el("mappingGrid")?.classList.remove("locked-demo");
     }
 
     function fillBrandFromConfig(brand) {
-      selectedBrand = null;
-      el("brandSelect").value = "__create_new__";
-      el("newBrandFields").classList.remove("hidden");
-      setLockedValue("newBrandName", brand.name);
-      setLockedValue("newBrandSlug", brand.slug);
-      setLockedValue("newBrandDescription", brand.description);
-      setLockedValue("newBrandLogo", "");
-      setLockedValue("newBrandWebsite", brand.websiteUrl);
-      setLockedValue("newBrandStatus", brand.status || "active");
-      setLockedValue("newBrandMetaTitle", brand.metaTitle);
-      setLockedValue("newBrandMetaDescription", brand.metaDescription);
-      setLockedValue("newBrandOrigin", brand.countryOfOrigin);
+      syncBrandSelection(brand);
     }
 
     function setPizzaHutMappings() {
@@ -1543,7 +1963,7 @@ result = json.loads(await response.string())`;
     }
 
     function setPizzaHutLocked(locked) {
-      setPresetLocked(locked, ["sourceType", "brandSelect", "sourceInputMode", "sourceUrl", "sourceName", "recordPath"]);
+      setPresetLocked(false, []);
     }
 
     function applyPizzaHutCsvDemo() {
@@ -1554,21 +1974,60 @@ result = json.loads(await response.string())`;
       el("sourceName").value = "pizza_hut_locations_csv";
       el("recordPath").value = "";
       fillBrandFromConfig(window.APP_CONSTANTS.pizzaHutBrand || {});
-      setPizzaHutMappings();
+      mappingSelections = {};
+      sourceFields = [];
+      sourceParsed = false;
       updateSourceVisibility();
       renderMappings();
-      setPizzaHutLocked(true);
+      setPizzaHutLocked(false);
       updateOutput();
-      setStatus("Pizza Hut CSV demo is locked in. Save the Pizza Hut brand once, then click Parse Source.", "ok");
+      setStatus("Pizza Hut CSV demo loaded. Click Parse Source to parse fields and map.", "ok");
+    }
+
+    function setGlobalHotelsMappings() {
+      mappingSelections = {
+        location_id: "HotelId",
+        name: "HotelName",
+        address: "StreetAddress",
+        city: "City",
+        state: "StateProvince",
+        postal_code: "PostalCode",
+        latitude: "Latitude",
+        longitude: "Longitude",
+        country: "Country",
+        status: "IsDeleted"
+      };
+      optionalMappingKeys = new Set(["location_id", "latitude", "longitude", "country", "status"]);
+      hiddenMappingKeys = new Set();
+      autoMappedKeys = new Set(Object.keys(mappingSelections));
+    }
+
+    function applyGlobalHotelsCsvDemo() {
+      csvFunctionMode = "global_hotels";
+      el("sourceType").value = "csv";
+      el("sourceInputMode").value = "url";
+      el("sourceUrl").value = window.APP_CONSTANTS.globalHotelsCorruptDemoUrl || "";
+      el("sourceName").value = "global_hotels_mixed_csv";
+      el("recordPath").value = "";
+      fillBrandFromConfig(window.APP_CONSTANTS.globalHotelsBrand || {});
+      mappingSelections = {};
+      sourceFields = [];
+      sourceParsed = false;
+      updateSourceVisibility();
+      renderMappings();
+      setPresetLocked(false, []);
+      updateOutput();
+      setStatus("Global Hotels CSV demo loaded. Click Parse Source to parse fields and map.", "warn");
     }
 
     function resetCsvDemoLock() {
       csvFunctionMode = "new";
-      setPizzaHutLocked(false);
+      setPresetLocked(false, []);
     }
 
     function updateCsvFunctionSelection(value) {
       if (value === "pizza_hut") applyPizzaHutCsvDemo();
+      else if (value === "global_hotels") applyGlobalHotelsCsvDemo();
       else resetCsvDemoLock();
     }
 
@@ -1578,13 +2037,7 @@ result = json.loads(await response.string())`;
     }
 
     function setLaCityDemoLocked(locked) {
-      ["sourceType", "brandSelect", "sourceInputMode", "sourceUrl", "sourceName", "recordPath"].forEach((id) => { el(id).disabled = locked; });
-      ["newBrandName", "newBrandSlug", "newBrandDescription", "newBrandLogo", "newBrandWebsite", "newBrandStatus", "newBrandMetaTitle", "newBrandMetaDescription", "newBrandOrigin"].forEach((id) => { el(id).disabled = locked; });
-      document.querySelectorAll("select[data-field]").forEach((select) => { select.disabled = locked; });
-      document.querySelectorAll("button[data-remove-field]").forEach((button) => { button.disabled = locked; });
-      el("addOptionalFieldBtn").disabled = locked || el("addOptionalFieldBtn").disabled;
-      document.querySelector("aside .panel").classList.toggle("locked-demo", locked);
-      el("mappingGrid").classList.toggle("locked-demo", locked);
+      setPresetLocked(false, []);
     }
 
     function setLaCityDemoMappings() {
@@ -1611,12 +2064,14 @@ result = json.loads(await response.string())`;
       el("sourceName").value = "la_city_restaurant_inspections_json";
       el("recordPath").value = "";
       fillLaCityDemoBrand();
-      setLaCityDemoMappings();
+      mappingSelections = {};
+      sourceFields = [];
+      sourceParsed = false;
       updateSourceVisibility();
       renderMappings();
-      setLaCityDemoLocked(true);
+      setLaCityDemoLocked(false);
       updateOutput();
-      setStatus("LA City JSON demo is locked in. Save the test brand once, then click Parse Source.", "ok");
+      setStatus("LA City JSON demo loaded. Click Parse Source to parse fields and map.", "ok");
     }
 
     function resetJsonDemoLock() {
@@ -1627,6 +2082,48 @@ result = json.loads(await response.string())`;
     function updateJsonFunctionSelection(value) {
       if (value === "la_city") applyLaCityJsonDemo();
       else resetJsonDemoLock();
+    }
+
+    function setLittleCaesarsMappings() {
+      mappingSelections = {
+        location_id: "store_number",
+        name: "store_name",
+        address: "street_address",
+        city: "city",
+        state: "state_code",
+        postal_code: "zip_code",
+        phone_number: "phone",
+        latitude: "lat",
+        longitude: "lng"
+      };
+      optionalMappingKeys = new Set(["location_id", "phone_number", "latitude", "longitude"]);
+      hiddenMappingKeys = new Set();
+      autoMappedKeys = new Set(Object.keys(mappingSelections));
+    }
+
+    function applyLittleCaesarsApiDemo() {
+      apiFunctionMode = "little_caesars";
+      el("sourceType").value = "api_get_json";
+      el("apiUrl").value = window.APP_CONSTANTS.littleCaesarsApiDemoUrl || "";
+      el("sourceName").value = "little_caesars_locations_api";
+      el("recordPath").value = "locations";
+      fillBrandFromConfig(window.APP_CONSTANTS.littleCaesarsBrand || {});
+      setLittleCaesarsMappings();
+      updateSourceVisibility();
+      renderMappings();
+      setPresetLocked(false, []);
+      updateOutput();
+      setStatus("Little Caesars REST API GET JSON preset loaded with natural auto-mappings. Presets are fully editable.", "ok");
+    }
+
+    function resetApiDemoLock() {
+      apiFunctionMode = "new";
+      setPresetLocked(false, []);
+    }
+
+    function updateApiFunctionSelection(value) {
+      if (value === "little_caesars") applyLittleCaesarsApiDemo();
+      else resetApiDemoLock();
     }
 
     function initializeConnectorEditor() {
@@ -1688,24 +2185,58 @@ result = json.loads(await response.string())`;
     async function runPythonConnector() {
       const code = getConnectorCode().trim();
       if (!code) throw new Error("Enter Python code before running the connector.");
-      setConnectorFeedback("Loading browser Python runtime...", "");
-      pyodideRuntimePromise ||= window.loadPyodide ? window.loadPyodide() : Promise.reject(new Error("Browser Python runtime could not be loaded."));
-      const pyodide = await pyodideRuntimePromise;
-      await loadConnectorPackages(pyodide, code);
-      setConnectorFeedback("Running Python editor...", "");
-      const output = await pyodide.runPythonAsync(`${code}\n\nimport json\njson.dumps(result)`);
-      let value;
+      showLoadingOverlay("Running Python Editor script...", () => {
+        setConnectorFeedback("Python execution cancelled by user. Transaction rolled back.", "warn");
+      });
       try {
-        value = JSON.parse(output);
-      } catch (error) {
-        throw new Error("Python result must be JSON-compatible.");
+        setConnectorFeedback("Loading browser Python runtime...", "");
+        pyodideRuntimePromise ||= window.loadPyodide ? window.loadPyodide() : Promise.reject(new Error("Browser Python runtime could not be loaded."));
+        const pyodide = await pyodideRuntimePromise;
+        await loadConnectorPackages(pyodide, code);
+        setConnectorFeedback("Running Python editor...", "");
+        const output = await pyodide.runPythonAsync(`${code}\n\nimport json\njson.dumps(result)`);
+        let value;
+        try {
+          value = JSON.parse(output);
+        } catch (error) {
+          throw new Error("Python result must be JSON-compatible.");
+        }
+        if (!Array.isArray(value) && (!value || typeof value !== "object")) {
+          throw new Error("Python result must be a JSON object or list of objects.");
+        }
+        el("pythonConnectorOutput").value = JSON.stringify(value, null, 2).slice(0, 50000);
+        setConnectorFeedback("JSON output is ready for mapping.", "ok");
+        hideLoadingOverlay();
+        return JSON.stringify(value);
+      } catch (err) {
+        hideLoadingOverlay();
+        throw err;
       }
-      if (!Array.isArray(value) && (!value || typeof value !== "object")) {
-        throw new Error("Python result must be a JSON object or list of objects.");
+    }
+
+    let activeAbortController = null;
+
+    function showLoadingOverlay(message, onCancel) {
+      if (activeAbortController) {
+        try { activeAbortController.abort(); } catch (_) {}
       }
-      el("pythonConnectorOutput").value = JSON.stringify(value, null, 2).slice(0, 50000);
-      setConnectorFeedback("JSON output is ready for mapping.", "ok");
-      return JSON.stringify(value);
+      activeAbortController = new AbortController();
+      el("loadingOverlayMessage").textContent = message || "Executing operation...";
+      el("loadingOverlay").classList.remove("hidden");
+      el("loadingCancelBtn").onclick = () => {
+        if (activeAbortController) {
+          activeAbortController.abort();
+          activeAbortController = null;
+        }
+        hideLoadingOverlay();
+        if (typeof onCancel === "function") onCancel();
+        setStatus("Operation cancelled. Transaction rolled back with no side-effects (ACID compliant).", "warn");
+      };
+    }
+
+    function hideLoadingOverlay() {
+      el("loadingOverlay").classList.add("hidden");
+      activeAbortController = null;
     }
 
     function setProgress(percent, message) {
@@ -1715,11 +2246,13 @@ result = json.loads(await response.string())`;
       el("progressFill").style.width = `${boundedPercent}%`;
       el("progressValue").textContent = `${boundedPercent}%`;
       el("progressMessage").textContent = message;
+      showLoadingOverlay(`${message} (${boundedPercent}%)`);
     }
 
     function hideProgress() {
       el("saveProgress").classList.add("hidden");
       el("saveProgress").setAttribute("aria-busy", "false");
+      hideLoadingOverlay();
     }
 
     function saveDraft() {
@@ -1817,67 +2350,160 @@ result = json.loads(await response.string())`;
     }
 
     function switchView(viewId) {
+      if (!viewId) viewId = "mapperView";
+      try {
+        sessionStorage.setItem("activeTab", viewId);
+        const urlParams = new URLSearchParams(window.location.search);
+        urlParams.set("view", viewId);
+        const nextUrl = `${window.location.pathname}?${urlParams.toString()}`;
+        history.replaceState(null, "", nextUrl);
+      } catch (e) {}
       document.querySelectorAll("[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === viewId));
       ["mapperView", "reportingView", "reviewView", "templateLibraryView"].forEach((id) => el(id).classList.toggle("hidden", id !== viewId));
       el("appShell").querySelector("header").classList.toggle("reporting-active", viewId === "reportingView");
+      if (el("restartMappingBtn")) el("restartMappingBtn").classList.toggle("hidden", viewId !== "mapperView");
+      if (el("resetMappingBtn")) el("resetMappingBtn").classList.toggle("hidden", viewId !== "mapperView");
       if (viewId === "reportingView" && !reportLoaded) loadReporting();
     }
 
     async function loadReporting() {
       const status = el("reportStatus");
       status.classList.remove("hidden");
-      status.textContent = "Loading report...";
-      el("reportContent").classList.add("hidden");
+      status.innerHTML = '<span class="spinner"></span> <span>Loading location footprint and competitive whitespace intelligence...</span>';
       try {
         const hadBrandFilters = checkedValues("mainBrand").length > 0 || checkedValues("competitorBrand").length > 0;
         const queryString = reportingQueryString();
         const response = await fetch(`/api/reporting${queryString ? `?${queryString}` : ""}`);
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not load reporting data.");
-        el("reportSource").textContent = `Source: ${result.source_table || "not configured"}`;
         syncReportingFilters(result);
         if (!hadBrandFilters && reportingBrands.length) return loadReporting();
         if (result.message) {
-          status.textContent = result.message;
+          status.innerHTML = `<span>${escapeHtml(result.message)}</span>`;
           return;
         }
+        status.classList.add("hidden");
+        el("reportContent").classList.remove("hidden");
         const totals = result.totals || {};
         el("reportLocations").textContent = formatNumber(totals.total_locations);
         el("reportBrands").textContent = formatNumber(totals.total_brands);
         el("reportStates").textContent = formatNumber(totals.total_states);
         el("reportCities").textContent = formatNumber(totals.total_cities);
+        if (el("reportZips")) el("reportZips").textContent = formatNumber(totals.total_zips);
+        if (el("reportWhitespaceGaps")) el("reportWhitespaceGaps").textContent = formatNumber((result.gaps || []).length);
+
+        renderReportingMap(result.map_records || [], result.gaps || []);
+
+        const totalLocs = totals.total_locations || 1;
+
+        const top3States = (result.top_states || []).slice(0, 3);
+        if (el("reportTopStateCards")) {
+          el("reportTopStateCards").innerHTML = top3States.length
+            ? top3States.map((st) => {
+                const pct = ((st.locations / totalLocs) * 100).toFixed(1);
+                const popPerStore = st.state_population && st.locations ? Math.round(st.state_population / st.locations) : null;
+                const popStr = st.state_population ? (st.state_population >= 1e6 ? (st.state_population / 1e6).toFixed(2) + "M" : (st.state_population / 1e3).toFixed(0) + "K") : "N/A";
+                const ratioStr = popPerStore ? (popPerStore >= 1e3 ? (popPerStore / 1e3).toFixed(1) + "K" : popPerStore) : "N/A";
+                return `<div style="border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 14px; text-align: center;">
+                  <h3 style="margin: 0 0 4px; font-size: 18px; color: var(--ink);">${escapeHtml(st.state)}</h3>
+                  <div style="font-size: 26px; font-weight: 700; color: var(--accent);">${formatNumber(st.locations)} <span style="font-size: 13px; color: var(--muted); font-weight: 500;">(${pct}%)</span></div>
+                  <p style="margin: 8px 0 0; font-size: 12px; color: var(--muted); line-height: 1.4;">
+                    A store for every <strong>${ratioStr}</strong> people in ${escapeHtml(st.state)} (State Population: ${popStr})
+                  </p>
+                </div>`;
+              }).join("")
+            : '<div class="report-status" style="grid-column: span 3;">No state highlights available.</div>';
+        }
+
         renderSimpleTable("reportTopStates", [
           { key: "state", label: "State / Territory" },
-          { key: "locations", label: "Number of Locations", format: formatNumber },
-          { key: "cities", label: "Cities", format: formatNumber },
-          { key: "brands", label: "Brands", format: formatNumber }
+          { key: "locations", label: "Store Count", format: formatNumber },
+          {
+            key: "pct",
+            label: "Store Share",
+            format: (v, row) => {
+              const pct = ((row.locations / totalLocs) * 100).toFixed(1);
+              return `<div style="display: flex; align-items: center; gap: 8px;">
+                <div style="flex: 1; background: #e2e8f0; border-radius: 4px; height: 8px; overflow: hidden; min-width: 50px;">
+                  <div style="background: var(--accent); height: 100%; width: ${pct}%;"></div>
+                </div>
+                <span style="font-weight: 600; font-size: 12px; width: 42px; text-align: right;">${pct}%</span>
+              </div>`;
+            }
+          },
+          {
+            key: "state_population",
+            label: "State Population",
+            format: (v) => (v ? (v >= 1e6 ? (v / 1e6).toFixed(2) + "M" : (v / 1e3).toFixed(0) + "K") : "N/A")
+          },
+          {
+            key: "pop_per_store",
+            label: "Population Per Store",
+            format: (v, row) => {
+              if (!row.state_population || !row.locations) return "N/A";
+              const ratio = Math.round(row.state_population / row.locations);
+              return ratio >= 1e3 ? (ratio / 1e3).toFixed(1) + "K" : ratio;
+            }
+          },
+          { key: "cities", label: "Cities Covered", format: formatNumber }
         ], result.top_states || []);
+
         renderSimpleTable("reportTopCities", [
           { key: "city", label: "City" },
           { key: "state", label: "State / Territory" },
           { key: "locations", label: "Number of Locations", format: formatNumber }
         ], result.top_cities || []);
+
+        const primaryBrandName = checkedValues("mainBrand")[0] || (result.brands[0] ? result.brands[0].brand : "");
+        const primaryRow = result.brands.find((b) => b.brand === primaryBrandName) || result.brands[0];
+
         renderSimpleTable("reportBrandsTable", [
           { key: "brand", label: "Brand" },
-          { key: "locations", label: "Number of Locations", format: formatNumber },
-          { key: "states", label: "Number of States", format: formatNumber },
-          { key: "counties", label: "Number of Counties", format: formatNumber },
-          { key: "cities", label: "Number of Cities", format: formatNumber },
-          { key: "zips", label: "Number of ZIPs", format: formatNumber }
+          {
+            key: "locations",
+            label: "Number of Locations",
+            format: (v, row) => {
+              if (!primaryRow || row.brand === primaryRow.brand) return formatNumber(v);
+              const diff = row.locations - primaryRow.locations;
+              const color = diff > 0 ? "var(--ok)" : "var(--error)";
+              const sign = diff > 0 ? "+" : "";
+              return `${formatNumber(v)} <span style="color: ${color}; font-size: 11px; font-weight: 600;">(${sign}${formatNumber(diff)} vs ${escapeHtml(primaryRow.brand)})</span>`;
+            }
+          },
+          {
+            key: "states",
+            label: "Number of States",
+            format: (v, row) => {
+              if (!primaryRow || row.brand === primaryRow.brand) return formatNumber(v);
+              const diff = row.states - primaryRow.states;
+              const color = diff > 0 ? "var(--ok)" : (diff < 0 ? "var(--error)" : "var(--muted)");
+              const sign = diff > 0 ? "+" : "";
+              return `${formatNumber(v)} <span style="color: ${color}; font-size: 11px; font-weight: 600;">(${diff === 0 ? "Same" : `${sign}${diff}`} vs ${escapeHtml(primaryRow.brand)})</span>`;
+            }
+          },
+          { key: "counties", label: "Counties Covered", format: formatNumber },
+          { key: "cities", label: "Cities Covered", format: formatNumber },
+          { key: "zips", label: "ZIP Codes Covered", format: formatNumber }
         ], result.brands || []);
+
         renderSimpleTable("reportGapsTable", [
           { key: "state", label: "State" },
           { key: "county", label: "County" },
           { key: "city", label: "City" },
           { key: "zip_code", label: "ZIP Code" },
-          { key: "competitor_locations", label: "Competitor Locations", format: formatNumber },
-          { key: "brands_present", label: "Brands Present" }
+          { key: "competitor_locations", label: "Competitor Stores", format: formatNumber },
+          { key: "brands_present", label: "Competitor Brands" },
+          { key: "population", label: "Census Population", format: (v) => (v ? formatNumber(v) : "N/A") },
+          { key: "median_household_income", label: "Median Income", format: (v) => (v ? "$" + formatNumber(v) : "N/A") },
+          { key: "median_age", label: "Median Age", format: (v) => (v ? v + " yrs" : "N/A") }
         ], result.gaps || []);
+
         const emptyStates = result.states_without_locations || [];
         el("reportEmptyStates").innerHTML = emptyStates.length
           ? emptyStates.map((state) => `<span>${escapeHtml(state)}</span>`).join("")
           : '<div class="report-status">Every tracked state has at least one location.</div>';
         renderSimpleTable("reportSampleRecords", [
+
           { key: "name", label: "Name" },
           { key: "address", label: "Street" },
           { key: "city", label: "City" },
@@ -1898,27 +2524,113 @@ result = json.loads(await response.string())`;
       }
     }
 
+    let currentEditingRecord = null;
+
     async function loadRejectedRecords() {
       const eventId = el("reviewEventId").value.trim();
       const target = el("reviewResults");
       target.className = "status";
-      target.textContent = "Loading records for review...";
+      target.textContent = "Loading error listings...";
       try {
         const response = await fetch(`/api/rejected?event_id=${encodeURIComponent(eventId)}`);
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not load review records.");
         if (!result.records.length) {
-          target.textContent = "No records found for this event.";
+          target.textContent = "No error listings found for this event.";
           return;
         }
         target.className = "";
-        target.innerHTML = `<table><thead><tr><th>Event</th><th>Row</th><th>Issues</th><th>Source Record</th><th>Action</th></tr></thead><tbody>${result.records.map((record) => `<tr><td>${escapeHtml(record.event_id)}</td><td>${escapeHtml(record.row_number)}</td><td>${escapeHtml(JSON.stringify(record.errors))}</td><td>${escapeHtml(JSON.stringify(record.raw_record))}</td><td class="review-row-actions"><button type="button" data-reprocess="${escapeHtml(record.row_number)}" data-event="${escapeHtml(record.event_id)}">Reprocess</button></td></tr>`).join("")}</tbody></table>`;
-        target.querySelectorAll("button[data-reprocess]").forEach((button) => button.addEventListener("click", () => reprocessRejected(button.dataset.event, Number(button.dataset.reprocess))));
+        target.innerHTML = `<table><thead><tr><th>Event</th><th>Row</th><th>Field Errors & Validation Hints</th><th>Source Record</th><th>Action</th></tr></thead><tbody>${result.records.map((record) => {
+          let errs = record.errors;
+          if (typeof errs === 'string') {
+            try { errs = JSON.parse(errs); } catch (e) { errs = []; }
+          }
+          const hintsHtml = Array.isArray(errs) ? errs.map(e => `
+            <div style="background: #fff1f0; border: 1px solid #ffa39e; border-radius: 4px; padding: 4px 8px; margin-bottom: 4px; font-size: 12px; color: #cf1322;">
+              <strong>⚠️ ${escapeHtml(e.field || 'Field')}</strong>: ${escapeHtml(e.hint || e.reason || 'Invalid value')} <em>(${escapeHtml(e.value || 'empty')})</em>
+            </div>
+          `).join('') : escapeHtml(JSON.stringify(record.errors));
+
+          return `<tr>
+            <td style="font-family: monospace; font-size: 11px;">${escapeHtml(record.event_id)}</td>
+            <td><strong>#${escapeHtml(record.row_number)}</strong></td>
+            <td style="max-width: 320px;">${hintsHtml}</td>
+            <td style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: monospace; font-size: 11px;">${escapeHtml(JSON.stringify(record.raw_record))}</td>
+            <td class="review-row-actions">
+              <button type="button" data-open-edit="${escapeHtml(record.row_number)}" data-event="${escapeHtml(record.event_id)}">✏️ Edit &amp; Retry Fix</button>
+            </td>
+          </tr>`;
+        }).join("")}</tbody></table>`;
+        target.querySelectorAll("button[data-open-edit]").forEach((button) => {
+          button.addEventListener("click", () => {
+            const rec = result.records.find(r => r.event_id === button.dataset.event && String(r.row_number) === button.dataset.openEdit);
+            if (rec) openEditRecordModal(rec);
+          });
+        });
       } catch (error) {
         target.className = "status error";
         target.textContent = error.message;
       }
     }
+
+    function openEditRecordModal(record) {
+      currentEditingRecord = record;
+      let rawObj = record.raw_record;
+      if (typeof rawObj === 'string') {
+        try { rawObj = JSON.parse(rawObj); } catch (e) { rawObj = {}; }
+      }
+      let errs = record.errors;
+      if (typeof errs === 'string') {
+        try { errs = JSON.parse(errs); } catch (e) { errs = []; }
+      }
+
+      const hintsEl = el("editRecordHints");
+      hintsEl.innerHTML = `<strong>Flagged Issues for Row #${record.row_number}:</strong><ul style="margin: 6px 0 0 18px; padding: 0;">` +
+        (Array.isArray(errs) ? errs.map(e => `<li><strong>${escapeHtml(e.field)}</strong>: ${escapeHtml(e.hint || e.reason)}</li>`).join('') : '<li>Validation issue found.</li>') +
+        `</ul>`;
+
+      const formEl = el("editRecordForm");
+      formEl.innerHTML = Object.entries(rawObj).map(([key, val]) => `
+        <div style="display: flex; flex-direction: column;">
+          <label style="font-size: 12px; font-weight: 700; color: var(--ink); margin-bottom: 4px;">${escapeHtml(key)}</label>
+          <input type="text" data-raw-key="${escapeHtml(key)}" value="${escapeHtml(val !== null && val !== undefined ? String(val) : '')}" style="padding: 6px; border: 1px solid var(--line); border-radius: 4px; font-size: 13px;">
+        </div>
+      `).join('');
+
+      el("editRecordDialog").showModal();
+    }
+
+    el("closeEditRecordBtn")?.addEventListener("click", () => el("editRecordDialog").close());
+    el("cancelEditRecordBtn")?.addEventListener("click", () => el("editRecordDialog").close());
+
+    el("submitEditRecordBtn")?.addEventListener("click", async () => {
+      if (!currentEditingRecord) return;
+      const inputs = el("editRecordForm").querySelectorAll("input[data-raw-key]");
+      const updatedRaw = {};
+      inputs.forEach(input => {
+        updatedRaw[input.dataset.rawKey] = input.value;
+      });
+
+      try {
+        const response = await fetch("/api/reprocess", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            event_id: currentEditingRecord.event_id,
+            row_numbers: [currentEditingRecord.row_number],
+            mapper: getMapper(),
+            rows: [updatedRaw]
+          })
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not reprocess record.");
+        el("editRecordDialog").close();
+        await loadRejectedRecords();
+        setStatus(`Record #${currentEditingRecord.row_number} reprocessed successfully! ${result.mapped_rows} accepted into Bronze/Silver.`, "ok");
+      } catch (error) {
+        alert("Reprocessing failed: " + error.message);
+      }
+    });
 
     async function refreshReviewCount() {
       const businessId = selectedBrand?.business_id || "";
@@ -1985,19 +2697,6 @@ result = json.loads(await response.string())`;
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Could not update workflow template.");
       setStatus("Workflow template version saved.", "ok");
-    }
-
-    async function reprocessRejected(eventId, rowNumber) {
-      try {
-        const response = await fetch("/api/reprocess", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ event_id: eventId, row_numbers: [rowNumber], mapper: getMapper() }) });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "Could not reprocess record.");
-        el("reviewResults").className = "status ok";
-        el("reviewResults").textContent = `Record reprocessed: ${result.mapped_rows} accepted, ${result.error_listings} still need attention. New event: ${result.event_id}`;
-      } catch (error) {
-        el("reviewResults").className = "status error";
-        el("reviewResults").textContent = error.message;
-      }
     }
 
     async function loadFieldRegistry() {
@@ -2151,6 +2850,7 @@ result = json.loads(await response.string())`;
       const isFileSource = !isApi && !isPythonConnector;
 
       document.querySelectorAll(".api-field").forEach((field) => field.classList.toggle("hidden", !isApi));
+      document.querySelectorAll(".api-function-field").forEach((field) => field.classList.toggle("hidden", !isApi));
       document.querySelectorAll(".csv-function-field").forEach((field) => field.classList.toggle("hidden", !isCsv));
       document.querySelectorAll(".json-function-field").forEach((field) => field.classList.toggle("hidden", !isJson));
       document.querySelectorAll(".python-connector-field").forEach((field) => field.classList.toggle("hidden", !isPythonConnector));
@@ -2186,8 +2886,13 @@ result = json.loads(await response.string())`;
         sessionStorage.setItem(loginSessionStorageKey, "true");
         sessionStorage.setItem(mappingSessionStorageKey, newSessionId());
         sessionStorage.removeItem(draftStorageKey);
+        
+        // Instant screen toggle & set default Workflow Templates view
         el("loginScreen").classList.add("hidden");
         el("appShell").classList.remove("hidden");
+        switchView("mapperView");
+        
+        // Asynchronous non-blocking background data load
         loadAppData();
       } catch (error) {
         status.className = "status error";
@@ -2213,28 +2918,25 @@ result = json.loads(await response.string())`;
     }
 
     function resetLoginSessionFromLaunch() {
-      const params = new URLSearchParams(window.location.search);
-      if (params.get("fresh") !== "1") return;
-      localStorage.removeItem("mapper_login_remembered");
-      sessionStorage.removeItem(loginSessionStorageKey);
-      sessionStorage.removeItem(mappingSessionStorageKey);
-      sessionStorage.removeItem(draftStorageKey);
-      el("loginScreen").classList.remove("hidden");
-      el("appShell").classList.add("hidden");
-      params.delete("fresh");
-      const nextQuery = params.toString();
-      const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`;
-      window.history.replaceState({}, "", nextUrl);
+      // Clean neat URLs: no query parameters required for login launch
     }
 
     async function prepareReferenceData() {
       const loginButton = el("loginBtn");
       loginButton.className = "reference-login-button";
       try {
-        const response = await fetch("/api/prepare");
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "Could not prepare reference data.");
+        // Lightweight network ping tests DB/Server connectivity instantly (<5ms)
+        const pingRes = await fetch("/api/ping");
+        if (!pingRes.ok) throw new Error("Could not ping database service");
+        
+        // Login button turns GREEN instantly!
         loginButton.className = "reference-login-button ready";
+        
+        // Lazy non-blocking background data pre-fetching starts now
+        Promise.allSettled([
+          fetch("/api/prepare"),
+          fetch("/api/brands?search=")
+        ]);
       } catch (error) {
         loginButton.className = "reference-login-button warn";
       }
@@ -2278,7 +2980,7 @@ result = json.loads(await response.string())`;
       const suggestionTargets = [...visibleTargets.filter((target) => target.required), ...visibleTargets.filter((target) => !target.required)];
       suggestionTargets.forEach((target) => {
         if (!Object.prototype.hasOwnProperty.call(mappingSelections, target.key)) {
-          const selected = suggestField(target, usedFields);
+          const selected = sourceFields.length ? suggestField(target, usedFields) : "";
           mappingSelections[target.key] = selected;
           if (selected) autoMappedKeys.add(target.key);
         }
@@ -2288,8 +2990,12 @@ result = json.loads(await response.string())`;
         const hasSelection = Object.prototype.hasOwnProperty.call(mappingSelections, target.key);
         const selected = hasSelection ? mappingSelections[target.key] : "";
         if (selected) usedFields.add(selected);
+        const availableOptionsList = [...sourceFields];
+        if (selected && !availableOptionsList.includes(selected)) {
+          availableOptionsList.push(selected);
+        }
         const options = ['<option value="">Unmapped</option>']
-          .concat(sourceFields.map((sourceField) => {
+          .concat(availableOptionsList.map((sourceField) => {
             const owner = Object.entries(mappingSelections).find(([, value]) => value === sourceField);
             const ownerLabel = owner ? mappingTargets.find((item) => item.key === owner[0])?.label : "";
             const title = ownerLabel ? ` title="Already mapped to ${escapeHtml(ownerLabel)}"` : "";
@@ -2357,13 +3063,27 @@ result = json.loads(await response.string())`;
     }
 
     function getVisibleTargets() {
+      const seenKeys = new Set();
+      const result = [];
       const standardTargets = mappingTargets
         .filter((target) => primaryMappingKeys.has(target.key) && !hiddenMappingKeys.has(target.key))
         .sort((left, right) => (fieldOrderIndex.get(left.key) ?? Number.MAX_SAFE_INTEGER) - (fieldOrderIndex.get(right.key) ?? Number.MAX_SAFE_INTEGER));
+      for (const target of standardTargets) {
+        if (target && !seenKeys.has(target.key)) {
+          seenKeys.add(target.key);
+          result.push(target);
+        }
+      }
       const optionalTargets = [...optionalMappingKeys]
         .map((key) => mappingTargets.find((target) => target.key === key))
         .filter(Boolean);
-      return [...standardTargets, ...optionalTargets];
+      for (const target of optionalTargets) {
+        if (target && !seenKeys.has(target.key)) {
+          seenKeys.add(target.key);
+          result.push(target);
+        }
+      }
+      return result;
     }
 
     function getMapper() {
@@ -2628,8 +3348,9 @@ result = json.loads(await response.string())`;
         activeTemplateId = "";
         autoMappedKeys = new Set();
         if (csvFunctionMode === "pizza_hut") setPizzaHutMappings();
-        if (jsonFunctionMode === "la_city") setLaCityDemoMappings();
-        if (document.querySelector("input[name='pythonFunction']:checked")?.value === "dominos") setDominosMappings();
+        else if (csvFunctionMode === "global_hotels") setGlobalHotelsMappings();
+        else if (jsonFunctionMode === "la_city") setLaCityDemoMappings();
+        else if (document.querySelector("input[name='pythonFunction']:checked")?.value === "dominos") setDominosMappings();
         sessionStorage.removeItem(draftStorageKey);
         if (resolvedRecordPath && !el("recordPath").value.trim()) el("recordPath").value = resolvedRecordPath;
         if (sourceType === "excel" && resolvedRecordPath) el("sheetName").value = resolvedRecordPath;
@@ -2799,8 +3520,41 @@ result = json.loads(await response.string())`;
       } catch (error) { setCustomFieldFeedback(error.message, "error"); }
     }
 
+    async function toggleShowExistingBrands() {
+      const box = el("existingBrandsDialog");
+      if (box.style.display === "block") {
+        box.style.display = "none";
+        return;
+      }
+      box.style.display = "block";
+      box.innerHTML = `<em>Fetching active businesses...</em>`;
+      try {
+        const response = await fetch("/api/brands?search=");
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not fetch active businesses.");
+        const brands = result.brands || [];
+        if (!brands.length) {
+          box.innerHTML = `<div style="color: var(--muted);">No existing businesses found in database.</div>`;
+          return;
+        }
+        const optionsHtml = brands.map(b => `<option value="${escapeHtml(b.business_id)}">${escapeHtml(b.name)} (ID: ${escapeHtml(b.business_id)})</option>`).join('');
+        box.innerHTML = `
+          <label style="display: block; font-weight: 700; margin-bottom: 4px; color: var(--navy);" for="activeBusinessesDropdown">
+            Active Businesses (${brands.length})
+          </label>
+          <select id="activeBusinessesDropdown" style="width: 100%; padding: 6px 8px; border-radius: 4px; border: 1px solid var(--line); background: #ffffff;">
+            ${optionsHtml}
+          </select>
+        `;
+      } catch (err) {
+        box.innerHTML = `<div style="color: var(--error);">${escapeHtml(err.message)}</div>`;
+      }
+    }
+
     el("parseBtn").addEventListener("click", parseSource);
     el("testBigQueryBtn").addEventListener("click", testBigQueryConnection);
+    el("showExistingBrandsBtn").addEventListener("click", toggleShowExistingBrands);
+    el("clearDemoDataBtn").addEventListener("click", clearSavedData);
     el("loginTestBigQueryBtn").addEventListener("click", testLoginBigQueryConnection);
     el("runPythonConnectorBtn").addEventListener("click", parseSource);
     el("expandPythonConnectorBtn").addEventListener("click", openConnectorEditor);
@@ -2906,6 +3660,9 @@ result = json.loads(await response.string())`;
     document.querySelectorAll("input[name='pythonFunction']").forEach((input) => {
       input.addEventListener("change", () => updatePythonFunctionSelection(input.value));
     });
+    document.querySelectorAll("input[name='apiFunction']").forEach((input) => {
+      input.addEventListener("change", () => updateApiFunctionSelection(input.value));
+    });
     el("jsonRecordPath").addEventListener("change", () => {
       el("recordPath").value = el("jsonRecordPath").value;
       parseSource();
@@ -2920,23 +3677,63 @@ result = json.loads(await response.string())`;
     addPairRow("queryParams", "limit", "100");
     addPairRow("customHeaders", "Accept", "application/json");
     initializeConnectorEditor();
-    document.querySelectorAll("[data-logo-src]").forEach((image) => { image.src = window.APP_CONSTANTS[image.dataset.logoSrc]; });
+    const fallbackBirdeyeDarkSvg = "data:image/svg+xml;utf8," + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 60" width="240" height="60"><rect width="240" height="60" fill="none"/><g transform="translate(10, 10)"><path d="M 6 22 C 6 8 18 3 24 3 C 30 3 42 8 42 22 C 42 36 30 41 24 41 C 18 41 6 36 6 22 Z" fill="#0b70f0"/><ellipse cx="24" cy="22" rx="10" ry="10" fill="#ffffff"/><circle cx="24" cy="22" r="5" fill="#1d2b4f"/><path d="M 2 22 C 14 36 34 36 46 22 C 34 8 14 8 2 22 Z" fill="none" stroke="#0b70f0" stroke-width="3" stroke-linecap="round"/><text x="56" y="31" font-family="system-ui, -apple-system, sans-serif" font-weight="800" font-size="28" fill="#1d2b4f">Birdeye</text></g></svg>`);
+    const fallbackBirdeyeLightSvg = "data:image/svg+xml;utf8," + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 60" width="240" height="60"><rect width="240" height="60" fill="none"/><g transform="translate(10, 10)"><path d="M 6 22 C 6 8 18 3 24 3 C 30 3 42 8 42 22 C 42 36 30 41 24 41 C 18 41 6 36 6 22 Z" fill="#ffffff"/><ellipse cx="24" cy="22" rx="10" ry="10" fill="#0b70f0"/><circle cx="24" cy="22" r="5" fill="#ffffff"/><path d="M 2 22 C 14 36 34 36 46 22 C 34 8 14 8 2 22 Z" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/><text x="56" y="31" font-family="system-ui, -apple-system, sans-serif" font-weight="800" font-size="28" fill="#ffffff">Birdeye</text></g></svg>`);
+
+    document.querySelectorAll("[data-logo-src]").forEach((image) => {
+      const isLightTarget = image.dataset.logoSrc === "birdeyeLogoLightUrl";
+      const defaultFallback = isLightTarget ? fallbackBirdeyeLightSvg : fallbackBirdeyeDarkSvg;
+      const srcUrl = window.APP_CONSTANTS[image.dataset.logoSrc] || window.APP_CONSTANTS.birdeyeLogoUrl;
+      image.onerror = () => {
+        image.onerror = null;
+        image.src = defaultFallback;
+      };
+      image.src = srcUrl || defaultFallback;
+    });
     el("refreshReportBtn").addEventListener("click", () => {
       reportLoaded = false;
       loadReporting();
     });
-    ["reportStateFilter", "reportCountyFilter", "reportCityFilter", "reportZipFilter"].forEach((id) => {
-      el(id).addEventListener("change", () => {
+    el("applyReportFiltersBtn")?.addEventListener("click", () => {
+      reportLoaded = false;
+      loadReporting();
+    });
+    el("resetReportFiltersBtn")?.addEventListener("click", () => {
+      if (el("reportStateFilter")) el("reportStateFilter").value = "";
+      if (el("reportCountyFilter")) el("reportCountyFilter").value = "";
+      if (el("reportCityFilter")) el("reportCityFilter").value = "";
+      if (el("reportZipFilter")) el("reportZipFilter").value = "";
+      reportLoaded = false;
+      loadReporting();
+    });
+    el("reportStateFilter")?.addEventListener("change", async () => {
+      if (el("reportCountyFilter")) el("reportCountyFilter").value = "";
+      if (el("reportCityFilter")) el("reportCityFilter").value = "";
+      if (el("reportZipFilter")) el("reportZipFilter").value = "";
+      await loadGeoOptions();
+      reportLoaded = false;
+      loadReporting();
+    });
+    el("reportCountyFilter")?.addEventListener("change", async () => {
+      if (el("reportCityFilter")) el("reportCityFilter").value = "";
+      if (el("reportZipFilter")) el("reportZipFilter").value = "";
+      await loadGeoOptions();
+      reportLoaded = false;
+      loadReporting();
+    });
+    ["reportCityFilter", "reportZipFilter"].forEach((id) => {
+      el(id)?.addEventListener("change", () => {
         reportLoaded = false;
         loadReporting();
       });
-      el(id).addEventListener("keydown", (event) => {
+      el(id)?.addEventListener("keydown", (event) => {
         if (event.key === "Enter") {
           reportLoaded = false;
           loadReporting();
         }
       });
     });
+
     document.querySelector("[data-json-viewer-link]").href = window.APP_CONSTANTS.jsonViewerUrl;
     document.querySelector("[data-json-viewer-link]").addEventListener("click", async (event) => {
       try {
@@ -2950,7 +3747,13 @@ result = json.loads(await response.string())`;
     updateSourceVisibility();
     resetLoginSessionFromLaunch();
     restoreRememberedLogin();
-    prepareReferenceData();
+    setTimeout(() => prepareReferenceData(), 10);
+    setupZipTypeahead();
+    setupBrandDropdownListeners();
+    loadGeoOptions();
+    const urlParams = new URLSearchParams(window.location.search);
+    const activeTab = urlParams.get("view") || sessionStorage.getItem("activeTab") || "mapperView";
+    switchView(activeTab || "mapperView");
   </script>
 </body>
 </html>

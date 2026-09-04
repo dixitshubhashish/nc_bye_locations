@@ -25,14 +25,19 @@ def get_nested(row: dict[str, Any], path: str, default: Any = "") -> Any:
 
 def clean_zip(value: Any) -> str:
     digits = "".join(ch for ch in str(value or "") if ch.isdigit())
-    return digits[:5].zfill(5) if digits else ""
+    if not digits:
+        return ""
+    if len(digits) >= 5:
+        return digits[:5]
+    return digits
 
 
 def optional_float(value: Any) -> float | None:
     if value in (None, ""):
         return None
+    cleaned = str(value).replace("$", "").replace(",", "").strip()
     try:
-        return float(value)
+        return float(cleaned)
     except (TypeError, ValueError):
         return None
 
@@ -40,8 +45,9 @@ def optional_float(value: Any) -> float | None:
 def optional_int(value: Any) -> int | None:
     if value in (None, ""):
         return None
+    cleaned = str(value).replace("$", "").replace(",", "").strip()
     try:
-        return int(float(value))
+        return int(float(cleaned))
     except (TypeError, ValueError):
         return None
 
