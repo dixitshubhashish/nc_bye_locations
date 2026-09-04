@@ -22,7 +22,7 @@ from whitespace_tool.learning import suggest_from_templates
 from whitespace_tool.field_registry import load_field_registry
 from whitespace_tool.sources.demographics import fetch_bigquery_demographics, resolve_bigquery_connection
 from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows, clear_dataset_tables, push_to_bigquery
-from whitespace_tool.storage_config import load_storage_config
+from whitespace_tool.storage_config import load_dotenv, load_storage_config
 
 
 SUPPORTED_SOURCE_TYPES = {"csv", "excel", "json", "xml", "api_get_json", "python_editor"}
@@ -52,6 +52,7 @@ def _build_logger() -> logging.Logger:
 
 LOGGER = _build_logger()
 ZIP_REFERENCE_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+load_dotenv()
 
 
 def _json_response(handler: http.server.BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
