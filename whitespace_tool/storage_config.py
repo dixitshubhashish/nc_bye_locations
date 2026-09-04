@@ -10,7 +10,7 @@ DEFAULT_STORAGE_CONFIG = Path("config/connections/storage.json")
 ENV_FILE = Path(".env")
 
 
-def _load_dotenv(path: str | Path = ENV_FILE) -> None:
+def load_dotenv(path: str | Path = ENV_FILE) -> None:
     env_path = Path(path)
     if not env_path.exists():
         return
@@ -47,7 +47,7 @@ def _config_from_env() -> dict[str, Any]:
 
 
 def load_storage_config(path: str | Path = DEFAULT_STORAGE_CONFIG) -> dict[str, Any]:
-    _load_dotenv()
+    load_dotenv()
     config_path = Path(path).resolve()
     if config_path.exists():
         with config_path.open("r", encoding="utf-8") as handle:
