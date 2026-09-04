@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from ast import literal_eval
 from pathlib import Path
 from typing import Any
 
@@ -33,10 +34,17 @@ def _credentials_json_path_from_env() -> str | None:
         try:
             parsed_credentials = json.loads(inline_json)
         except json.JSONDecodeError as exc:
-            raise ValueError(
-                "GOOGLE_APPLICATION_CREDENTIALS_JSON must be valid JSON. "
-                "Paste the full service account JSON as compact one-line JSON, not a Python dict or escaped file text."
-            ) from exc
+            try:
+                parsed_credentials = literal_eval(inline_json)
+            except (SyntaxError, ValueError) as literal_exc:
+                raise ValueError(
+                    "GOOGLE_APPLICATION_CREDENTIALS_JSON must be a valid service account object. "
+                    "Paste the full service account JSON from the key file; it should start with { and include type, project_id, private_key, and client_email."
+                ) from literal_exc
+            if not isinstance(parsed_credentials, dict):
+                raise ValueError("GOOGLE_APPLICATION_CREDENTIALS_JSON must be a JSON object.") from exc
+        if not isinstance(parsed_credentials, dict):
+            raise ValueError("GOOGLE_APPLICATION_CREDENTIALS_JSON must be a JSON object.")
         credentials_path = Path(os.environ.get("BIGQUERY_CREDENTIALS_PATH", "/tmp/birdeye-bigquery-service-account.json"))
         credentials_path.parent.mkdir(parents=True, exist_ok=True)
         credentials_path.write_text(json.dumps(parsed_credentials, separators=(",", ":")), encoding="utf-8")

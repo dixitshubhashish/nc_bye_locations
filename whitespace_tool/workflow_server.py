@@ -1035,5 +1035,5 @@ def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
     handler = make_handler(ui_dir)
     socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer((host, port), handler) as httpd:
-        print(f"Workflow UI running at http://{host}:{port}/integrations.html")
+        print(f"Workflow UI running at http://{host}:{port}/")
         httpd.serve_forever()

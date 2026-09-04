@@ -736,8 +736,17 @@
       height: 30px;
       max-width: none;
     }
-    .login-brand .brand-icon-crop { width: 38px; height: 38px; flex-basis: 38px; }
-    .login-brand .brand-logo-image { height: 38px; }
+    .login-brand .brand-icon-crop {
+      width: min(240px, 100%);
+      height: 46px;
+      flex: 0 1 240px;
+      overflow: visible;
+    }
+    .login-brand .brand-logo-image {
+      height: 46px;
+      max-width: 100%;
+      object-fit: contain;
+    }
     .app-footer .brand-icon-crop { width: 27px; height: 27px; flex-basis: 27px; }
     .app-footer .brand-logo-image { height: 27px; }
     .brand-mark {

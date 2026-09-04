@@ -40,6 +40,20 @@ class StorageConfigTests(unittest.TestCase):
             self.assertEqual(config["credentials_json"], str(credentials_path))
             self.assertEqual(credentials_path.read_text(encoding="utf-8"), '{"type":"service_account"}')
 
+    def test_inline_credentials_accepts_python_dict_style_paste(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            credentials_path = Path(temp_dir) / "service-account.json"
+            env = {
+                "BIGQUERY_PROJECT_ID": "render-project",
+                "BIGQUERY_BRONZE_DATASET_ID": "bronze",
+                "GOOGLE_APPLICATION_CREDENTIALS_JSON": "{'type':'service_account','project_id':'render-project'}",
+                "BIGQUERY_CREDENTIALS_PATH": str(credentials_path),
+            }
+            with patch.dict(os.environ, env, clear=True):
+                config = load_storage_config(Path(temp_dir) / "missing.json")
+            self.assertEqual(config["credentials_json"], str(credentials_path))
+            self.assertEqual(credentials_path.read_text(encoding="utf-8"), '{"type":"service_account","project_id":"render-project"}')
+
 
 if __name__ == "__main__":
     unittest.main()
