@@ -8,6 +8,7 @@ from whitespace_tool.models import LocationRecord
 from whitespace_tool.normalization import clean_zip, normalize_location, optional_date, optional_float, optional_int
 from whitespace_tool.source_adapters import csv_source
 from whitespace_tool.source_adapters import json_source
+from whitespace_tool.source_adapters import xml_source
 from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows
 from whitespace_tool.workflow_server import REQUIRED_MAPPER_FIELDS, validate_mapper
 
@@ -52,6 +53,13 @@ class CsvWorkflowTests(unittest.TestCase):
         result = csv_source.preview(content)
         self.assertEqual(result["fields"], ["store_id", "store_name", "zip_code"])
         self.assertEqual(result["rows"], [{"store_id": "1", "store_name": "Main Store", "zip_code": "27601"}])
+
+    def test_csv_preview_returns_all_rows_for_processing(self) -> None:
+        content = "store_id,store_name,zip_code\n" + "\n".join(f"{index},Store {index},27601" for index in range(30))
+        result = csv_source.preview(content.encode("utf-8"))
+        self.assertEqual(result["record_count"], 30)
+        self.assertEqual(len(result["rows"]), 30)
+        self.assertEqual(len(result["preview_rows"]), 25)
 
     def test_csv_preview_removes_blank_headers(self) -> None:
         result = csv_source.preview(b"name,,zip_code\nStore,,27601\n")
@@ -135,6 +143,20 @@ class CsvWorkflowTests(unittest.TestCase):
         self.assertIn("level1.level2.stores", result["record_paths"])
         self.assertNotIn("level1.too_deep.level3.level4", result["record_paths"])
         self.assertIn("details.location.coordinates.latitude", result["fields"])
+
+    def test_json_preview_returns_all_rows_for_processing(self) -> None:
+        content = ('{"stores": [' + ",".join(f'{{"id": "{index}", "name": "Store {index}"}}' for index in range(30)) + "]}").encode("utf-8")
+        result = json_source.preview(content, "stores")
+        self.assertEqual(result["record_count"], 30)
+        self.assertEqual(len(result["rows"]), 30)
+        self.assertEqual(len(result["preview_rows"]), 25)
+
+    def test_xml_preview_returns_all_rows_for_processing(self) -> None:
+        content = ("<stores>" + "".join(f"<store><id>{index}</id><name>Store {index}</name></store>" for index in range(30)) + "</stores>").encode("utf-8")
+        result = xml_source.preview(content)
+        self.assertEqual(result["record_count"], 30)
+        self.assertEqual(len(result["rows"]), 30)
+        self.assertEqual(len(result["preview_rows"]), 25)
 
     def test_geojson_feature_collection_promotes_properties_and_point_coordinates(self) -> None:
         content = b"""{
