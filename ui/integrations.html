@@ -829,8 +829,10 @@
       </label>
       <div class="button-row">
         <button id="loginBtn" class="reference-login-button" type="button">Login</button>
+        <button id="loginTestBigQueryBtn" class="secondary" type="button">Test BigQuery</button>
       </div>
       <div id="loginStatus" class="status hidden"></div>
+      <div id="loginBigQueryStatus" class="status hidden"></div>
     </div>
   </div>
 
@@ -1714,6 +1716,15 @@ result = json.loads(await response.string())</textarea>
 
     async function testBigQueryConnection() {
       const target = el("bigQueryStatus");
+      await runBigQueryConnectionTest(target);
+    }
+
+    async function testLoginBigQueryConnection() {
+      const target = el("loginBigQueryStatus");
+      await runBigQueryConnectionTest(target);
+    }
+
+    async function runBigQueryConnectionTest(target) {
       target.className = "status";
       target.textContent = "Testing BigQuery connection...";
       try {
@@ -2404,6 +2415,7 @@ result = json.loads(await response.string())</textarea>
 
     el("parseBtn").addEventListener("click", parseSource);
     el("testBigQueryBtn").addEventListener("click", testBigQueryConnection);
+    el("loginTestBigQueryBtn").addEventListener("click", testLoginBigQueryConnection);
     el("runPythonConnectorBtn").addEventListener("click", parseSource);
     el("expandPythonConnectorBtn").addEventListener("click", openConnectorEditor);
     el("minimizePythonConnectorBtn").addEventListener("click", minimizeConnectorEditor);

@@ -29,9 +29,17 @@ def load_dotenv(path: str | Path = ENV_FILE) -> None:
 def _credentials_json_path_from_env() -> str | None:
     inline_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON") or os.environ.get("BIGQUERY_CREDENTIALS_JSON")
     if inline_json:
+        inline_json = inline_json.strip().strip('"').strip("'")
+        try:
+            parsed_credentials = json.loads(inline_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "GOOGLE_APPLICATION_CREDENTIALS_JSON must be valid JSON. "
+                "Paste the full service account JSON as compact one-line JSON, not a Python dict or escaped file text."
+            ) from exc
         credentials_path = Path(os.environ.get("BIGQUERY_CREDENTIALS_PATH", "/tmp/birdeye-bigquery-service-account.json"))
         credentials_path.parent.mkdir(parents=True, exist_ok=True)
-        credentials_path.write_text(inline_json, encoding="utf-8")
+        credentials_path.write_text(json.dumps(parsed_credentials, separators=(",", ":")), encoding="utf-8")
         return str(credentials_path)
     return os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or os.environ.get("BIGQUERY_CREDENTIALS_FILE")
 
