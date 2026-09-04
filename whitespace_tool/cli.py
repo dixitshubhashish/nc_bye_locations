@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from whitespace_tool.analysis import analyze_whitespace
@@ -141,7 +142,7 @@ def main() -> None:
 
     workflow_ui_parser = subparsers.add_parser("workflow-ui", help="Serve the no-code workflow template UI")
     workflow_ui_parser.add_argument("--host", default="127.0.0.1")
-    workflow_ui_parser.add_argument("--port", type=int, default=8765)
+    workflow_ui_parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8765")))
 
     args = parser.parse_args()
     if args.command == "fetch-public-zips":
@@ -160,7 +161,7 @@ def main() -> None:
     elif args.command == "workflow-ui":
         serve_workflow_ui(args.host, args.port)
     else:
-        serve_workflow_ui("127.0.0.1", 8765)
+        serve_workflow_ui("127.0.0.1", int(os.environ.get("PORT", "8765")))
 
 
 if __name__ == "__main__":

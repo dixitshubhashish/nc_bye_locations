@@ -7,6 +7,7 @@ from whitespace_tool.field_registry import load_field_registry
 from whitespace_tool.models import LocationRecord
 from whitespace_tool.normalization import clean_zip, normalize_location, optional_date, optional_float, optional_int
 from whitespace_tool.source_adapters import csv_source
+from whitespace_tool.source_adapters import json_source
 from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows
 from whitespace_tool.workflow_server import REQUIRED_MAPPER_FIELDS, validate_mapper
 
@@ -121,6 +122,19 @@ class CsvWorkflowTests(unittest.TestCase):
         required = {field["name"] for field in TABLE_SCHEMAS["listings"] if field["mode"] == "REQUIRED"}
         self.assertTrue({"business_id", "source_type_id", "name", "address", "city_name", "state_code", "zip_code"} <= required)
         self.assertEqual(TABLE_SCHEMAS["error_listings"][0]["name"], "event_id")
+
+    def test_field_catalogs_are_business_aware_and_plural(self) -> None:
+        self.assertIn("field_catalogs", TABLE_SCHEMAS)
+        self.assertNotIn("field_catalog", TABLE_SCHEMAS)
+        field_names = {field["name"] for field in TABLE_SCHEMAS["field_catalogs"]}
+        self.assertIn("business_id", field_names)
+
+    def test_json_preview_offers_record_layers_through_depth_three(self) -> None:
+        content = b'{"level1": {"level2": {"stores": [{"name": "Main", "details": {"location": {"coordinates": {"latitude": 35.7, "longitude": -78.6}}}}]}, "too_deep": {"level3": {"level4": [{"name": "Hidden"}]}}}}'
+        result = json_source.preview(content)
+        self.assertIn("level1.level2.stores", result["record_paths"])
+        self.assertNotIn("level1.too_deep.level3.level4", result["record_paths"])
+        self.assertIn("details.location.coordinates.latitude", result["fields"])
 
 
 if __name__ == "__main__":

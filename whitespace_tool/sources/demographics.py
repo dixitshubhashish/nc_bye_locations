@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,17 @@ def _row_value(row: Any, field: str) -> Any:
     return row[field]
 
 
+@lru_cache(maxsize=8)
+def _bigquery_client(project_id: str, credentials_json: str | None):
+    from google.cloud import bigquery
+    from google.oauth2 import service_account
+
+    if credentials_json:
+        credentials = service_account.Credentials.from_service_account_file(credentials_json)
+        return bigquery.Client(project=project_id, credentials=credentials)
+    return bigquery.Client(project=project_id)
+
+
 def fetch_bigquery_demographics(
     project_id: str,
     query: str,
@@ -30,15 +42,10 @@ def fetch_bigquery_demographics(
 ) -> dict[str, ZipDemographics]:
     try:
         from google.cloud import bigquery
-        from google.oauth2 import service_account
     except ImportError as exc:
         raise RuntimeError("Install google-cloud-bigquery and google-auth to query BigQuery demographics.") from exc
 
-    if credentials_json:
-        credentials = service_account.Credentials.from_service_account_file(credentials_json)
-        client = bigquery.Client(project=project_id, credentials=credentials)
-    else:
-        client = bigquery.Client(project=project_id)
+    client = _bigquery_client(project_id, credentials_json)
 
     rows: dict[str, ZipDemographics] = {}
     for row in client.query(query).result():

@@ -1,5 +1,6 @@
-CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.field_catalog` (
+CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.field_catalogs` (
   field_id STRING NOT NULL DEFAULT GENERATE_UUID(),
+  business_id STRING,
   slug STRING NOT NULL,
   label STRING NOT NULL,
   table_name STRING NOT NULL,

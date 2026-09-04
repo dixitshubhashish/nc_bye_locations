@@ -13,8 +13,9 @@ LOGGER = logging.getLogger("whitespace_tool.workflow")
 
 
 TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
-    "field_catalog": [
+    "field_catalogs": [
         {"name": "field_id", "type": "STRING", "mode": "REQUIRED", "default": "GENERATE_UUID()"},
+        {"name": "business_id", "type": "STRING", "mode": "NULLABLE"},
         {"name": "slug", "type": "STRING", "mode": "REQUIRED"},
         {"name": "label", "type": "STRING", "mode": "REQUIRED"},
         {"name": "table_name", "type": "STRING", "mode": "REQUIRED"},
@@ -326,7 +327,7 @@ def clear_dataset_tables(
         client = bigquery.Client(project=project_id)
 
     dataset_ref = f"{project_id}.{dataset_id}"
-    preserved_tables = {"us_zipcodes", "field_catalog", "source_types", "workflow_templates"}
+    preserved_tables = {"us_zipcodes", "field_catalogs", "field_catalog", "source_types", "workflow_templates"}
     table_refs = [table.reference for table in client.list_tables(dataset_ref) if table.table_id not in preserved_tables]
     LOGGER.warning("db_clear_started dataset=%s table_count=%d", dataset_ref, len(table_refs))
     soft_deleted: list[str] = []

@@ -4,6 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Competitive Whitespace Tool</title>
+  <script src="constants.js"></script>
+  <link id="appFavicon" rel="icon" type="image/png">
+  <script>document.getElementById("appFavicon").href = window.APP_CONSTANTS.birdeyeFaviconUrl;</script>
   <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.0/min/vs/loader.js"></script>
   <script src="https://cdn.jsdelivr.net/pyodide/v0.27.0/full/pyodide.js"></script>
   <style>
@@ -72,11 +75,52 @@
     header.reporting-active #clearDataBtn { visibility: hidden; }
 
     .reporting-view {
-      height: calc(100vh - 71px);
-      padding: 0;
+      padding: 24px;
     }
 
-    .reporting-frame { width: 100%; height: 100%; border: 0; display: block; }
+    .report-shell {
+      max-width: 1180px;
+      margin: 0 auto;
+    }
+
+    .report-hero {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      align-items: flex-start;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 18px;
+      margin-bottom: 18px;
+    }
+
+    .report-hero h1 {
+      margin: 0 0 6px;
+      color: var(--ink);
+      font-size: 30px;
+      line-height: 1.15;
+      letter-spacing: 0;
+    }
+
+    .report-hero p { margin: 0; color: var(--muted); max-width: 780px; }
+    .report-source { color: var(--muted); font-size: 12px; margin-top: 8px; overflow-wrap: anywhere; }
+    .report-filters { display: grid; grid-template-columns: 1.2fr 1.2fr 1fr; gap: 14px; margin: 18px 0; align-items: start; }
+    .report-filter-group { border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 12px; }
+    .report-filter-group h2 { margin: 0 0 8px; font-size: 14px; color: var(--ink); }
+    .report-checks { display: grid; gap: 6px; max-height: 150px; overflow: auto; }
+    .report-checks label { display: flex; gap: 7px; align-items: center; color: var(--ink); font-weight: 650; }
+    .report-checks input { width: auto; }
+    .report-geo-filters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .report-geo-filters input { width: 100%; }
+    .report-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 16px 0 22px; }
+    .report-metric { border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 14px; min-height: 88px; }
+    .report-metric strong { display: block; font-size: 28px; line-height: 1.1; color: var(--navy, var(--ink)); }
+    .report-metric span { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; }
+    .report-section { margin-top: 24px; }
+    .report-section h2 { margin: 0 0 10px; color: var(--ink); font-size: 20px; }
+    .report-columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
+    .report-empty-states { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    .report-empty-states span { border: 1px solid var(--line); border-radius: 999px; padding: 5px 9px; background: #ffffff; color: var(--muted); font-weight: 700; }
+    .report-status { border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 16px; color: var(--muted); }
 
     .review-view { padding: 24px; }
     .review-toolbar { display: flex; gap: 8px; max-width: 620px; margin-bottom: 16px; }
@@ -111,10 +155,43 @@
     }
 
     .template-progress strong { color: var(--accent); font-size: 18px; }
+    .mapping-percentage.low { color: #c43b54; }
+    .mapping-percentage.medium { color: #b97816; }
+    .mapping-percentage.high { color: #147d63; }
+    #saveBtn:disabled { background: #aeb8c9; border-color: #aeb8c9; color: #eef2f7; cursor: not-allowed; }
+    .save-action-wrap { position: relative; display: inline-flex; }
+    .save-action-wrap::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      left: 0;
+      bottom: calc(100% + 8px);
+      z-index: 6;
+      width: 250px;
+      padding: 8px 10px;
+      border: 1px solid #b8c7dc;
+      border-radius: 5px;
+      background: var(--navy);
+      color: #ffffff;
+      font-size: 12px;
+      font-weight: 500;
+      line-height: 1.4;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(4px);
+      transition: opacity 150ms ease, transform 150ms ease;
+    }
+    .save-action-wrap:hover::after, .save-action-wrap:focus-within::after { opacity: 1; transform: translateY(0); }
 
     .advanced-template textarea {
       font-size: 18px;
     }
+
+    .json-viewer-panel { overflow: hidden; }
+    .json-viewer-link { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 9px 12px; border: 1px solid var(--accent); border-radius: 5px; background: var(--accent); color: var(--accent-ink); font-weight: 700; text-decoration: none; }
+    .json-viewer-link:hover { background: #0759e8; border-color: #0759e8; }
+    main > aside, main > section, .panel { min-width: 0; }
+    #sourcePreview, #entityPreview { max-width: 100%; overflow-x: auto; }
+    #sourcePreview table, #entityPreview table { width: max-content; min-width: 100%; }
 
     .connector-editor {
       height: 280px;
@@ -299,6 +376,13 @@
     }
 
     .optional-picker select { flex: 1; }
+    .optional-fields-layout {
+      display: grid;
+      grid-template-columns: minmax(220px, 0.8fr) minmax(300px, 1.2fr);
+      gap: 24px;
+      align-items: start;
+    }
+    .optional-fields-column { min-width: 0; }
 
     .mapping-remove {
       min-width: 30px;
@@ -342,8 +426,12 @@
       text-align: left;
       vertical-align: top;
       font-size: 12px;
+      min-width: 120px;
       max-width: 260px;
-      overflow-wrap: anywhere;
+      overflow-wrap: break-word;
+      word-break: normal;
+      white-space: normal;
+      writing-mode: horizontal-tb;
     }
 
     th {
@@ -351,6 +439,9 @@
       color: #334155;
       font-weight: 750;
     }
+
+    .source-column-standard { display: block; color: var(--navy); }
+    .source-column-name { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; font-weight: 500; }
 
     tr:last-child td { border-bottom: 0; }
 
@@ -525,22 +616,208 @@
     .entity-field-source.mapped { color: var(--ok); }
     .entity-field-source.unmapped { color: #8a9298; font-style: italic; }
 
+    /* Birdeye-inspired product styling: navy navigation, blue actions, cool gray workspace. */
+    :root {
+      --bg: #f4f7fb;
+      --panel: #ffffff;
+      --ink: #17233f;
+      --muted: #68758d;
+      --line: #dce3ee;
+      --accent: #1769ff;
+      --accent-ink: #ffffff;
+      --navy: #101d3b;
+      --navy-soft: #1b2c54;
+      --cyan: #0bb5d8;
+      --warn: #a86412;
+      --error: #c43b54;
+      --ok: #147d63;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "DM Sans", "Avenir Next", ui-sans-serif, system-ui, sans-serif;
+    }
+
+    header {
+      min-height: 72px;
+      border-bottom: 0;
+      background: var(--navy);
+      color: #ffffff;
+      padding: 14px 24px;
+      box-shadow: 0 4px 16px rgba(16, 29, 59, 0.14);
+    }
+
+    header h1 { color: #ffffff; letter-spacing: -0.02em; }
+    .top-tabs { gap: 4px; }
+    .top-tab {
+      background: transparent;
+      color: #b9c7e4;
+      border-color: transparent;
+      border-radius: 5px;
+      padding: 9px 11px;
+    }
+    .top-tab:hover { color: #ffffff; background: var(--navy-soft); }
+    .top-tab.active { background: #ffffff; color: var(--navy); }
+    .header-actions { gap: 6px; }
+    .header-actions button.secondary {
+      background: transparent;
+      color: #dbe5ff;
+      border-color: #40557f;
+    }
+    .header-actions button.secondary:hover { background: var(--navy-soft); border-color: #6d84b3; }
+
+    main { min-height: calc(100vh - 72px); }
+    aside { background: #edf2f8; border-right-color: var(--line); padding: 22px 18px; }
+    section { padding: 24px 28px; }
+    .panel, .login-box {
+      border-color: var(--line);
+      border-radius: 7px;
+      box-shadow: 0 2px 8px rgba(28, 51, 88, 0.04);
+    }
+    .panel h2 { color: var(--navy); }
+    label { color: #53627d; letter-spacing: 0.01em; }
+    input, select, textarea {
+      border-color: #cfd9e8;
+      border-radius: 5px;
+      background: #ffffff;
+    }
+    input:focus, select:focus, textarea:focus {
+      outline: 2px solid rgba(23, 105, 255, 0.22);
+      outline-offset: 1px;
+      border-color: var(--accent);
+    }
+    button { border-radius: 5px; background: var(--accent); }
+    button:hover { background: #0759e8; }
+    button.secondary { border-color: #cbd6e6; color: var(--navy); }
+    button.secondary:hover { background: #edf4ff; border-color: #9ebbe9; }
+    a.secondary { display: inline-block; text-decoration: none; }
+    .login-box button:disabled {
+      background: #aeb8c9;
+      border-color: #aeb8c9;
+      color: #eef2f7;
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+    .status { border-color: var(--line); box-shadow: 0 2px 8px rgba(28, 51, 88, 0.03); }
+    .progress-wrap { top: 72px; border-bottom-color: var(--line); background: rgba(255, 255, 255, 0.96); }
+    .progress-fill { background: linear-gradient(90deg, var(--accent), var(--cyan)); }
+    .progress-track { background: #e0e8f3; }
+    .mapping-grid, .entity-box, table { border-color: var(--line); }
+    th { background: #eef4fc; color: var(--navy); }
+    .entity-title { background: #eef4fc; color: var(--navy); }
+    .entity-field { border-color: #e1e7f0; }
+    .tab { border-color: #cbd6e6; color: var(--navy); }
+    .tab.active { background: var(--navy); color: #ffffff; }
+    .connector-editor { border-color: #b9c9e0; }
+    .login-screen { background: radial-gradient(circle at 50% 0%, #dceaff 0, var(--bg) 42%); }
+    .login-box { border-top: 4px solid var(--accent); }
+
+    .brand-lockup {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      color: inherit;
+      font-size: 18px;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      line-height: 1;
+    }
+    .brand-icon-crop {
+      display: block;
+      width: 30px;
+      height: 30px;
+      flex: 0 0 30px;
+      overflow: hidden;
+    }
+    .brand-logo-image {
+      display: block;
+      width: auto;
+      height: 30px;
+      max-width: none;
+    }
+    .login-brand .brand-icon-crop { width: 38px; height: 38px; flex-basis: 38px; }
+    .login-brand .brand-logo-image { height: 38px; }
+    .app-footer .brand-icon-crop { width: 27px; height: 27px; flex-basis: 27px; }
+    .app-footer .brand-logo-image { height: 27px; }
+    .brand-mark {
+      position: relative;
+      display: inline-block;
+      width: 27px;
+      height: 17px;
+      border: 3px solid currentColor;
+      border-radius: 75% 15%;
+      transform: rotate(45deg);
+    }
+    .brand-mark::after {
+      content: "";
+      position: absolute;
+      width: 5px;
+      height: 5px;
+      top: 3px;
+      left: 8px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+    .login-brand { margin-bottom: 22px; color: var(--navy); font-size: 22px; }
+    .reference-login-button { background: #ffffff; border-color: #c43b54; color: #c43b54; transition: color 180ms ease, border-color 180ms ease, background 180ms ease; }
+    .reference-login-button:hover { background: #fff5f6; border-color: #a92d45; color: #a92d45; }
+    .reference-login-button.ready { border-color: #147d63; color: #147d63; }
+    .reference-login-button.ready:hover { background: #f1fbf7; border-color: #0d654f; color: #0d654f; }
+    .reference-login-button.warn { border-color: #d28a27; color: #a86412; }
+    header .brand-lockup { color: #ffffff; flex: 0 0 auto; }
+    header .brand-logo-image, .app-footer .brand-logo-image { filter: brightness(0) invert(1); }
+    header .brand-mark { color: var(--cyan); }
+    .app-title { display: flex; align-items: center; gap: 18px; }
+    .app-title h1 { white-space: nowrap; }
+    .app-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 20px;
+      padding: 18px 28px;
+      border-top: 1px solid var(--line);
+      background: var(--navy);
+      color: #b9c7e4;
+      font-size: 11px;
+    }
+    .app-footer .brand-lockup { color: #ffffff; font-size: 16px; }
+    .app-footer .brand-mark { color: var(--cyan); }
+    .app-footer p { margin: 0; max-width: 720px; line-height: 1.5; overflow-wrap: anywhere; }
+
     @media (max-width: 900px) {
       .entity-map { grid-template-columns: 1fr; }
     }
 
     @media (max-width: 900px) {
       main, main.connector-active { grid-template-columns: 1fr; }
+      header { display: block; min-width: 0; padding: 14px 16px; }
+      .app-title { margin-bottom: 12px; }
+      .app-title h1 { white-space: normal; }
+      .top-tabs, .header-actions { max-width: 100%; overflow-x: auto; padding-bottom: 2px; }
+      .header-actions { flex-wrap: wrap; margin-top: 8px; }
+      .header-actions #clearDataBtn { margin-left: auto; }
+      .header-actions #logoutBtn { margin-left: 0; }
+      .top-tab { padding: 7px 9px; font-size: 12px; }
+      .header-actions button { padding: 7px 9px; font-size: 11px; }
+      .header-actions #clearDataBtn { color: #ffd7df; border-color: #b94b65; background: rgba(196, 59, 84, 0.16); }
+      .header-actions #clearDataBtn:hover { color: #ffffff; border-color: #dc7187; background: rgba(196, 59, 84, 0.32); }
+      .header-actions #logoutBtn { color: #dbe5ff; border-color: #52678f; }
       aside { border-right: 0; border-bottom: 1px solid var(--line); }
       .mapping-grid { grid-template-columns: 1fr; }
       .mapping-head { display: none; }
       .source-row { grid-template-columns: 1fr; }
+      .optional-fields-layout { grid-template-columns: 1fr; gap: 12px; }
+      .app-footer { align-items: flex-start; flex-direction: column; padding: 18px 16px; }
     }
   </style>
 </head>
 <body>
   <div id="loginScreen" class="login-screen">
     <div class="login-box">
+      <div class="brand-lockup login-brand" aria-label="Birdeye brand reference">
+        <span class="brand-icon-crop"><img class="brand-logo-image" data-logo-src="birdeyeLogoUrl" alt="Birdeye"></span>
+      </div>
       <h1 id="productTitle">Competitive Whitespace Tool</h1>
       <label for="loginUser">Username</label>
       <input id="loginUser" autocomplete="username" value="admin">
@@ -551,7 +828,7 @@
         Remember login
       </label>
       <div class="button-row">
-        <button id="loginBtn">Login</button>
+        <button id="loginBtn" class="reference-login-button" type="button">Login</button>
       </div>
       <div id="loginStatus" class="status hidden"></div>
     </div>
@@ -559,7 +836,12 @@
 
   <div id="appShell" class="hidden">
     <header>
-      <h1>Competitive Whitespace Tool</h1>
+      <div class="app-title">
+        <div class="brand-lockup" aria-label="Birdeye brand reference">
+          <span class="brand-icon-crop"><img class="brand-logo-image" data-logo-src="birdeyeLogoUrl" alt="Birdeye"></span>
+        </div>
+        <h1>Competitive Whitespace Tool</h1>
+      </div>
       <nav class="top-tabs" aria-label="Primary navigation">
         <button class="top-tab active" data-view="mapperView" type="button">Workflow Templates</button>
         <button class="top-tab" data-view="reviewView" type="button">Review Error Listings (<span id="reviewCount">0</span>)</button>
@@ -575,7 +857,7 @@
     </header>
     <div id="mapperView">
     <div id="saveProgress" class="progress-wrap hidden" aria-live="polite" aria-busy="false">
-      <div class="progress-label"><span id="progressMessage">Preparing records for BigQuery</span><span id="progressValue">0%</span></div>
+      <div class="progress-label"><span id="progressMessage">Preparing your records</span><span id="progressValue">0%</span></div>
       <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
     </div>
     <main>
@@ -589,7 +871,7 @@
           <option value="json">JSON</option>
           <option value="xml">XML</option>
           <option value="api_get_json">GET API JSON</option>
-          <option value="python_api_connector">Python API Connector</option>
+          <option value="python_editor">Python Editor</option>
         </select>
 
         <div class="field-group file-field">
@@ -624,6 +906,10 @@
           <span class="info-icon" tabindex="0" data-tooltip="Use this when records are inside a nested response. Example: locations or data.stores for JSON/API. For Excel, the selected sheet name is used. CSV usually does not need this.">i</span>
         </div>
         <input id="recordPath" placeholder="JSON: stores or data.locations; Excel: sheet1">
+        <label for="jsonRecordPath" class="json-record-path-field hidden">JSON record layer</label>
+        <select id="jsonRecordPath" class="json-record-path-field hidden">
+          <option value="">Automatically select the best record layer</option>
+        </select>
         </div>
 
         <div class="field-group excel-field">
@@ -674,14 +960,16 @@
         </div>
 
         <div class="field-group python-connector-field hidden">
-          <label for="pythonConnectorCode">Python connector</label>
+          <label for="pythonConnectorCode">Python editor</label>
           <textarea id="pythonConnectorCode" class="hidden" spellcheck="false">from pyodide.http import pyfetch
 import json
 
 response = await pyfetch("https://cdn.jsdelivr.net/npm/vega-datasets@2/data/cars.json")
 result = json.loads(await response.string())</textarea>
-          <div id="pythonConnectorEditor" class="connector-editor" aria-label="Python connector editor"></div>
-          <div class="mapping-note">Write Python that assigns a JSON-compatible list or object to <code>result</code>. The code runs in this browser, then its JSON output is sent to the standard mapping workflow.</div>
+          <div id="pythonConnectorEditor" class="connector-editor" aria-label="Python editor"></div>
+          <label for="pythonPackages">Pyodide packages (optional)</label>
+          <input id="pythonPackages" placeholder="Example: pandas, beautifulsoup4">
+          <div class="mapping-note">Write any Python supported by the browser runtime. Assign the final JSON-compatible object or list to <code>result</code>. Add supported Pyodide package names above when needed.</div>
           <div class="button-row">
             <button class="secondary" id="runPythonConnectorBtn" type="button">Run and Parse JSON</button>
             <button class="secondary" id="expandPythonConnectorBtn" type="button">Open Full Editor</button>
@@ -697,10 +985,12 @@ result = json.loads(await response.string())</textarea>
       </div>
 
       <div class="panel">
-        <div class="template-progress"><span>Mapping Coverage</span><strong id="mappingPercentage">0%</strong></div>
+        <div class="template-progress"><span>Mapping Coverage</span><strong id="mappingPercentage" class="mapping-percentage low">0%</strong></div>
         <div id="mappingCoverageDetail" class="mapping-note">Parse a source to measure mapped columns.</div>
         <div class="button-row">
-          <button id="saveBtn">Save Workflow Template</button>
+          <span id="saveActionWrap" class="save-action-wrap" data-tooltip="Map at least 50% of your source columns before saving the workflow template.">
+            <button id="saveBtn" type="button" disabled>Save Workflow Template</button>
+          </span>
         </div>
         <details class="advanced-template">
           <summary>View Workflow Template</summary>
@@ -710,6 +1000,14 @@ result = json.loads(await response.string())</textarea>
           </div>
           <div id="copyFeedback" class="action-feedback" role="status" aria-live="polite"></div>
         </details>
+      </div>
+
+      <div class="panel json-viewer-panel">
+        <h2>JSON Viewer</h2>
+        <div class="mapping-note">Open the viewer to beautify or validate the generated workflow template JSON.</div>
+        <div class="button-row">
+          <a class="json-viewer-link" data-json-viewer-link target="_blank" rel="noopener noreferrer">Copy JSON &amp; Open Viewer</a>
+        </div>
       </div>
 
     </aside>
@@ -725,20 +1023,25 @@ result = json.loads(await response.string())</textarea>
       <div class="panel">
         <h2>Optional Fields</h2>
         <div class="mapping-note">Add fields available in this source. New fields appear at the end of the mapping list.</div>
-        <div class="optional-picker">
-          <select id="optionalFieldSelect" aria-label="Optional field to add">
-            <option value="">Choose a field</option>
-          </select>
-          <button class="secondary" id="addOptionalFieldBtn" type="button">Add</button>
-        </div>
-        <div class="alias-picker">
-          <label for="customFieldLabel">New custom field label</label>
-          <input id="customFieldLabel" placeholder="For example: Delivery Zone">
-          <input id="customFieldSlug" placeholder="Slug, for example delivery_zone">
-          <select id="customFieldType"><option value="string">Text</option><option value="float">Number</option><option value="integer">Whole number</option><option value="date">Date</option></select>
-          <input id="aliasPassword" type="password" placeholder="Administrative password">
-          <button class="secondary" id="addCustomFieldBtn" type="button">Add Custom Field</button>
-          <div id="customFieldFeedback" class="action-feedback" role="status" aria-live="polite"></div>
+        <div class="optional-fields-layout">
+          <div class="optional-fields-column">
+            <label for="optionalFieldSelect">Available optional fields</label>
+            <div class="optional-picker">
+              <select id="optionalFieldSelect" aria-label="Optional field to add">
+                <option value="">Choose a field</option>
+              </select>
+              <button class="secondary" id="addOptionalFieldBtn" type="button">Add</button>
+            </div>
+          </div>
+          <div class="optional-fields-column alias-picker">
+            <label for="customFieldLabel">New custom field label</label>
+            <input id="customFieldLabel" placeholder="For example: Delivery Zone">
+            <input id="customFieldSlug" placeholder="Slug, for example delivery_zone">
+            <select id="customFieldType"><option value="string">Text</option><option value="float">Number</option><option value="integer">Whole number</option><option value="date">Date</option></select>
+            <input id="aliasPassword" type="password" placeholder="Administrative password">
+            <button class="secondary" id="addCustomFieldBtn" type="button">Add Custom Field</button>
+            <div id="customFieldFeedback" class="action-feedback" role="status" aria-live="polite"></div>
+          </div>
         </div>
       </div>
 
@@ -755,14 +1058,77 @@ result = json.loads(await response.string())</textarea>
     <dialog id="pythonConnectorDialog" class="connector-editor-dialog">
       <div class="connector-editor-dialog-content">
         <div class="connector-editor-dialog-header">
-          <h2 class="connector-editor-dialog-title">Python API Connector</h2>
+          <h2 class="connector-editor-dialog-title">Python Editor</h2>
           <button class="secondary" id="minimizePythonConnectorBtn" type="button">Minimize Editor</button>
         </div>
         <div id="pythonConnectorDialogHost"></div>
       </div>
     </dialog>
     <section id="reportingView" class="reporting-view hidden">
-      <iframe class="reporting-frame" title="Reporting dashboard" src="https://lookerstudio.google.com/embed/reporting/1f6e8f3c-2c43-4a55-9f4a-8a4b3f9e2d10/page/p_abc123"></iframe>
+      <div class="report-shell">
+        <div class="report-hero">
+          <div>
+            <h1>Location Intelligence Report</h1>
+            <p>Current location coverage from the configured reporting table. This view defaults to raw bronze listings and can later point to a silver or gold BigQuery view.</p>
+            <div id="reportSource" class="report-source"></div>
+          </div>
+          <button id="refreshReportBtn" type="button">Refresh</button>
+        </div>
+        <div id="reportStatus" class="report-status">Open Reporting to load the latest summary.</div>
+        <div class="report-filters">
+          <div class="report-filter-group">
+            <h2>Main Brand</h2>
+            <div id="mainBrandChecks" class="report-checks"></div>
+          </div>
+          <div class="report-filter-group">
+            <h2>Competitor Brand</h2>
+            <div id="competitorBrandChecks" class="report-checks"></div>
+          </div>
+          <div class="report-filter-group">
+            <h2>Geography</h2>
+            <div class="report-geo-filters">
+              <input id="reportStateFilter" placeholder="State">
+              <input id="reportCountyFilter" placeholder="County">
+              <input id="reportCityFilter" placeholder="City">
+              <input id="reportZipFilter" placeholder="ZIP Code">
+            </div>
+          </div>
+        </div>
+        <div id="reportContent" class="hidden">
+          <div class="report-grid">
+            <div class="report-metric"><strong id="reportLocations">0</strong><span>Locations</span></div>
+            <div class="report-metric"><strong id="reportBrands">0</strong><span>Brands</span></div>
+            <div class="report-metric"><strong id="reportStates">0</strong><span>States</span></div>
+            <div class="report-metric"><strong id="reportCities">0</strong><span>Cities</span></div>
+          </div>
+          <div class="report-columns">
+            <section class="report-section">
+              <h2>Top States and Territories</h2>
+              <div id="reportTopStates"></div>
+            </section>
+            <section class="report-section">
+              <h2>Cities with the Most Locations</h2>
+              <div id="reportTopCities"></div>
+            </section>
+          </div>
+          <section class="report-section">
+            <h2>Brand Comparison</h2>
+            <div id="reportBrandsTable"></div>
+          </section>
+          <section class="report-section">
+            <h2>Mapped Gaps</h2>
+            <div id="reportGapsTable"></div>
+          </section>
+          <section class="report-section">
+            <h2>States without Locations</h2>
+            <div id="reportEmptyStates" class="report-empty-states"></div>
+          </section>
+          <section class="report-section">
+            <h2>Sample Records</h2>
+            <div id="reportSampleRecords"></div>
+          </section>
+        </div>
+      </div>
     </section>
     <section id="reviewView" class="review-view hidden">
       <h2>Review Records</h2>
@@ -782,6 +1148,12 @@ result = json.loads(await response.string())</textarea>
       </div>
       <div id="templateResults" class="status">Search saved templates to edit an existing mapping.</div>
     </section>
+    <footer class="app-footer">
+      <div class="brand-lockup" aria-label="Birdeye brand reference">
+        <span class="brand-icon-crop"><img class="brand-logo-image" data-logo-src="birdeyeLogoUrl" alt="Birdeye"></span>
+      </div>
+      <p id="brandDisclaimer"></p>
+    </footer>
   </div>
   <dialog id="dangerDialog" class="danger-dialog">
     <h2>DANGER</h2>
@@ -794,14 +1166,14 @@ result = json.loads(await response.string())</textarea>
 
   <script>
     let mappingTargets = [
-      { key: "location_id", table: "listings", field: "location_key", label: "Location ID / Store ID", required: false, hints: ["locationid", "storeid", "store_id", "id", "number"] },
       { key: "name", table: "listings", field: "name", label: "Restaurant Name", required: true, hints: ["name", "restaurantname", "storename", "displayname"] },
       { key: "address", table: "listings", field: "address", label: "Street Address", required: true, hints: ["address", "addressdescription", "line1", "street"] },
       { key: "city", table: "listings", field: "city_name", label: "City", required: true, hints: ["city", "town"] },
-      { key: "town", table: "listings", field: "town", label: "Town", required: false, hints: ["town", "locality"] },
       { key: "state", table: "listings", field: "state_code", label: "State", required: true, hints: ["state", "region", "province", "state_code"] },
-      { key: "province", table: "listings", field: "province", label: "Province", required: false, hints: ["province", "region"] },
       { key: "postal_code", table: "listings", field: "zip_code", label: "ZIP Code", required: true, hints: ["zip", "zipcode", "zip_code", "postalcode", "postal_code"] },
+      { key: "location_id", table: "listings", field: "location_key", label: "Location ID / Store ID", required: false, hints: ["locationid", "storeid", "store_id", "id", "number"] },
+      { key: "town", table: "listings", field: "town", label: "Town", required: false, hints: ["town", "locality"] },
+      { key: "province", table: "listings", field: "province", label: "Province", required: false, hints: ["province", "region"] },
       { key: "country", table: "listings", field: "country", label: "Country", required: false, hints: ["country", "countrycode"] },
       { key: "latitude", table: "listings", field: "latitude", label: "Latitude", required: false, hints: ["lat", "latitude"] },
       { key: "longitude", table: "listings", field: "longitude", label: "Longitude", required: false, hints: ["lng", "lon", "longitude"] },
@@ -834,6 +1206,15 @@ result = json.loads(await response.string())</textarea>
     ];
 
     const primaryMappingKeys = new Set(mappingTargets.slice(0, 20).map((target) => target.key));
+    const fieldDisplayOrder = [
+      "name", "address", "city", "state", "postal_code", "location_id", "town", "province", "country",
+      "latitude", "longitude", "franchise_name", "concept_type", "cuisine_type", "neighborhood", "district",
+      "phone_number", "website_url", "google_maps_link", "social_media_handles", "operating_hours", "seating_capacity",
+      "service_types", "opening_date", "status", "observed_at", "annual_revenue", "average_ticket_size", "daily_footfall",
+      "monthly_footfall", "rental_cost", "lease_cost", "population_density", "average_household_income", "competitor_count",
+      "foot_traffic_score", "parking_availability"
+    ];
+    const fieldOrderIndex = new Map(fieldDisplayOrder.map((key, index) => [key, index]));
     let optionalMappingKeys = new Set();
     let hiddenMappingKeys = new Set();
 
@@ -841,6 +1222,7 @@ result = json.loads(await response.string())</textarea>
     let sourceFields = [];
     let resolvedRecordPath = "";
     let mappingSelections = {};
+    let jsonRecordPaths = [];
     let autoMappedKeys = new Set();
     let learnedSuggestions = {};
     let sourceParsed = false;
@@ -850,6 +1232,9 @@ result = json.loads(await response.string())</textarea>
     let activeTemplateId = "";
     let connectorEditor = null;
     let pyodideRuntimePromise = null;
+    let appDataLoaded = false;
+    let reportLoaded = false;
+    let reportingBrands = [];
     const draftStorageKey = "competitive_whitespace_mapping_draft";
     const loginSessionStorageKey = "competitive_whitespace_login_session";
 
@@ -865,6 +1250,66 @@ result = json.loads(await response.string())</textarea>
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;");
+    }
+
+    function formatNumber(value) {
+      const number = Number(value || 0);
+      return Number.isFinite(number) ? number.toLocaleString() : "0";
+    }
+
+    function renderSimpleTable(targetId, columns, rows) {
+      const target = el(targetId);
+      if (!rows.length) {
+        target.innerHTML = '<div class="report-status">No records available.</div>';
+        return;
+      }
+      target.innerHTML = `<table><thead><tr>${columns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr>${columns.map((column) => `<td>${escapeHtml(column.format ? column.format(row[column.key], row) : row[column.key])}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+    }
+
+    function checkedValues(name) {
+      return [...document.querySelectorAll(`input[name="${name}"]:checked`)].map((input) => input.value);
+    }
+
+    function renderBrandChecks(containerId, name, brands, checkedBrands) {
+      const selected = new Set(checkedBrands || []);
+      el(containerId).innerHTML = brands.length
+        ? brands.map((brand) => `<label><input type="checkbox" name="${name}" value="${escapeHtml(brand)}" ${selected.has(brand) ? "checked" : ""}>${escapeHtml(brand)}</label>`).join("")
+        : '<div class="report-status">No brands available.</div>';
+      el(containerId).querySelectorAll("input").forEach((input) => input.addEventListener("change", () => {
+        reportLoaded = false;
+        loadReporting();
+      }));
+    }
+
+    function syncReportingFilters(result) {
+      const brands = result.filter_options?.brands || [];
+      if (brands.join("|") !== reportingBrands.join("|")) {
+        reportingBrands = brands;
+        const currentMain = checkedValues("mainBrand");
+        const currentCompetitors = checkedValues("competitorBrand");
+        const defaultMain = currentMain.length ? currentMain : brands.slice(0, 1);
+        const defaultCompetitors = currentCompetitors.length ? currentCompetitors : brands.slice(1);
+        renderBrandChecks("mainBrandChecks", "mainBrand", brands, defaultMain);
+        renderBrandChecks("competitorBrandChecks", "competitorBrand", brands, defaultCompetitors);
+      }
+    }
+
+    function reportingQueryString() {
+      const params = new URLSearchParams();
+      const mainBrands = checkedValues("mainBrand");
+      const competitorBrands = checkedValues("competitorBrand");
+      if (mainBrands.length) params.set("main_brands", mainBrands.join(","));
+      if (competitorBrands.length) params.set("competitor_brands", competitorBrands.join(","));
+      [
+        ["state", "reportStateFilter"],
+        ["county", "reportCountyFilter"],
+        ["city", "reportCityFilter"],
+        ["zip", "reportZipFilter"]
+      ].forEach(([key, id]) => {
+        const value = el(id).value.trim();
+        if (value) params.set(key, value);
+      });
+      return params.toString();
     }
 
     function flattenObject(value, prefix = "", output = {}) {
@@ -959,9 +1404,11 @@ result = json.loads(await response.string())</textarea>
     }
 
     async function loadConnectorPackages(pyodide, code) {
-      if (/^\s*(?:from\s+requests\s+import|import\s+requests\b)/m.test(code)) {
-        setConnectorFeedback("Loading requests for the Python connector...", "");
-        await pyodide.loadPackage("requests");
+      const requested = el("pythonPackages").value.split(",").map((name) => name.trim()).filter(Boolean);
+      if (/^\s*(?:from\s+requests\s+import|import\s+requests\b)/m.test(code) && !requested.includes("requests")) requested.push("requests");
+      if (requested.length) {
+        setConnectorFeedback(`Loading Python packages: ${requested.join(", ")}...`, "");
+        await pyodide.loadPackage(requested);
       }
     }
 
@@ -972,7 +1419,7 @@ result = json.loads(await response.string())</textarea>
       pyodideRuntimePromise ||= window.loadPyodide ? window.loadPyodide() : Promise.reject(new Error("Browser Python runtime could not be loaded."));
       const pyodide = await pyodideRuntimePromise;
       await loadConnectorPackages(pyodide, code);
-      setConnectorFeedback("Running Python connector...", "");
+      setConnectorFeedback("Running Python editor...", "");
       const output = await pyodide.runPythonAsync(`${code}\n\nimport json\njson.dumps(result)`);
       let value;
       try {
@@ -1010,10 +1457,12 @@ result = json.loads(await response.string())</textarea>
         selectedBrand,
         sourceName: el("sourceName").value,
         recordPath: el("recordPath").value,
+        jsonRecordPaths,
         sheetName: el("sheetName").value,
         apiUrl: el("apiUrl").value,
         authType: el("authType").value,
         pythonConnectorCode: getConnectorCode(),
+        pythonPackages: el("pythonPackages").value,
         sourceRows,
         sourceFields,
         resolvedRecordPath,
@@ -1035,6 +1484,7 @@ result = json.loads(await response.string())</textarea>
         sourceFields = draft.sourceFields || [];
         sourceParsed = sourceRows.length > 0;
         resolvedRecordPath = draft.resolvedRecordPath || "";
+        jsonRecordPaths = draft.jsonRecordPaths || [];
         mappingSelections = draft.mappingSelections || {};
         autoMappedKeys = new Set(draft.autoMappedKeys || []);
         optionalMappingKeys = new Set(draft.optionalMappingKeys || []);
@@ -1048,8 +1498,10 @@ result = json.loads(await response.string())</textarea>
         el("apiUrl").value = draft.apiUrl || "";
         el("authType").value = draft.authType || "none";
         setConnectorCode(draft.pythonConnectorCode || getConnectorCode());
+        el("pythonPackages").value = draft.pythonPackages || "";
         updateAuthVisibility();
         updateSourceVisibility();
+        populateJsonRecordPaths(jsonRecordPaths);
         selectedBrand = draft.selectedBrand || null;
         renderMappings();
         renderTable("sourcePreview", sourceRows.slice(0, 10).map((row) => flattenObject(row)));
@@ -1063,6 +1515,82 @@ result = json.loads(await response.string())</textarea>
       document.querySelectorAll("[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === viewId));
       ["mapperView", "reportingView", "reviewView", "templateLibraryView"].forEach((id) => el(id).classList.toggle("hidden", id !== viewId));
       el("appShell").querySelector("header").classList.toggle("reporting-active", viewId === "reportingView");
+      if (viewId === "reportingView" && !reportLoaded) loadReporting();
+    }
+
+    async function loadReporting() {
+      const status = el("reportStatus");
+      status.classList.remove("hidden");
+      status.textContent = "Loading report...";
+      el("reportContent").classList.add("hidden");
+      try {
+        const hadBrandFilters = checkedValues("mainBrand").length > 0 || checkedValues("competitorBrand").length > 0;
+        const queryString = reportingQueryString();
+        const response = await fetch(`/api/reporting${queryString ? `?${queryString}` : ""}`);
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not load reporting data.");
+        el("reportSource").textContent = `Source: ${result.source_table || "not configured"}`;
+        syncReportingFilters(result);
+        if (!hadBrandFilters && reportingBrands.length) return loadReporting();
+        if (result.message) {
+          status.textContent = result.message;
+          return;
+        }
+        const totals = result.totals || {};
+        el("reportLocations").textContent = formatNumber(totals.total_locations);
+        el("reportBrands").textContent = formatNumber(totals.total_brands);
+        el("reportStates").textContent = formatNumber(totals.total_states);
+        el("reportCities").textContent = formatNumber(totals.total_cities);
+        renderSimpleTable("reportTopStates", [
+          { key: "state", label: "State / Territory" },
+          { key: "locations", label: "Number of Locations", format: formatNumber },
+          { key: "cities", label: "Cities", format: formatNumber },
+          { key: "brands", label: "Brands", format: formatNumber }
+        ], result.top_states || []);
+        renderSimpleTable("reportTopCities", [
+          { key: "city", label: "City" },
+          { key: "state", label: "State / Territory" },
+          { key: "locations", label: "Number of Locations", format: formatNumber }
+        ], result.top_cities || []);
+        renderSimpleTable("reportBrandsTable", [
+          { key: "brand", label: "Brand" },
+          { key: "locations", label: "Number of Locations", format: formatNumber },
+          { key: "states", label: "Number of States", format: formatNumber },
+          { key: "counties", label: "Number of Counties", format: formatNumber },
+          { key: "cities", label: "Number of Cities", format: formatNumber },
+          { key: "zips", label: "Number of ZIPs", format: formatNumber }
+        ], result.brands || []);
+        renderSimpleTable("reportGapsTable", [
+          { key: "state", label: "State" },
+          { key: "county", label: "County" },
+          { key: "city", label: "City" },
+          { key: "zip_code", label: "ZIP Code" },
+          { key: "competitor_locations", label: "Competitor Locations", format: formatNumber },
+          { key: "brands_present", label: "Brands Present" }
+        ], result.gaps || []);
+        const emptyStates = result.states_without_locations || [];
+        el("reportEmptyStates").innerHTML = emptyStates.length
+          ? emptyStates.map((state) => `<span>${escapeHtml(state)}</span>`).join("")
+          : '<div class="report-status">Every tracked state has at least one location.</div>';
+        renderSimpleTable("reportSampleRecords", [
+          { key: "name", label: "Name" },
+          { key: "address", label: "Street" },
+          { key: "city", label: "City" },
+          { key: "state", label: "State" },
+          { key: "county", label: "County" },
+          { key: "zip_code", label: "Zip Code" },
+          { key: "phone_number", label: "Phone" },
+          { key: "latitude", label: "Latitude" },
+          { key: "longitude", label: "Longitude" },
+          { key: "country", label: "Country" },
+          { key: "last_observed_at", label: "Last Updated" }
+        ], result.sample_records || []);
+        status.classList.add("hidden");
+        el("reportContent").classList.remove("hidden");
+        reportLoaded = true;
+      } catch (error) {
+        status.textContent = error.message;
+      }
     }
 
     async function loadRejectedRecords() {
@@ -1187,6 +1715,16 @@ result = json.loads(await response.string())</textarea>
       return "csv";
     }
 
+    function populateJsonRecordPaths(paths) {
+      jsonRecordPaths = Array.isArray(paths) ? paths : [];
+      const picker = el("jsonRecordPath");
+      picker.innerHTML = '<option value="">Automatically select the best record layer</option>' + jsonRecordPaths
+        .filter((path) => path)
+        .map((path) => `<option value="${escapeHtml(path)}">${escapeHtml(path)}</option>`)
+        .join("");
+      picker.value = el("recordPath").value || "";
+    }
+
     function isExcelFile(file) {
       if (!file) return false;
       const lower = file.name.toLowerCase();
@@ -1254,15 +1792,17 @@ result = json.loads(await response.string())</textarea>
     function updateSourceVisibility() {
       const sourceType = el("sourceType").value;
       const isApi = sourceType === "api_get_json";
-      const isPythonConnector = sourceType === "python_api_connector";
+      const isPythonConnector = sourceType === "python_editor";
       const isExcel = sourceType === "excel";
-      const hasRecordPath = ["json", "xml", "api_get_json", "python_api_connector"].includes(sourceType);
+      const hasRecordPath = ["json", "xml", "api_get_json", "python_editor"].includes(sourceType);
 
       document.querySelectorAll(".api-field").forEach((field) => field.classList.toggle("hidden", !isApi));
       document.querySelectorAll(".python-connector-field").forEach((field) => field.classList.toggle("hidden", !isPythonConnector));
       document.querySelectorAll(".excel-field").forEach((field) => field.classList.toggle("hidden", !isExcel));
       document.querySelectorAll(".file-field").forEach((field) => field.classList.toggle("hidden", isApi || isPythonConnector));
       document.querySelectorAll(".record-field").forEach((field) => field.classList.toggle("hidden", !hasRecordPath));
+      document.querySelectorAll(".json-record-path-field").forEach((field) => field.classList.toggle("hidden", sourceType !== "json"));
+
       document.querySelector("main").classList.toggle("connector-active", isPythonConnector);
 
       el("fileInput").disabled = isApi || isPythonConnector;
@@ -1271,21 +1811,33 @@ result = json.loads(await response.string())</textarea>
       updateAuthVisibility();
     }
 
-    function login() {
-      const ok = el("loginUser").value.trim() === "admin" && el("loginPassword").value.trim() === "birdeye";
-      if (!ok) {
-        el("loginStatus").className = "status error";
-        el("loginStatus").textContent = "Invalid username or password.";
-        return;
+    async function login() {
+      const status = el("loginStatus");
+      status.className = "status hidden";
+      try {
+        const response = await fetch("/api/login", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ username: el("loginUser").value.trim(), password: el("loginPassword").value })
+        });
+        const result = await response.json();
+        if (!response.ok || !result.authenticated) throw new Error(result.error || "Invalid username or password.");
+        if (el("rememberLogin").checked) localStorage.setItem("mapper_login_remembered", "true");
+        else localStorage.removeItem("mapper_login_remembered");
+        sessionStorage.setItem(loginSessionStorageKey, "true");
+        el("loginScreen").classList.add("hidden");
+        el("appShell").classList.remove("hidden");
+        loadAppData();
+      } catch (error) {
+        status.className = "status error";
+        status.textContent = error.message;
       }
-      if (el("rememberLogin").checked) {
-        localStorage.setItem("mapper_login_remembered", "true");
-      } else {
-        localStorage.removeItem("mapper_login_remembered");
-      }
-      sessionStorage.setItem(loginSessionStorageKey, "true");
-      el("loginScreen").classList.add("hidden");
-      el("appShell").classList.remove("hidden");
+    }
+
+    async function loadAppData() {
+      if (appDataLoaded) return;
+      appDataLoaded = true;
+      await Promise.allSettled([loadFieldRegistry(), loadBrands(), loadTemplateFilters()]);
     }
 
     function restoreRememberedLogin() {
@@ -1295,22 +1847,20 @@ result = json.loads(await response.string())</textarea>
         el("rememberLogin").checked = remembered;
         el("loginScreen").classList.add("hidden");
         el("appShell").classList.remove("hidden");
+        loadAppData();
       }
     }
 
     async function prepareReferenceData() {
-      const status = el("loginStatus");
-      status.className = "status";
-      status.textContent = "Preparing ZIP reference data...";
+      const loginButton = el("loginBtn");
+      loginButton.className = "reference-login-button";
       try {
         const response = await fetch("/api/prepare");
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not prepare reference data.");
-        status.className = "status ok";
-        status.textContent = `ZIP reference ready: ${result.rows.toLocaleString()} records.`;
+        loginButton.className = "reference-login-button ready";
       } catch (error) {
-        status.className = "status warn";
-        status.textContent = `Reference data will be prepared when storage is available: ${error.message}`;
+        loginButton.className = "reference-login-button warn";
       }
     }
 
@@ -1431,7 +1981,9 @@ result = json.loads(await response.string())</textarea>
     }
 
     function getVisibleTargets() {
-      const standardTargets = mappingTargets.filter((target) => primaryMappingKeys.has(target.key) && !hiddenMappingKeys.has(target.key));
+      const standardTargets = mappingTargets
+        .filter((target) => primaryMappingKeys.has(target.key) && !hiddenMappingKeys.has(target.key))
+        .sort((left, right) => (fieldOrderIndex.get(left.key) ?? Number.MAX_SAFE_INTEGER) - (fieldOrderIndex.get(right.key) ?? Number.MAX_SAFE_INTEGER));
       const optionalTargets = [...optionalMappingKeys]
         .map((key) => mappingTargets.find((target) => target.key === key))
         .filter(Boolean);
@@ -1452,7 +2004,7 @@ result = json.loads(await response.string())</textarea>
         aliases: customAliases
       };
       const recordPath = el("recordPath").value.trim() || resolvedRecordPath;
-      if (recordPath && ["json", "xml", "excel", "api_get_json", "python_api_connector"].includes(el("sourceType").value)) {
+      if (recordPath && ["json", "xml", "excel", "api_get_json", "python_editor"].includes(el("sourceType").value)) {
         mapper.record_path = recordPath;
       }
       if (el("sourceType").value === "api_get_json") {
@@ -1464,8 +2016,8 @@ result = json.loads(await response.string())</textarea>
           auth: collectAuth()
         };
       }
-      if (el("sourceType").value === "python_api_connector") {
-        mapper.python_connector = { code: getConnectorCode() };
+      if (el("sourceType").value === "python_editor") {
+        mapper.python_editor = { code: getConnectorCode() };
       }
       return mapper;
     }
@@ -1519,7 +2071,7 @@ result = json.loads(await response.string())</textarea>
     }
 
     function validateMapper(mapper) {
-      if (!sourceParsed) return;
+      if (!sourceParsed || !sourceFields.length || !Object.keys(mappingSelections).length) return;
       const missing = mappingTargets.filter((target) => target.required && !mapper.fields[target.key]).map((target) => target.label);
       if (!mapper.brand) missing.unshift("brand");
       if (missing.length) {
@@ -1535,7 +2087,13 @@ result = json.loads(await response.string())</textarea>
       const mapper = getMapper();
       const mappedSourceFields = new Set(Object.values(mapper.fields).filter(Boolean));
       const coverage = sourceFields.length ? Math.round(mappedSourceFields.size / sourceFields.length * 100) : 0;
-      el("mappingPercentage").textContent = `${coverage}%`;
+      const percentage = el("mappingPercentage");
+      percentage.textContent = `${coverage}%`;
+      percentage.className = `mapping-percentage ${coverage < 50 ? "low" : coverage <= 75 ? "medium" : "high"}`;
+      el("saveBtn").disabled = !sourceParsed || coverage < 50;
+      el("saveActionWrap").dataset.tooltip = !sourceParsed || coverage < 50
+        ? "Map at least 50% of your source columns before saving the workflow template."
+        : "Workflow template is ready to save.";
       el("mappingCoverageDetail").textContent = sourceFields.length ? `${mappedSourceFields.size} of ${sourceFields.length} source columns mapped` : "Parse a source to measure mapped columns.";
       el("mapperOutput").value = JSON.stringify(mapper, null, 2);
       validateMapper(mapper);
@@ -1592,14 +2150,32 @@ result = json.loads(await response.string())</textarea>
         target.innerHTML = "";
         return;
       }
-      const columns = Object.keys(flattenObject(rows[0]));
+      const sourceColumns = Object.keys(flattenObject(rows[0]));
+      const mappedColumns = new Map(Object.entries(mappingSelections).filter(([, source]) => source));
+      const columns = ["__brand", ...sourceColumns].sort((left, right) => {
+        if (left === "__brand") return -1;
+        if (right === "__brand") return 1;
+        const leftTarget = [...mappedColumns.entries()].find(([, source]) => source === left)?.[0];
+        const rightTarget = [...mappedColumns.entries()].find(([, source]) => source === right)?.[0];
+        const leftOrder = leftTarget ? (fieldOrderIndex.get(leftTarget) ?? Number.MAX_SAFE_INTEGER) : Number.MAX_SAFE_INTEGER;
+        const rightOrder = rightTarget ? (fieldOrderIndex.get(rightTarget) ?? Number.MAX_SAFE_INTEGER) : Number.MAX_SAFE_INTEGER;
+        return leftOrder - rightOrder || sourceColumns.indexOf(left) - sourceColumns.indexOf(right);
+      });
+      const columnHeaders = columns.map((column) => {
+        if (column === "__brand") return "Brand Name";
+        const target = Object.entries(mappingSelections).find(([, source]) => source === column);
+        const targetDefinition = target && mappingTargets.find((item) => item.key === target[0]);
+        return targetDefinition
+          ? `<span class="source-column-standard">${escapeHtml(targetDefinition.label)}</span><span class="source-column-name">[${escapeHtml(column)}]</span>`
+          : escapeHtml(column);
+      });
       const body = rows.map((row) => {
         const flat = flattenObject(row);
-        return `<tr>${columns.map((col) => `<td>${escapeHtml(flat[col] ?? "")}</td>`).join("")}</tr>`;
+        return `<tr>${columns.map((col) => `<td>${escapeHtml(col === "__brand" ? (selectedBrand?.name || "") : flat[col] ?? "")}</td>`).join("")}</tr>`;
       }).join("");
       target.innerHTML = `
         <table>
-          <thead><tr>${columns.map((col) => `<th>${escapeHtml(col)}</th>`).join("")}</tr></thead>
+          <thead><tr>${columnHeaders.map((header) => `<th>${header}</th>`).join("")}</tr></thead>
           <tbody>${body}</tbody>
         </table>
       `;
@@ -1620,7 +2196,7 @@ result = json.loads(await response.string())</textarea>
           payload.query_params = collectPairs("queryParams");
           payload.headers = Object.fromEntries(collectPairs("customHeaders").map((pair) => [pair.key, pair.value]));
           payload.auth = collectAuth();
-        } else if (sourceType === "python_api_connector") {
+        } else if (sourceType === "python_editor") {
           payload.source_type = "json";
           payload.content_base64 = textToBase64(await runPythonConnector());
         } else {
@@ -1643,7 +2219,9 @@ result = json.loads(await response.string())</textarea>
         if (!response.ok) throw new Error(result.error || "Preview failed.");
         sourceRows = result.rows || [];
         sourceFields = [...new Set((result.fields || []).filter((field) => field !== null && field !== undefined && String(field).trim()))];
+        jsonRecordPaths = result.record_paths || [];
         sourceParsed = true;
+        populateJsonRecordPaths(jsonRecordPaths);
         learnedSuggestions = {};
         try {
           const learningResponse = await fetch("/api/learning", {
@@ -1704,10 +2282,15 @@ result = json.loads(await response.string())</textarea>
     async function saveMapper() {
       if (activeTemplateId) return saveEditedTemplate();
       const mapper = getMapper();
-      setStatus("Preparing records for BigQuery storage...", "");
-      setProgress(10, "Preparing records for BigQuery");
+      const coverage = sourceFields.length ? Math.round(new Set(Object.values(mapper.fields).filter(Boolean)).size / sourceFields.length * 100) : 0;
+      if (coverage < 50) {
+        setStatus("Mapping coverage must reach 50% before saving.", "warn");
+        return;
+      }
+      setStatus("Preparing your records...", "");
+      setProgress(10, "Preparing your records");
       try {
-        setProgress(35, `Writing ${sourceRows.length} records to BigQuery`);
+        setProgress(35, `Processing ${sourceRows.length} records`);
         const response = await fetch("/api/save", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -1719,7 +2302,7 @@ result = json.loads(await response.string())</textarea>
         el("reviewEventId").value = result.event_id;
         await refreshReviewCount();
         hideProgress();
-        setStatus(`Processing complete: ${result.mapped_rows} of ${result.total_rows} records processed successfully; ${result.error_listings} error listings are available under event ${result.event_id}.`, "ok");
+        setStatus(`Processing complete: ${result.mapped_rows} of ${result.total_rows} records processed successfully; ${result.error_listings} records need review.`, "ok");
       } catch (error) {
         hideProgress();
         setStatus(error.message, "error");
@@ -1785,7 +2368,7 @@ result = json.loads(await response.string())</textarea>
       }
       try {
         const response = await fetch("/api/custom-field", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
-          label, slug: el("customFieldSlug").value.trim(), type: el("customFieldType").value, password: el("aliasPassword").value
+          label, slug: el("customFieldSlug").value.trim(), type: el("customFieldType").value, password: el("aliasPassword").value, business_id: selectedBrand?.business_id || ""
         }) });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not save custom field.");
@@ -1877,6 +2460,10 @@ result = json.loads(await response.string())</textarea>
       setStatus("Source changed. Ready to review fields.", "");
       updateSourceVisibility();
     });
+    el("jsonRecordPath").addEventListener("change", () => {
+      el("recordPath").value = el("jsonRecordPath").value;
+      parseSource();
+    });
     document.querySelectorAll(".tab").forEach((button) => {
       button.addEventListener("click", () => {
         document.querySelectorAll(".tab").forEach((tab) => tab.classList.remove("active"));
@@ -1887,10 +2474,34 @@ result = json.loads(await response.string())</textarea>
     addPairRow("queryParams", "limit", "100");
     addPairRow("customHeaders", "Accept", "application/json");
     initializeConnectorEditor();
+    document.querySelectorAll("[data-logo-src]").forEach((image) => { image.src = window.APP_CONSTANTS[image.dataset.logoSrc]; });
+    el("refreshReportBtn").addEventListener("click", () => {
+      reportLoaded = false;
+      loadReporting();
+    });
+    ["reportStateFilter", "reportCountyFilter", "reportCityFilter", "reportZipFilter"].forEach((id) => {
+      el(id).addEventListener("change", () => {
+        reportLoaded = false;
+        loadReporting();
+      });
+      el(id).addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          reportLoaded = false;
+          loadReporting();
+        }
+      });
+    });
+    document.querySelector("[data-json-viewer-link]").href = window.APP_CONSTANTS.jsonViewerUrl;
+    document.querySelector("[data-json-viewer-link]").addEventListener("click", async (event) => {
+      try {
+        await navigator.clipboard.writeText(el("mapperOutput").value || "{}");
+        setStatus("Workflow JSON copied. Paste it into the viewer's left input pane.", "ok");
+      } catch (error) {
+        setStatus("The JSON Viewer opened. Copy the workflow JSON from View Workflow Template, then paste it into the viewer.", "warn");
+      }
+    });
+    document.querySelector("#brandDisclaimer").textContent = window.APP_CONSTANTS.trademarkDisclaimer;
     updateSourceVisibility();
-    loadFieldRegistry();
-    loadBrands();
-    loadTemplateFilters();
     restoreRememberedLogin();
     prepareReferenceData();
   </script>

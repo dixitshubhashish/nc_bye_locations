@@ -23,7 +23,7 @@ Current tested fetch result: 33,791 ZIP geography rows. Known missing ACS fields
 Launch the local workflow-template UI for adding a new brand source:
 
 ```bash
-python3 -m whitespace_tool workflow-ui
+.venv/bin/python -m whitespace_tool workflow-ui
 ```
 
 Open `http://127.0.0.1:8765/integrations.html`, upload a source, map source columns/paths to the generic target fields, then choose `Save`. The server validates required mappings, stores the workflow template, and writes bronze rows.
@@ -44,8 +44,11 @@ Supported mapper inputs:
 - JSON
 - XML
 - GET API with JSON response
+- Python Editor
 
 Each input type is handled by a separate Python adapter under `whitespace_tool/source_adapters/`. Excel files expose sheet names in the UI so the user can choose which source to use.
+
+The Python Editor runs user-authored Python in a browser Pyodide runtime. Scripts may import standard-library modules and supported Pyodide packages, and can fetch or transform data as needed. Assign the final JSON-compatible object or list to `result`; that value is validated and passed into the same mapping workflow as every other source. The server receives only the resulting JSON and does not execute the script.
 
 The demo config uses small sample files for brand locations only. ZIP geography and demographics are read from BigQuery public datasets.
 
@@ -69,6 +72,40 @@ python3 scripts/test_storage_connection.py
 Put the downloaded service account file at `config/connections/keen-device-610-2af9b27dfda3.json`, or edit `credentials_json` in `config/connections/storage.json`. That local config and credential file are ignored by git.
 
 `config/live_bigquery.json` uses a `demographics_source` of type `bigquery` and the configured bronze dataset. If you are not using Application Default Credentials, set `credentials_json` in `config/connections/storage.json` or pass `--credentials-json` when pushing warehouse tables.
+
+## Configuration And Render Deployment
+
+Local secrets are not committed. The app can read storage settings from either ignored `config/connections/storage.json`, a local ignored `.env`, or host environment variables. Start from:
+
+```bash
+cp .env.example .env
+```
+
+Environment variables supported by the app:
+
+- `WORKFLOW_LOGIN_USER`
+- `WORKFLOW_LOGIN_PASSWORD`
+- `WORKFLOW_CONFIG`
+- `BIGQUERY_PROJECT_ID` or `GOOGLE_CLOUD_PROJECT`
+- `BIGQUERY_BRONZE_DATASET_ID`
+- `BIGQUERY_SILVER_DATASET_ID`
+- `BIGQUERY_GOLD_DATASET_ID`
+- `GOOGLE_APPLICATION_CREDENTIALS` for a local service-account file path
+- `GOOGLE_APPLICATION_CREDENTIALS_JSON` for hosted deploys where the full service-account JSON is stored as a secret
+- `REPORTING_LISTINGS_TABLE` to point the Reporting tab at a BigQuery table or view. If omitted, it reads raw bronze `listings`.
+
+The Reporting tab is built in the app, not embedded from an external dashboard. It summarizes location counts by brand, state, county, city, and ZIP, supports multi-select main/competitor brand filters, and maps gaps where competitor brands are present but selected main brands are absent. Keep `REPORTING_LISTINGS_TABLE` on the bronze `listings` table for raw reporting, or point it to a BigQuery silver/gold view once you add transformation views.
+
+For Render, create a Web Service from GitHub and use the workflow UI:
+
+```bash
+Build Command: pip install -r requirements.txt
+Start Command: python -m whitespace_tool workflow-ui --host 0.0.0.0
+```
+
+The workflow UI includes source mapping, rejected-record review, template library, and the native Reporting tab. The server automatically uses Render's `PORT` environment variable. Add the environment variables above in Render's dashboard; paste the full BigQuery service account JSON into `GOOGLE_APPLICATION_CREDENTIALS_JSON` instead of committing a credential file. Do not upload or commit `.env`; Render stores these values as encrypted service environment variables.
+
+This repo also includes `render.yaml`, so Render can pre-fill the build/start commands and prompt for secret environment variables.
 
 ## Approach
 
