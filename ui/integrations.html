@@ -1698,10 +1698,11 @@ result = json.loads(await response.string())</textarea>
     async function loadFieldRegistry() {
       try {
         const response = await fetch("/api/field-registry");
-        if (!response.ok) throw new Error("Could not load field definitions.");
         const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not load field definitions.");
         if (Array.isArray(result.fields) && result.fields.length) mappingTargets = result.fields;
         if (sourceParsed) renderMappings();
+        if (result.warning) setStatus(result.warning, "warn");
       } catch (error) {
         setStatus(error.message, "error");
       }

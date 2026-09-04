@@ -109,8 +109,23 @@ def source_sheets(payload: dict[str, Any]) -> dict[str, Any]:
     return {"sheets": excel_source.list_sheets(content, file_name)}
 
 
+def mapper_targets_with_status() -> dict[str, Any]:
+    try:
+        return {"fields": field_catalog(), "source": "bigquery"}
+    except Exception as exc:
+        LOGGER.exception("field_catalog_fallback error=%s", exc)
+        return {
+            "fields": load_field_registry(),
+            "source": "local_registry",
+            "warning": (
+                "BigQuery field catalog is unavailable, so local default fields were loaded. "
+                f"Storage error: {exc}"
+            ),
+        }
+
+
 def mapper_targets() -> list[dict[str, Any]]:
-    return field_catalog()
+    return mapper_targets_with_status()["fields"]
 
 
 def field_catalog() -> list[dict[str, Any]]:
@@ -890,10 +905,12 @@ def make_handler(ui_dir: Path):
 
         def do_GET(self) -> None:
             if self.path == "/api/schema":
-                _json_response(self, 200, {"targets": mapper_targets()})
+                result = mapper_targets_with_status()
+                _json_response(self, 200, {"targets": result["fields"], "source": result["source"], "warning": result.get("warning")})
                 return
             if self.path == "/api/field-registry":
-                _json_response(self, 200, {"fields": mapper_targets()})
+                result = mapper_targets_with_status()
+                _json_response(self, 200, result)
                 return
             if self.path == "/api/prepare":
                 try:
