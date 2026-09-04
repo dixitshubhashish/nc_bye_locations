@@ -136,6 +136,20 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
     ],
 }
 
+TABLE_PARTITION_SPECS: dict[str, dict[str, Any]] = {
+    "listings": {"field": "first_observed_at", "type": "DAY"},
+    "error_listings": {"field": "observed_at", "type": "DAY"},
+    "listings_enriched": {"field": "first_observed_at", "type": "DAY"},
+}
+
+TABLE_CLUSTER_SPECS: dict[str, list[str]] = {
+    "listings": ["state_code", "zip_code", "business_id"],
+    "us_zipcodes": ["state_code", "county", "zip_code"],
+    "error_listings": ["business_id", "source_type_id"],
+    "businesses": ["status", "slug"],
+    "listings_enriched": ["state_code", "zip_code", "business_id"],
+}
+
 
 def _scrub_config(value: Any) -> Any:
     if isinstance(value, dict):
@@ -284,6 +298,15 @@ def push_to_bigquery(
         table_ref = f"{project_id}.{dataset_id}.{table_name}"
         LOGGER.info("db_table_prepare table=%s rows=%d", table_ref, len(rows))
         table = bigquery.Table(table_ref, schema=schema)
+        part_spec = TABLE_PARTITION_SPECS.get(table_name)
+        if part_spec:
+            table.time_partitioning = bigquery.TimePartitioning(
+                type_=getattr(bigquery.TimePartitionType, part_spec["type"], bigquery.TimePartitionType.DAY),
+                field=part_spec["field"]
+            )
+        cluster_fields = TABLE_CLUSTER_SPECS.get(table_name)
+        if cluster_fields:
+            table.clustering_fields = cluster_fields
         try:
             existing = client.get_table(table_ref)
         except Exception as exc:
@@ -316,18 +339,24 @@ def _clear_dataset_tables_with_client(client: Any, dataset_ref: str) -> dict[str
     soft_deleted: list[str] = []
     truncated: list[str] = []
     soft_delete_tables = {"businesses", "listings", "error_listings"}
+    
+    # Execute batch soft delete queries in single API calls for optimal speed
     for table_ref in table_refs:
-        if table_ref.table_id in soft_delete_tables:
-            client.query(f"ALTER TABLE `{dataset_ref}.{table_ref.table_id}` ADD COLUMN IF NOT EXISTS is_deleted BOOL").result()
-            client.query(f"ALTER TABLE `{dataset_ref}.{table_ref.table_id}` ADD COLUMN IF NOT EXISTS deleted_on TIMESTAMP").result()
-            query = f"UPDATE `{dataset_ref}.{table_ref.table_id}` SET is_deleted = TRUE, deleted_on = CURRENT_TIMESTAMP() WHERE is_deleted IS NOT TRUE"
+        t_id = table_ref.table_id
+        if t_id in soft_delete_tables:
+            query = f"""
+            ALTER TABLE `{dataset_ref}.{t_id}` ADD COLUMN IF NOT EXISTS is_deleted BOOL;
+            ALTER TABLE `{dataset_ref}.{t_id}` ADD COLUMN IF NOT EXISTS deleted_on TIMESTAMP;
+            UPDATE `{dataset_ref}.{t_id}` SET is_deleted = TRUE, deleted_on = CURRENT_TIMESTAMP() WHERE is_deleted IS NOT TRUE;
+            """
             client.query(query).result()
-            soft_deleted.append(table_ref.table_id)
-            LOGGER.warning("db_table_soft_deleted dataset=%s table=%s", dataset_ref, table_ref.table_id)
+            soft_deleted.append(t_id)
+            LOGGER.warning("db_table_soft_deleted dataset=%s table=%s", dataset_ref, t_id)
             continue
-        client.query(f"TRUNCATE TABLE `{dataset_ref}.{table_ref.table_id}`").result()
-        truncated.append(table_ref.table_id)
-        LOGGER.warning("db_table_truncated dataset=%s table=%s", dataset_ref, table_ref.table_id)
+        client.query(f"TRUNCATE TABLE `{dataset_ref}.{t_id}`").result()
+        truncated.append(t_id)
+        LOGGER.warning("db_table_truncated dataset=%s table=%s", dataset_ref, t_id)
+        
     LOGGER.warning("db_clear_succeeded dataset=%s soft_deleted_count=%d truncated_count=%d", dataset_ref, len(soft_deleted), len(truncated))
     return {"soft_deleted_tables": soft_deleted, "truncated_tables": truncated}
 

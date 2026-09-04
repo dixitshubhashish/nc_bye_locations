@@ -195,5 +195,55 @@ class CsvWorkflowTests(unittest.TestCase):
         self.assertEqual(result["rows"][0]["longitude"], -80.1)
 
 
+    def test_invalid_geographic_and_type_data_flags_error_listings(self) -> None:
+        """Test edge cases with malformed ZIPs, bad dates, and out-of-bounds coordinates."""
+        # 1. Invalid ZIP code (not 5 digits)
+        row_bad_zip = {**VALID_ROW, "zip_code": "999"}
+        loc_bad_zip = normalize_location(row_bad_zip, VALID_MAPPER, "example_csv", 0)
+        self.assertIsNotNone(loc_bad_zip)
+        errors_zip = validate_normalized_location(loc_bad_zip, load_field_registry())
+        self.assertTrue(any(e["field"] == "postal_code" for e in errors_zip))
+        self.assertIn("invalid US ZIP code", [e["reason"] for e in errors_zip])
+
+        # 2. Out-of-bounds US Coordinates (Lat 95.0, Lon 20.0 - inside Europe/Asia)
+        row_bad_coords = {**VALID_ROW, "latitude": "95.0", "longitude": "20.0"}
+        loc_bad_coords = normalize_location(row_bad_coords, VALID_MAPPER, "example_csv", 0)
+        self.assertIsNotNone(loc_bad_coords)
+        errors_coords = validate_normalized_location(loc_bad_coords, load_field_registry())
+        self.assertTrue(any(e["field"] == "coordinates" for e in errors_coords))
+        self.assertIn("coordinates outside US boundary", [e["reason"] for e in errors_coords])
+
+        # 3. Malformed dates and seating capacities
+        row_bad_types = {**VALID_ROW, "opened_on": "not-a-date", "seats": "invalid_number"}
+        errors_types = validate_source_row(row_bad_types, VALID_MAPPER)
+        self.assertEqual({e["field"] for e in errors_types}, {"opening_date", "seating_capacity"})
+        self.assertTrue(all("hint" in e for e in errors_types))
+
+    def test_currency_formatting_and_domain_boundary_checks(self) -> None:
+        """Test currency cleaning ($1,250.50 -> 1250.5) and age/income domain boundaries."""
+        # Currency string cleaning
+        self.assertEqual(optional_float("$1,250.50"), 1250.5)
+        self.assertEqual(optional_int("$50,000"), 50000)
+
+        # Domain boundary checks
+        location = normalize_location(VALID_ROW, VALID_MAPPER, "example_csv", 0)
+        self.assertIsNotNone(location)
+        assert location is not None
+        
+        # Domain boundary checks for ZipDemographics and LocationRecord
+        from whitespace_tool.models import ZipDemographics
+        demo_bad_age = ZipDemographics(zip_code="27601", population=5000, median_household_income=50000, median_age=145, source="demo")
+        errs_age = validate_normalized_location(demo_bad_age, load_field_registry())
+        self.assertTrue(any(e["field"] == "median_age" for e in errs_age))
+        self.assertIn("age outside realistic boundary", [e["reason"] for e in errs_age])
+
+        # Test negative revenue on LocationRecord
+        import dataclasses
+        loc_bad_rev = dataclasses.replace(location, annual_revenue=-5000.0)
+        errs_rev = validate_normalized_location(loc_bad_rev, load_field_registry())
+        self.assertTrue(any(e["field"] == "annual_revenue" for e in errs_rev))
+        self.assertIn("negative monetary amount", [e["reason"] for e in errs_rev])
+
+
 if __name__ == "__main__":
     unittest.main()

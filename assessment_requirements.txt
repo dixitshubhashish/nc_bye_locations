@@ -1,13 +1,16 @@
 
 Stand and Deliver - Senior Data Platform Engineer
 The Exercise: Build a Competitive Whitespace Tool
+
+
+=====
 Context
 Birdeye's Product Insights & Strategy Platform team works with location data at national scale: hundreds of thousands of businesses across many brands, pulled from internal systems, client CRMs, third-party providers, and public sources.
 The data is messy. It is inconsistent, incomplete, duplicated, and constantly changing. Very little of it arrives ready to use.
 The questions we need to answer also change frequently. One week it might be pizza brands and how demographics are changing competition levels. The next it could be urgent care and how SEO performance is shifting due to the rise of LLMs..
 We don't want to solve each question from scratch. We want tools that can handle the next question without starting over.
 This exercise is a small version of that problem.
-
+======
 The Build
 Build a working prototype that produces a competitive whitespace analysis and can be reused for a different question without rewriting the core logic.
 We should be able to change:
@@ -15,6 +18,8 @@ The brands: Which brand is the subject and which are the competitors.
 The geography: The entire US, a group of states, or a metro area.
 The metrics: Which demographic or economic variables define "similar" and which are included in the output.
 How you do this is up to you. We are not prescribing a language, architecture, or technology stack. We want to see the decisions you make and why.
+
+======
 Demonstration case
 Use your tool to answer the following and bring the results to the session:
 The most complete set of Domino's locations in the US that you can assemble, along with the population of the ZIP code where each location sits.
@@ -24,6 +29,8 @@ Median household income for those whitespace ZIP codes.
 One additional data point of your choice that you think would make the analysis more useful. Be prepared to explain why.
 We do not expect the location data to be perfect or authoritative. We want you to explain how you assessed coverage and data quality, and what you believe may be missing.
 A map is a natural option, but it isn't required. A well-structured dataset and clear interface are equally acceptable.
+
+======
 What we mean by "repurposable"
 This isn't production software. We're looking for a solid foundation:
 Someone else should be able to run it and understand it without you in the room.
@@ -32,6 +39,8 @@ Source-specific acquisition and normalization logic should be separated from the
 If an upstream source changes or fails, that should be visible rather than silently producing bad results.
 You should be able to understand where a location record came from and, where practical, when it was observed or updated.
 Running the analysis again next month should produce a comparable result, with a way to identify what changed.
+
+====
 Think beyond the demonstration
 The demonstration case is intentionally small. Think about the underlying data model and pipeline as if this were going to become a shared data product.
 You don't need to build everything, but be prepared to explain how your design would handle:
@@ -42,17 +51,22 @@ Data quality and validation
 Downstream consumers using the normalized data
 Significantly larger data volumes
 The goal is not to build all of these capabilities. We want to see how you think about them.
+
+======
 The hard part
 The map isn't the difficult part.
 Getting complete, current, deduplicated location data for three brands is harder, and the brands may have very different sources and data quality.
 Designing the tool so that a fourth brand, with a completely different source and data shape, can be added without breaking the model is harder still.
 That platform design problem is a big part of what we're interested in seeing.
 
+======
 Scope
 Use your judgment about how far to take the exercise. We want to see what you choose to build and what you choose not to build, so treat scoping as part of the exercise.
 If something isn't worth doing, that's fine. Tell us what you left out and why. A focused prototype with deliberate gaps is more useful than something that tries to do everything.
 You can use any tools, libraries, data sources, and AI assistance you want. The only requirement is that you understand and can explain the decisions and code you submit.
 
+
+====== 
 What to Submit
 Please send the following at least 24 hours before the session:
 Your code, in a form we can run: repo, notebook, or scripts, with setup instructions.
@@ -68,6 +82,7 @@ How do you assess source coverage and data quality
 What is incomplete or potentially wrong, including differences in data quality between the brands
 What did you choose not to build and why
 
+=======
 The Session
 60 minutes total
 5–10 minutes: Presentation
@@ -95,6 +110,7 @@ The hardest decisions and how you resolved them
 What would you change if building this for long-term use
 Five to ten minutes is short by design. We want to see what you think is important enough to spend that time on.
 
+======
 What We're Evaluating
 Design for reuse. Can the tool handle the next question through configuration, or does it require a rewrite?
 Platform thinking. Does the candidate distinguish between solving the demonstration problem and designing the underlying system? Are the data model, interfaces, and source-specific logic structured for reuse?
@@ -107,12 +123,16 @@ Scoping. What you built, what you didn't, and why.
 Honesty about limitations. Tell us what's wrong with the result. We expect there to be things that aren't perfect.
 The additional data point. What you chose and why it makes the analysis more useful.
 
+
+======
 What You Can Assume
 You can use any public or free-tier data source. We are not asking you to purchase data.
 If a source requires an API key you don't have, explain the limitation and find a reasonable workaround.
 Approximations are fine as long as you identify them.
 There is no single correct implementation, methodology, or target number. We're interested in the quality of the design and your reasoning.
 
+
+=====
 Questions
 If anything is unclear, contact Adam Dorfman 
 Asking clarifying questions ahead of time is encouraged.

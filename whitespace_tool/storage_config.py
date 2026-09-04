@@ -74,5 +74,13 @@ def load_storage_config(path: str | Path = DEFAULT_STORAGE_CONFIG) -> dict[str, 
     config = {**config, **env_config}
     credentials_json = config.get("credentials_json")
     if credentials_json and not Path(credentials_json).is_absolute():
-        config["credentials_json"] = str(config_path.parent / credentials_json)
+        rel_to_config = (config_path.parent / credentials_json).resolve()
+        rel_to_cwd = Path(credentials_json).resolve()
+        if rel_to_config.exists():
+            config["credentials_json"] = str(rel_to_config)
+        elif rel_to_cwd.exists():
+            config["credentials_json"] = str(rel_to_cwd)
+        else:
+            config["credentials_json"] = str(rel_to_config)
     return config
+
