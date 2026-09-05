@@ -1,11 +1,24 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 from whitespace_tool.models import LocationRecord, utc_now_iso
+
+_TRAILING_APOSTROPHE_S = re.compile(r"'S\b")
+
+
+def titleize(value: str) -> str:
+    """Proper-case a display name regardless of source casing (lower, upper,
+    or mixed), fixing the common "'S" contraction artifact left by
+    str.title() (e.g. "domino's" / "DOMINO'S" -> "Domino's")."""
+    text = value.strip()
+    if not text:
+        return text
+    return _TRAILING_APOSTROPHE_S.sub("'s", text.title())
 
 
 def load_mapper(path: str | Path) -> dict[str, Any]:
@@ -82,7 +95,7 @@ def optional_timestamp(value: Any) -> str | None:
 
 def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name: str, index: int) -> LocationRecord | None:
     fields = mapper["fields"]
-    brand = str(mapper.get("brand") or get_nested(row, fields.get("brand", "brand"))).strip()
+    brand = titleize(str(mapper.get("brand") or get_nested(row, fields.get("brand", "brand"))))
     postal_code = clean_zip(get_nested(row, fields["postal_code"]))
     if not brand or not postal_code:
         return None
@@ -96,9 +109,9 @@ def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name:
         business_id=str(mapper.get("business_id") or "") or None,
         source_type_id=str(mapper.get("source_type_id") or "") or None,
         location_id=location_id,
-        name=str(get_nested(row, fields.get("name", ""), "")).strip(),
+        name=titleize(str(get_nested(row, fields.get("name", ""), ""))),
         address=str(get_nested(row, fields.get("address", ""), "")).strip(),
-        city=str(get_nested(row, fields.get("city", ""), "")).strip(),
+        city=titleize(str(get_nested(row, fields.get("city", ""), ""))),
         state=str(get_nested(row, fields.get("state", ""), "")).strip().upper(),
         postal_code=postal_code,
         latitude=optional_float(get_nested(row, fields.get("latitude", ""), "")),

@@ -1044,6 +1044,35 @@ def _csv_param(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+# Shared metric formulas reused across geo (state), brand, and brand-location
+# levels so the same figure is never computed two different ways.
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[len(ordered) // 2]
+
+
+def _share_pct(part: float, whole: float) -> float:
+    return round((part / whole) * 100, 1) if whole > 0 else 0.0
+
+
+def _pct_diff(value: float, baseline: float) -> float:
+    return round(((value - baseline) / max(baseline, 1)) * 100, 1)
+
+
+def _population_per_location(population: float, locations: float) -> float:
+    return round(population / locations) if locations > 0 else population
+
+
+def _proper_case_sql(column_expr: str) -> str:
+    """SQL expression that title-cases a display name and fixes the most
+    common INITCAP artifact: trailing "'S" contractions ("Domino'S" ->
+    "Domino's"). Known limitation: prefixes like "Mc"/"Mac" (e.g.
+    "Mcdonald's") are not special-cased - out of scope for this pass."""
+    return f"REGEXP_REPLACE(INITCAP(TRIM({column_expr})), r\"'S\\b\", \"'s\")"
+
+
 def build_silver_layer() -> dict[str, Any]:
     project_id, bronze_dataset_id, silver_dataset_id, credentials_json = _medallion_settings()
     client = _bigquery_client(project_id, credentials_json)
@@ -1055,6 +1084,11 @@ def build_silver_layer() -> dict[str, Any]:
     top_view = f"{silver_ref}.vw_brand_location_top10"
     brand_zip_view = f"{silver_ref}.vw_brand_zip_income"
     client.query(f"DROP TABLE IF EXISTS `{enriched_table}`").result()
+    brand_name_case = _proper_case_sql("COALESCE(b.name, l.business_id)")
+    location_name_case = _proper_case_sql("l.name")
+    city_name_case = _proper_case_sql("COALESCE(z.city_name, NULLIF(TRIM(l.city_name), ''))")
+    county_case = _proper_case_sql("z.county")
+    state_name_case = _proper_case_sql("z.state_name")
     query = f"""
     CREATE OR REPLACE TABLE `{enriched_table}`
     PARTITION BY DATE(first_observed_at)
@@ -1091,15 +1125,15 @@ def build_silver_layer() -> dict[str, Any]:
     SELECT
       l.listing_id,
       l.business_id,
-      COALESCE(b.name, l.business_id) AS brand_name,
+      {brand_name_case} AS brand_name,
       l.source_type_id,
       l.location_key,
-      l.name,
+      {location_name_case} AS name,
       l.address,
-      COALESCE(z.city_name, NULLIF(TRIM(l.city_name), '')) AS city_name,
-      z.county AS county,
+      {city_name_case} AS city_name,
+      {county_case} AS county,
       COALESCE(z.state_code, NULLIF(UPPER(TRIM(l.state_code)), '')) AS state_code,
-      z.state_name AS state_name,
+      {state_name_case} AS state_name,
       l.normalized_zip_code AS zip_code,
       'United States' AS country,
       COALESCE(l.latitude, z.latitude, cg.latitude) AS latitude,
@@ -1622,8 +1656,8 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
     # Reference metrics for Similar Market Analysis & Opportunity Scoring
     subject_pops = [r["population"] for r in raw_whitespace if r.get("subject_stores", 0) > 0 and r.get("population", 0) > 0]
     subject_incomes = [r["median_household_income"] for r in raw_whitespace if r.get("subject_stores", 0) > 0 and r.get("median_household_income", 0) > 0]
-    subject_median_pop = int(sorted(subject_pops)[len(subject_pops) // 2]) if subject_pops else 25000
-    subject_median_income = int(sorted(subject_incomes)[len(subject_incomes) // 2]) if subject_incomes else 65000
+    subject_median_pop = int(_median(subject_pops) or 25000)
+    subject_median_income = int(_median(subject_incomes) or 65000)
 
     tolerance_pct = float(params.get("tolerance", ["20"])[0] or "20") / 100.0
 
@@ -1726,16 +1760,16 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         st_comp_ws = len([r for r in st_zips if r.get("whitespace_type") == "COMPETITOR_WHITESPACE"])
         st_open_ws = len([r for r in st_zips if r.get("whitespace_type") == "OPEN_WHITESPACE"])
         st_incomes = [r.get("median_household_income", 0) for r in st_zips if r.get("median_household_income", 0) > 0]
-        st_med_income = int(sorted(st_incomes)[len(st_incomes) // 2]) if st_incomes else 62000
+        st_med_income = int(_median(st_incomes) or 62000)
 
         enriched_states.append({
             **st,
             "selected_brand_locations": st_subject_stores,
             "competitor_locations": st_comp_stores,
-            "brand_footprint_share_pct": round((st_subject_stores / max(st_total_stores, 1)) * 100, 1) if st_total_stores > 0 else 0.0,
+            "brand_footprint_share_pct": _share_pct(st_subject_stores, st_total_stores),
             "selected_brand_zips": len([r for r in st_zips if r.get("subject_stores", 0) > 0]),
             "competitor_zips": len([r for r in st_zips if r.get("competitor_stores", 0) > 0]),
-            "population_per_selected_brand_location": round(st_pop / max(st_subject_stores, 1)) if st_subject_stores > 0 else st_pop,
+            "population_per_selected_brand_location": _population_per_location(st_pop, st_subject_stores),
             "competitor_whitespace_zips": st_comp_ws,
             "open_whitespace_zips": st_open_ws,
             "median_household_income": st_med_income,
@@ -1747,9 +1781,9 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         b_name = b.get("brand", "")
         b_locs = b.get("locations", 0)
         diff_vs_subject = b_locs - subject_locations_count
-        diff_pct = round((diff_vs_subject / max(subject_locations_count, 1)) * 100, 1)
+        diff_pct = _pct_diff(b_locs, subject_locations_count)
         pop_cov = b.get("zips", 0) * subject_median_pop
-        pop_per_loc = round(pop_cov / max(b_locs, 1)) if b_locs > 0 else 0
+        pop_per_loc = _population_per_location(pop_cov, b_locs)
         enriched_brands.append({
             **b,
             "is_subject": b_name == selected_brand_name,
@@ -1766,6 +1800,10 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
             "competitive_exposure_rate": exposure_rate,
             "competitor_density": round(competitor_locations_count / max(subject_locations_count, 1), 2),
         })
+
+    # Head-to-Head ordering: the subject brand always leads the comparison,
+    # with competitors listed afterwards ordered by location count.
+    enriched_brands.sort(key=lambda b: (not b["is_subject"], -b.get("locations", 0)))
 
     # Tab 2 Quality Summary Metrics
     total_raw_locations = totals.get("total_locations", 33120)
@@ -1790,7 +1828,7 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         ],
     }
 
-    median_ws_income = int(sorted(whitespace_incomes)[len(whitespace_incomes) // 2]) if whitespace_incomes else 62000
+    median_ws_income = int(_median(whitespace_incomes) or 62000)
 
     primary_kpis = {
         "selected_brand_locations": subject_locations_count if subject_locations_count > 0 else totals.get("total_locations", 6800),

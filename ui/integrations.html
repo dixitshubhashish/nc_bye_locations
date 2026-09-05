@@ -1795,6 +1795,7 @@ else:
     let mapMarkerLayerGroup = null;
     let stateBoundaryLayerGroup = null;
     let staticMapZoom = 1;
+    const DEFAULT_US_MAP_VIEW = { center: [39.8283, -98.5795], zoom: 4 };
     const stateNameToCode = {
       Alabama: "AL", Alaska: "AK", Arizona: "AZ", Arkansas: "AR", California: "CA", Colorado: "CO", Connecticut: "CT", Delaware: "DE",
       Florida: "FL", Georgia: "GA", Hawaii: "HI", Idaho: "ID", Illinois: "IL", Indiana: "IN", Iowa: "IA", Kansas: "KS",
@@ -1877,7 +1878,12 @@ else:
       }
       if (!reportingMap) {
         el("reportingMap").innerHTML = "";
-        reportingMap = L.map("reportingMap").setView([37.8, -96.0], 4);
+        reportingMap = L.map("reportingMap", {
+          zoomSnap: 0.1,
+          zoomDelta: 0.5,
+          minZoom: 2,
+          maxZoom: 18
+        }).setView(DEFAULT_US_MAP_VIEW.center, DEFAULT_US_MAP_VIEW.zoom);
         L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
           maxZoom: 19,
           attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
@@ -2012,7 +2018,7 @@ else:
       if (bounds.length) {
         reportingMap.fitBounds(bounds, { padding: [30, 30], maxZoom: 12 });
       } else {
-        reportingMap.setView([37.8, -96.0], 4);
+        reportingMap.setView(DEFAULT_US_MAP_VIEW.center, DEFAULT_US_MAP_VIEW.zoom);
       }
       setTimeout(() => reportingMap.invalidateSize(), 200);
     }
