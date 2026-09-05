@@ -23,6 +23,14 @@ class SampleDataTests(unittest.TestCase):
             self.assertLessEqual(brand.row_count, 1000)
         self.assertGreater(len({brand.row_count for brand in SAMPLE_BRANDS}), 5)
 
+    def test_sample_brands_never_use_the_real_assessment_brand_names(self) -> None:
+        # The synthetic/demo data generator must stay clearly separate from
+        # the real Domino's/Pizza Hut/Little Caesars data used for the
+        # actual assessment demonstration case.
+        real_brand_names = {"Domino's", "Pizza Hut", "Little Caesars"}
+        business_names = {brand.business_name for brand in SAMPLE_BRANDS}
+        self.assertTrue(real_brand_names.isdisjoint(business_names))
+
     def test_generated_rows_are_linked_to_business_template_and_batch(self) -> None:
         brand = SAMPLE_BRANDS[1]
         source_type_id = "source-json"

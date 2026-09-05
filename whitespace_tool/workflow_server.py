@@ -1053,7 +1053,7 @@ def load_sample_dataset(reset: bool = False) -> dict[str, Any]:
                 "mapping_id": f"sample_mapping_{brand.key}",
                 "source_configuration": config,
             },
-        })
+        }, client=client, skip_cache_invalidation=True)
         summary["locations"] += result["total_rows"]
         summary["valid"] += result["mapped_rows"]
         summary["errors"] += result["error_listings"]
@@ -1064,6 +1064,7 @@ def load_sample_dataset(reset: bool = False) -> dict[str, Any]:
     try:
         silver_result = build_silver_layer()
         summary["silver"] = silver_result
+        summary["gold"] = build_gold_layer()
     except Exception as exc:
         LOGGER.warning("sample_silver_refresh_failed error=%s", exc)
         summary["silver_warning"] = "Sample data loaded, but reporting refresh could not complete automatically."
