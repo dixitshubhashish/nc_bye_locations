@@ -146,7 +146,7 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "row_number", "type": "INTEGER", "mode": "REQUIRED"},
         {"name": "errors", "type": "JSON", "mode": "REQUIRED"},
         {"name": "raw_record", "type": "JSON", "mode": "REQUIRED"},
-        {"name": "observed_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
+        {"name": "observed_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
         {"name": "template_id", "type": "STRING", "mode": "NULLABLE"},
         {"name": "ingestion_id", "type": "STRING", "mode": "NULLABLE"},
         {"name": "mapping_id", "type": "STRING", "mode": "NULLABLE"},
@@ -337,7 +337,10 @@ def push_to_bigquery(
             client.create_table(table)
         else:
             existing_names = {field.name for field in existing.schema}
-            missing_fields = [field for field in schema if field.name not in existing_names]
+            missing_fields = [
+                bigquery.SchemaField(field.name, field.field_type, mode="NULLABLE", default_value_expression=field.default_value_expression)
+                for field in schema if field.name not in existing_names
+            ]
             if missing_fields:
                 existing.schema = list(existing.schema) + missing_fields
                 client.update_table(existing, ["schema"])
