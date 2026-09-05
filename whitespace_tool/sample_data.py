@@ -21,20 +21,20 @@ class SampleBrandConfig:
 
 
 SAMPLE_BRANDS: tuple[SampleBrandConfig, ...] = (
+    SampleBrandConfig("dominos_pizza_api", "Domino's", "api_get_json", 720, 0.05, ("USA",), "Pizza", "Quick service"),
+    SampleBrandConfig("pizza_hut_csv", "Pizza Hut", "csv", 680, 0.06, ("USA",), "Pizza", "Quick service"),
+    SampleBrandConfig("little_caesars_json", "Little Caesars", "json", 620, 0.05, ("USA",), "Pizza", "Takeout pizza"),
     SampleBrandConfig("golden_fork_csv", "Golden Fork", "csv", 527, 0.06, ("USA", "Canada"), "American", "Casual dining"),
-    SampleBrandConfig("urban_kitchen_json", "Urban Kitchen", "json", 681, 0.08, ("USA", "UK", "Germany"), "Modern European", "Urban cafe"),
+    SampleBrandConfig("urban_kitchen_json", "Urban Kitchen", "json", 650, 0.08, ("USA", "UK", "Germany"), "Modern European", "Urban cafe"),
     SampleBrandConfig("bella_italia_excel", "Bella Italia", "excel", 514, 0.06, ("USA", "Italy", "France"), "Italian", "Family restaurant"),
-    SampleBrandConfig("sakura_sushi_api", "Sakura Sushi", "api_get_json", 908, 0.07, ("USA", "Japan", "Singapore"), "Japanese", "Sushi bar"),
+    SampleBrandConfig("sakura_sushi_api", "Sakura Sushi", "api_get_json", 750, 0.07, ("USA", "Japan", "Singapore"), "Japanese", "Sushi bar"),
     SampleBrandConfig("metro_bistro_osm", "Metro Bistro", "python_editor", 576, 0.07, ("USA", "UK"), "Bistro", "Neighborhood bistro"),
-    SampleBrandConfig("spice_route_csv", "Spice Route", "csv", 742, 0.06, ("USA", "India"), "Indian", "Fast casual"),
+    SampleBrandConfig("spice_route_csv", "Spice Route", "csv", 680, 0.06, ("USA", "India"), "Indian", "Fast casual"),
     SampleBrandConfig("casa_verde_json", "Casa Verde", "json", 589, 0.07, ("USA", "Mexico"), "Mexican", "Fresh casual"),
     SampleBrandConfig("ocean_grill_excel", "Ocean Grill", "excel", 633, 0.06, ("USA", "Australia"), "Seafood", "Grill"),
-    SampleBrandConfig("harvest_table_api", "Harvest Table", "api_get_json", 821, 0.07, ("USA", "Canada"), "Farm-to-table", "Casual dining"),
+    SampleBrandConfig("harvest_table_api", "Harvest Table", "api_get_json", 720, 0.07, ("USA", "Canada"), "Farm-to-table", "Casual dining"),
     SampleBrandConfig("local_table_osm", "Local Table", "python_editor", 568, 0.08, ("USA", "Germany"), "Cafe", "Local cafe"),
-    SampleBrandConfig("fire_and_stone_csv", "Fire & Stone", "csv", 704, 0.06, ("USA", "UK"), "Pizza", "Wood-fired kitchen"),
-    SampleBrandConfig("royal_curry_json", "Royal Curry", "json", 577, 0.07, ("USA", "India", "Singapore"), "Indian", "Fine casual"),
-    SampleBrandConfig("copper_spoon_excel", "Copper Spoon", "excel", 649, 0.06, ("USA", "France"), "French", "Brasserie"),
-    SampleBrandConfig("taste_house_api", "Taste House", "api_get_json", 786, 0.07, ("USA", "Japan"), "Asian fusion", "Counter service"),
+    SampleBrandConfig("fire_and_stone_csv", "Fire & Stone", "csv", 650, 0.06, ("USA", "UK"), "Pizza", "Wood-fired kitchen"),
     SampleBrandConfig("garden_kitchen_xml", "Garden Kitchen", "xml", 536, 0.06, ("USA", "Australia"), "Vegetarian", "Health focused"),
 )
 
@@ -44,6 +44,14 @@ GEO_POINTS: tuple[dict[str, Any], ...] = (
     {"country": "USA", "city": "Austin", "state": "TX", "postal": "78701", "lat": 30.2711, "lon": -97.7437},
     {"country": "USA", "city": "Chicago", "state": "IL", "postal": "60601", "lat": 41.8864, "lon": -87.6186},
     {"country": "USA", "city": "Seattle", "state": "WA", "postal": "98101", "lat": 47.6101, "lon": -122.3344},
+    {"country": "USA", "city": "Los Angeles", "state": "CA", "postal": "90001", "lat": 33.9731, "lon": -118.2479},
+    {"country": "USA", "city": "Miami", "state": "FL", "postal": "33101", "lat": 25.7743, "lon": -80.1937},
+    {"country": "USA", "city": "Atlanta", "state": "GA", "postal": "30301", "lat": 33.7490, "lon": -84.3880},
+    {"country": "USA", "city": "Denver", "state": "CO", "postal": "80201", "lat": 39.7392, "lon": -104.9903},
+    {"country": "USA", "city": "Phoenix", "state": "AZ", "postal": "85001", "lat": 33.4484, "lon": -112.0740},
+    {"country": "USA", "city": "Dallas", "state": "TX", "postal": "75201", "lat": 32.7767, "lon": -96.7970},
+    {"country": "USA", "city": "Philadelphia", "state": "PA", "postal": "19101", "lat": 39.9526, "lon": -75.1652},
+    {"country": "USA", "city": "Charlotte", "state": "NC", "postal": "28201", "lat": 35.2271, "lon": -80.8431},
     {"country": "Canada", "city": "Toronto", "state": "ON", "postal": "M5H 2N2", "lat": 43.6532, "lon": -79.3832},
     {"country": "UK", "city": "London", "state": "England", "postal": "SW1A 1AA", "lat": 51.5072, "lon": -0.1276},
     {"country": "India", "city": "Mumbai", "state": "Maharashtra", "postal": "400001", "lat": 18.9388, "lon": 72.8354},
@@ -126,15 +134,6 @@ def mapper_for(config: SampleBrandConfig, business_id: str, source_type_id: str)
             "cuisine_type": "restaurant.cuisine", "phone_number": "restaurant.phone", "website_url": "restaurant.website",
         },
     }
-    if config.source_type == "xml":
-        return {
-            "restaurant": {
-                "id": base["id"], "name": base["name"], "street": base["street"], "city": base["city"],
-                "region": base["state"], "postal": base["postal"], "country": base["country"],
-                "latitude": base["lat"], "longitude": base["lon"], "franchise": base["franchise"],
-                "concept": base["concept"], "cuisine": base["cuisine"], "phone": base["phone"], "website": base["website"],
-            }
-        }
     return {
         "brand": config.business_name,
         "business_id": business_id,
@@ -210,6 +209,15 @@ def _shape_row(config: SampleBrandConfig, base: dict[str, Any]) -> dict[str, Any
             "contact": {"address": {"street": base["street"], "city": base["city"], "region": base["state"], "postalCode": base["postal"], "country": base["country"]}, "phone": base["phone"], "website": base["website"]},
             "coordinates": {"latitude": base["lat"], "longitude": base["lon"]},
             "categories": {"franchise": base["franchise"], "concept": base["concept"], "cuisine": base["cuisine"]},
+        }
+    if config.source_type == "xml":
+        return {
+            "restaurant": {
+                "id": base["id"], "name": base["name"], "street": base["street"], "city": base["city"],
+                "region": base["state"], "postal": base["postal"], "country": base["country"],
+                "latitude": base["lat"], "longitude": base["lon"], "franchise": base["franchise"],
+                "concept": base["concept"], "cuisine": base["cuisine"], "phone": base["phone"], "website": base["website"],
+            }
         }
     return {
         "osm_id": base["id"], "name": base["name"], "addr:street": base["street"], "addr:city": base["city"],
