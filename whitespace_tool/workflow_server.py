@@ -1523,18 +1523,21 @@ def build_gold_layer() -> dict[str, Any]:
     enriched_table = f"{silver_ref}.listings_enriched"
 
     zip_brand_view = f"{gold_ref}.vw_zip_brand_activity"
-    state_view = f"{gold_ref}.vw_state_summary"
-    city_view = f"{gold_ref}.vw_city_summary"
     brand_view = f"{gold_ref}.vw_brand_summary"
-    quality_view = f"{gold_ref}.vw_listing_quality_summary"
-    geo_view = f"{gold_ref}.vw_geo_reference"
     location_view = f"{gold_ref}.vw_reporting_locations"
-    totals_view = f"{gold_ref}.vw_reporting_totals"
     filters_view = f"{gold_ref}.vw_reporting_filter_options"
-    state_brand_view = f"{gold_ref}.vw_reporting_state_brand"
-    city_brand_view = f"{gold_ref}.vw_reporting_city_brand"
-    zip_summary_view = f"{gold_ref}.vw_reporting_zip_summary"
     gap_base_view = f"{gold_ref}.vw_reporting_gap_base"
+
+    # These views were built at various points but never queried anywhere -
+    # each was grouped by brand_name, which can't answer "distinct zips
+    # across a user-chosen multi-brand selection" without double counting,
+    # so reporting_summary() always filtered zip_brand_view/vw_reporting_locations
+    # directly instead. Drop the stale objects from BigQuery itself, not just
+    # the code that used to create them.
+    for dead_view in ("vw_state_summary", "vw_city_summary", "vw_listing_quality_summary",
+                      "vw_geo_reference", "vw_reporting_totals", "vw_reporting_state_brand",
+                      "vw_reporting_city_brand", "vw_reporting_zip_summary"):
+        client.query(f"DROP VIEW IF EXISTS `{gold_ref}.{dead_view}`").result()
 
     client.query(f"""
     CREATE OR REPLACE VIEW `{zip_brand_view}` AS
@@ -1559,33 +1562,6 @@ def build_gold_layer() -> dict[str, Any]:
     """).result()
 
     client.query(f"""
-    CREATE OR REPLACE VIEW `{state_view}` AS
-    SELECT
-      state_code,
-      state_name,
-      brand_name,
-      SUM(location_count) AS location_count,
-      COUNT(DISTINCT city_name) AS city_count,
-      COUNT(DISTINCT zip_code) AS zip_count
-    FROM `{zip_brand_view}`
-    GROUP BY state_code, state_name, brand_name
-    """).result()
-
-    client.query(f"""
-    CREATE OR REPLACE VIEW `{city_view}` AS
-    SELECT
-      city_name,
-      state_code,
-      state_name,
-      county,
-      brand_name,
-      SUM(location_count) AS location_count,
-      COUNT(DISTINCT zip_code) AS zip_count
-    FROM `{zip_brand_view}`
-    GROUP BY city_name, state_code, state_name, county, brand_name
-    """).result()
-
-    client.query(f"""
     CREATE OR REPLACE VIEW `{brand_view}` AS
     SELECT
       brand_name,
@@ -1597,28 +1573,6 @@ def build_gold_layer() -> dict[str, Any]:
     FROM `{zip_brand_view}`
     WHERE brand_name IS NOT NULL AND location_count > 0
     GROUP BY brand_name
-    """).result()
-
-    client.query(f"""
-    CREATE OR REPLACE VIEW `{quality_view}` AS
-    SELECT
-      COUNT(*) AS total_rows,
-      COUNTIF(latitude IS NOT NULL AND longitude IS NOT NULL) AS with_coordinates,
-      COUNTIF(zip_code IS NOT NULL AND zip_code != '') AS with_zip,
-      COUNT(DISTINCT CONCAT(COALESCE(brand_name, ''), '|', COALESCE(zip_code, ''), '|', COALESCE(address, ''))) AS distinct_rows,
-      MAX(last_observed_at) AS last_observed_at
-    FROM `{enriched_table}`
-    """).result()
-
-    client.query(f"""
-    CREATE OR REPLACE VIEW `{geo_view}` AS
-    SELECT DISTINCT
-      state_code,
-      state_name,
-      county,
-      city_name
-    FROM `{silver_ref}.zip_reference`
-    WHERE state_code IS NOT NULL AND state_code != ''
     """).result()
 
     client.query(f"""
@@ -1650,21 +1604,6 @@ def build_gold_layer() -> dict[str, Any]:
     """).result()
 
     client.query(f"""
-    CREATE OR REPLACE VIEW `{totals_view}` AS
-    SELECT
-      COUNT(DISTINCT zip_code) AS total_zips,
-      COUNT(DISTINCT state_code) AS total_states,
-      COUNT(DISTINCT city_name) AS total_cities,
-      COUNT(DISTINCT IF(brand_name IS NOT NULL AND location_count > 0, brand_name, NULL)) AS total_brands,
-      COALESCE(SUM(location_count), 0) AS total_stores,
-      COUNT(DISTINCT IF(brand_name IS NOT NULL AND location_count > 0, zip_code, NULL)) AS active_market_locations,
-      COUNT(DISTINCT IF(brand_name IS NOT NULL AND location_count > 0, state_code, NULL)) AS active_brand_states,
-      COUNT(DISTINCT IF(brand_name IS NOT NULL AND location_count > 0, city_name, NULL)) AS active_brand_cities,
-      MAX(last_observed_at) AS last_updated
-    FROM `{zip_brand_view}`
-    """).result()
-
-    client.query(f"""
     CREATE OR REPLACE VIEW `{filters_view}` AS
     SELECT 'brand' AS filter_type, brand_name AS filter_value, brand_name AS filter_label,
       CAST(NULL AS STRING) AS state_code, CAST(NULL AS STRING) AS county, CAST(NULL AS STRING) AS city_name, CAST(NULL AS STRING) AS zip_code
@@ -1688,56 +1627,6 @@ def build_gold_layer() -> dict[str, Any]:
     """).result()
 
     client.query(f"""
-    CREATE OR REPLACE VIEW `{state_brand_view}` AS
-    SELECT
-      state_code,
-      state_name,
-      brand_name,
-      SUM(location_count) AS location_count,
-      COUNT(DISTINCT county) AS county_count,
-      COUNT(DISTINCT city_name) AS city_count,
-      COUNT(DISTINCT zip_code) AS zip_count,
-      SUM(COALESCE(population, 0)) AS market_population
-    FROM `{zip_brand_view}`
-    GROUP BY state_code, state_name, brand_name
-    """).result()
-
-    client.query(f"""
-    CREATE OR REPLACE VIEW `{city_brand_view}` AS
-    SELECT
-      state_code,
-      state_name,
-      county,
-      city_name,
-      brand_name,
-      SUM(location_count) AS location_count,
-      COUNT(DISTINCT zip_code) AS zip_count,
-      SUM(COALESCE(population, 0)) AS market_population
-    FROM `{zip_brand_view}`
-    GROUP BY state_code, state_name, county, city_name, brand_name
-    """).result()
-
-    client.query(f"""
-    CREATE OR REPLACE VIEW `{zip_summary_view}` AS
-    SELECT
-      zip_code,
-      ANY_VALUE(state_code) AS state_code,
-      ANY_VALUE(state_name) AS state_name,
-      ANY_VALUE(county) AS county,
-      ANY_VALUE(city_name) AS city_name,
-      ANY_VALUE(population) AS population,
-      ANY_VALUE(median_household_income) AS median_household_income,
-      ANY_VALUE(median_age) AS median_age,
-      ANY_VALUE(latitude) AS latitude,
-      ANY_VALUE(longitude) AS longitude,
-      COUNT(DISTINCT IF(brand_name IS NOT NULL AND location_count > 0, brand_name, NULL)) AS active_brand_count,
-      COALESCE(SUM(location_count), 0) AS store_count,
-      MAX(last_observed_at) AS last_observed_at
-    FROM `{zip_brand_view}`
-    GROUP BY zip_code
-    """).result()
-
-    client.query(f"""
     CREATE OR REPLACE VIEW `{gap_base_view}` AS
     SELECT
       z.zip_code,
@@ -1752,16 +1641,26 @@ def build_gold_layer() -> dict[str, Any]:
       z.longitude,
       a.brand_name,
       COALESCE(a.location_count, 0) AS location_count
-    FROM `{zip_summary_view}` z
+    FROM (
+      SELECT
+        zip_code,
+        ANY_VALUE(state_code) AS state_code,
+        ANY_VALUE(state_name) AS state_name,
+        ANY_VALUE(county) AS county,
+        ANY_VALUE(city_name) AS city_name,
+        ANY_VALUE(population) AS population,
+        ANY_VALUE(median_household_income) AS median_household_income,
+        ANY_VALUE(median_age) AS median_age,
+        ANY_VALUE(latitude) AS latitude,
+        ANY_VALUE(longitude) AS longitude
+      FROM `{zip_brand_view}`
+      GROUP BY zip_code
+    ) z
     LEFT JOIN `{zip_brand_view}` a ON z.zip_code = a.zip_code
     """).result()
 
     invalidate_cache()
-    views = [
-        zip_brand_view, state_view, city_view, brand_view, quality_view, geo_view,
-        location_view, totals_view, filters_view, state_brand_view, city_brand_view,
-        zip_summary_view, gap_base_view,
-    ]
+    views = [zip_brand_view, brand_view, location_view, filters_view, gap_base_view]
     return {
         "bronze_dataset": bronze_ref,
         "silver_dataset": silver_ref,
@@ -1847,17 +1746,9 @@ def _start_silver_gold_scheduler() -> None:
 def _ensure_gold_reporting_views(client: Any, gold_ref: str) -> bool:
     required_views = (
         "vw_zip_brand_activity",
-        "vw_state_summary",
-        "vw_city_summary",
         "vw_brand_summary",
-        "vw_listing_quality_summary",
-        "vw_geo_reference",
         "vw_reporting_locations",
-        "vw_reporting_totals",
         "vw_reporting_filter_options",
-        "vw_reporting_state_brand",
-        "vw_reporting_city_brand",
-        "vw_reporting_zip_summary",
         "vw_reporting_gap_base",
     )
     try:
