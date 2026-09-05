@@ -1854,9 +1854,18 @@ def _ensure_gold_reporting_views(client: Any, gold_ref: str) -> bool:
     except Exception as exc:
         if getattr(exc, "code", None) != 404:
             raise
-    prepare_zipcodes()
-    build_silver_layer()
-    build_gold_layer()
+    try:
+        prepare_zipcodes()
+    except Exception as exc:
+        raise RuntimeError(f"gold bootstrap failed at prepare_zipcodes: {exc}") from exc
+    try:
+        build_silver_layer()
+    except Exception as exc:
+        raise RuntimeError(f"gold bootstrap failed at build_silver_layer: {exc}") from exc
+    try:
+        build_gold_layer()
+    except Exception as exc:
+        raise RuntimeError(f"gold bootstrap failed at build_gold_layer: {exc}") from exc
     return True
 
 
@@ -1922,7 +1931,11 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
             source_table = f"{project_id}.{source_table}"
     except (ImportError, Exception) as init_err:
         LOGGER.warning("bigquery_reporting_fallback reason=%s", init_err)
-        return _empty_reporting_payload("us_zipcodes_baseline", params, "Connected to geographic baseline data.")
+        # Name the real failure instead of a reassuring-sounding generic
+        # message - this fallback fires on any setup error (including a
+        # failed first-time gold bootstrap), so silently saying "connected"
+        # here makes an actual outage look like empty data.
+        return _empty_reporting_payload("us_zipcodes_baseline", params, f"Reporting setup incomplete: {init_err}")
     table_ref = f"`{source_table}`"
     gold_zip_ref = f"`{gold_ref}.vw_zip_brand_activity`"
     # vw_state_summary/vw_city_summary are grouped by brand_name, so summing

@@ -161,6 +161,38 @@ class BigQueryBootstrapTests(unittest.TestCase):
         self.assertIn("bigquery-public-data.geo_us_boundaries.zip_codes", sql)
         self.assertIn("TO_HEX(SHA256(TO_JSON_STRING(STRUCT", sql)
 
+    def test_gold_bootstrap_names_the_failing_stage(self) -> None:
+        class NotFound(Exception):
+            code = 404
+
+        class FakeClient:
+            def get_table(self, _ref: str) -> None:
+                raise NotFound("missing")
+
+        with patch.object(workflow_server, "prepare_zipcodes", side_effect=RuntimeError("no external demographics access")):
+            with self.assertRaisesRegex(RuntimeError, r"gold bootstrap failed at prepare_zipcodes: no external demographics access"):
+                workflow_server._ensure_gold_reporting_views(FakeClient(), "project.gold")
+
+    def test_reporting_fallback_surfaces_the_real_bootstrap_error(self) -> None:
+        # A failed first-time gold bootstrap (or any other setup error) used
+        # to report as "Connected to geographic baseline data." - a
+        # reassuring-sounding message that hid a real outage. It should name
+        # what actually broke.
+        import sys
+        import types
+
+        fake_bigquery = types.SimpleNamespace()
+        fake_google = types.ModuleType("google")
+        fake_cloud = types.ModuleType("google.cloud")
+        modules = {"google": fake_google, "google.cloud": fake_cloud, "google.cloud.bigquery": fake_bigquery}
+
+        with patch.dict(sys.modules, modules):
+            with patch.object(workflow_server, "_medallion_settings", side_effect=RuntimeError("gold bootstrap failed at build_silver_layer: table not found")):
+                result = workflow_server.reporting_summary({})
+
+        self.assertIn("gold bootstrap failed at build_silver_layer", result["warning"])
+        self.assertEqual(result["filter_options"]["brands"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
