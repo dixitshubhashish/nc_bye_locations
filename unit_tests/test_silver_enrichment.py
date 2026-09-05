@@ -32,7 +32,7 @@ class SilverEnrichmentTests(unittest.TestCase):
     def test_build_silver_layer_creates_enriched_table_and_views(self) -> None:
         client = _FakeClient()
 
-        with patch.object(workflow_server, "_medallion_settings", return_value=("project", "bronze", "silver", None)):
+        with patch.object(workflow_server, "_medallion_settings", return_value=("project", "bronze", "silver", "gold", None)):
             with patch.object(workflow_server, "_bigquery_client", return_value=client):
                 with patch.object(workflow_server, "_ensure_dataset", side_effect=lambda *_: None):
                     result = workflow_server.build_silver_layer()
@@ -54,6 +54,28 @@ class SilverEnrichmentTests(unittest.TestCase):
         self.assertIn("geocode_query", sql)
         self.assertIn("state_code", sql)
         self.assertIn("state_name", sql)
+
+    def test_build_silver_layer_creates_zip_reference_and_invalid_split(self) -> None:
+        client = _FakeClient()
+
+        with patch.object(workflow_server, "_medallion_settings", return_value=("project", "bronze", "silver", "gold", None)):
+            with patch.object(workflow_server, "_bigquery_client", return_value=client):
+                with patch.object(workflow_server, "_ensure_dataset", side_effect=lambda *_: None):
+                    workflow_server.build_silver_layer()
+
+        sql = "\n".join(client.queries)
+        # A separate, refined zip/income reference table, sourced from
+        # bronze (not re-derived by every downstream consumer).
+        self.assertIn("CREATE OR REPLACE TABLE `project.silver.zip_reference`", sql)
+        self.assertIn("FROM `project.bronze.us_zipcodes`", sql)
+        # listings_enriched and listings_invalid are both derived from one
+        # staging table, split by the same mandatory-fields check, so a row
+        # can't silently vanish or silently keep null coordinates.
+        self.assertIn("CREATE OR REPLACE TABLE `project.silver._listings_staging`", sql)
+        self.assertIn("CREATE OR REPLACE TABLE `project.silver.listings_invalid`", sql)
+        self.assertIn("rejection_reason", sql)
+        self.assertIn("latitude IS NOT NULL AND longitude IS NOT NULL", sql)
+        self.assertIn("DROP TABLE IF EXISTS `project.silver._listings_staging`", sql)
 
 
 if __name__ == "__main__":

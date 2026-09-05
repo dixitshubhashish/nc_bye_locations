@@ -21,9 +21,14 @@ class SampleBrandConfig:
 
 
 SAMPLE_BRANDS: tuple[SampleBrandConfig, ...] = (
-    SampleBrandConfig("dominos_pizza_api", "Domino's", "api_get_json", 720, 0.05, ("USA",), "Pizza", "Quick service"),
-    SampleBrandConfig("pizza_hut_csv", "Pizza Hut", "csv", 680, 0.06, ("USA",), "Pizza", "Quick service"),
-    SampleBrandConfig("little_caesars_json", "Little Caesars", "json", 620, 0.05, ("USA",), "Pizza", "Takeout pizza"),
+    # Intentionally fictional brand names/keys - the sample/demo data
+    # generator must never use the three real brands (Domino's, Pizza Hut,
+    # Little Caesars) named in this project's actual assessment
+    # demonstration case, to avoid confusing synthetic QA data with real
+    # ingested data under those names.
+    SampleBrandConfig("starlight_pizza_api", "Starlight Pizza Co.", "api_get_json", 720, 0.05, ("USA",), "Pizza", "Quick service"),
+    SampleBrandConfig("crimson_slice_csv", "Crimson Slice", "csv", 680, 0.06, ("USA",), "Pizza", "Quick service"),
+    SampleBrandConfig("pinnacle_pizza_json", "Pinnacle Pizza", "json", 620, 0.05, ("USA",), "Pizza", "Takeout pizza"),
     SampleBrandConfig("golden_fork_csv", "Golden Fork", "csv", 527, 0.06, ("USA", "Canada"), "American", "Casual dining"),
     SampleBrandConfig("urban_kitchen_json", "Urban Kitchen", "json", 650, 0.08, ("USA", "UK", "Germany"), "Modern European", "Urban cafe"),
     SampleBrandConfig("bella_italia_excel", "Bella Italia", "excel", 514, 0.06, ("USA", "Italy", "France"), "Italian", "Family restaurant"),

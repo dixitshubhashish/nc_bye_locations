@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from google.cloud import bigquery
 from google.oauth2 import service_account

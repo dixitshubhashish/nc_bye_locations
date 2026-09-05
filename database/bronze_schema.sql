@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.field_catalogs` (
   aliases JSON NOT NULL,
   is_custom BOOL NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP(),
-  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP()
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+  content_hash STRING
 );
 
 CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.us_zipcodes` (
@@ -31,7 +32,8 @@ CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.us_zipcodes` (
   employed_population FLOAT64,
   unemployed_population FLOAT64,
   housing_units FLOAT64,
-  source STRING NOT NULL
+  source STRING NOT NULL,
+  content_hash STRING
 );
 
 CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.businesses` (
@@ -50,6 +52,7 @@ CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.businesses` (
   country_of_origin STRING,
   is_sample_data BOOL DEFAULT FALSE,
   sample_batch_id STRING,
+  content_hash STRING,
   is_deleted BOOL DEFAULT FALSE,
   deleted_on TIMESTAMP
 );
@@ -102,6 +105,7 @@ CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.listings` (
   ,competitor_count INT64
   ,foot_traffic_score FLOAT64
   ,parking_availability STRING,
+  content_hash STRING,
   is_deleted BOOL DEFAULT FALSE,
   deleted_on TIMESTAMP
 );
@@ -116,6 +120,7 @@ CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.workflow_templates` (
   source_configuration JSON,
   is_sample_data BOOL DEFAULT FALSE,
   sample_batch_id STRING,
+  content_hash STRING,
   is_deleted BOOL DEFAULT FALSE,
   deleted_on TIMESTAMP,
   created_at TIMESTAMP NOT NULL,
@@ -126,7 +131,8 @@ CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.source_types` (
   source_type_id STRING NOT NULL DEFAULT GENERATE_UUID(),
   name STRING NOT NULL,
   data_format JSON NOT NULL,
-  created_at TIMESTAMP NOT NULL
+  created_at TIMESTAMP NOT NULL,
+  content_hash STRING
 );
 
 CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.error_listings` (
@@ -144,6 +150,7 @@ CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.error_listings` (
   country STRING,
   is_sample_data BOOL DEFAULT FALSE,
   sample_batch_id STRING,
+  content_hash STRING,
   is_deleted BOOL DEFAULT FALSE,
   deleted_on TIMESTAMP
 );

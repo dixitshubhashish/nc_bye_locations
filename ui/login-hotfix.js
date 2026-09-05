@@ -57,10 +57,10 @@
     appShell?.classList.remove("hidden");
 
     try {
-      if (typeof window.switchPrimaryTab === "function") {
-        window.switchPrimaryTab("tab1");
-      } else if (typeof window.switchView === "function") {
-        window.switchView("reportingView");
+      // Always land on the Mappings tab right after login, regardless of
+      // whatever tab a previous session left active in sessionStorage.
+      if (typeof window.switchView === "function") {
+        window.switchView("mapperView");
       }
     } catch (error) {
       console.error("Post-login navigation initialization failed:", error);
@@ -70,6 +70,11 @@
       if (typeof window.loadAppData === "function") window.loadAppData();
     } catch (error) {
       console.error("Post-login data initialization failed:", error);
+    }
+    try {
+      if (typeof window.refreshHeaderReadiness === "function") window.refreshHeaderReadiness();
+    } catch (error) {
+      console.error("Post-login readiness initialization failed:", error);
     }
   }
 

@@ -112,6 +112,188 @@ class WarehouseSchemaTests(unittest.TestCase):
         self.assertEqual(listings_table.time_partitioning.type_, "DAY")
         self.assertEqual(listings_table.time_partitioning.field, "first_observed_at")
 
+    def test_push_uses_dataframe_bulk_loader_with_computed_hash(self) -> None:
+        loaded_frames = []
+
+        class FakeSchemaField:
+            def __init__(self, name: str, field_type: str, mode: str = "NULLABLE", default_value_expression: str | None = None) -> None:
+                self.name = name
+                self.field_type = field_type
+                self.mode = mode
+                self.default_value_expression = default_value_expression
+
+        class FakeTable:
+            def __init__(self, table_ref: str, schema: list[FakeSchemaField]) -> None:
+                self.table_ref = table_ref
+                self.schema = schema
+                self.time_partitioning = None
+                self.clustering_fields = None
+
+        class FakeDataset:
+            def __init__(self, dataset_ref: str) -> None:
+                self.dataset_ref = dataset_ref
+
+        class FakeLoadJobConfig:
+            def __init__(self, schema: list[FakeSchemaField], write_disposition: str | None = None) -> None:
+                self.schema = schema
+                self.write_disposition = write_disposition
+
+        class FakeLoadJob:
+            errors = None
+            job_id = "job-1"
+
+            def result(self) -> None:
+                return None
+
+        class FakeClient:
+            def __init__(self, project: str) -> None:
+                self.project = project
+
+            def create_dataset(self, dataset: FakeDataset, exists_ok: bool = False) -> None:
+                return None
+
+            def get_table(self, table_ref: str) -> FakeTable:
+                exc = Exception("missing")
+                setattr(exc, "code", 404)
+                raise exc
+
+            def create_table(self, table: FakeTable) -> FakeTable:
+                return table
+
+            def load_table_from_dataframe(self, frame, table_ref: str, job_config: FakeLoadJobConfig):
+                loaded_frames.append((table_ref, frame.copy()))
+                return FakeLoadJob()
+
+            def load_table_from_json(self, rows: list[dict], table_ref: str, job_config: FakeLoadJobConfig):
+                raise AssertionError("JSON loader should not be used when dataframe loading is available")
+
+        fake_bigquery = types.SimpleNamespace(
+            Client=FakeClient,
+            Dataset=FakeDataset,
+            LoadJobConfig=FakeLoadJobConfig,
+            SchemaField=FakeSchemaField,
+            Table=FakeTable,
+            TimePartitioning=lambda type_, field: types.SimpleNamespace(type_=type_, field=field),
+            WriteDisposition=types.SimpleNamespace(WRITE_TRUNCATE="WRITE_TRUNCATE"),
+        )
+        fake_google = types.ModuleType("google")
+        fake_cloud = types.ModuleType("google.cloud")
+        fake_oauth2 = types.ModuleType("google.oauth2")
+        fake_service_account = types.SimpleNamespace(Credentials=types.SimpleNamespace(from_service_account_file=lambda _: None))
+
+        modules = {
+            "google": fake_google,
+            "google.cloud": fake_cloud,
+            "google.cloud.bigquery": fake_bigquery,
+            "google.oauth2": fake_oauth2,
+            "google.oauth2.service_account": fake_service_account,
+        }
+        with patch.dict(sys.modules, modules):
+            push_to_bigquery("project", "dataset", {"businesses": [{
+                "business_id": "b1",
+                "name": "Store",
+                "slug": "store",
+                "status": "active",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            }]})
+
+        self.assertEqual(len(loaded_frames), 1)
+        table_ref, frame = loaded_frames[0]
+        self.assertTrue(table_ref.endswith(".businesses"))
+        self.assertIn("content_hash", frame.columns)
+        self.assertTrue(frame.iloc[0]["content_hash"])
+
+    def test_push_uses_json_loader_for_tables_with_json_columns(self) -> None:
+        loaded_json_rows = []
+
+        class FakeSchemaField:
+            def __init__(self, name: str, field_type: str, mode: str = "NULLABLE", default_value_expression: str | None = None) -> None:
+                self.name = name
+                self.field_type = field_type
+                self.mode = mode
+                self.default_value_expression = default_value_expression
+
+        class FakeTable:
+            def __init__(self, table_ref: str, schema: list[FakeSchemaField]) -> None:
+                self.table_ref = table_ref
+                self.schema = schema
+                self.time_partitioning = None
+                self.clustering_fields = None
+
+        class FakeDataset:
+            def __init__(self, dataset_ref: str) -> None:
+                self.dataset_ref = dataset_ref
+
+        class FakeLoadJobConfig:
+            def __init__(self, schema: list[FakeSchemaField], write_disposition: str | None = None) -> None:
+                self.schema = schema
+                self.write_disposition = write_disposition
+
+        class FakeLoadJob:
+            errors = None
+            job_id = "job-json"
+
+            def result(self) -> None:
+                return None
+
+        class FakeClient:
+            def __init__(self, project: str) -> None:
+                self.project = project
+
+            def create_dataset(self, dataset: FakeDataset, exists_ok: bool = False) -> None:
+                return None
+
+            def get_table(self, table_ref: str) -> FakeTable:
+                exc = Exception("missing")
+                setattr(exc, "code", 404)
+                raise exc
+
+            def create_table(self, table: FakeTable) -> FakeTable:
+                return table
+
+            def load_table_from_dataframe(self, frame, table_ref: str, job_config: FakeLoadJobConfig):
+                raise AssertionError("DataFrame loader should not be used for JSON-column tables")
+
+            def load_table_from_json(self, rows: list[dict], table_ref: str, job_config: FakeLoadJobConfig):
+                loaded_json_rows.append((table_ref, rows))
+                return FakeLoadJob()
+
+        fake_bigquery = types.SimpleNamespace(
+            Client=FakeClient,
+            Dataset=FakeDataset,
+            LoadJobConfig=FakeLoadJobConfig,
+            SchemaField=FakeSchemaField,
+            Table=FakeTable,
+            TimePartitioning=lambda type_, field: types.SimpleNamespace(type_=type_, field=field),
+            WriteDisposition=types.SimpleNamespace(WRITE_TRUNCATE="WRITE_TRUNCATE"),
+        )
+        fake_google = types.ModuleType("google")
+        fake_cloud = types.ModuleType("google.cloud")
+        fake_oauth2 = types.ModuleType("google.oauth2")
+        fake_service_account = types.SimpleNamespace(Credentials=types.SimpleNamespace(from_service_account_file=lambda _: None))
+
+        modules = {
+            "google": fake_google,
+            "google.cloud": fake_cloud,
+            "google.cloud.bigquery": fake_bigquery,
+            "google.oauth2": fake_oauth2,
+            "google.oauth2.service_account": fake_service_account,
+        }
+        with patch.dict(sys.modules, modules):
+            push_to_bigquery("project", "dataset", {"workflow_templates": [{
+                "workflow_template_id": "t1",
+                "business_id": "b1",
+                "name": "Template",
+                "components": "{}",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            }]})
+
+        self.assertEqual(len(loaded_json_rows), 1)
+        self.assertTrue(loaded_json_rows[0][0].endswith(".workflow_templates"))
+        self.assertTrue(loaded_json_rows[0][1][0]["content_hash"])
+
 
 if __name__ == "__main__":
     unittest.main()

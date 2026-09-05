@@ -32,12 +32,13 @@ class ReportingCacheTests(unittest.TestCase):
         refresh.assert_called_once()
 
     def test_reporting_brand_options_include_business_registry(self) -> None:
-        source = inspect.getsource(workflow_server.reporting_summary)
+        reporting_source = inspect.getsource(workflow_server.reporting_summary)
+        gold_source = inspect.getsource(workflow_server.build_gold_layer)
 
-        self.assertIn("reporting_summary:v3", source)
-        self.assertIn("FROM `{project_id}.{bronze_dataset_id}.businesses`", source)
-        self.assertIn("UNION DISTINCT", source)
-        self.assertIn("SELECT COALESCE(brand_name, business_id) AS brand", source)
+        self.assertIn("reporting_summary:v3", reporting_source)
+        self.assertIn("vw_reporting_filter_options", reporting_source)
+        self.assertIn("FROM `{bronze_ref}.businesses`", gold_source)
+        self.assertIn("UNION DISTINCT", gold_source)
 
 
 if __name__ == "__main__":

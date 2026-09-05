@@ -1,12 +1,129 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import pandas as pd
+
 from whitespace_tool.models import LocationRecord, ZipDemographics
+
+
+# Fields that describe the physical location itself, not the ingestion run
+# that produced this row. Deliberately excludes: listing_id (generated
+# uuid), location_key (often an index-based fallback id that can differ
+# between runs for the same real-world store), source_type_id/template_id/
+# ingestion_id/mapping_id/sample_batch_id (ingestion-run metadata, not
+# content), first_observed_at/last_observed_at (time-varying by design),
+# and is_deleted/deleted_on (mutable state).
+CONTENT_HASH_FIELDS: tuple[str, ...] = (
+    "business_id", "name", "address", "city_name", "town", "state_code", "province",
+    "zip_code", "country", "latitude", "longitude", "franchise_name", "concept_type",
+    "cuisine_type", "neighborhood", "district", "phone_number", "website_url",
+    "google_maps_link", "social_media_handles", "operating_hours", "seating_capacity",
+    "service_types", "opening_date", "status", "annual_revenue", "average_ticket_size",
+    "daily_footfall", "monthly_footfall", "rental_cost", "lease_cost",
+    "population_density", "average_household_income", "competitor_count",
+    "foot_traffic_score", "parking_availability",
+)
+
+
+def _canonical_hash_payload(row: dict[str, Any], fields: tuple[str, ...] | list[str]) -> str:
+    canonical = {key: ("" if row.get(key) is None else str(row.get(key))) for key in fields}
+    return json.dumps(canonical, sort_keys=True)
+
+
+def _is_nullish(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, (dict, list, tuple, set)):
+        return False
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _canonical_hash_payload_from_values(values: list[Any], fields: tuple[str, ...] | list[str]) -> str:
+    canonical = {field: ("" if _is_nullish(value) else str(value)) for field, value in zip(fields, values)}
+    return json.dumps(canonical, sort_keys=True)
+
+
+def content_hash(row: dict[str, Any]) -> str:
+    """Deterministic SHA-256 over a listing's stable content fields."""
+    payload = _canonical_hash_payload(row, CONTENT_HASH_FIELDS)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def table_content_hash(table_name: str, row: dict[str, Any]) -> str:
+    """Deterministic SHA-256 over all managed columns present in a table row.
+
+    The hash column itself is excluded so the value can be recomputed
+    idempotently before each BigQuery load.
+    """
+    if table_name == "listings":
+        return content_hash(row)
+    fields = [field["name"] for field in TABLE_SCHEMAS[table_name] if field["name"] != "content_hash"]
+    payload = _canonical_hash_payload(row, fields)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def table_columns(table_name: str) -> list[str]:
+    return [field["name"] for field in TABLE_SCHEMAS[table_name]]
+
+
+def table_hash_columns(table_name: str) -> list[str]:
+    if table_name == "listings":
+        return list(CONTENT_HASH_FIELDS)
+    return [field["name"] for field in TABLE_SCHEMAS[table_name] if field["name"] != "content_hash"]
+
+
+def table_has_json_fields(table_name: str) -> bool:
+    return any(field["type"] == "JSON" for field in TABLE_SCHEMAS[table_name])
+
+
+def rows_to_dataframe(table_name: str, rows: list[dict[str, Any]]) -> pd.DataFrame:
+    """Build a schema-ordered DataFrame for a managed table."""
+    columns = table_columns(table_name)
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame.from_records(rows).reindex(columns=columns)
+
+
+def dataframe_to_records(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    """Convert a DataFrame to BigQuery JSON-compatible row dictionaries."""
+    normalized = frame.astype(object).where(pd.notna(frame), None)
+    return normalized.to_dict(orient="records")
+
+
+def add_content_hash_column(table_name: str, frame: pd.DataFrame) -> pd.DataFrame:
+    if "content_hash" not in table_columns(table_name):
+        return frame
+    hashed = frame.copy()
+    hash_columns = table_hash_columns(table_name)
+    for column in hash_columns:
+        if column not in hashed.columns:
+            hashed[column] = None
+    payloads = hashed[hash_columns].apply(
+        lambda row: _canonical_hash_payload_from_values(row.tolist(), hash_columns),
+        axis=1,
+    )
+    hashed["content_hash"] = payloads.map(lambda payload: hashlib.sha256(payload.encode("utf-8")).hexdigest())
+    return hashed.reindex(columns=table_columns(table_name))
+
+
+def rows_to_hashed_dataframe(table_name: str, rows: list[dict[str, Any]]) -> pd.DataFrame:
+    return add_content_hash_column(table_name, rows_to_dataframe(table_name, rows))
+
+
+def hash_rows_by_table(rows_by_table: dict[str, list[dict[str, Any]]]) -> dict[str, list[dict[str, Any]]]:
+    return {
+        table_name: dataframe_to_records(rows_to_hashed_dataframe(table_name, rows))
+        for table_name, rows in rows_by_table.items()
+    }
 
 
 LOGGER = logging.getLogger("whitespace_tool.workflow")
@@ -27,6 +144,7 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "is_custom", "type": "BOOLEAN", "mode": "REQUIRED"},
         {"name": "created_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
         {"name": "updated_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
+        {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
     ],
     "us_zipcodes": [
         {"name": "zip_code", "type": "STRING", "mode": "REQUIRED"},
@@ -46,6 +164,7 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "unemployed_population", "type": "FLOAT", "mode": "NULLABLE"},
         {"name": "housing_units", "type": "FLOAT", "mode": "NULLABLE"},
         {"name": "source", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
     ],
     "businesses": [
         {"name": "business_id", "type": "STRING", "mode": "REQUIRED", "default": "GENERATE_UUID()"},
@@ -63,6 +182,7 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "country_of_origin", "type": "STRING", "mode": "NULLABLE"},
         {"name": "is_sample_data", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "sample_batch_id", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
         {"name": "is_deleted", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "deleted_on", "type": "TIMESTAMP", "mode": "NULLABLE"},
     ],
@@ -115,6 +235,7 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "competitor_count", "type": "INTEGER", "mode": "NULLABLE"},
         {"name": "foot_traffic_score", "type": "FLOAT", "mode": "NULLABLE"},
         {"name": "parking_availability", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
         {"name": "is_deleted", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "deleted_on", "type": "TIMESTAMP", "mode": "NULLABLE"},
     ],
@@ -128,6 +249,7 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "source_configuration", "type": "JSON", "mode": "NULLABLE"},
         {"name": "is_sample_data", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "sample_batch_id", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
         {"name": "is_deleted", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "deleted_on", "type": "TIMESTAMP", "mode": "NULLABLE"},
         {"name": "created_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
@@ -138,6 +260,7 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "name", "type": "STRING", "mode": "REQUIRED"},
         {"name": "data_format", "type": "JSON", "mode": "REQUIRED"},
         {"name": "created_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
+        {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
     ],
     "error_listings": [
         {"name": "event_id", "type": "STRING", "mode": "REQUIRED"},
@@ -154,6 +277,7 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "country", "type": "STRING", "mode": "NULLABLE"},
         {"name": "is_sample_data", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "sample_batch_id", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
         {"name": "is_deleted", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "deleted_on", "type": "TIMESTAMP", "mode": "NULLABLE"},
     ],
@@ -184,6 +308,58 @@ def _scrub_config(value: Any) -> Any:
     return value
 
 
+def _listing_row(row: LocationRecord) -> dict[str, Any]:
+    listing = {
+        **(row.raw.get("__meta", {}) if isinstance(row.raw, dict) and isinstance(row.raw.get("__meta"), dict) else {}),
+        "listing_id": str(uuid4()),
+        "business_id": getattr(row, "business_id", row.brand),
+        "source_type_id": getattr(row, "source_type_id", ""),
+        "location_key": row.location_id,
+        "name": row.name,
+        "address": row.address,
+        "city_name": row.city,
+        "town": row.town,
+        "state_code": row.state,
+        "province": row.province,
+        "zip_code": row.zip5,
+        "country": row.country,
+        "latitude": row.latitude,
+        "longitude": row.longitude,
+        "first_observed_at": row.observed_at,
+        "last_observed_at": row.observed_at,
+        # Enhanced location fields
+        "franchise_name": row.franchise_name,
+        "concept_type": row.concept_type,
+        "cuisine_type": row.cuisine_type,
+        "neighborhood": row.neighborhood,
+        "district": row.district,
+        "phone_number": row.phone_number,
+        "website_url": row.website_url,
+        "google_maps_link": row.google_maps_link,
+        "social_media_handles": row.social_media_handles,
+        "operating_hours": row.operating_hours,
+        "seating_capacity": row.seating_capacity,
+        "service_types": row.service_types,
+        "opening_date": row.opening_date,
+        "status": row.status,
+        "annual_revenue": row.annual_revenue,
+        "average_ticket_size": row.average_ticket_size,
+        "daily_footfall": row.daily_footfall,
+        "monthly_footfall": row.monthly_footfall,
+        "rental_cost": row.rental_cost,
+        "lease_cost": row.lease_cost,
+        "population_density": row.population_density,
+        "average_household_income": row.average_household_income,
+        "competitor_count": row.competitor_count,
+        "foot_traffic_score": row.foot_traffic_score,
+        "parking_availability": row.parking_availability,
+        "is_deleted": False,
+        "deleted_on": None,
+    }
+    listing["content_hash"] = content_hash(listing)
+    return listing
+
+
 def build_table_rows(
     locations: list[LocationRecord],
     demographics: dict[str, ZipDemographics],
@@ -192,7 +368,7 @@ def build_table_rows(
     summary: dict[str, Any] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     zip_city_state = {row.zip5: (row.city, row.state) for row in locations}
-    return {
+    rows_by_table = {
         "us_zipcodes": [
             {
                 "zip_code": demo.zip_code,
@@ -216,60 +392,12 @@ def build_table_rows(
             for demo in demographics.values()
         ],
         "businesses": [],
-        "listings": [
-            {
-                **(row.raw.get("__meta", {}) if isinstance(row.raw, dict) and isinstance(row.raw.get("__meta"), dict) else {}),
-                "listing_id": str(uuid4()),
-                "business_id": getattr(row, "business_id", row.brand),
-                "source_type_id": getattr(row, "source_type_id", ""),
-                "location_key": row.location_id,
-                "name": row.name,
-                "address": row.address,
-                "city_name": row.city,
-                "town": row.town,
-                "state_code": row.state,
-                "province": row.province,
-                "zip_code": row.zip5,
-                "country": row.country,
-                "latitude": row.latitude,
-                "longitude": row.longitude,
-                "first_observed_at": row.observed_at,
-                "last_observed_at": row.observed_at,
-                # Enhanced location fields
-                "franchise_name": row.franchise_name,
-                "concept_type": row.concept_type,
-                "cuisine_type": row.cuisine_type,
-                "neighborhood": row.neighborhood,
-                "district": row.district,
-                "phone_number": row.phone_number,
-                "website_url": row.website_url,
-                "google_maps_link": row.google_maps_link,
-                "social_media_handles": row.social_media_handles,
-                "operating_hours": row.operating_hours,
-                "seating_capacity": row.seating_capacity,
-                "service_types": row.service_types,
-                "opening_date": row.opening_date,
-                "status": row.status,
-                "annual_revenue": row.annual_revenue,
-                "average_ticket_size": row.average_ticket_size,
-                "daily_footfall": row.daily_footfall,
-                "monthly_footfall": row.monthly_footfall,
-                "rental_cost": row.rental_cost,
-                "lease_cost": row.lease_cost,
-                "population_density": row.population_density,
-                "average_household_income": row.average_household_income,
-                "competitor_count": row.competitor_count,
-                "foot_traffic_score": row.foot_traffic_score,
-                "parking_availability": row.parking_availability,
-                "is_deleted": False,
-                "deleted_on": None,
-            }
-            for row in locations
-        ],
+        "listings": [_listing_row(row) for row in locations],
         "workflow_templates": [],
         "source_types": [],
         "error_listings": [],
     }
+    return hash_rows_by_table(rows_by_table)
 
 
 def write_bigquery_jsonl(output_dir: str | Path, rows_by_table: dict[str, list[dict[str, Any]]]) -> None:
@@ -297,6 +425,7 @@ def push_to_bigquery(
     rows_by_table: dict[str, list[dict[str, Any]]],
     credentials_json: str | None = None,
     write_disposition: str | None = None,
+    client: Any = None,
 ) -> None:
     try:
         from google.cloud import bigquery
@@ -304,15 +433,21 @@ def push_to_bigquery(
     except ImportError as exc:
         raise RuntimeError("Install google-cloud-bigquery and google-auth to push directly to BigQuery.") from exc
 
-    if credentials_json:
-        credentials = service_account.Credentials.from_service_account_file(credentials_json)
-        client = bigquery.Client(project=project_id, credentials=credentials)
-    else:
-        client = bigquery.Client(project=project_id)
+    frames_by_table = {
+        table_name: rows_to_hashed_dataframe(table_name, rows)
+        for table_name, rows in rows_by_table.items()
+    }
+    if client is None:
+        if credentials_json:
+            credentials = service_account.Credentials.from_service_account_file(credentials_json)
+            client = bigquery.Client(project=project_id, credentials=credentials)
+        else:
+            client = bigquery.Client(project=project_id)
     dataset_ref = bigquery.Dataset(f"{project_id}.{dataset_id}")
     client.create_dataset(dataset_ref, exists_ok=True)
 
-    for table_name, rows in rows_by_table.items():
+    for table_name, frame in frames_by_table.items():
+        rows = dataframe_to_records(frame)
         schema = [
             bigquery.SchemaField(field["name"], field["type"], mode=field["mode"], default_value_expression=field.get("default"))
             for field in TABLE_SCHEMAS[table_name]
@@ -349,7 +484,10 @@ def push_to_bigquery(
             load_config = bigquery.LoadJobConfig(schema=schema)
             if write_disposition:
                 load_config.write_disposition = write_disposition
-            load_job = client.load_table_from_json(rows, table_ref, job_config=load_config)
+            if hasattr(client, "load_table_from_dataframe") and not table_has_json_fields(table_name):
+                load_job = client.load_table_from_dataframe(frame, table_ref, job_config=load_config)
+            else:
+                load_job = client.load_table_from_json(rows, table_ref, job_config=load_config)
             load_job.result()
             if load_job.errors:
                 LOGGER.error("db_batch_load_failed table=%s rows=%d error_count=%d errors=%s", table_ref, len(rows), len(load_job.errors), load_job.errors)

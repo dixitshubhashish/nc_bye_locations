@@ -239,14 +239,19 @@ class CsvWorkflowTests(unittest.TestCase):
             ["unexpected", "row", "shape"],
         ]
 
-        def fake_push(_project_id, _dataset_id, rows_by_table, _credentials_json):
+        def fake_push(_project_id, _dataset_id, rows_by_table, _credentials_json, **_kwargs):
             captured_rows.update(rows_by_table)
+
+        def fake_dedupe(_client, _project_id, _dataset_id, listing_rows):
+            return listing_rows, 0
 
         with patch("whitespace_tool.workflow_server.field_catalog", side_effect=RuntimeError("catalog unavailable")):
             with patch("whitespace_tool.workflow_server._load_mapped_zip_demographics", side_effect=RuntimeError("zip enrichment unavailable")):
                 with patch("whitespace_tool.workflow_server._warehouse_settings", return_value=("project", "dataset", None)):
-                    with patch("whitespace_tool.workflow_server.push_to_bigquery", side_effect=fake_push):
-                        result = save_mapper({"mapper": VALID_MAPPER, "rows": rows, "source_fields": list(VALID_ROW)})
+                    with patch("whitespace_tool.workflow_server._bigquery_client", return_value=object()):
+                        with patch("whitespace_tool.workflow_server._dedupe_listings_against_bronze", side_effect=fake_dedupe):
+                            with patch("whitespace_tool.workflow_server.push_to_bigquery", side_effect=fake_push):
+                                result = save_mapper({"mapper": VALID_MAPPER, "rows": rows, "source_fields": list(VALID_ROW)})
 
         self.assertEqual(result["total_rows"], 3)
         self.assertEqual(result["mapped_rows"], 1)
@@ -261,29 +266,34 @@ class CsvWorkflowTests(unittest.TestCase):
             {**VALID_ROW, "store_id": "bad-coords", "latitude": "not-a-latitude"},
         ]
 
-        def fake_push(_project_id, _dataset_id, rows_by_table, _credentials_json):
+        def fake_push(_project_id, _dataset_id, rows_by_table, _credentials_json, **_kwargs):
             captured_batches.append(rows_by_table)
+
+        def fake_dedupe(_client, _project_id, _dataset_id, listing_rows):
+            return listing_rows, 0
 
         with patch("whitespace_tool.workflow_server.field_catalog", side_effect=RuntimeError("catalog unavailable")):
             with patch("whitespace_tool.workflow_server._load_mapped_zip_demographics", side_effect=RuntimeError("zip enrichment unavailable")):
                 with patch("whitespace_tool.workflow_server._warehouse_settings", return_value=("project", "dataset", None)):
-                    with patch("whitespace_tool.workflow_server.push_to_bigquery", side_effect=fake_push):
-                        first = save_mapper({
-                            "mapper": dict(VALID_MAPPER),
-                            "rows": [rows[0]],
-                            "source_fields": list(VALID_ROW),
-                            "batch_event_id": "batch-123",
-                            "row_offset": 0,
-                            "save_template": True,
-                        })
-                        second = save_mapper({
-                            "mapper": dict(VALID_MAPPER),
-                            "rows": [rows[1]],
-                            "source_fields": list(VALID_ROW),
-                            "batch_event_id": "batch-123",
-                            "row_offset": 1,
-                            "save_template": False,
-                        })
+                    with patch("whitespace_tool.workflow_server._bigquery_client", return_value=object()):
+                        with patch("whitespace_tool.workflow_server._dedupe_listings_against_bronze", side_effect=fake_dedupe):
+                            with patch("whitespace_tool.workflow_server.push_to_bigquery", side_effect=fake_push):
+                                first = save_mapper({
+                                    "mapper": dict(VALID_MAPPER),
+                                    "rows": [rows[0]],
+                                    "source_fields": list(VALID_ROW),
+                                    "batch_event_id": "batch-123",
+                                    "row_offset": 0,
+                                    "save_template": True,
+                                })
+                                second = save_mapper({
+                                    "mapper": dict(VALID_MAPPER),
+                                    "rows": [rows[1]],
+                                    "source_fields": list(VALID_ROW),
+                                    "batch_event_id": "batch-123",
+                                    "row_offset": 1,
+                                    "save_template": False,
+                                })
 
         self.assertEqual(first["event_id"], "batch-123")
         self.assertEqual(second["event_id"], "batch-123")
