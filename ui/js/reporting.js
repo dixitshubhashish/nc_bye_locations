@@ -220,7 +220,7 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [])
             onEachFeature: (feature, layer) => {
               const code = stateNameToCode[feature?.properties?.name] || "";
               if (!code) return;
-              layer.bindTooltip(feature.properties.name || code, { sticky: true, className: "state-code-label" });
+              layer.bindTooltip(code || feature.properties.name, { sticky: true, className: "state-code-label" });
               layer.bindPopup(`
                 <div style="font-family: sans-serif; font-size: 13px; line-height: 1.4;">
                   <strong>${escapeHtml(feature.properties.name || code)}</strong><br/>
@@ -246,7 +246,7 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [])
             opacity: 0.9,
             fillOpacity: 0.85
           });
-          marker.bindTooltip(row.state_name || stateCodeToName[stateCode] || "Unknown State", {
+          marker.bindTooltip(stateCode || "??", {
             permanent: true,
             direction: "center",
             className: "state-code-label"
