@@ -155,6 +155,10 @@ function switchView(viewId) {
       if (el("resetMappingBtn")) el("resetMappingBtn").classList.toggle("hidden", viewId !== "mapperView");
       if (viewId === "reportingView" && !reportLoaded) loadReporting();
       if (viewId === "templateLibraryView") loadTemplateFilters().then(loadTemplateLibrary);
+      if (viewId === "reviewView") {
+        loadRejectedRecords();
+        refreshReviewCount();
+      }
     }
 
 async function testReadiness() {

@@ -47,6 +47,15 @@ async function loadRejectedRecords() {
         target.textContent = productSafeError(error.message, "Could not load review records.");
       }
     }
+function getNestedRawValue(row, path) {
+      if (!path) return "";
+      let current = row;
+      for (const part of path.split(".")) {
+        if (current && typeof current === "object") current = current[part];
+        else return "";
+      }
+      return current !== null && current !== undefined ? current : "";
+    }
 function openEditRecordModal(record) {
       currentEditingRecord = record;
       let rawObj = record.raw_record;
@@ -63,8 +72,51 @@ function openEditRecordModal(record) {
         (Array.isArray(errs) ? errs.map(e => `<li><strong>${escapeHtml(e.field)}</strong>: ${escapeHtml(e.hint || e.reason)}</li>`).join('') : '<li>Issue found.</li>') +
         `</ul>`;
 
+      // required_location fails in two ways: (1) no brand/ZIP at all, or
+      // (2) brand+ZIP resolved but name/address/city/state didn't. Either
+      // way, the missing value's mapped path may simply be absent from
+      // raw_record (sparse JSON/XML/API sources omit blank fields), so it
+      // never gets a regular input below. Surface exactly the fields the
+      // triggered variant(s) need, keyed to the exact path the mapper will
+      // look up on retry, so they're always fixable here.
+      const locationErrors = Array.isArray(errs) ? errs.filter(e => e.field === "required_location") : [];
+      const missingKeys = new Set();
+      locationErrors.forEach((e) => {
+        if (e.reason === "missing brand or ZIP Code") {
+          missingKeys.add("brand");
+          missingKeys.add("postal_code");
+        } else {
+          ["name", "address", "city", "state", "postal_code"].forEach((key) => missingKeys.add(key));
+        }
+      });
+      const activeMapper = typeof getMapper === "function" ? getMapper() : { fields: {} };
+      const mapperFields = activeMapper.fields || {};
+      const fixedBrand = String(activeMapper.brand || "").trim();
+      const LOCATION_FIELD_SPECS = {
+        brand: { label: "Business / Brand Name", path: mapperFields.brand || "brand", note: fixedBrand ? `Optional - falls back to selected business "${fixedBrand}" if left blank.` : "Required - no fixed business is selected for this mapper." },
+        name: { label: "Location Name", path: mapperFields.name || "name", note: "Required." },
+        address: { label: "Address", path: mapperFields.address || "address", note: "Required." },
+        city: { label: "City", path: mapperFields.city || "city", note: "Required." },
+        state: { label: "State", path: mapperFields.state || "state", note: "Required." },
+        postal_code: { label: "ZIP Code", path: mapperFields.postal_code || "postal_code", note: "Required - 5-digit US ZIP code." },
+      };
+      const requiredPaths = new Set();
+      const requiredFieldHtml = ["brand", "name", "address", "city", "state", "postal_code"]
+        .filter((key) => missingKeys.has(key))
+        .map((key) => {
+          const { label, path, note } = LOCATION_FIELD_SPECS[key];
+          requiredPaths.add(path);
+          return `
+        <div style="display: flex; flex-direction: column;">
+          <label style="font-size: 12px; font-weight: 700; color: var(--ink); margin-bottom: 4px;">${escapeHtml(label)} <span style="font-weight: 400; color: #cf1322;">(${escapeHtml(path)})</span></label>
+          <input type="text" data-raw-key="${escapeHtml(path)}" value="${escapeHtml(String(getNestedRawValue(rawObj, path)))}" style="padding: 6px; border: 1px solid var(--line); border-radius: 4px; font-size: 13px;">
+          <span style="font-size: 11px; color: var(--muted, #6b7280); margin-top: 2px;">${escapeHtml(note)}</span>
+        </div>
+      `;
+        }).join('');
+
       const formEl = el("editRecordForm");
-      formEl.innerHTML = Object.entries(rawObj).map(([key, val]) => `
+      formEl.innerHTML = requiredFieldHtml + Object.entries(rawObj).filter(([key]) => !requiredPaths.has(key)).map(([key, val]) => `
         <div style="display: flex; flex-direction: column;">
           <label style="font-size: 12px; font-weight: 700; color: var(--ink); margin-bottom: 4px;">${escapeHtml(key)}</label>
           <input type="text" data-raw-key="${escapeHtml(key)}" value="${escapeHtml(val !== null && val !== undefined ? String(val) : '')}" style="padding: 6px; border: 1px solid var(--line); border-radius: 4px; font-size: 13px;">
