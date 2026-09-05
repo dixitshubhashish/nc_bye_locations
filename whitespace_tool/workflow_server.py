@@ -2220,7 +2220,10 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
     sample_meta = payload.get("sample_meta") if isinstance(payload.get("sample_meta"), dict) else {}
     template_id = str(sample_meta.get("template_id") or uuid4())
     ingestion_id = str(sample_meta.get("ingestion_id") or event_id)
-    mapping_id = str(sample_meta.get("mapping_id") or mapper_id if "mapper_id" in locals() else "")
+    # mapper_id doesn't exist yet at this point (it's generated further down,
+    # see the `mapping_id = mapping_id or mapper_id` fallback below) - use
+    # whatever the caller passed, or fall back to that generated id later.
+    mapping_id = str(sample_meta.get("mapping_id") or "")
     mapper["business_id"] = business_id
     mapper["source_type_id"] = source_type_id
     locations = []

@@ -1302,7 +1302,7 @@ async function loadSampleDataset(reset = false) {
         reportLoaded = false;
         await loadReporting();
         const sourceTypesSummary = Object.entries(result.source_types || {}).map(([name, count]) => `${name}: ${count}`).join(", ");
-        const reportingRows = result["sil" + "ver"]?.rows;
+        const reportingRows = result.silver?.rows;
         const message = result.already_loaded
           ? `Sample dataset already loaded${reportingRows !== undefined ? `, ${formatNumber(reportingRows)} records ready` : ""}.`
           : `Sample dataset loaded: ${formatNumber(result.locations)} records, ${formatNumber(result.errors)} in review${reportingRows !== undefined ? `, ${formatNumber(reportingRows)} ready for reporting` : ""}${sourceTypesSummary ? ` (${sourceTypesSummary})` : ""}.`;
