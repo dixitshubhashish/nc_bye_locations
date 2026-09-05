@@ -444,7 +444,18 @@ def push_to_bigquery(
     credentials_json: str | None = None,
     write_disposition: str | None = None,
     client: Any = None,
+    skip_empty_table_checks: bool = False,
 ) -> None:
+    """skip_empty_table_checks lets a caller that already knows every
+    managed table exists (e.g. load_sample_dataset(), which calls the
+    _ensure_*_table() helpers before its per-brand loop) skip the
+    get_table/create_table round trip entirely for table keys with zero
+    rows - those calls have nothing to load and nothing to create, but
+    without this flag every call still probes each empty table (businesses,
+    source_types, us_zipcodes are always [] from save_mapper()), adding a
+    real BigQuery API round trip per table per brand for no reason.
+    Defaults to False so every other caller (including ones that rely on an
+    empty push to create a table) keeps today's behavior exactly."""
     try:
         from google.cloud import bigquery
         from google.oauth2 import service_account
@@ -466,6 +477,8 @@ def push_to_bigquery(
 
     for table_name, frame in frames_by_table.items():
         rows = dataframe_to_records(frame)
+        if not rows and skip_empty_table_checks:
+            continue
         schema = [
             bigquery.SchemaField(field["name"], field["type"], mode=field["mode"], default_value_expression=field.get("default"))
             for field in TABLE_SCHEMAS[table_name]

@@ -1186,7 +1186,7 @@ def load_sample_dataset(reset: bool = False) -> dict[str, Any]:
                 "mapping_id": f"sample_mapping_{brand.key}",
                 "source_configuration": config,
             },
-        }, client=client, skip_cache_invalidation=True)
+        }, client=client, skip_cache_invalidation=True, assume_tables_exist=True)
         summary["locations"] += result["total_rows"]
         summary["valid"] += result["mapped_rows"]
         summary["errors"] += result["error_listings"]
@@ -3318,7 +3318,7 @@ def _maybe_refresh_after_save(skip_cache_invalidation: bool) -> None:
     _refresh_silver_background()
 
 
-def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_invalidation: bool = False) -> dict[str, Any]:
+def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_invalidation: bool = False, assume_tables_exist: bool = False) -> dict[str, Any]:
     mapper = payload.get("mapper")
     rows = payload.get("rows")
     source_fields = payload.get("source_fields", [])
@@ -3449,7 +3449,7 @@ def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_inval
         "created_at": utc_now_iso(), "updated_at": utc_now_iso(),
     }] if save_template else []
     rows_by_table["error_listings"] = error_listings
-    push_to_bigquery(project_id, dataset_id, rows_by_table, credentials_json, client=client)
+    push_to_bigquery(project_id, dataset_id, rows_by_table, credentials_json, client=client, skip_empty_table_checks=assume_tables_exist)
     _maybe_refresh_after_save(skip_cache_invalidation)
     LOGGER.info(
         "save_succeeded mapper_id=%s dataset=%s mapped_rows=%d mapped_fields=%d duplicate_listings_skipped=%d",
