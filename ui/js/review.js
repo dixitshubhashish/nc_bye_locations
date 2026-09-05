@@ -1,7 +1,22 @@
 // Review Error Listings tab: rejected-record search and the edit/retry modal.
 
 let currentEditingRecord = null;
-async function loadRejectedRecords() {
+let loadRejectedRecordsPromise = null;
+// login-hotfix.js and integrations.html's own bootstrap script can each
+// independently call switchView("reviewView") on the same page load (the
+// hotfix script loads async, so ordering isn't guaranteed) - without this
+// guard, two concurrent runs race on the Search button's "restore original
+// html" step: whichever finishes last can restore the OTHER call's
+// mid-spin snapshot, leaving the button stuck spinning even though
+// #reviewResults already rendered real records from the call that won.
+function loadRejectedRecords() {
+      if (loadRejectedRecordsPromise) return loadRejectedRecordsPromise;
+      loadRejectedRecordsPromise = _loadRejectedRecordsOnce().finally(() => {
+        loadRejectedRecordsPromise = null;
+      });
+      return loadRejectedRecordsPromise;
+    }
+async function _loadRejectedRecordsOnce() {
       const eventId = el("reviewEventId").value.trim();
       const target = el("reviewResults");
       const searchBtn = el("reviewSearchBtn");

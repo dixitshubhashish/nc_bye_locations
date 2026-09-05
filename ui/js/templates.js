@@ -1,8 +1,23 @@
 // Template Library tab: browse, load, and save saved mapping templates.
 
 let templateBusinessNames = {};
-
-async function loadTemplateLibrary() {
+let loadTemplateLibraryPromise = null;
+// login-hotfix.js and integrations.html's own bootstrap script can each
+// independently call switchView("templateLibraryView") on the same page
+// load (the hotfix script loads async, so ordering isn't guaranteed).
+// Without this guard, two concurrent loadTemplateFilters().then(
+// loadTemplateLibrary) chains race on #templateResults - whichever
+// resolves last wins, and if that one hits an error or a slower response,
+// it can stomp the other call's already-rendered table with "Loading..."
+// or an error, leaving the table never actually shown.
+function loadTemplateLibrary() {
+      if (loadTemplateLibraryPromise) return loadTemplateLibraryPromise;
+      loadTemplateLibraryPromise = _loadTemplateLibraryOnce().finally(() => {
+        loadTemplateLibraryPromise = null;
+      });
+      return loadTemplateLibraryPromise;
+    }
+async function _loadTemplateLibraryOnce() {
       const target = el("templateResults");
       const search = el("templateSearch").value.trim();
       const businessId = el("templateBusinessFilter").value;
@@ -26,7 +41,15 @@ async function loadTemplateLibrary() {
         target.textContent = productSafeError(error.message, "Could not load templates.");
       }
     }
-async function loadTemplateFilters() {
+let loadTemplateFiltersPromise = null;
+function loadTemplateFilters() {
+      if (loadTemplateFiltersPromise) return loadTemplateFiltersPromise;
+      loadTemplateFiltersPromise = _loadTemplateFiltersOnce().finally(() => {
+        loadTemplateFiltersPromise = null;
+      });
+      return loadTemplateFiltersPromise;
+    }
+async function _loadTemplateFiltersOnce() {
       let businesses = [];
       try {
         const businessResponse = await fetch("/api/brands?search=");
