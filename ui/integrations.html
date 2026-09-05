@@ -1338,6 +1338,13 @@ else:
             <button class="secondary" id="addCustomFieldBtn" type="button">Add Custom Field</button>
             <div id="customFieldFeedback" class="action-feedback" role="status" aria-live="polite"></div>
           </div>
+          <div class="optional-fields-column alias-picker">
+            <label for="dropCustomFieldSelect">Remove an existing custom field</label>
+            <select id="dropCustomFieldSelect"><option value="">Choose a custom field</option></select>
+            <input id="dropCustomFieldPassword" type="password" placeholder="Admin password (use '54321')">
+            <button class="secondary" id="dropCustomFieldBtn" type="button">Drop Custom Field</button>
+            <div id="dropCustomFieldFeedback" class="action-feedback" role="status" aria-live="polite"></div>
+          </div>
         </div>
       </div>
 
@@ -1568,6 +1575,7 @@ else:
           if (event.key === "Enter") loadTemplateLibrary();
         });
     el("addCustomFieldBtn").addEventListener("click", addCustomField);
+    el("dropCustomFieldBtn")?.addEventListener("click", dropCustomField);
     document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
     el("addOptionalFieldBtn").addEventListener("click", () => {
           const key = el("optionalFieldSelect").value;
@@ -1600,6 +1608,7 @@ else:
             el("templateSourceFilter").value = "";
             el("newBrandFields").classList.remove("hidden");
             updateOutput();
+            updateDropCustomFieldPicker();
             return;
           }
           const brands = JSON.parse(event.target.dataset.brands || "[]");
@@ -1614,6 +1623,7 @@ else:
           refreshReviewCount();
           refreshTemplatesForBusiness();
           updateOutput();
+          updateDropCustomFieldPicker();
         });
     el("createBrandBtn").addEventListener("click", createNewBrand);
     el("sourceName").addEventListener("input", updateOutput);

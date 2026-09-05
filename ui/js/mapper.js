@@ -910,6 +910,7 @@ function renderMappings() {
         });
       });
       updateOptionalFieldPicker();
+      updateDropCustomFieldPicker();
       updateOutput();
     }
 function updateOptionalFieldPicker() {
@@ -919,6 +920,50 @@ function updateOptionalFieldPicker() {
         .map((target) => `<option value="${escapeHtml(target.key)}">${escapeHtml(target.label)}</option>`)
         .join("");
       el("addOptionalFieldBtn").disabled = available.length === 0;
+    }
+function updateDropCustomFieldPicker() {
+      const picker = el("dropCustomFieldSelect");
+      if (!picker) return;
+      const businessId = selectedBrand?.business_id || "";
+      const removable = mappingTargets.filter((target) => target.is_custom && target.business_id === businessId);
+      picker.innerHTML = '<option value="">Choose a custom field</option>' + removable
+        .map((target) => `<option value="${escapeHtml(target.key)}">${escapeHtml(target.label)}</option>`)
+        .join("");
+      const button = el("dropCustomFieldBtn");
+      if (button) button.disabled = removable.length === 0;
+    }
+async function dropCustomField() {
+      const fieldKey = el("dropCustomFieldSelect").value;
+      if (!fieldKey) {
+        setDropCustomFieldFeedback("Choose a custom field to remove.", "warn");
+        return;
+      }
+      try {
+        const response = await fetch("/api/custom-field/delete", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            field_key: fieldKey,
+            password: el("dropCustomFieldPassword").value,
+            business_id: selectedBrand?.business_id || ""
+          })
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not remove custom field.");
+        await loadFieldRegistry();
+        updateOptionalFieldPicker();
+        updateDropCustomFieldPicker();
+        el("dropCustomFieldPassword").value = "";
+        setDropCustomFieldFeedback(`Custom field ${result.label || fieldKey} removed.`, "ok");
+      } catch (error) {
+        setDropCustomFieldFeedback(productSafeError(error.message, "Could not remove custom field."), "error");
+      }
+    }
+function setDropCustomFieldFeedback(message, type = "") {
+      const target = el("dropCustomFieldFeedback");
+      if (!target) return;
+      target.className = `action-feedback ${type}`;
+      target.textContent = message;
     }
 function getVisibleTargets() {
       const seenKeys = new Set();
@@ -1429,6 +1474,7 @@ async function addCustomField() {
         el("customFieldSlug").value = "";
         el("aliasPassword").value = "";
         updateOptionalFieldPicker();
+        updateDropCustomFieldPicker();
         setCustomFieldFeedback(`Custom field ${result.field.label} saved.`, "ok");
       } catch (error) { setCustomFieldFeedback(productSafeError(error.message, "Could not save custom field."), "error"); }
     }

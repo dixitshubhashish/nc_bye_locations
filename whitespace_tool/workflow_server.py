@@ -369,6 +369,43 @@ def create_custom_field(data: dict[str, Any]) -> dict[str, Any]:
     return {"field": {"key": slug, "label": label, "table": "listings", "field": slug, "type": field["data_type"], "required": False, "hints": [slug], "is_custom": True}}
 
 
+def delete_custom_field(data: dict[str, Any]) -> dict[str, Any]:
+    from google.cloud import bigquery
+
+    if str(data.get("password", "")) != "54321":
+        raise ValueError("Administrative password required (use '54321')")
+    business_id = str(data.get("business_id", "")).strip()
+    if not business_id:
+        raise ValueError("Select a business before removing a custom field")
+    field_key = str(data.get("field_key", "")).strip()
+    if not field_key:
+        raise ValueError("Choose a custom field to remove")
+
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    table_ref = f"{project_id}.{dataset_id}.field_catalogs"
+
+    lookup_query = f"SELECT field_id, label, is_custom, business_id FROM `{table_ref}` WHERE slug = @slug AND business_id = @business_id LIMIT 1"
+    lookup_config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("slug", "STRING", field_key),
+        bigquery.ScalarQueryParameter("business_id", "STRING", business_id),
+    ])
+    matches = list(client.query(lookup_query, job_config=lookup_config).result())
+    if not matches:
+        raise ValueError("Custom field was not found for this business")
+    row = matches[0]
+    # Standard/built-in fields are never business-scoped custom rows, but
+    # guard explicitly anyway so this can never delete a platform field.
+    if not row["is_custom"]:
+        raise ValueError("Standard fields are built into the platform and cannot be removed")
+
+    delete_query = f"DELETE FROM `{table_ref}` WHERE field_id = @field_id"
+    delete_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("field_id", "STRING", row["field_id"])])
+    client.query(delete_query, job_config=delete_config).result()
+    invalidate_cache()
+    return {"deleted": True, "field_key": field_key, "label": row["label"]}
+
+
 REQUIRED_MAPPER_FIELDS = {"name", "address", "city", "state", "postal_code"}
 REQUIRED_LOCATION_VALUES = ("name", "address", "city", "state", "postal_code")
 
@@ -2471,7 +2508,7 @@ def make_handler(ui_dir: Path):
             super().do_GET()
 
         def do_POST(self) -> None:
-            if self.path not in {"/api/login", "/api/preview", "/api/source-url", "/api/sheets", "/api/save", "/api/clear", "/api/brands", "/api/learning", "/api/reprocess", "/api/field-alias", "/api/custom-field", "/api/templates/save", "/api/silver/enrich", "/api/reporting/refresh", "/api/sample/load"}:
+            if self.path not in {"/api/login", "/api/preview", "/api/source-url", "/api/sheets", "/api/save", "/api/clear", "/api/brands", "/api/learning", "/api/reprocess", "/api/field-alias", "/api/custom-field", "/api/custom-field/delete", "/api/templates/save", "/api/silver/enrich", "/api/reporting/refresh", "/api/sample/load"}:
                 _json_response(self, 404, {"error": "Not found"})
                 return
             request_id = uuid4().hex
@@ -2500,6 +2537,8 @@ def make_handler(ui_dir: Path):
                     _json_response(self, 200, add_field_alias(payload))
                 elif self.path == "/api/custom-field":
                     _json_response(self, 200, create_custom_field(payload))
+                elif self.path == "/api/custom-field/delete":
+                    _json_response(self, 200, delete_custom_field(payload))
                 elif self.path == "/api/templates/save":
                     _json_response(self, 200, save_template_version(payload))
                 elif self.path in {"/api/silver/enrich", "/api/reporting/refresh"}:
