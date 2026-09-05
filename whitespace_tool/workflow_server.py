@@ -254,20 +254,33 @@ def field_catalog() -> list[dict[str, Any]]:
                 raise
         else:
             client.query(f"INSERT INTO `{table_ref}` (field_id, business_id, slug, label, table_name, field_name, data_type, required, hints, aliases, is_custom, created_at, updated_at) SELECT field_id, NULL, slug, label, table_name, field_name, data_type, required, hints, aliases, is_custom, created_at, updated_at FROM `{legacy_ref}`").result()
+    def _registry_seed_row(field: dict[str, Any], now: str) -> dict[str, Any]:
+        return {
+            "field_id": str(uuid4()), "business_id": None,
+            "slug": field["key"], "label": field["label"], "table_name": field["table"], "field_name": field["field"],
+            "data_type": field["type"], "required": field.get("required", False), "hints": json.dumps(field.get("hints", [])),
+            "aliases": json.dumps([]), "is_custom": False, "created_at": now, "updated_at": now,
+        }
+
     rows = [dict(row) for row in client.query(f"SELECT * FROM `{table_ref}` ORDER BY is_custom, label").result()]
     if not rows:
         now = utc_now_iso()
-        seed = []
-        for field in load_field_registry():
-            seed.append({
-                "field_id": str(uuid4()), "business_id": None,
-                "slug": field["key"], "label": field["label"], "table_name": field["table"], "field_name": field["field"],
-                "data_type": field["type"], "required": field.get("required", False), "hints": json.dumps(field.get("hints", [])),
-                "aliases": json.dumps([]), "is_custom": False, "created_at": now, "updated_at": now,
-            })
+        seed = [_registry_seed_row(field, now) for field in load_field_registry()]
         load_job = client.load_table_from_json(seed, table_ref, job_config=bigquery.LoadJobConfig(schema=schema))
         load_job.result()
         rows = [dict(row) for row in client.query(f"SELECT * FROM `{table_ref}` ORDER BY is_custom, label").result()]
+    else:
+        # A project seeded before a new standard field (e.g. "ratings") was
+        # added to the registry won't have it yet - top up any missing
+        # standard (non-custom) fields instead of requiring a full reset.
+        existing_standard_slugs = {row["slug"] for row in rows if not row.get("is_custom")}
+        missing = [field for field in load_field_registry() if field["key"] not in existing_standard_slugs]
+        if missing:
+            now = utc_now_iso()
+            seed = [_registry_seed_row(field, now) for field in missing]
+            load_job = client.load_table_from_json(seed, table_ref, job_config=bigquery.LoadJobConfig(schema=schema))
+            load_job.result()
+            rows = [dict(row) for row in client.query(f"SELECT * FROM `{table_ref}` ORDER BY is_custom, label").result()]
     for row in rows:
         for key in ("created_at", "updated_at"):
             if hasattr(row.get(key), "isoformat"):

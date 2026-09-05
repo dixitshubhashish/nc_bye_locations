@@ -173,6 +173,73 @@ class BigQueryBootstrapTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, r"gold bootstrap failed at prepare_zipcodes: no external demographics access"):
                 workflow_server._ensure_gold_reporting_views(FakeClient(), "project.gold")
 
+    def test_field_catalog_tops_up_missing_standard_fields_without_a_full_reset(self) -> None:
+        # A project whose field_catalogs table was already seeded before
+        # "ratings" existed in the registry should pick it up on the next
+        # call instead of requiring a full wipe.
+        import sys
+        import types
+        from types import SimpleNamespace
+
+        class FakeSchemaField:
+            def __init__(self, name, field_type, mode="NULLABLE", default_value_expression=None):
+                self.name = name
+
+        class FakeLoadJobConfig:
+            def __init__(self, schema=None):
+                self.schema = schema
+
+        class FakeLoadJob:
+            def result(self):
+                return None
+
+        class FakeQueryJob:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def result(self):
+                return self._rows
+
+        existing_rows = [
+            {"field_id": "f1", "business_id": None, "slug": "name", "label": "Restaurant Name", "table_name": "listings",
+             "field_name": "name", "data_type": "string", "required": True, "hints": "[]", "aliases": "[]",
+             "is_custom": False, "created_at": "2026-01-01T00:00:00+00:00", "updated_at": "2026-01-01T00:00:00+00:00"},
+        ]
+
+        class FakeClient:
+            def __init__(self):
+                self.rows = list(existing_rows)
+                self.loaded_batches = []
+
+            def get_table(self, _ref):
+                return SimpleNamespace(schema=[SimpleNamespace(name="business_id")])
+
+            def query(self, _query):
+                return FakeQueryJob(list(self.rows))
+
+            def load_table_from_json(self, rows, _table_ref, job_config=None):
+                self.loaded_batches.append(rows)
+                self.rows.extend(rows)
+                return FakeLoadJob()
+
+        fake_bigquery = types.SimpleNamespace(SchemaField=FakeSchemaField, LoadJobConfig=FakeLoadJobConfig, Table=lambda *a, **k: None)
+        fake_google = types.ModuleType("google")
+        fake_cloud = types.ModuleType("google.cloud")
+        modules = {"google": fake_google, "google.cloud": fake_cloud, "google.cloud.bigquery": fake_bigquery}
+
+        client = FakeClient()
+        with patch.dict(sys.modules, modules):
+            with patch.object(workflow_server, "_warehouse_settings", return_value=("project", "bronze", None)):
+                with patch.object(workflow_server, "_bigquery_client", return_value=client):
+                    with patch.object(workflow_server, "_ensure_dataset"):
+                        result = workflow_server.field_catalog()
+
+        keys = {field["key"] for field in result}
+        self.assertIn("ratings", keys)
+        self.assertIn("name", keys)  # the pre-existing row is preserved
+        self.assertEqual(len(client.loaded_batches), 1)  # one top-up batch, not a full reseed
+        self.assertGreater(len(client.loaded_batches[0]), 1)  # every missing field, not just ratings
+
     def test_reporting_fallback_surfaces_the_real_bootstrap_error(self) -> None:
         # A failed first-time gold bootstrap (or any other setup error) used
         # to report as "Connected to geographic baseline data." - a

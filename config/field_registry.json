@@ -35,5 +35,6 @@
   {"key":"competitor_count","table":"listings","field":"competitor_count","label":"Competitor Count","type":"integer","required":false,"hints":["competitors","competitorcount"]},
   {"key":"foot_traffic_score","table":"listings","field":"foot_traffic_score","label":"Foot Traffic Score","type":"float","required":false,"hints":["foottraffic","foottrafficscore"]},
   {"key":"parking_availability","table":"listings","field":"parking_availability","label":"Parking Availability","type":"string","required":false,"hints":["parking","parkingavailability"]},
+  {"key":"ratings","table":"listings","field":"ratings","label":"Rating","type":"float","required":false,"hints":["rating","ratings","stars","avgrating","average_rating","reviewscore","review_score"]},
   {"key":"observed_at","table":"listings","field":"first_observed_at","label":"Observed At","type":"timestamp","required":false,"hints":["observed_at","updatedat","updated_at","last_seen"]}
 ]

@@ -154,4 +154,5 @@ def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name:
         competitor_count=optional_int(get_nested(row, fields.get("competitor_count", ""), "")),
         foot_traffic_score=optional_float(get_nested(row, fields.get("foot_traffic_score", ""), "")),
         parking_availability=_text(get_nested(row, fields.get("parking_availability", ""), "")) or None,
+        ratings=optional_float(get_nested(row, fields.get("ratings", ""), "")),
     )

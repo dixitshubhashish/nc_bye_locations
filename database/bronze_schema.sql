@@ -104,7 +104,8 @@ CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.listings` (
   ,average_household_income FLOAT64
   ,competitor_count INT64
   ,foot_traffic_score FLOAT64
-  ,parking_availability STRING,
+  ,parking_availability STRING
+  ,ratings FLOAT64,
   content_hash STRING,
   is_deleted BOOL DEFAULT FALSE,
   deleted_on TIMESTAMP

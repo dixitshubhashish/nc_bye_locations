@@ -87,6 +87,29 @@ class CsvWorkflowTests(unittest.TestCase):
         self.assertEqual(location.opening_date, "2024-04-12")
         self.assertEqual(location.seating_capacity, 42)
 
+    def test_ratings_field_maps_through_normalization(self) -> None:
+        mapper = {**VALID_MAPPER, "fields": {**VALID_MAPPER["fields"], "ratings": "avg_rating"}}
+        row = {**VALID_ROW, "avg_rating": "4.5"}
+        location = normalize_location(row, mapper, "example_csv", 0)
+        self.assertIsNotNone(location)
+        assert location is not None
+        self.assertEqual(location.ratings, 4.5)
+
+    def test_ratings_field_is_registered_in_the_standard_field_catalog(self) -> None:
+        registry = load_field_registry()
+        ratings_field = next((field for field in registry if field["key"] == "ratings"), None)
+        self.assertIsNotNone(ratings_field)
+        self.assertEqual(ratings_field["table"], "listings")
+        self.assertEqual(ratings_field["type"], "float")
+        self.assertFalse(ratings_field["required"])
+
+    def test_ratings_column_exists_in_listings_schema_and_content_hash(self) -> None:
+        from whitespace_tool.warehouse_bigquery import CONTENT_HASH_FIELDS
+
+        listing_fields = {field["name"] for field in TABLE_SCHEMAS["listings"]}
+        self.assertIn("ratings", listing_fields)
+        self.assertIn("ratings", CONTENT_HASH_FIELDS)
+
     def test_zip_and_scalar_normalization(self) -> None:
         self.assertEqual(clean_zip(" 12-345-6789 "), "12345")
         self.assertEqual(clean_zip("27601"), "27601")

@@ -41,7 +41,7 @@ CONTENT_HASH_FIELDS: tuple[str, ...] = (
     "service_types", "opening_date", "status", "annual_revenue", "average_ticket_size",
     "daily_footfall", "monthly_footfall", "rental_cost", "lease_cost",
     "population_density", "average_household_income", "competitor_count",
-    "foot_traffic_score", "parking_availability",
+    "foot_traffic_score", "parking_availability", "ratings",
 )
 
 
@@ -251,6 +251,7 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "competitor_count", "type": "INTEGER", "mode": "NULLABLE"},
         {"name": "foot_traffic_score", "type": "FLOAT", "mode": "NULLABLE"},
         {"name": "parking_availability", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "ratings", "type": "FLOAT", "mode": "NULLABLE"},
         {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
         {"name": "is_deleted", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "deleted_on", "type": "TIMESTAMP", "mode": "NULLABLE"},
@@ -369,6 +370,7 @@ def _listing_row(row: LocationRecord) -> dict[str, Any]:
         "competitor_count": row.competitor_count,
         "foot_traffic_score": row.foot_traffic_score,
         "parking_availability": row.parking_availability,
+        "ratings": row.ratings,
         "is_deleted": False,
         "deleted_on": None,
     }

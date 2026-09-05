@@ -48,6 +48,7 @@ class LocationRecord:
     competitor_count: int | None = None  # number of competitors nearby
     foot_traffic_score: float | None = None  # 0-100 score
     parking_availability: str | None = None  # limited, ample, validated, etc.
+    ratings: float | None = None  # average customer rating, e.g. 0-5 stars
     town: str | None = None
     province: str | None = None
     country: str | None = None
