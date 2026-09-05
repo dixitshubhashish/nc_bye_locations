@@ -50,17 +50,21 @@
     status.textContent = message;
   }
 
-  function showAuthenticatedApp() {
+  function showAuthenticatedApp(isInitialRestore = false) {
     const loginScreen = document.getElementById("loginScreen");
     const appShell = document.getElementById("appShell");
     loginScreen?.classList.add("hidden");
     appShell?.classList.remove("hidden");
 
     try {
-      // Always land on the Mappings tab right after login, regardless of
-      // whatever tab a previous session left active in sessionStorage.
       if (typeof window.switchView === "function") {
-        window.switchView("mapperView");
+        if (isInitialRestore) {
+          const urlParams = new URLSearchParams(window.location.search);
+          const activeTab = urlParams.get("view") || sessionStorage.getItem("activeTab") || "mapperView";
+          window.switchView(activeTab);
+        } else {
+          window.switchView("mapperView");
+        }
       }
     } catch (error) {
       console.error("Post-login navigation initialization failed:", error);
@@ -159,7 +163,7 @@
     // If the current tab already has a valid in-browser session, keep the UI
     // consistent with the existing application behavior.
     if (sessionStorage.getItem(LOGIN_SESSION_KEY) === "true") {
-      showAuthenticatedApp();
+      showAuthenticatedApp(true);
     }
   }
 

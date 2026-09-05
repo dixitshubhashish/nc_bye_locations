@@ -278,8 +278,13 @@ async function loadAppData() {
 function restoreRememberedLogin() {
       const remembered = localStorage.getItem("mapper_login_remembered") === "true";
       el("rememberLogin").checked = remembered;
-      sessionStorage.removeItem(loginSessionStorageKey);
-      sessionStorage.removeItem(mappingSessionStorageKey);
+      if (remembered) {
+        sessionStorage.setItem(loginSessionStorageKey, "true");
+      }
+      if (sessionStorage.getItem(loginSessionStorageKey) === "true") {
+        el("loginScreen")?.classList.add("hidden");
+        el("appShell")?.classList.remove("hidden");
+      }
     }
 function resetLoginSessionFromLaunch() {
       // Clean neat URLs: no query parameters required for login launch

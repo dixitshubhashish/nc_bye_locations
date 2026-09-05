@@ -4,6 +4,14 @@ let currentEditingRecord = null;
 async function loadRejectedRecords() {
       const eventId = el("reviewEventId").value.trim();
       const target = el("reviewResults");
+      const searchBtn = el("reviewSearchBtn");
+      const originalSearchBtnHtml = searchBtn ? searchBtn.innerHTML : "Search Records";
+
+      if (searchBtn) {
+        searchBtn.disabled = true;
+        searchBtn.innerHTML = `<span style="display: inline-flex; align-items: center; gap: 6px;"><span class="inline-spinner" style="display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #ffffff; border-radius: 50%; animation: spinCircle 0.8s linear infinite;"></span> Searching...</span>`;
+      }
+
       target.className = "status";
       target.textContent = "Loading error listings...";
       try {
@@ -45,6 +53,11 @@ async function loadRejectedRecords() {
       } catch (error) {
         target.className = "status error";
         target.textContent = productSafeError(error.message, "Could not load review records.");
+      } finally {
+        if (searchBtn) {
+          searchBtn.disabled = false;
+          searchBtn.innerHTML = originalSearchBtnHtml;
+        }
       }
     }
 function getNestedRawValue(row, path) {
@@ -56,7 +69,7 @@ function getNestedRawValue(row, path) {
       }
       return current !== null && current !== undefined ? current : "";
     }
-function openEditRecordModal(record) {
+async function openEditRecordModal(record) {
       currentEditingRecord = record;
       let rawObj = record.raw_record;
       if (typeof rawObj === 'string') {
@@ -72,56 +85,163 @@ function openEditRecordModal(record) {
         (Array.isArray(errs) ? errs.map(e => `<li><strong>${escapeHtml(e.field)}</strong>: ${escapeHtml(e.hint || e.reason)}</li>`).join('') : '<li>Issue found.</li>') +
         `</ul>`;
 
-      // required_location fails in two ways: (1) no brand/ZIP at all, or
-      // (2) brand+ZIP resolved but name/address/city/state didn't. Either
-      // way, the missing value's mapped path may simply be absent from
-      // raw_record (sparse JSON/XML/API sources omit blank fields), so it
-      // never gets a regular input below. Surface exactly the fields the
-      // triggered variant(s) need, keyed to the exact path the mapper will
-      // look up on retry, so they're always fixable here.
-      const locationErrors = Array.isArray(errs) ? errs.filter(e => e.field === "required_location") : [];
-      const missingKeys = new Set();
-      locationErrors.forEach((e) => {
-        if (e.reason === "missing brand or ZIP Code") {
-          missingKeys.add("brand");
-          missingKeys.add("postal_code");
-        } else {
-          ["name", "address", "city", "state", "postal_code"].forEach((key) => missingKeys.add(key));
+      // Fetch saved businesses directly from DB API if not already cached
+      let savedBrandsList = [];
+      try {
+        savedBrandsList = JSON.parse(el("brandSelect")?.dataset.brands || "[]");
+      } catch (e) {
+        savedBrandsList = [];
+      }
+      if (!savedBrandsList.length) {
+        try {
+          const res = await fetch("/api/brands?search=");
+          const data = await res.json();
+          if (res.ok && Array.isArray(data.brands)) {
+            savedBrandsList = data.brands;
+            if (el("brandSelect")) el("brandSelect").dataset.brands = JSON.stringify(savedBrandsList);
+          }
+        } catch (err) {
+          // fallback to empty
         }
-      });
+      }
+
       const activeMapper = typeof getMapper === "function" ? getMapper() : { fields: {} };
       const mapperFields = activeMapper.fields || {};
-      const fixedBrand = String(activeMapper.brand || "").trim();
+
+      // Match similar business from existing data:
+      // Check record.business_id, rawObj business_id/brand, active mapper brand, or name matching
+      const rawBrandVal = String(getNestedRawValue(rawObj, mapperFields.brand || "brand") || record.brand || activeMapper.brand || "").trim();
+      const rawNameVal = String(getNestedRawValue(rawObj, mapperFields.name || "name") || "").trim();
+      const targetBusinessId = String(record.business_id || activeMapper.business_id || "").trim();
+
+      let matchedBrand = savedBrandsList.find(b => targetBusinessId && b.business_id === targetBusinessId);
+      if (!matchedBrand && rawBrandVal) {
+        matchedBrand = savedBrandsList.find(b => b.name && b.name.toLowerCase() === rawBrandVal.toLowerCase());
+      }
+      if (!matchedBrand && rawNameVal) {
+        matchedBrand = savedBrandsList.find(b => b.name && (rawNameVal.toLowerCase().includes(b.name.toLowerCase()) || b.name.toLowerCase().includes(rawNameVal.toLowerCase())));
+      }
+
       const LOCATION_FIELD_SPECS = {
-        brand: { label: "Business / Brand Name", path: mapperFields.brand || "brand", note: fixedBrand ? `Optional - falls back to selected business "${fixedBrand}" if left blank.` : "Required - no fixed business is selected for this mapper." },
-        name: { label: "Location Name", path: mapperFields.name || "name", note: "Required." },
-        address: { label: "Address", path: mapperFields.address || "address", note: "Required." },
-        city: { label: "City", path: mapperFields.city || "city", note: "Required." },
-        state: { label: "State", path: mapperFields.state || "state", note: "Required." },
-        postal_code: { label: "ZIP Code", path: mapperFields.postal_code || "postal_code", note: "Required - 5-digit US ZIP code." },
+        brand: { label: "Business / Brand Name", path: mapperFields.brand || "brand", note: "Select the business/brand to associate with this record.", required: true },
+        name: { label: "Location Name", path: mapperFields.name || "name", note: "Required.", required: true },
+        address: { label: "Address", path: mapperFields.address || "address", note: "Required.", required: true },
+        city: { label: "City", path: mapperFields.city || "city", note: "Required.", required: true },
+        state: { label: "State", path: mapperFields.state || "state", note: "Required (2-letter code or state name).", required: true },
+        postal_code: { label: "ZIP Code", path: mapperFields.postal_code || "postal_code", note: "Required (5-digit US ZIP code).", required: true },
+        latitude: { label: "Latitude", path: mapperFields.latitude || "latitude", note: "Decimal latitude coordinate (e.g. 40.7128).", required: false },
+        longitude: { label: "Longitude", path: mapperFields.longitude || "longitude", note: "Decimal longitude coordinate (e.g. -74.0060).", required: false },
       };
-      const requiredPaths = new Set();
-      const requiredFieldHtml = ["brand", "name", "address", "city", "state", "postal_code"]
-        .filter((key) => missingKeys.has(key))
+      const renderedPaths = new Set();
+
+      const requiredFieldHtml = ["brand", "name", "address", "city", "state", "postal_code", "latitude", "longitude"]
         .map((key) => {
-          const { label, path, note } = LOCATION_FIELD_SPECS[key];
-          requiredPaths.add(path);
+          const { label, path, note, required } = LOCATION_FIELD_SPECS[key];
+          renderedPaths.add(path);
+          if (key === "brand") {
+            const optionsHtml = ['<option value="">Select a saved business</option>']
+              .concat(savedBrandsList.map(b => {
+                const isSelected = matchedBrand ? b.business_id === matchedBrand.business_id : (b.name.toLowerCase() === rawBrandVal.toLowerCase());
+                return `<option value="${escapeHtml(b.name)}" data-business-id="${escapeHtml(b.business_id)}" ${isSelected ? 'selected' : ''}>${escapeHtml(b.name)}</option>`;
+              }))
+              .join('');
+            return `
+        <div style="display: flex; flex-direction: column;">
+          <label style="font-size: 12px; font-weight: 700; color: var(--ink); margin-bottom: 4px;">${escapeHtml(label)} <span style="font-weight: 400; color: ${required ? '#cf1322' : 'var(--muted)'};">(${escapeHtml(path)})${required ? ' *' : ''}</span></label>
+          <select id="editRecordBrandSelect" data-raw-key="${escapeHtml(path)}" data-field-type="brand" style="padding: 6px; border: 1px solid var(--line); border-radius: 4px; font-size: 13px; background: #fff;">
+            ${optionsHtml}
+          </select>
+          <span style="font-size: 11px; color: var(--muted, #6b7280); margin-top: 2px;">${escapeHtml(note)}</span>
+        </div>
+      `;
+          }
+          const rawVal = getNestedRawValue(rawObj, path);
           return `
         <div style="display: flex; flex-direction: column;">
-          <label style="font-size: 12px; font-weight: 700; color: var(--ink); margin-bottom: 4px;">${escapeHtml(label)} <span style="font-weight: 400; color: #cf1322;">(${escapeHtml(path)})</span></label>
-          <input type="text" data-raw-key="${escapeHtml(path)}" value="${escapeHtml(String(getNestedRawValue(rawObj, path)))}" style="padding: 6px; border: 1px solid var(--line); border-radius: 4px; font-size: 13px;">
+          <label style="font-size: 12px; font-weight: 700; color: var(--ink); margin-bottom: 4px;">${escapeHtml(label)} <span style="font-weight: 400; color: ${required ? '#cf1322' : 'var(--muted)'};">(${escapeHtml(path)})${required ? ' *' : ''}</span></label>
+          <input type="text" data-raw-key="${escapeHtml(path)}" data-field-type="${escapeHtml(key)}" value="${escapeHtml(rawVal !== null && rawVal !== undefined ? String(rawVal) : '')}" style="padding: 6px; border: 1px solid var(--line); border-radius: 4px; font-size: 13px;">
           <span style="font-size: 11px; color: var(--muted, #6b7280); margin-top: 2px;">${escapeHtml(note)}</span>
         </div>
       `;
         }).join('');
 
       const formEl = el("editRecordForm");
-      formEl.innerHTML = requiredFieldHtml + Object.entries(rawObj).filter(([key]) => !requiredPaths.has(key)).map(([key, val]) => `
+      formEl.innerHTML = requiredFieldHtml + Object.entries(rawObj).filter(([key]) => !renderedPaths.has(key)).map(([key, val]) => {
+        const isLat = key.toLowerCase().includes("lat");
+        const isLon = key.toLowerCase().includes("lon") || key.toLowerCase().includes("lng");
+        const isZip = key.toLowerCase().includes("zip") || key.toLowerCase().includes("postal");
+        const fieldType = isLat ? "latitude" : (isLon ? "longitude" : (isZip ? "postal_code" : ""));
+        return `
         <div style="display: flex; flex-direction: column;">
-          <label style="font-size: 12px; font-weight: 700; color: var(--ink); margin-bottom: 4px;">${escapeHtml(key)}</label>
-          <input type="text" data-raw-key="${escapeHtml(key)}" value="${escapeHtml(val !== null && val !== undefined ? String(val) : '')}" style="padding: 6px; border: 1px solid var(--line); border-radius: 4px; font-size: 13px;">
+          <label style="font-size: 12px; font-weight: 700; color: var(--ink); margin-bottom: 4px;">${escapeHtml(key)}${isLat || isLon || isZip ? ` <span style="font-weight: 400; color: var(--muted); font-size: 11px;">(${fieldType})</span>` : ''}</label>
+          <input type="text" data-raw-key="${escapeHtml(key)}" data-field-type="${escapeHtml(fieldType)}" value="${escapeHtml(val !== null && val !== undefined ? String(val) : '')}" style="padding: 6px; border: 1px solid var(--line); border-radius: 4px; font-size: 13px;">
         </div>
-      `).join('');
+      `;
+      }).join('');
+
+      const feedbackEl = el("editRecordFeedback");
+      if (feedbackEl) {
+        feedbackEl.style.display = "none";
+        feedbackEl.textContent = "";
+        feedbackEl.className = "action-feedback";
+      }
+
+      // City/State level ZIP & Lat/Long suggestion helper
+      const cityVal = String(getNestedRawValue(rawObj, mapperFields.city || "city") || rawObj.city || rawObj.City || "").trim();
+      const stateVal = String(getNestedRawValue(rawObj, mapperFields.state || "state") || rawObj.state || rawObj.State || "").trim();
+      const zipVal = String(getNestedRawValue(rawObj, mapperFields.postal_code || "postal_code") || rawObj.zip || rawObj.postal_code || "").trim();
+
+      if (cityVal && (!zipVal || zipVal.length < 5)) {
+        try {
+          fetch(`/api/zips/search?q=${encodeURIComponent(cityVal)}&state=${encodeURIComponent(stateVal)}&limit=5`)
+            .then(res => res.json())
+            .then(data => {
+              if (data && Array.isArray(data.zips) && data.zips.length > 0) {
+                const suggestionBox = document.createElement("div");
+                suggestionBox.id = "zipSuggestionsBox";
+                suggestionBox.style.gridColumn = "1 / -1";
+                suggestionBox.style.background = "#e6f7ff";
+                suggestionBox.style.border = "1px solid #91d5ff";
+                suggestionBox.style.borderRadius = "6px";
+                suggestionBox.style.padding = "8px 12px";
+                suggestionBox.style.fontSize = "12px";
+                suggestionBox.style.color = "#0050b3";
+                suggestionBox.style.marginBottom = "8px";
+
+                const zipsListHtml = data.zips.slice(0, 4).map(z => `
+                  <button type="button" class="secondary" style="padding: 2px 8px; font-size: 11px; margin: 2px 4px 2px 0; border: 1px solid #91d5ff; background: #fff; cursor: pointer;"
+                    onclick="(function(){
+                      const zipInput = document.querySelector('input[data-field-type=\\'postal_code\\']');
+                      if (zipInput) zipInput.value = '${escapeHtml(z.zip_code)}';
+                      const cityInput = document.querySelector('input[data-field-type=\\'city\\']');
+                      if (cityInput && !cityInput.value) cityInput.value = '${escapeHtml(z.city_name || '')}';
+                      const stateInput = document.querySelector('input[data-field-type=\\'state\\']');
+                      if (stateInput && !stateInput.value) stateInput.value = '${escapeHtml(z.state_code || '')}';
+                    })()">📍 ${escapeHtml(z.zip_code)} (${escapeHtml(z.city_name || cityVal)}, ${escapeHtml(z.state_code || stateVal)})</button>
+                `).join('');
+
+                suggestionBox.innerHTML = `<strong>💡 Suggested ZIPs for ${escapeHtml(cityVal)}:</strong> <div style="margin-top: 4px;">${zipsListHtml}</div>`;
+                formEl.insertBefore(suggestionBox, formEl.firstChild);
+              }
+            })
+            .catch(() => {});
+        } catch (e) {}
+      }
+
+      el("editRecordForm").querySelectorAll("input, select").forEach(input => {
+        input.addEventListener("input", () => {
+          if (feedbackEl && feedbackEl.className.includes("error")) {
+            feedbackEl.style.display = "none";
+            feedbackEl.textContent = "";
+          }
+        });
+        input.addEventListener("change", () => {
+          if (feedbackEl && feedbackEl.className.includes("error")) {
+            feedbackEl.style.display = "none";
+            feedbackEl.textContent = "";
+          }
+        });
+      });
 
       el("editRecordDialog").showModal();
     }
@@ -129,30 +249,152 @@ el("closeEditRecordBtn")?.addEventListener("click", () => el("editRecordDialog")
 el("cancelEditRecordBtn")?.addEventListener("click", () => el("editRecordDialog").close());
 el("submitEditRecordBtn")?.addEventListener("click", async () => {
       if (!currentEditingRecord) return;
-      const inputs = el("editRecordForm").querySelectorAll("input[data-raw-key]");
+      const feedbackEl = el("editRecordFeedback");
+      const showDialogError = (msg) => {
+        if (feedbackEl) {
+          feedbackEl.className = "action-feedback error";
+          feedbackEl.style.color = "#cf1322";
+          feedbackEl.style.background = "#fff1f0";
+          feedbackEl.style.border = "1px solid #ffa39e";
+          feedbackEl.style.borderRadius = "4px";
+          feedbackEl.style.padding = "8px 12px";
+          feedbackEl.textContent = msg;
+          feedbackEl.style.display = "block";
+        } else {
+          alert(msg);
+        }
+      };
+
+      const inputs = el("editRecordForm").querySelectorAll("input[data-raw-key], select[data-raw-key]");
       const updatedRaw = {};
+      const validationErrors = [];
+      let selectedBusinessId = "";
+      let selectedBrandName = "";
+
       inputs.forEach(input => {
-        updatedRaw[input.dataset.rawKey] = input.value;
+        const val = input.value.trim();
+        const rawKey = input.dataset.rawKey;
+        const fieldType = input.dataset.fieldType || "";
+        updatedRaw[rawKey] = input.value;
+
+        if (fieldType === "brand") {
+          selectedBrandName = val;
+          if (input.tagName === "SELECT") {
+            const opt = input.selectedOptions[0];
+            selectedBusinessId = opt?.dataset.businessId || "";
+          }
+        }
+
+        // Field specific data validation
+        if (fieldType === "latitude" && val) {
+          const num = parseFloat(val);
+          if (isNaN(num)) {
+            validationErrors.push(`Latitude '${val}' for '${rawKey}' must be a valid decimal number.`);
+          } else if (num < 13.0 || num > 72.0) {
+            validationErrors.push(`Latitude ${num} is outside standard US territory boundaries (13.0 to 72.0). Please correct coordinate.`);
+          }
+        } else if (fieldType === "longitude" && val) {
+          const num = parseFloat(val);
+          if (isNaN(num)) {
+            validationErrors.push(`Longitude '${val}' for '${rawKey}' must be a valid decimal number.`);
+          } else if (!((num >= -180.0 && num <= -64.0) || (num >= 144.0 && num <= 146.0))) {
+            validationErrors.push(`Longitude ${num} is outside standard US territory boundaries (-180.0 to -64.0). Please correct coordinate.`);
+          }
+        } else if (fieldType === "postal_code" && val) {
+          const digits = val.replace(/\D/g, "");
+          if (digits.length < 5) {
+            validationErrors.push(`ZIP Code '${val}' for '${rawKey}' must contain at least 5 digits.`);
+          }
+        }
       });
 
+      if (validationErrors.length > 0) {
+        showDialogError(validationErrors[0]);
+        return;
+      }
+
+      if (feedbackEl) feedbackEl.style.display = "none";
+
+      const activeMapper = typeof getMapper === "function" ? getMapper() : {};
+      const finalBrandName = selectedBrandName || activeMapper.brand || currentEditingRecord.brand || "";
+      const finalBusinessId = selectedBusinessId || currentEditingRecord.business_id || activeMapper.business_id || "";
+
+      const retryMapper = {
+        ...activeMapper,
+        business_id: finalBusinessId,
+        source_type_id: currentEditingRecord.source_type_id || activeMapper.source_type_id || "",
+        brand: finalBrandName,
+        source_name: activeMapper.source_name || "error_listings_review",
+        source_type: activeMapper.source_type || "csv",
+        fields: activeMapper.fields && Object.keys(activeMapper.fields).length ? activeMapper.fields : {
+          name: "name",
+          address: "address",
+          city: "city",
+          state: "state",
+          postal_code: "postal_code",
+          latitude: "latitude",
+          longitude: "longitude"
+        }
+      };
+
+      const showDialogSuccess = (msg) => {
+        if (feedbackEl) {
+          feedbackEl.className = "action-feedback ok";
+          feedbackEl.style.color = "#389e0d";
+          feedbackEl.style.background = "#f6ffed";
+          feedbackEl.style.border = "1px solid #b7eb8f";
+          feedbackEl.style.borderRadius = "4px";
+          feedbackEl.style.padding = "8px 12px";
+          feedbackEl.textContent = msg;
+          feedbackEl.style.display = "block";
+        }
+      };
+
+      const submitBtn = el("submitEditRecordBtn");
+      const cancelBtn = el("cancelEditRecordBtn");
+      const originalBtnHtml = submitBtn ? submitBtn.innerHTML : "Retry Record";
+
       try {
+        if (submitBtn) {
+          submitBtn.disabled = true;
+          submitBtn.innerHTML = `<span style="display: inline-flex; align-items: center; gap: 8px;"><span class="inline-spinner" style="display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #ffffff; border-radius: 50%; animation: spinCircle 0.8s linear infinite;"></span> Validating &amp; Retrying...</span>`;
+        }
+        if (cancelBtn) cancelBtn.disabled = true;
+
         const response = await fetch("/api/reprocess", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             event_id: currentEditingRecord.event_id,
             row_numbers: [currentEditingRecord.row_number],
-            mapper: getMapper(),
+            mapper: retryMapper,
             rows: [updatedRaw]
           })
         });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not reprocess record.");
-        el("editRecordDialog").close();
-        await loadRejectedRecords();
-        setStatus(`Record #${currentEditingRecord.row_number} reprocessed. ${result.mapped_rows} accepted.`, "ok");
+
+        if (result.mapped_rows > 0) {
+          showDialogSuccess(`✅ Record #${currentEditingRecord.row_number} successfully validated & moved from error listings to listings.`);
+          await loadRejectedRecords();
+          await refreshReviewCount();
+          setStatus(`Record #${currentEditingRecord.row_number} reprocessed successfully and moved to listings.`, "ok");
+          setTimeout(() => {
+            el("editRecordDialog").close();
+          }, 1200);
+        } else {
+          // If record still failed validation, keep modal open so user can fix issues directly in the same window
+          await refreshReviewCount();
+          showDialogError("Record validation failed again. Please review required fields, valid ZIP Code, and coordinates.");
+        }
       } catch (error) {
-        alert(productSafeError(error.message, "Could not reprocess this record."));
+        showDialogError(productSafeError(error.message, "Could not reprocess this record."));
+      } finally {
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.innerHTML = originalBtnHtml;
+        }
+        if (cancelBtn) cancelBtn.disabled = false;
       }
     });
 async function refreshReviewCount() {

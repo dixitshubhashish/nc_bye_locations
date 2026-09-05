@@ -1010,9 +1010,14 @@ function getMapper() {
       document.querySelectorAll("select[data-field]").forEach((select) => {
         if (select.value) fields[select.dataset.field] = select.value;
       });
+      const selectedOption = el("brandSelect")?.selectedOptions?.[0];
+      const selectedOptionText = selectedOption && selectedOption.value !== "" && selectedOption.value !== "__create_new__" ? selectedOption.textContent.trim() : "";
+      const enteredBrandName = el("newBrandName")?.value.trim() || "";
+      const resolvedBrand = selectedBrand?.name || selectedOptionText || enteredBrandName;
+
       const mapper = {
-        brand: selectedBrand?.name || "",
-        business_id: selectedBrand?.business_id || "",
+        brand: resolvedBrand,
+        business_id: selectedBrand?.business_id || (selectedOption && selectedOption.value !== "__create_new__" ? selectedOption.value : "") || "",
         source_type_id: selectedBrand?.source_type_id || currentSourceTypeId(),
         source_name: el("sourceName").value.trim(),
         source_type: el("sourceType").value,
@@ -1053,13 +1058,13 @@ async function loadBrands(search = "") {
         setStatus(productSafeError(error.message, "Could not load businesses."), "error");
       }
     }
-async function createNewBrand() {
-      const name = el("newBrandName").value.trim();
-      if (!name) { setStatus("Brand name is required.", "warn"); return; }
-      const sourceTypeId = el("newBrandSourceType").value;
+async function createNewBrand(brandNameOverride = "") {
+      const name = (brandNameOverride || el("newBrandName").value).trim();
+      if (!name) { setStatus("Brand name is required.", "warn"); return null; }
+      const sourceTypeId = el("newBrandSourceType").value || currentSourceTypeId();
       const selectedSourceOption = el("newBrandSourceType").selectedOptions[0];
       const sourceType = selectedSourceOption?.dataset.format || sourceTypeNameToFormat(selectedSourceOption?.textContent || "") || el("sourceType").value;
-      if (!sourceTypeId) { setStatus("Source format is required.", "warn"); return; }
+      if (!sourceTypeId) { setStatus("Source format is required.", "warn"); return null; }
       try {
         const response = await fetch("/api/brands", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
           name, source_type_id: sourceTypeId, source_type: sourceType, slug: el("newBrandSlug").value.trim(), description: el("newBrandDescription").value.trim(), logo_url: el("newBrandLogo").value.trim(), website_url: el("newBrandWebsite").value.trim(), status: el("newBrandStatus").value, meta_title: el("newBrandMetaTitle").value.trim(), meta_description: el("newBrandMetaDescription").value.trim(), country_of_origin: el("newBrandOrigin").value.trim()
@@ -1075,7 +1080,11 @@ async function createNewBrand() {
         await refreshTemplatesForBusiness();
         setStatus(`Brand ${selectedBrand.name} is ready for mapping.`, "ok");
         updateOutput();
-      } catch (error) { setStatus(productSafeError(error.message, "Could not create business."), "error"); }
+        return selectedBrand;
+      } catch (error) {
+        setStatus(productSafeError(error.message, "Could not create business."), "error");
+        return null;
+      }
     }
 function normalizedRows() {
       const mapper = getMapper();
@@ -1427,7 +1436,20 @@ async function refreshSampleDatasetStatus() {
     }
 async function saveMapper() {
       if (activeTemplateId) return saveEditedTemplate();
-      const mapper = getMapper();
+      let mapper = getMapper();
+      if (!mapper.brand) {
+        setStatus("Please select or enter a Business/Brand name before saving.", "warn");
+        return;
+      }
+      if (!mapper.business_id) {
+        setStatus("Creating business for mapping...", "");
+        const created = await createNewBrand(mapper.brand);
+        if (!created || !created.business_id) {
+          setStatus("Could not resolve business ID. Please save the business first.", "warn");
+          return;
+        }
+        mapper = getMapper();
+      }
       const coverage = sourceFields.length ? Math.round(new Set(Object.values(mapper.fields).filter(Boolean)).size / sourceFields.length * 100) : 0;
       if (coverage < 50) {
         setStatus("Mapping coverage must reach 50% before saving.", "warn");

@@ -3204,16 +3204,71 @@ def reprocess_rejected(data: dict[str, Any]) -> dict[str, Any]:
     mapper = data.get("mapper")
     if not event_id or not isinstance(mapper, dict):
         raise ValueError("event_id and mapper are required")
+    records = list_rejected(event_id)["records"]
     if data.get("rows") and isinstance(data["rows"], list):
         rows = data["rows"]
     else:
-        records = list_rejected(event_id)["records"]
         selected_numbers = {int(value) for value in data.get("row_numbers", [])}
         rows = [record["raw_record"] for record in records if not selected_numbers or record["row_number"] in selected_numbers]
     if not rows:
         raise ValueError("No rejected records were found for reprocessing")
+
+    # Fallback to recorded business_id / source_type_id if mapper lacks them
+    if records:
+        first_rec = records[0]
+        if not mapper.get("business_id") and first_rec.get("business_id"):
+            mapper["business_id"] = first_rec["business_id"]
+        if not mapper.get("source_type_id") and first_rec.get("source_type_id"):
+            mapper["source_type_id"] = first_rec["source_type_id"]
+        if not mapper.get("brand") and mapper.get("business_id"):
+            try:
+                for b in fetch_mirror_businesses():
+                    if b.get("business_id") == mapper["business_id"]:
+                        mapper["brand"] = b.get("name")
+                        break
+            except Exception:
+                pass
+
     source_fields = sorted({path for path in mapper.get("fields", {}).values() if path})
-    return save_mapper({"mapper": mapper, "rows": rows, "source_fields": source_fields})
+    if not source_fields and rows and isinstance(rows[0], dict):
+        source_fields = list(rows[0].keys())
+
+    # Reprocess single record or batch without creating duplicate error rows
+    reprocessed_row_numbers = [int(v) for v in data.get("row_numbers", [])]
+    if not reprocessed_row_numbers and records:
+        reprocessed_row_numbers = [int(rec["row_number"]) for rec in records if "row_number" in rec]
+
+    result = save_mapper({
+        "mapper": mapper,
+        "rows": rows,
+        "source_fields": source_fields,
+        "save_template": False,
+        "event_id": event_id,
+        "row_offset": (reprocessed_row_numbers[0] - 1) if len(reprocessed_row_numbers) == 1 else 0
+    })
+
+    # Handle soft-deleting old error records:
+    # 1) If mapped successfully into listings, delete from error_listings.
+    # 2) If validation fails again, delete the old error record version so it is replaced by the newly generated row (preventing row count multiplication).
+    if records and reprocessed_row_numbers:
+        try:
+            project_id, dataset_id, credentials_json = _warehouse_settings()
+            client = _bigquery_client(project_id, credentials_json)
+            from google.cloud import bigquery
+            update_query = f"""
+            UPDATE `{project_id}.{dataset_id}.error_listings`
+            SET is_deleted = TRUE, deleted_on = CURRENT_TIMESTAMP()
+            WHERE event_id = @event_id AND row_number IN UNNEST(@row_numbers)
+            """
+            update_config = bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ScalarQueryParameter("event_id", "STRING", event_id),
+                bigquery.ArrayQueryParameter("row_numbers", "INT64", reprocessed_row_numbers),
+            ])
+            client.query(update_query, job_config=update_config).result()
+        except Exception as exc:
+            LOGGER.warning("error_listings_cleanup_failed event_id=%s error=%s", event_id, exc)
+
+    return result
 
 
 def _safe_json_dumps(value: Any) -> str:
@@ -3627,7 +3682,8 @@ def make_handler(ui_dir: Path):
             try:
                 length = int(self.headers.get("content-length", "0"))
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
-                payload["event_id"] = request_id
+                if not payload.get("event_id"):
+                    payload["event_id"] = request_id
                 LOGGER.info("request_started request_id=%s endpoint=%s content_length=%d", request_id, self.path, length)
                 if self.path == "/api/login":
                     _json_response(self, 200, authenticate(payload))

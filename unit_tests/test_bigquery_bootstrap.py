@@ -255,7 +255,8 @@ class BigQueryBootstrapTests(unittest.TestCase):
 
         with patch.dict(sys.modules, modules):
             with patch.object(workflow_server, "_medallion_settings", side_effect=RuntimeError("gold bootstrap failed at build_silver_layer: table not found")):
-                result = workflow_server.reporting_summary({})
+                with patch.object(workflow_server, "get_mirror_status", return_value=None):
+                    result = workflow_server.reporting_summary({})
 
         self.assertIn("gold bootstrap failed at build_silver_layer", result["warning"])
         self.assertEqual(result["filter_options"]["brands"], [])

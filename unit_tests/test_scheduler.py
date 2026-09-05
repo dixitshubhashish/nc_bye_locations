@@ -8,7 +8,16 @@ import whitespace_tool.workflow_server as workflow_server
 
 
 class SchedulerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        for thread in threading.enumerate():
+            if thread.name == "reporting-silver-refresh":
+                thread.join(timeout=5)
+        workflow_server.REPORTING_REFRESHING = False
+
     def tearDown(self) -> None:
+        for thread in threading.enumerate():
+            if thread.name == "reporting-silver-refresh":
+                thread.join(timeout=5)
         workflow_server.REPORTING_REFRESHING = False
 
     def test_tick_calls_silver_then_gold_and_resets_flag(self) -> None:
@@ -65,7 +74,8 @@ class SchedulerTests(unittest.TestCase):
 
         with patch.object(workflow_server, "build_silver_layer", side_effect=fake_silver):
             with patch.object(workflow_server, "build_gold_layer", side_effect=fake_gold):
-                started = workflow_server._refresh_silver_background()
+                with patch.object(workflow_server, "sync_gold_mirror", return_value={"zip_brand_rows": 0, "location_rows": 0, "business_rows": 0}):
+                    started = workflow_server._refresh_silver_background()
 
         self.assertTrue(started)
         for thread in threading.enumerate():
