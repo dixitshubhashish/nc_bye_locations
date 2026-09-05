@@ -667,7 +667,15 @@ async function loadFieldRegistry() {
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not load field definitions.");
         if (Array.isArray(result.fields) && result.fields.length) mappingTargets = result.fields;
-        if (sourceParsed) renderMappings();
+        // The standard field catalog is fixed, independent of any parsed
+        // source file - keep "Available optional fields" populated as soon
+        // as it loads, not only after the user parses a source.
+        if (sourceParsed) {
+          renderMappings();
+        } else {
+          updateOptionalFieldPicker();
+          updateDropCustomFieldPicker();
+        }
         if (result.warning) setStatus(result.warning, "warn");
       } catch (error) {
         setStatus(productSafeError(error.message, "Could not load field definitions."), "error");
@@ -1324,19 +1332,21 @@ async function loadSampleDataset(reset = false) {
       if (button) button.disabled = true;
       if (reloadLink) reloadLink.disabled = true;
       const status = el("reportStatus");
-      status.classList.add("hidden");
-      status.textContent = "";
-      const estimatedSeconds = reset ? 80 : 50;
+      status.className = "report-status";
+      status.classList.remove("hidden");
+      // Sample loading now returns as soon as bronze data is in (silver/gold
+      // rebuild in the background - see _background_medallion_refresh_status
+      // server-side), so this is a much shorter wait than it used to be.
+      // Show progress inline here, below the Refresh Report button, instead
+      // of a full-screen overlay.
+      const estimatedSeconds = reset ? 25 : 15;
       const startedAt = Date.now();
-      showLoadingOverlay(reset ? "Clearing and reloading sample dataset (0%)" : "Loading sample dataset (0%)", `About ${estimatedSeconds}s left.`);
+      const progressLabel = reset ? "Clearing and reloading sample dataset" : "Loading sample dataset";
+      status.textContent = `${progressLabel} (0%)...`;
       const progressTimer = window.setInterval(() => {
         const elapsed = Math.floor((Date.now() - startedAt) / 1000);
         const percent = Math.min(94, Math.round(elapsed / estimatedSeconds * 100));
-        const remaining = Math.max(1, estimatedSeconds - elapsed);
-        updateLoadingOverlay(
-          reset ? `Clearing and reloading sample dataset (${percent}%)` : `Loading sample dataset (${percent}%)`,
-          `About ${remaining}s left.`
-        );
+        status.textContent = `${progressLabel} (${percent}%)...`;
       }, 1000);
       try {
         const response = await fetch("/api/sample/load", {
@@ -1347,16 +1357,19 @@ async function loadSampleDataset(reset = false) {
         });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not load sample dataset.");
-        updateLoadingOverlay(reset ? "Clearing and reloading sample dataset (100%)" : "Loading sample dataset (100%)", "Finishing report.");
+        status.textContent = `${progressLabel} (100%)...`;
         await loadBrands();
         await loadTemplateFilters();
         reportLoaded = false;
         await loadReporting();
         const sourceTypesSummary = Object.entries(result.source_types || {}).map(([name, count]) => `${name}: ${count}`).join(", ");
         const reportingRows = result.silver?.rows;
+        const reportingStatusSuffix = reportingRows !== undefined
+          ? `, ${formatNumber(reportingRows)} ready for reporting`
+          : (result.silver?.status === "refreshing" ? ", reporting is updating in the background" : "");
         const message = result.already_loaded
-          ? `Sample dataset already loaded${reportingRows !== undefined ? `, ${formatNumber(reportingRows)} records ready` : ""}.`
-          : `Sample dataset loaded: ${formatNumber(result.locations)} records, ${formatNumber(result.errors)} in review${reportingRows !== undefined ? `, ${formatNumber(reportingRows)} ready for reporting` : ""}${sourceTypesSummary ? ` (${sourceTypesSummary})` : ""}.`;
+          ? `Sample dataset already loaded${reportingStatusSuffix}.`
+          : `Sample dataset loaded: ${formatNumber(result.locations)} records, ${formatNumber(result.errors)} in review${reportingStatusSuffix}${sourceTypesSummary ? ` (${sourceTypesSummary})` : ""}.`;
         status.className = "report-status";
         status.textContent = message;
         status.classList.remove("hidden");
@@ -1370,7 +1383,6 @@ async function loadSampleDataset(reset = false) {
         setStatus(message, error.name === "AbortError" ? "warn" : "error");
       } finally {
         window.clearInterval(progressTimer);
-        hideLoadingOverlay();
         if (button && button.dataset.sampleLoaded !== "true") button.disabled = false;
         if (reloadLink) reloadLink.disabled = false;
       }

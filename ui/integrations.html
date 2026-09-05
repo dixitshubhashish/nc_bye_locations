@@ -189,7 +189,7 @@
     .report-source { color: var(--muted); font-size: 12px; margin-top: 8px; overflow-wrap: anywhere; }
     .report-filters { display: grid; gap: 12px; margin: 18px 0; align-items: start; }
     .report-filter-group { border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 12px; }
-    .report-filter-group h2 { margin: 0 0 8px; font-size: 14px; color: var(--ink); }
+    .report-filter-group h2 { margin: 0 0 8px; font-size: 12px; color: var(--ink); }
     .report-filter-row {
       display: grid;
       gap: 12px;
@@ -1501,14 +1501,14 @@ else:
           <div class="report-filter-row primary">
           <div class="report-filter-group">
             <h2>Primary Brand</h2>
-            <select id="reportMainBrandSelect" style="width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); font-size: 13px; font-weight: 600; background: var(--panel);">
+            <select id="reportMainBrandSelect" style="width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px; font-weight: 600; background: var(--panel);">
               <option value="">Select Primary Brand</option>
             </select>
           </div>
           <div class="report-filter-group">
             <h2>Competitor Brands (Multi)</h2>
             <div id="competitorDropdownContainer" style="position: relative;">
-              <button id="competitorDropdownBtn" type="button" style="width: 100%; text-align: left; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); font-size: 13px; background: var(--panel); display: flex; justify-content: space-between; align-items: center; cursor: pointer;">
+              <button id="competitorDropdownBtn" type="button" style="width: 100%; text-align: left; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px; background: var(--panel); display: flex; justify-content: space-between; align-items: center; cursor: pointer;">
                 <span id="competitorDropdownBtnText">Select Competitors</span>
                 <span style="font-size: 10px; margin-left: 4px;">▼</span>
               </button>
@@ -1521,25 +1521,25 @@ else:
           <div class="report-filter-row geo">
             <div class="report-filter-group">
               <h2>State</h2>
-              <select id="reportStateFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 13px;">
+              <select id="reportStateFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px;">
                 <option value="">All States</option>
               </select>
             </div>
             <div class="report-filter-group">
               <h2>County</h2>
-              <select id="reportCountyFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 13px;">
+              <select id="reportCountyFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px;">
                 <option value="">All Counties</option>
               </select>
             </div>
             <div class="report-filter-group">
               <h2>City</h2>
-              <select id="reportCityFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 13px;">
+              <select id="reportCityFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px;">
                 <option value="">All Cities</option>
               </select>
             </div>
             <div class="report-filter-group">
               <h2>ZIP</h2>
-              <input id="reportZipFilter" list="zipSuggestions" placeholder="Search 30k+ ZIPs..." style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 13px;">
+              <input id="reportZipFilter" list="zipSuggestions" placeholder="Search 30k+ ZIPs..." style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px;">
               <datalist id="zipSuggestions"></datalist>
             </div>
           </div>
@@ -1547,9 +1547,9 @@ else:
             <div class="report-filter-group demographics">
               <h2>Market Demographics</h2>
               <div class="demographic-inputs">
-                <input id="reportMinPopFilter" type="number" placeholder="Min Population" style="padding: 7px; font-size: 12px;">
-                <input id="reportMinIncomeFilter" type="number" placeholder="Min Income" style="padding: 7px; font-size: 12px;">
-                <input id="reportMaxAgeFilter" type="number" placeholder="Max Median Age" style="padding: 7px; font-size: 12px;">
+                <input id="reportMinPopFilter" type="number" placeholder="Min Population" style="padding: 7px; font-size: 10px;">
+                <input id="reportMinIncomeFilter" type="number" placeholder="Min Income" style="padding: 7px; font-size: 10px;">
+                <input id="reportMaxAgeFilter" type="number" placeholder="Max Median Age" style="padding: 7px; font-size: 10px;">
               </div>
             </div>
           </div>
@@ -1560,7 +1560,7 @@ else:
         </div>
 
         <div id="reportContent" class="hidden" style="margin-top: 20px;">
-          <div class="report-grid" style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px;">
+          <div class="report-grid" style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px;">
             <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportStates" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Total State</span></div>
             <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportZips" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">ZIP Locations</span></div>
             <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportBrands" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Brands</span></div>
@@ -1568,6 +1568,7 @@ else:
             <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportLocations" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Market Locations</span></div>
             <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportBrandStates" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Brand States</span></div>
             <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportCities" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Brand Cities</span></div>
+            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportWhitespaceGaps" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Gap ZIPs</span></div>
           </div>
           <section class="report-section" style="margin-top: 0;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">

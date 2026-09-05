@@ -49,6 +49,42 @@ class SchedulerTests(unittest.TestCase):
         thread_names = {t.name for t in threading.enumerate()}
         self.assertNotIn("silver-gold-hourly-refresh", thread_names)
 
+    def test_on_demand_refresh_rebuilds_gold_after_silver(self) -> None:
+        # Reporting reads exclusively from gold: an on-demand refresh that
+        # only rebuilt silver would leave newly-saved data invisible in
+        # Reporting until the next hourly tick.
+        calls: list[str] = []
+
+        def fake_silver():
+            calls.append("silver")
+            return {"rows": 1, "invalid_rows": 0}
+
+        def fake_gold():
+            calls.append("gold")
+            return {"views": ["a"]}
+
+        with patch.object(workflow_server, "build_silver_layer", side_effect=fake_silver):
+            with patch.object(workflow_server, "build_gold_layer", side_effect=fake_gold):
+                started = workflow_server._refresh_silver_background()
+
+        self.assertTrue(started)
+        for thread in threading.enumerate():
+            if thread.name == "reporting-silver-refresh":
+                thread.join(timeout=5)
+        self.assertEqual(calls, ["silver", "gold"])
+        self.assertFalse(workflow_server.REPORTING_REFRESHING)
+
+    def test_save_mapper_triggers_background_refresh_unless_skipped(self) -> None:
+        with patch.object(workflow_server, "_refresh_silver_background") as fake_refresh:
+            with patch.object(workflow_server, "invalidate_cache"):
+                workflow_server._maybe_refresh_after_save(skip_cache_invalidation=False)
+        fake_refresh.assert_called_once()
+
+        with patch.object(workflow_server, "_refresh_silver_background") as fake_refresh:
+            with patch.object(workflow_server, "invalidate_cache"):
+                workflow_server._maybe_refresh_after_save(skip_cache_invalidation=True)
+        fake_refresh.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

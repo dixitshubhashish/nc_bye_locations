@@ -2,6 +2,7 @@
 
 let reportLoaded = false;
 let reportingBrands = [];
+let competitorDefaultsAppliedForMainBrand = null;
 
 function renderEmptyReportingStructure() {
       el("reportContent").classList.remove("hidden");
@@ -364,7 +365,14 @@ function updateCompetitorOptions() {
       const competitorChoices = selectedMain ? reportingBrands.filter((b) => b !== selectedMain) : [];
       const currentlyChecked = new Set(checkedValues("competitorBrand"));
 
-      const defaultCompetitors = competitorChoices.filter((b) => currentlyChecked.has(b));
+      // Picking a primary brand should default to comparing against every other
+      // brand, same as the primary brand selector defaulting to "All Brands" -
+      // the user can still narrow it down manually afterward.
+      const isFreshMainBrandSelection = selectedMain && selectedMain !== competitorDefaultsAppliedForMainBrand;
+      const defaultCompetitors = isFreshMainBrandSelection
+        ? competitorChoices
+        : competitorChoices.filter((b) => currentlyChecked.has(b));
+      competitorDefaultsAppliedForMainBrand = selectedMain || null;
 
       renderBrandChecks("competitorBrandChecks", "competitorBrand", competitorChoices, defaultCompetitors);
       updateCompetitorDropdownText();
@@ -513,7 +521,7 @@ async function loadReporting() {
         if (el("reportZips")) el("reportZips").textContent = formatNumber(totals.total_zips);
         if (el("reportStores")) el("reportStores").textContent = formatNumber(totals.total_stores);
         if (el("reportBrandStates")) el("reportBrandStates").textContent = formatNumber(totals.active_brand_states);
-        if (el("reportWhitespaceGaps")) el("reportWhitespaceGaps").textContent = formatNumber((result.gaps || []).length);
+        if (el("reportWhitespaceGaps")) el("reportWhitespaceGaps").textContent = formatNumber(result.primary_kpis?.gap_zips ?? (result.gaps || []).length);
 
         renderReportingMap(result.map_records || [], result.gaps || [], result.top_states || [], result.filters || {});
 

@@ -1041,6 +1041,21 @@ def sample_dataset_status() -> dict[str, Any]:
     }
 
 
+def _background_medallion_refresh_status() -> dict[str, Any]:
+    """Kick off (or note an already-in-flight) background silver+gold
+    rebuild instead of blocking the caller on it. Sample loading used to run
+    build_silver_layer()+build_gold_layer() synchronously inline with bronze
+    loading - fine for a handful of brands, but a full "clear and reload"
+    chains 12 sequential brand loads with a full silver rebuild and 13 gold
+    view rebuilds into one HTTP request, which can take minutes and left the
+    UI's progress bar stuck waiting on a single fetch. Reporting already
+    tolerates and surfaces this background-refreshing state (see
+    REPORTING_REFRESHING / the "refreshing" field), so backgrounding it here
+    is consistent with how the rest of the app already handles staleness."""
+    started = _refresh_silver_background()
+    return {"status": "refreshing", "background": True, "started": started}
+
+
 def load_sample_dataset(reset: bool = False) -> dict[str, Any]:
     if not _sample_loader_enabled():
         raise ValueError("Sample dataset loader is disabled for this environment")
@@ -1056,11 +1071,7 @@ def load_sample_dataset(reset: bool = False) -> dict[str, Any]:
     else:
         sample_status = _sample_data_status(client, project_id, dataset_id)
         if sample_status["businesses"] and sample_status["listings"] and sample_status["workflow_templates"]:
-            try:
-                silver_result = build_silver_layer()
-            except Exception as exc:
-                LOGGER.warning("sample_existing_silver_refresh_failed error=%s", exc)
-                silver_result = {"warning": "Sample dataset exists, but reporting refresh could not complete automatically."}
+            silver_result = _background_medallion_refresh_status()
             return {
                 "already_loaded": True,
                 "sample_batch_id": SAMPLE_BATCH_ID,
@@ -1090,11 +1101,7 @@ def load_sample_dataset(reset: bool = False) -> dict[str, Any]:
     brands_to_load = [brand for brand in SAMPLE_BRANDS if stable_business_id(brand.key) not in existing_sample_brands]
 
     if not brands_to_load:
-        try:
-            silver_result = build_silver_layer()
-        except Exception as exc:
-            LOGGER.warning("sample_silver_refresh_failed error=%s", exc)
-            silver_result = {"warning": "All sample brands are already loaded, but reporting refresh could not complete automatically."}
+        silver_result = _background_medallion_refresh_status()
         return {
             "already_loaded": True,
             "sample_batch_id": SAMPLE_BATCH_ID,
@@ -1170,13 +1177,7 @@ def load_sample_dataset(reset: bool = False) -> dict[str, Any]:
         summary["source_types"][source_label(brand.source_type)] += 1
         summary["countries"].update(brand.geographies)
 
-    try:
-        silver_result = build_silver_layer()
-        summary["silver"] = silver_result
-        summary["gold"] = build_gold_layer()
-    except Exception as exc:
-        LOGGER.warning("sample_silver_refresh_failed error=%s", exc)
-        summary["silver_warning"] = "Sample data loaded, but reporting refresh could not complete automatically."
+    summary["silver"] = _background_medallion_refresh_status()
     summary["countries"] = len(summary["countries"])
     summary["validation_success_pct"] = round(summary["valid"] / max(summary["locations"], 1) * 100, 1)
     invalidate_cache()
@@ -1767,6 +1768,12 @@ def _refresh_silver_background() -> bool:
         global REPORTING_REFRESHING
         try:
             build_silver_layer()
+            # Reporting reads exclusively from gold views - rebuilding silver
+            # alone would leave newly-ingested data (e.g. a brand just added
+            # via Mappings/Template Library) invisible to Reporting until the
+            # next hourly _run_silver_gold_tick(). Keep both layers in sync
+            # on every on-demand refresh, same as the hourly tick does.
+            build_gold_layer()
         except Exception as exc:
             LOGGER.warning("reporting_background_silver_refresh_failed error=%s", exc)
         finally:
@@ -1918,15 +1925,18 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         return _empty_reporting_payload("us_zipcodes_baseline", params, "Connected to geographic baseline data.")
     table_ref = f"`{source_table}`"
     gold_zip_ref = f"`{gold_ref}.vw_zip_brand_activity`"
-    gold_state_ref = f"`{gold_ref}.vw_state_summary`"
-    gold_city_ref = f"`{gold_ref}.vw_city_summary`"
+    # vw_state_summary/vw_city_summary are grouped by brand_name, so summing
+    # their per-brand zip_count across a multi-brand selection would double
+    # count zips shared by more than one selected brand - not usable here,
+    # where top_states/top_cities must report true DISTINCT zip coverage
+    # across whatever brands the user has selected. They stay in the gold
+    # dataset for direct/external BigQuery consumption instead.
     gold_brand_ref = f"`{gold_ref}.vw_brand_summary`"
-    gold_quality_ref = f"`{gold_ref}.vw_listing_quality_summary`"
     gold_location_ref = f"`{gold_ref}.vw_reporting_locations`"
     gold_filters_ref = f"`{gold_ref}.vw_reporting_filter_options`"
     gold_gap_ref = f"`{gold_ref}.vw_reporting_gap_base`"
     zip_ref = gold_zip_ref
-    refresh_started = _refresh_silver_background()
+    refresh_started = _refresh_silver_background() or gold_bootstrapped
     
     main_brands = _csv_param(params.get("main_brands", [""])[0])
     raw_competitor_brands = _csv_param(params.get("competitor_brands", [""])[0])
@@ -2010,7 +2020,10 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
     SELECT
       COUNT(DISTINCT zip_state) AS total_states,
       COUNT(DISTINCT zip_code) AS total_zips,
-      (SELECT COUNT(DISTINCT brand_name) FROM {gold_brand_ref}) AS total_brands,
+      -- Brands actually present in the current filtered view; only fall
+      -- back to the platform-wide catalog count when the filter matches
+      -- zero listings, so selecting a state/brand narrows this KPI too.
+      COALESCE(NULLIF(COUNT(DISTINCT brand), 0), (SELECT COUNT(DISTINCT brand_name) FROM {gold_brand_ref})) AS total_brands,
       COALESCE(SUM(location_count), 0) AS total_stores,
       COUNT(DISTINCT IF(location_count > 0 AND brand IS NOT NULL, zip_code, NULL)) AS active_market_locations,
       COUNT(DISTINCT IF(location_count > 0 AND brand IS NOT NULL, zip_state, NULL)) AS active_brand_states,
@@ -2030,9 +2043,12 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
       COALESCE(MAX(sp.state_pop), 0) AS state_population
     FROM base b
     LEFT JOIN (
+      -- {zip_ref}'s grain is (zip_code, brand_name): a zip with N distinct
+      -- brands present appears as N rows carrying the same population value,
+      -- so dedupe down to one row per zip before summing or population gets
+      -- multiplied by however many brands operate in each zip.
       SELECT state_code, SUM(population) AS state_pop
-      FROM {zip_ref}
-      WHERE population IS NOT NULL
+      FROM (SELECT DISTINCT zip_code, state_code, population FROM {zip_ref} WHERE population IS NOT NULL)
       GROUP BY state_code
     ) sp ON b.zip_state = sp.state_code
     GROUP BY state, state_name
@@ -2198,14 +2214,19 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
     # listings table (not the zip-joined base CTE), so completeness/duplicate
     # rates reflect the actual ingested records rather than a fabricated
     # "looks healthy" placeholder.
+    # vw_listing_quality_summary is a single unfiltered aggregate over all of
+    # silver.listings_enriched (no brand dimension), so it can't answer "data
+    # quality for the brands I've selected" - query the enriched table
+    # directly with the same brand filter the rest of the payload uses.
     data_quality_query = f"""
     SELECT
-      MAX(total_rows) AS total_rows,
-      MAX(with_coordinates) AS with_coordinates,
-      MAX(with_zip) AS with_zip,
-      MAX(distinct_rows) AS distinct_rows,
+      COUNT(*) AS total_rows,
+      COUNTIF(latitude IS NOT NULL AND longitude IS NOT NULL) AS with_coordinates,
+      COUNTIF(zip_code IS NOT NULL AND zip_code != '') AS with_zip,
+      COUNT(DISTINCT CONCAT(COALESCE(brand_name, ''), '|', COALESCE(zip_code, ''), '|', COALESCE(address, ''))) AS distinct_rows,
       MAX(last_observed_at) AS last_observed_at
-    FROM {gold_quality_ref}
+    FROM `{project_id}.{silver_dataset_id}.listings_enriched`
+    WHERE (ARRAY_LENGTH(@selected_brands) = 0 OR COALESCE(brand_name, business_id) IN UNNEST(@selected_brands))
     """
 
     def zip_only_payload(warning: str) -> dict[str, Any]:
@@ -2231,6 +2252,14 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         {zip_where}
         """
         zip_states_query = f"""
+        WITH zip_dedup AS (
+          -- {zip_ref}'s grain is (zip_code, brand_name); collapse the
+          -- per-brand fan-out to one row per zip before summing population,
+          -- or a zip with N brands present would count its population N times.
+          SELECT DISTINCT zip_code, state_code, state_name, city_name, population
+          FROM {zip_ref}
+          {zip_where}
+        )
         SELECT
           COALESCE(state_code, '') AS state,
           COALESCE(state_name, state_code, '') AS state_name,
@@ -2238,8 +2267,7 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
           COUNT(DISTINCT city_name) AS cities,
           (SELECT COUNT(DISTINCT name) FROM `{project_id}.{bronze_dataset_id}.businesses` WHERE is_deleted IS NOT TRUE AND COALESCE(status, 'active') = 'active') AS brands,
           COALESCE(SUM(population), 0) AS state_population
-        FROM {zip_ref}
-        {zip_where}
+        FROM zip_dedup
         GROUP BY state, state_name
         ORDER BY locations DESC
         LIMIT 15
@@ -2526,6 +2554,7 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         "similar_zip_candidates": similar_candidates_count,
         "competitor_whitespace_zips": competitor_whitespace_count,
         "open_whitespace_zips": open_whitespace_count,
+        "gap_zips": competitor_whitespace_count + open_whitespace_count,
         "whitespace_population": total_whitespace_pop,
         "median_whitespace_income": median_ws_income if whitespace_incomes else 0,
         "data_confidence": "HIGH" if total_raw_locations > 0 else "NO_DATA",
@@ -2871,6 +2900,20 @@ def _dedupe_listings_against_bronze(client: Any, project_id: str, dataset_id: st
     return new_rows, duplicate_count
 
 
+def _maybe_refresh_after_save(skip_cache_invalidation: bool) -> None:
+    """Called after a mapping save lands in bronze. Reporting reads
+    exclusively from gold, which only reflects bronze/silver as of its last
+    rebuild - kick that off now (non-blocking, in the background) instead of
+    leaving newly-saved data invisible in Reporting until someone happens to
+    view it and trigger the refresh, or the next hourly tick. Sample loading
+    runs its own end-of-batch silver+gold rebuild instead, so it passes
+    skip_cache_invalidation=True to avoid firing this redundantly per brand."""
+    if skip_cache_invalidation:
+        return
+    invalidate_cache()
+    _refresh_silver_background()
+
+
 def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_invalidation: bool = False) -> dict[str, Any]:
     mapper = payload.get("mapper")
     rows = payload.get("rows")
@@ -3003,8 +3046,7 @@ def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_inval
     }] if save_template else []
     rows_by_table["error_listings"] = error_listings
     push_to_bigquery(project_id, dataset_id, rows_by_table, credentials_json, client=client)
-    if not skip_cache_invalidation:
-        invalidate_cache()
+    _maybe_refresh_after_save(skip_cache_invalidation)
     LOGGER.info(
         "save_succeeded mapper_id=%s dataset=%s mapped_rows=%d mapped_fields=%d duplicate_listings_skipped=%d",
         mapper_id,

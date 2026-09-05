@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from whitespace_tool.warehouse_bigquery import TABLE_PARTITION_SPECS, TABLE_SCHEMAS, push_to_bigquery
@@ -293,6 +294,29 @@ class WarehouseSchemaTests(unittest.TestCase):
         self.assertEqual(len(loaded_json_rows), 1)
         self.assertTrue(loaded_json_rows[0][0].endswith(".workflow_templates"))
         self.assertTrue(loaded_json_rows[0][1][0]["content_hash"])
+
+
+class PandasIsLazyTests(unittest.TestCase):
+    """pandas/pyarrow power the vectorized hashing/load path only - the module
+    (and workflow_server.py, which imports from it at module scope) must
+    still import cleanly without them, same as this codebase's existing
+    lazy `from google.cloud import bigquery` convention."""
+
+    def test_missing_pandas_raises_friendly_error_instead_of_import_crash(self) -> None:
+        from whitespace_tool import warehouse_bigquery
+
+        with patch.dict(sys.modules, {"pandas": None}):
+            with self.assertRaisesRegex(RuntimeError, "Install pandas and pyarrow"):
+                warehouse_bigquery.rows_to_dataframe("businesses", [{"business_id": "b1"}])
+
+    def test_workflow_server_module_has_no_top_level_pandas_dependency(self) -> None:
+        import ast
+
+        source_path = Path(__file__).resolve().parent.parent / "whitespace_tool" / "warehouse_bigquery.py"
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        top_level_imports = [node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))]
+        imported_names = {alias.name for node in top_level_imports for alias in node.names}
+        self.assertNotIn("pandas", imported_names)
 
 
 if __name__ == "__main__":

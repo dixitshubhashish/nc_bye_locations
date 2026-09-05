@@ -4,12 +4,26 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-import pandas as pd
-
 from whitespace_tool.models import LocationRecord, ZipDemographics
+
+if TYPE_CHECKING:
+    import pandas as pd
+
+
+def _pandas():
+    """Lazily import pandas so this module (and everything that imports it,
+    including workflow_server.py at module scope) can still load without
+    pandas/pyarrow installed - only the vectorized hashing/load path needs
+    them, matching the lazy `from google.cloud import bigquery` pattern used
+    throughout the rest of the app for the same reason."""
+    try:
+        import pandas as pd
+    except ImportError as exc:
+        raise RuntimeError("Install pandas and pyarrow to use vectorized BigQuery row hashing/loading.") from exc
+    return pd
 
 
 # Fields that describe the physical location itself, not the ingestion run
@@ -42,7 +56,7 @@ def _is_nullish(value: Any) -> bool:
     if isinstance(value, (dict, list, tuple, set)):
         return False
     try:
-        return bool(pd.isna(value))
+        return bool(_pandas().isna(value))
     except (TypeError, ValueError):
         return False
 
@@ -87,6 +101,7 @@ def table_has_json_fields(table_name: str) -> bool:
 
 def rows_to_dataframe(table_name: str, rows: list[dict[str, Any]]) -> pd.DataFrame:
     """Build a schema-ordered DataFrame for a managed table."""
+    pd = _pandas()
     columns = table_columns(table_name)
     if not rows:
         return pd.DataFrame(columns=columns)
@@ -95,6 +110,7 @@ def rows_to_dataframe(table_name: str, rows: list[dict[str, Any]]) -> pd.DataFra
 
 def dataframe_to_records(frame: pd.DataFrame) -> list[dict[str, Any]]:
     """Convert a DataFrame to BigQuery JSON-compatible row dictionaries."""
+    pd = _pandas()
     normalized = frame.astype(object).where(pd.notna(frame), None)
     return normalized.to_dict(orient="records")
 

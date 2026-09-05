@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -71,6 +72,11 @@ class BigQueryBootstrapTests(unittest.TestCase):
             calls.append("silver")
             return {"rows": 9272}
 
+        def fake_gold() -> dict[str, int]:
+            calls.append("gold")
+            return {"views": []}
+
+        self.addCleanup(setattr, workflow_server, "REPORTING_REFRESHING", False)
         with patch.object(workflow_server, "_sample_loader_enabled", return_value=True):
             with patch.object(workflow_server, "_warehouse_settings", return_value=("project", "bronze", None)):
                 with patch.object(workflow_server, "_bigquery_client", return_value=object()):
@@ -80,11 +86,19 @@ class BigQueryBootstrapTests(unittest.TestCase):
                                 with patch.object(workflow_server, "prepare_zipcodes", side_effect=fake_prepare):
                                     with patch.object(workflow_server, "_sample_data_status", side_effect=fake_status):
                                         with patch.object(workflow_server, "build_silver_layer", side_effect=fake_silver):
-                                            result = workflow_server.load_sample_dataset()
+                                            with patch.object(workflow_server, "build_gold_layer", side_effect=fake_gold):
+                                                # Sample loading no longer blocks the response on the silver/gold
+                                                # rebuild (see _background_medallion_refresh_status) - it kicks
+                                                # that off in a background thread instead, so wait for it here.
+                                                result = workflow_server.load_sample_dataset()
+                                                for thread in threading.enumerate():
+                                                    if thread.name == "reporting-silver-refresh":
+                                                        thread.join(timeout=5)
 
-        self.assertEqual(calls, ["prepare_zips", "sample_status", "silver"])
+        self.assertEqual(calls, ["prepare_zips", "sample_status", "silver", "gold"])
         self.assertTrue(result["already_loaded"])
         self.assertEqual(result["zips"]["rows"], 33791)
+        self.assertEqual(result["silver"]["status"], "refreshing")
 
     def test_sample_dataset_status_reports_loaded_when_core_sample_tables_have_rows(self) -> None:
         with patch.object(workflow_server, "_sample_loader_enabled", return_value=True):
