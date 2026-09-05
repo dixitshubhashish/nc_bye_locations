@@ -926,11 +926,12 @@ function updateOptionalFieldPicker() {
       // Before a source is parsed, the main mapping grid itself isn't
       // rendered yet (renderMappings() is gated on sourceParsed), so this
       // picker is the only place to see any fields at all - show every
-      // non-required field, main/primary included, rather than just the
-      // narrow "not-yet-added optional field" subset that applies once a
-      // source is parsed and the primary fields are already on the grid.
+      // field, required main/primary ones (name, address, city, state,
+      // ZIP) included, rather than just the narrow "not-yet-added optional
+      // field" subset that applies once a source is parsed and those
+      // required fields are already on the grid.
       const available = !sourceParsed
-        ? mappingTargets.filter((target) => !target.required)
+        ? mappingTargets
         : mappingTargets.filter((target) => !target.required && ((primaryMappingKeys.has(target.key) && hiddenMappingKeys.has(target.key)) || (!primaryMappingKeys.has(target.key) && !optionalMappingKeys.has(target.key))));
       picker.innerHTML = '<option value="">Choose a field</option>' + available
         .map((target) => `<option value="${escapeHtml(target.key)}">${escapeHtml(target.label)}</option>`)
