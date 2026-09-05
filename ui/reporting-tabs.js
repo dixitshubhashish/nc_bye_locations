@@ -159,7 +159,7 @@
       shell.querySelectorAll('.report-location-panel').forEach((n) => n.classList.toggle('hidden', name !== 'location'));
       quality.classList.toggle('hidden', name !== 'quality');
       if (name === 'quality') loadQuality();
-      if (name === 'location' && window.reportingMap) setTimeout(() => window.reportingMap.invalidateSize(), 100);
+      if (name === 'location' && typeof window.reportingMap?.invalidateSize === 'function') setTimeout(() => window.reportingMap.invalidateSize(), 100);
     }
 
     tabs.addEventListener('click', (e) => {
