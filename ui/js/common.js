@@ -8,6 +8,22 @@ const loginReadinessTimeoutMs = 2500;
 
 let sourceTypes = [];
 
+// Canonical human-readable labels for internal source_type keys, matching
+// the #sourceType select in the Mappings tab - reused wherever a source
+// type needs to be displayed (e.g. the Template Library table/filter)
+// instead of showing the raw code name.
+const SOURCE_TYPE_LABELS = {
+  csv: "CSV",
+  excel: "Excel (.xlsx)",
+  json: "JSON",
+  xml: "XML",
+  api_get_json: "GET API JSON",
+  python_editor: "Python Editor",
+};
+function sourceTypeLabel(sourceTypeKey) {
+      return SOURCE_TYPE_LABELS[sourceTypeKey] || String(sourceTypeKey || "Unknown");
+    }
+
 const loginSessionStorageKey = "competitive_whitespace_login_session";
 const mappingSessionStorageKey = "competitive_whitespace_mapping_session";
 const el = (id) => document.getElementById(id);
@@ -138,7 +154,7 @@ function switchView(viewId) {
       if (el("restartMappingBtn")) el("restartMappingBtn").classList.toggle("hidden", viewId !== "mapperView");
       if (el("resetMappingBtn")) el("resetMappingBtn").classList.toggle("hidden", viewId !== "mapperView");
       if (viewId === "reportingView" && !reportLoaded) loadReporting();
-      if (viewId === "templateLibraryView") loadTemplateLibrary();
+      if (viewId === "templateLibraryView") loadTemplateFilters().then(loadTemplateLibrary);
     }
 
 async function testReadiness() {

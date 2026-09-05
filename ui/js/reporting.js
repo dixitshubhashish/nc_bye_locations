@@ -498,7 +498,7 @@ function reportingQueryString() {
 async function loadReporting() {
       const status = el("reportStatus");
       status.className = "report-status loading";
-      status.textContent = "Loading";
+      status.innerHTML = '<span class="spinner"></span> Loading...';
       renderEmptyReportingStructure();
       try {
         const queryString = reportingQueryString();

@@ -923,7 +923,15 @@ function renderMappings() {
     }
 function updateOptionalFieldPicker() {
       const picker = el("optionalFieldSelect");
-      const available = mappingTargets.filter((target) => !target.required && ((primaryMappingKeys.has(target.key) && hiddenMappingKeys.has(target.key)) || (!primaryMappingKeys.has(target.key) && !optionalMappingKeys.has(target.key))));
+      // Before a source is parsed, the main mapping grid itself isn't
+      // rendered yet (renderMappings() is gated on sourceParsed), so this
+      // picker is the only place to see any fields at all - show every
+      // non-required field, main/primary included, rather than just the
+      // narrow "not-yet-added optional field" subset that applies once a
+      // source is parsed and the primary fields are already on the grid.
+      const available = !sourceParsed
+        ? mappingTargets.filter((target) => !target.required)
+        : mappingTargets.filter((target) => !target.required && ((primaryMappingKeys.has(target.key) && hiddenMappingKeys.has(target.key)) || (!primaryMappingKeys.has(target.key) && !optionalMappingKeys.has(target.key))));
       picker.innerHTML = '<option value="">Choose a field</option>' + available
         .map((target) => `<option value="${escapeHtml(target.key)}">${escapeHtml(target.label)}</option>`)
         .join("");
@@ -1332,21 +1340,26 @@ async function loadSampleDataset(reset = false) {
       if (button) button.disabled = true;
       if (reloadLink) reloadLink.disabled = true;
       const status = el("reportStatus");
-      status.className = "report-status";
+      status.className = "report-status loading";
       status.classList.remove("hidden");
       // Sample loading now returns as soon as bronze data is in (silver/gold
       // rebuild in the background - see _background_medallion_refresh_status
       // server-side), so this is a much shorter wait than it used to be.
       // Show progress inline here, below the Refresh Report button, instead
-      // of a full-screen overlay.
+      // of a full-screen overlay. The spinner + sliding bar (.report-status
+      // .spinner / .loading::after) make clear it's actively working rather
+      // than stuck, since the percentage alone is only an estimate.
       const estimatedSeconds = reset ? 25 : 15;
       const startedAt = Date.now();
       const progressLabel = reset ? "Clearing and reloading sample dataset" : "Loading sample dataset";
-      status.textContent = `${progressLabel} (0%)...`;
+      const renderProgress = (percent) => {
+        status.innerHTML = `<span class="spinner"></span> ${progressLabel} (${percent}%)...`;
+      };
+      renderProgress(0);
       const progressTimer = window.setInterval(() => {
         const elapsed = Math.floor((Date.now() - startedAt) / 1000);
         const percent = Math.min(94, Math.round(elapsed / estimatedSeconds * 100));
-        status.textContent = `${progressLabel} (${percent}%)...`;
+        renderProgress(percent);
       }, 1000);
       try {
         const response = await fetch("/api/sample/load", {

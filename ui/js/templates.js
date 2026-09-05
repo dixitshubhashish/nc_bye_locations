@@ -1,5 +1,7 @@
 // Template Library tab: browse, load, and save saved mapping templates.
 
+let templateBusinessNames = {};
+
 async function loadTemplateLibrary() {
       const target = el("templateResults");
       const search = el("templateSearch").value.trim();
@@ -15,8 +17,9 @@ async function loadTemplateLibrary() {
           target.textContent = "No templates found.";
           return;
         }
+        const sourceTypeIdToLabel = Object.fromEntries(sourceTypes.map((source) => [source.source_type_id, sourceTypeLabel(source.name)]));
         target.className = "";
-        target.innerHTML = `<table><thead><tr><th>Template</th><th>Business</th><th>Created</th><th>Updated</th><th>Action</th></tr></thead><tbody>${result.templates.map((template) => `<tr><td>${escapeHtml(template.name)}</td><td>${escapeHtml(template.business_id)}</td><td>${escapeHtml(template.created_at)}</td><td>${escapeHtml(template.updated_at)}</td><td><button type="button" data-load-template="${escapeHtml(template.workflow_template_id)}">Load</button></td></tr>`).join("")}</tbody></table>`;
+        target.innerHTML = `<table><thead><tr><th>Template</th><th>Business</th><th>Source Type</th><th>Created</th><th>Updated</th><th>Action</th></tr></thead><tbody>${result.templates.map((template) => `<tr><td>${escapeHtml(template.name)}</td><td>${escapeHtml(templateBusinessNames[template.business_id] || template.business_id)}</td><td>${escapeHtml(sourceTypeIdToLabel[template.source_type_id] || sourceTypeLabel(template.source_type_id))}</td><td>${escapeHtml(template.created_at)}</td><td>${escapeHtml(template.updated_at)}</td><td><button type="button" data-load-template="${escapeHtml(template.workflow_template_id)}">Load</button></td></tr>`).join("")}</tbody></table>`;
         target.querySelectorAll("button[data-load-template]").forEach((button) => button.addEventListener("click", () => loadTemplateIntoEditor(result.templates.find((template) => template.workflow_template_id === button.dataset.loadTemplate))));
       } catch (error) {
         target.className = "status error";
@@ -33,6 +36,7 @@ async function loadTemplateFilters() {
       } catch (error) {
         businesses = [];
       }
+      templateBusinessNames = Object.fromEntries(businesses.map((business) => [business.business_id, business.name]));
       el("templateBusinessFilter").innerHTML = '<option value="">All businesses</option><option class="create-new-option" value="__create_new__">+ Create New Business</option>' + businesses.map((business) => `<option value="${escapeHtml(business.business_id)}">${escapeHtml(business.name)}</option>`).join("");
       try {
         const sourceResponse = await fetch("/api/source-types");
@@ -42,7 +46,7 @@ async function loadTemplateFilters() {
       } catch (error) {
         sourceTypes = [];
       }
-      el("templateSourceFilter").innerHTML = '<option value="">All source types</option>' + sourceTypes.map((source) => `<option value="${escapeHtml(source.source_type_id)}">${escapeHtml(source.name)}</option>`).join("");
+      el("templateSourceFilter").innerHTML = '<option value="">All source types</option>' + sourceTypes.map((source) => `<option value="${escapeHtml(source.source_type_id)}">${escapeHtml(sourceTypeLabel(source.name))}</option>`).join("");
       populateSourceTypeSelects();
     }
 function loadTemplateIntoEditor(template) {
