@@ -45,6 +45,13 @@ def clean_zip(value: Any) -> str:
     return digits
 
 
+def _text(value: Any) -> str:
+    """Coerce a mapped field value to a stripped string, treating None
+    (e.g. an explicit JSON null in the source) as empty rather than the
+    literal text "None" that plain str(None) would otherwise produce."""
+    return "" if value is None else str(value).strip()
+
+
 def optional_float(value: Any) -> float | None:
     if value in (None, ""):
         return None
@@ -95,12 +102,12 @@ def optional_timestamp(value: Any) -> str | None:
 
 def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name: str, index: int) -> LocationRecord | None:
     fields = mapper["fields"]
-    brand = titleize(str(mapper.get("brand") or get_nested(row, fields.get("brand", "brand"))))
+    brand = titleize(_text(mapper.get("brand")) or _text(get_nested(row, fields.get("brand", "brand"))))
     postal_code = clean_zip(get_nested(row, fields["postal_code"]))
     if not brand or not postal_code:
         return None
 
-    location_id = str(get_nested(row, fields.get("location_id", ""), "")).strip()
+    location_id = _text(get_nested(row, fields.get("location_id", ""), ""))
     if not location_id:
         location_id = f"{brand.lower().replace(' ', '_')}:{postal_code}:{index}"
 
@@ -109,33 +116,33 @@ def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name:
         business_id=str(mapper.get("business_id") or "") or None,
         source_type_id=str(mapper.get("source_type_id") or "") or None,
         location_id=location_id,
-        name=titleize(str(get_nested(row, fields.get("name", ""), ""))),
-        address=str(get_nested(row, fields.get("address", ""), "")).strip(),
-        city=titleize(str(get_nested(row, fields.get("city", ""), ""))),
-        state=str(get_nested(row, fields.get("state", ""), "")).strip().upper(),
+        name=titleize(_text(get_nested(row, fields.get("name", ""), ""))),
+        address=_text(get_nested(row, fields.get("address", ""), "")),
+        city=titleize(_text(get_nested(row, fields.get("city", ""), ""))),
+        state=_text(get_nested(row, fields.get("state", ""), "")).upper(),
         postal_code=postal_code,
         latitude=optional_float(get_nested(row, fields.get("latitude", ""), "")),
         longitude=optional_float(get_nested(row, fields.get("longitude", ""), "")),
         source=source_name,
-        observed_at=str(get_nested(row, fields.get("observed_at", ""), "")).strip() or utc_now_iso(),
+        observed_at=_text(get_nested(row, fields.get("observed_at", ""), "")) or utc_now_iso(),
         raw=dict(row),
-        franchise_name=str(get_nested(row, fields.get("franchise_name", ""), "")).strip() or None,
-        concept_type=str(get_nested(row, fields.get("concept_type", ""), "")).strip() or None,
-        cuisine_type=str(get_nested(row, fields.get("cuisine_type", ""), "")).strip() or None,
-        town=str(get_nested(row, fields.get("town", ""), "")).strip() or None,
-        province=str(get_nested(row, fields.get("province", ""), "")).strip() or None,
-        country=str(get_nested(row, fields.get("country", ""), "")).strip() or None,
-        neighborhood=str(get_nested(row, fields.get("neighborhood", ""), "")).strip() or None,
-        district=str(get_nested(row, fields.get("district", ""), "")).strip() or None,
-        phone_number=str(get_nested(row, fields.get("phone_number", ""), "")).strip() or None,
-        website_url=str(get_nested(row, fields.get("website_url", ""), "")).strip() or None,
-        google_maps_link=str(get_nested(row, fields.get("google_maps_link", ""), "")).strip() or None,
-        social_media_handles=str(get_nested(row, fields.get("social_media_handles", ""), "")).strip() or None,
-        operating_hours=str(get_nested(row, fields.get("operating_hours", ""), "")).strip() or None,
+        franchise_name=_text(get_nested(row, fields.get("franchise_name", ""), "")) or None,
+        concept_type=_text(get_nested(row, fields.get("concept_type", ""), "")) or None,
+        cuisine_type=_text(get_nested(row, fields.get("cuisine_type", ""), "")) or None,
+        town=_text(get_nested(row, fields.get("town", ""), "")) or None,
+        province=_text(get_nested(row, fields.get("province", ""), "")) or None,
+        country=_text(get_nested(row, fields.get("country", ""), "")) or None,
+        neighborhood=_text(get_nested(row, fields.get("neighborhood", ""), "")) or None,
+        district=_text(get_nested(row, fields.get("district", ""), "")) or None,
+        phone_number=_text(get_nested(row, fields.get("phone_number", ""), "")) or None,
+        website_url=_text(get_nested(row, fields.get("website_url", ""), "")) or None,
+        google_maps_link=_text(get_nested(row, fields.get("google_maps_link", ""), "")) or None,
+        social_media_handles=_text(get_nested(row, fields.get("social_media_handles", ""), "")) or None,
+        operating_hours=_text(get_nested(row, fields.get("operating_hours", ""), "")) or None,
         seating_capacity=optional_int(get_nested(row, fields.get("seating_capacity", ""), "")),
-        service_types=str(get_nested(row, fields.get("service_types", ""), "")).strip() or None,
+        service_types=_text(get_nested(row, fields.get("service_types", ""), "")) or None,
         opening_date=optional_date(get_nested(row, fields.get("opening_date", ""), "")),
-        status=str(get_nested(row, fields.get("status", ""), "")).strip() or None,
+        status=_text(get_nested(row, fields.get("status", ""), "")) or None,
         annual_revenue=optional_float(get_nested(row, fields.get("annual_revenue", ""), "")),
         average_ticket_size=optional_float(get_nested(row, fields.get("average_ticket_size", ""), "")),
         daily_footfall=optional_int(get_nested(row, fields.get("daily_footfall", ""), "")),
@@ -146,5 +153,5 @@ def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name:
         average_household_income=optional_float(get_nested(row, fields.get("average_household_income", ""), "")),
         competitor_count=optional_int(get_nested(row, fields.get("competitor_count", ""), "")),
         foot_traffic_score=optional_float(get_nested(row, fields.get("foot_traffic_score", ""), "")),
-        parking_availability=str(get_nested(row, fields.get("parking_availability", ""), "")).strip() or None,
+        parking_availability=_text(get_nested(row, fields.get("parking_availability", ""), "")) or None,
     )
