@@ -69,11 +69,11 @@ function renderEmptyReportingStructure() {
 function checkedValues(name) {
       return [...document.querySelectorAll(`input[name="${name}"]:checked`)].map((input) => input.value);
     }
-function renderBrandChecks(containerId, name, brands, checkedBrands) {
+function renderBrandChecks(containerId, name, brands, checkedBrands, emptyMessage = "No brands available.") {
       const selected = new Set(checkedBrands || []);
       el(containerId).innerHTML = brands.length
         ? brands.map((brand) => `<label><input type="checkbox" name="${name}" value="${escapeHtml(brand)}" ${selected.has(brand) ? "checked" : ""}>${escapeHtml(brand)}</label>`).join("")
-        : '<div class="report-status">No brands available.</div>';
+        : `<div class="report-status">${escapeHtml(emptyMessage)}</div>`;
       el(containerId).querySelectorAll("input").forEach((input) => input.addEventListener("change", () => {
         reportLoaded = false;
         loadReporting();
@@ -374,7 +374,11 @@ function updateCompetitorOptions() {
         : competitorChoices.filter((b) => currentlyChecked.has(b));
       competitorDefaultsAppliedForMainBrand = selectedMain || null;
 
-      renderBrandChecks("competitorBrandChecks", "competitorBrand", competitorChoices, defaultCompetitors);
+      // Distinguish "you haven't picked a primary brand yet" from "the data
+      // genuinely has no other brands" - the old fixed "No brands available."
+      // read like a data problem even when it just meant pick one first.
+      const emptyMessage = selectedMain ? "No other brands available." : "Select a primary brand first.";
+      renderBrandChecks("competitorBrandChecks", "competitorBrand", competitorChoices, defaultCompetitors, emptyMessage);
       updateCompetitorDropdownText();
     }
 function updateCompetitorDropdownText() {
@@ -384,7 +388,7 @@ function updateCompetitorDropdownText() {
       if (!el("reportMainBrandSelect")?.value) {
         btnText.textContent = "Select Primary Brand";
       } else if (checked.length === 0) {
-        btnText.textContent = "Select Competitors (0 selected)";
+        btnText.textContent = "Select Competitor Brands (0 selected)";
       } else if (checked.length === (reportingBrands.length ? reportingBrands.length - 1 : 0)) {
         btnText.textContent = "All Competitors Selected";
       } else {
