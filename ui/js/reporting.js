@@ -267,16 +267,18 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [])
         if (!isUSLatLong(lat, lon)) return; // Discard non-US coordinates
         bounds.push([lat, lon]);
         const isPrimary = mainBrandSet.has(String(rec.brand || "").toLowerCase());
-        const color = isPrimary ? "#16a34a" : "#dc2626";
+        // No primary brand selected yet -> every location is neutral blue,
+        // since there's nothing to distinguish "primary" from "competitor" against.
+        const color = mainBrandSet.size === 0 ? "#3b82f6" : (isPrimary ? "#16a34a" : "#dc2626");
         const stateLabel = rec.state_name || rec.state || "";
 
         const marker = L.circleMarker([lat, lon], {
-          radius: 6,
+          radius: 4,
           fillColor: color,
-          color: "#ffffff",
-          weight: 1.5,
+          color: color,
+          weight: 0,
           opacity: 1,
-          fillOpacity: 0.85
+          fillOpacity: 0.9
         });
         marker.bindPopup(`
           <div style="font-family: sans-serif; font-size: 13px; line-height: 1.4;">
