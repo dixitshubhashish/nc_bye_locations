@@ -5,8 +5,8 @@ import types
 import unittest
 from unittest.mock import patch
 
-from whitespace_tool.models import LocationRecord
-from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows, content_hash
+from whitespace_tool.models import LocationRecord, ZipDemographics
+from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows, content_hash, rows_to_hashed_dataframe, table_content_hash
 from whitespace_tool.workflow_server import _dedupe_listings_against_bronze
 
 
@@ -55,10 +55,31 @@ class ContentHashTests(unittest.TestCase):
         fields = {field["name"] for field in TABLE_SCHEMAS["listings"]}
         self.assertIn("content_hash", fields)
 
+    def test_all_managed_tables_have_content_hash_column(self) -> None:
+        for table_name, schema in TABLE_SCHEMAS.items():
+            with self.subTest(table_name=table_name):
+                self.assertIn("content_hash", {field["name"] for field in schema})
+
     def test_build_table_rows_populates_content_hash(self) -> None:
         rows = build_table_rows([_location()], {})
         self.assertEqual(len(rows["listings"]), 1)
         self.assertTrue(rows["listings"][0]["content_hash"])
+
+    def test_build_table_rows_populates_zip_content_hash(self) -> None:
+        rows = build_table_rows([], {
+            "78701": ZipDemographics(
+                zip_code="78701",
+                population=1000,
+                median_household_income=75000,
+                median_age=34,
+                source="public_bigquery",
+                city="Austin",
+                county="Travis",
+                state_code="TX",
+            )
+        })
+        self.assertEqual(len(rows["us_zipcodes"]), 1)
+        self.assertTrue(rows["us_zipcodes"][0]["content_hash"])
 
     def test_same_content_different_id_and_observed_at_hashes_identically(self) -> None:
         first = build_table_rows([_location(location_id="loc-1", observed_at="2026-01-01T00:00:00+00:00")], {})["listings"][0]
@@ -76,6 +97,23 @@ class ContentHashTests(unittest.TestCase):
     def test_content_hash_is_deterministic(self) -> None:
         row = {"business_id": "b1", "name": "Store", "address": "1 Main St", "city_name": "Austin"}
         self.assertEqual(content_hash(row), content_hash(dict(row)))
+
+    def test_table_content_hash_uses_all_managed_non_hash_columns(self) -> None:
+        base = {"business_id": "b1", "name": "Store", "slug": "store", "status": "active"}
+        changed = dict(base, status="paused")
+        self.assertNotEqual(table_content_hash("businesses", base), table_content_hash("businesses", changed))
+
+    def test_rows_to_hashed_dataframe_is_schema_ordered_and_vectorized(self) -> None:
+        frame = rows_to_hashed_dataframe("businesses", [{
+            "business_id": "b1",
+            "name": "Store",
+            "slug": "store",
+            "status": "active",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        }])
+        self.assertEqual(list(frame.columns), [field["name"] for field in TABLE_SCHEMAS["businesses"]])
+        self.assertTrue(frame.iloc[0]["content_hash"])
 
 
 class DedupeAgainstBronzeTests(unittest.TestCase):

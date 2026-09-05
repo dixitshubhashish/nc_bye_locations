@@ -71,6 +71,11 @@
     } catch (error) {
       console.error("Post-login data initialization failed:", error);
     }
+    try {
+      if (typeof window.refreshHeaderReadiness === "function") window.refreshHeaderReadiness();
+    } catch (error) {
+      console.error("Post-login readiness initialization failed:", error);
+    }
   }
 
   async function safeLogin() {

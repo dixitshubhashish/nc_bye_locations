@@ -3,6 +3,7 @@
 
 let appDataLoaded = false;
 let appReady = false;
+let readinessCheckInFlight = null;
 const loginReadinessTimeoutMs = 2500;
 
 let sourceTypes = [];
@@ -140,8 +141,7 @@ function switchView(viewId) {
     }
 
 async function testReadiness() {
-      const target = el("readinessStatus");
-      await runReadinessCheck(target);
+      await refreshHeaderReadiness(true);
     }
 async function fetchReadinessPing() {
       const controller = new AbortController();
@@ -152,7 +152,55 @@ async function fetchReadinessPing() {
         clearTimeout(timeout);
       }
     }
+function setHeaderReadiness(message, type = "") {
+      const target = el("headerReadinessStatus");
+      if (!target) return;
+      target.className = `header-readiness ${type}`.trim();
+      target.textContent = message;
+    }
+function setReadinessButtonDisabled(disabled) {
+      const button = el("testReadinessBtn");
+      if (!button) return;
+      button.disabled = Boolean(disabled);
+      button.title = disabled ? "ZIP reference data is already loaded." : "";
+    }
+function updateLoginButtonReferenceState() {
+      const loginButton = el("loginBtn");
+      if (!loginButton) return;
+      loginButton.className = `reference-login-button ${appReady ? "ready" : "warn"}`;
+      loginButton.disabled = false;
+    }
+async function refreshHeaderReadiness(force = false) {
+      if (readinessCheckInFlight && !force) return readinessCheckInFlight;
+      setHeaderReadiness("Checking ZIPs...", "warn");
+      setReadinessButtonDisabled(true);
+      readinessCheckInFlight = (async () => {
+        try {
+          const response = await fetch("/api/prepare");
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || "ZIP setup needs attention.");
+          appReady = true;
+          updateLoginButtonReferenceState();
+          setHeaderReadiness("ZIPs loaded", "ok");
+          setReadinessButtonDisabled(true);
+          return result;
+        } catch (error) {
+          appReady = false;
+          updateLoginButtonReferenceState();
+          setHeaderReadiness("ZIPs need attention", "error");
+          setReadinessButtonDisabled(false);
+          return null;
+        } finally {
+          readinessCheckInFlight = null;
+        }
+      })();
+      return readinessCheckInFlight;
+    }
 async function runReadinessCheck(target) {
+      if (!target) {
+        await refreshHeaderReadiness(true);
+        return;
+      }
       target.className = "status";
       target.textContent = "Checking readiness...";
       try {
@@ -162,7 +210,7 @@ async function runReadinessCheck(target) {
         appReady = true;
         updateLoginButtonReferenceState();
         target.className = "status ok";
-        target.textContent = "Ready.";
+        target.textContent = "Storage ready.";
       } catch (error) {
         appReady = false;
         updateLoginButtonReferenceState();
@@ -192,6 +240,7 @@ async function login() {
         el("loginScreen").classList.add("hidden");
         el("appShell").classList.remove("hidden");
         switchView("mapperView");
+        refreshHeaderReadiness();
         
         // Asynchronous non-blocking background data load
         loadAppData();
@@ -218,20 +267,8 @@ async function prepareReferenceData() {
       const loginButton = el("loginBtn");
       loginButton.className = "reference-login-button";
       loginButton.disabled = false;
-      try {
-        const pingRes = await fetchReadinessPing();
-        if (!pingRes.ok) throw new Error("Could not check readiness");
-        appReady = true;
-        loginButton.className = "reference-login-button ready";
-        loginButton.disabled = false;
-      } catch (error) {
-        appReady = false;
-        loginButton.className = "reference-login-button warn";
-        loginButton.disabled = false;
-        const target = el("loginReadinessStatus");
-        target.className = "status error";
-        target.textContent = "Setup is still finishing.";
-      }
+      loginButton.classList.add("ready");
+      appReady = true;
     }
 
 function logout() {
@@ -244,4 +281,3 @@ function logout() {
       el("appShell").classList.add("hidden");
       el("loginScreen").classList.remove("hidden");
     }
-

@@ -478,8 +478,6 @@ def _load_mapped_zip_demographics(zip_codes: set[str]) -> dict[str, Any]:
 
 
 def prepare_zipcodes() -> dict[str, Any]:
-    from google.cloud import bigquery
-
     started_at = perf_counter()
     project_id, dataset_id, credentials_json = _warehouse_settings()
     cache_key = (project_id, dataset_id)
@@ -497,7 +495,7 @@ def prepare_zipcodes() -> dict[str, Any]:
         LOGGER.info("zip_reference_timing phase=metadata_check elapsed_ms=%.1f rows=%d", (perf_counter() - metadata_started_at) * 1000, row_count)
         if row_count >= MINIMUM_US_ZIP_REFERENCE_ROWS:
             LOGGER.info("zip_reference_ready table=%s rows=%d", table_ref, row_count)
-            result = {"status": "ready", "rows": int(row_count), "loaded": False}
+            result = {"status": "ready", "rows": int(row_count), "loaded": True, "created": False, "source": "bronze_copy", "table": table_ref}
             ZIP_REFERENCE_CACHE[cache_key] = result
             LOGGER.info("zip_reference_timing phase=ready_total elapsed_ms=%.1f", (perf_counter() - started_at) * 1000)
             return dict(result)
@@ -509,20 +507,81 @@ def prepare_zipcodes() -> dict[str, Any]:
     with config_path.open("r", encoding="utf-8") as handle:
         config = json.load(handle)
     source = config.get("demographics_source", {})
-    source_project_id, source_credentials_json = resolve_bigquery_connection(source, {"_config_dir": str(config_path.parent)})
+    source_project_id, _source_credentials_json = resolve_bigquery_connection(source, {"_config_dir": str(config_path.parent)})
+    if source_project_id != project_id:
+        LOGGER.info("zip_reference_source_project source_project=%s target_project=%s", source_project_id, project_id)
     LOGGER.info("zip_reference_load_started table=%s", table_ref)
-    query_started_at = perf_counter()
-    demographics = fetch_bigquery_demographics(source_project_id, source["query"], source.get("name", "public_demographics"), source_credentials_json)
-    LOGGER.info("zip_reference_timing phase=source_query elapsed_ms=%.1f rows=%d", (perf_counter() - query_started_at) * 1000, len(demographics))
-    rows = {"us_zipcodes": build_table_rows([], demographics)["us_zipcodes"]}
-    load_started_at = perf_counter()
-    push_to_bigquery(project_id, dataset_id, rows, credentials_json, write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE)
-    LOGGER.info("zip_reference_timing phase=table_load elapsed_ms=%.1f rows=%d", (perf_counter() - load_started_at) * 1000, len(rows["us_zipcodes"]))
-    LOGGER.info("zip_reference_load_succeeded table=%s rows=%d", table_ref, len(rows["us_zipcodes"]))
-    result = {"status": "ready", "rows": len(rows["us_zipcodes"]), "loaded": True}
+    copy_started_at = perf_counter()
+    client.query(_zip_reference_copy_sql(table_ref, source["query"], source.get("name", "public_demographics"))).result()
+    LOGGER.info("zip_reference_timing phase=bq_copy elapsed_ms=%.1f", (perf_counter() - copy_started_at) * 1000)
+    copied = client.get_table(table_ref)
+    row_count = int(copied.num_rows or 0)
+    if row_count < MINIMUM_US_ZIP_REFERENCE_ROWS:
+        raise RuntimeError(f"US ZIP reference copy returned only {row_count} rows")
+    LOGGER.info("zip_reference_load_succeeded table=%s rows=%d", table_ref, row_count)
+    result = {"status": "ready", "rows": row_count, "loaded": True, "created": True, "source": "bronze_copy", "table": table_ref}
     ZIP_REFERENCE_CACHE[cache_key] = result
     LOGGER.info("zip_reference_timing phase=rebuild_total elapsed_ms=%.1f", (perf_counter() - started_at) * 1000)
     return dict(result)
+
+
+def _zip_reference_copy_sql(table_ref: str, source_query: str, source_name: str) -> str:
+    query = source_query.rstrip(";")
+    source_literal = json.dumps(source_name)
+    hash_fields = """
+        CAST(zip_code AS STRING) AS zip_code,
+        CAST(city_name AS STRING) AS city_name,
+        CAST(county AS STRING) AS county,
+        CAST(state_code AS STRING) AS state_code,
+        CAST(state_name AS STRING) AS state_name,
+        CAST(latitude AS STRING) AS latitude,
+        CAST(longitude AS STRING) AS longitude,
+        CAST(population AS STRING) AS population,
+        CAST(median_household_income AS STRING) AS median_household_income,
+        CAST(median_age AS STRING) AS median_age,
+        CAST(households AS STRING) AS households,
+        CAST(income_per_capita AS STRING) AS income_per_capita,
+        CAST(poverty AS STRING) AS poverty,
+        CAST(employed_population AS STRING) AS employed_population,
+        CAST(unemployed_population AS STRING) AS unemployed_population,
+        CAST(housing_units AS STRING) AS housing_units,
+        source AS source
+    """
+    return f"""
+    CREATE OR REPLACE TABLE `{table_ref}`
+    CLUSTER BY state_code, county, zip_code
+    AS
+    WITH source_zips AS (
+      {query}
+    ),
+    normalized AS (
+      SELECT
+        LPAD(SUBSTR(CAST(zip_code AS STRING), 1, 5), 5, '0') AS zip_code,
+        CAST(city AS STRING) AS city_name,
+        CAST(county AS STRING) AS county,
+        UPPER(TRIM(CAST(state_code AS STRING))) AS state_code,
+        CAST(state_name AS STRING) AS state_name,
+        SAFE_CAST(latitude AS FLOAT64) AS latitude,
+        SAFE_CAST(longitude AS FLOAT64) AS longitude,
+        SAFE_CAST(population AS FLOAT64) AS population,
+        SAFE_CAST(median_household_income AS FLOAT64) AS median_household_income,
+        SAFE_CAST(median_age AS FLOAT64) AS median_age,
+        SAFE_CAST(households AS FLOAT64) AS households,
+        SAFE_CAST(income_per_capita AS FLOAT64) AS income_per_capita,
+        SAFE_CAST(poverty AS FLOAT64) AS poverty,
+        SAFE_CAST(employed_population AS FLOAT64) AS employed_population,
+        SAFE_CAST(unemployed_population AS FLOAT64) AS unemployed_population,
+        SAFE_CAST(housing_units AS FLOAT64) AS housing_units,
+        {source_literal} AS source
+      FROM source_zips
+      WHERE zip_code IS NOT NULL
+    )
+    SELECT
+      *,
+      TO_HEX(SHA256(TO_JSON_STRING(STRUCT({hash_fields})))) AS content_hash
+    FROM normalized
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY zip_code ORDER BY population DESC NULLS LAST) = 1
+    """
 
 
 def _dominos_zip_codes(client: Any, project_id: str, dataset_id: str, limit: int | None) -> list[str]:
@@ -611,25 +670,47 @@ def test_storage_connection() -> dict[str, Any]:
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
     _ensure_dataset(client, project_id, dataset_id)
+    health = _write_connection_health_probe(client, project_id, dataset_id)
+    zips = prepare_zipcodes()
     probe = list(client.query("SELECT 1 AS ok").result())
     if not probe or probe[0]["ok"] != 1:
         raise RuntimeError("Workspace readiness check did not return the expected result")
     return {
         "ok": True,
         "status": "ready",
+        "health": health,
+        "zips": zips,
     }
 
 
 def ping_storage_connection() -> dict[str, Any]:
-    project_id, _dataset_id, credentials_json = _warehouse_settings()
+    project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
+    _ensure_dataset(client, project_id, dataset_id)
+    health = _write_connection_health_probe(client, project_id, dataset_id)
     probe = list(client.query("SELECT 1 AS ok").result())
     if not probe or probe[0]["ok"] != 1:
         raise RuntimeError("Readiness check did not return the expected result")
     return {
         "ok": True,
         "status": "ready",
+        "health": health,
     }
+
+
+def _write_connection_health_probe(client: Any, project_id: str, dataset_id: str) -> dict[str, Any]:
+    table_ref = f"{project_id}.{dataset_id}.connection_health"
+    client.query(f"""
+    CREATE OR REPLACE TABLE `{table_ref}` AS
+    SELECT
+      'storage_connection' AS probe_name,
+      CURRENT_TIMESTAMP() AS checked_at,
+      1 AS ok
+    """).result()
+    rows = list(client.query(f"SELECT ok FROM `{table_ref}` LIMIT 1").result())
+    if not rows or rows[0]["ok"] != 1:
+        raise RuntimeError("Connection health probe table did not return the expected row")
+    return {"table": table_ref, "rows": 1}
 
 
 def _ensure_businesses_table(client: Any, project_id: str, dataset_id: str) -> None:
@@ -936,6 +1017,30 @@ def _reset_sample_data(client: Any, project_id: str, dataset_id: str) -> None:
                 raise
 
 
+def sample_dataset_status() -> dict[str, Any]:
+    if not _sample_loader_enabled():
+        return {"enabled": False, "loaded": False, "message": "Sample dataset loader is disabled for this environment"}
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    try:
+        counts = _sample_data_status(client, project_id, dataset_id)
+    except Exception as exc:
+        if getattr(exc, "code", None) == 404:
+            counts = {"businesses": 0, "listings": 0, "workflow_templates": 0, "error_listings": 0}
+        else:
+            raise
+    loaded = bool(counts["businesses"] and counts["listings"] and counts["workflow_templates"])
+    return {
+        "enabled": True,
+        "loaded": loaded,
+        "sample_batch_id": SAMPLE_BATCH_ID,
+        "businesses": counts["businesses"],
+        "locations": counts["listings"],
+        "templates": counts["workflow_templates"],
+        "errors": counts["error_listings"],
+    }
+
+
 def load_sample_dataset(reset: bool = False) -> dict[str, Any]:
     if not _sample_loader_enabled():
         raise ValueError("Sample dataset loader is disabled for this environment")
@@ -945,6 +1050,7 @@ def load_sample_dataset(reset: bool = False) -> dict[str, Any]:
     _ensure_businesses_table(client, project_id, dataset_id)
     _ensure_source_types_table(client, project_id, dataset_id)
     _ensure_workflow_templates_table(client, project_id, dataset_id)
+    zip_result = prepare_zipcodes()
     if reset:
         _reset_sample_data(client, project_id, dataset_id)
     else:
@@ -962,6 +1068,7 @@ def load_sample_dataset(reset: bool = False) -> dict[str, Any]:
                 "businesses": sample_status["businesses"],
                 "locations": sample_status["listings"],
                 "errors": sample_status["error_listings"],
+                "zips": zip_result,
                 "silver": silver_result,
             }
         if sample_status["businesses"] or sample_status["listings"] or sample_status["workflow_templates"] or sample_status["error_listings"]:
@@ -994,6 +1101,7 @@ def load_sample_dataset(reset: bool = False) -> dict[str, Any]:
             "message": "All sample brands are already loaded.",
             "businesses": len(SAMPLE_BRANDS),
             "loaded_new": 0,
+            "zips": zip_result,
             "silver": silver_result,
         }
 
@@ -1032,6 +1140,7 @@ def load_sample_dataset(reset: bool = False) -> dict[str, Any]:
         "errors": 0,
         "countries": set(),
         "source_types": {},
+        "zips": zip_result,
     }
     for brand in brands_to_load:
         business_id = stable_business_id(brand.key)
@@ -1076,6 +1185,15 @@ def load_sample_dataset(reset: bool = False) -> dict[str, Any]:
 
 def _csv_param(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _safe_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 # Shared metric formulas reused across geo (state), brand, and brand-location
@@ -1396,6 +1514,13 @@ def build_gold_layer() -> dict[str, Any]:
     brand_view = f"{gold_ref}.vw_brand_summary"
     quality_view = f"{gold_ref}.vw_listing_quality_summary"
     geo_view = f"{gold_ref}.vw_geo_reference"
+    location_view = f"{gold_ref}.vw_reporting_locations"
+    totals_view = f"{gold_ref}.vw_reporting_totals"
+    filters_view = f"{gold_ref}.vw_reporting_filter_options"
+    state_brand_view = f"{gold_ref}.vw_reporting_state_brand"
+    city_brand_view = f"{gold_ref}.vw_reporting_city_brand"
+    zip_summary_view = f"{gold_ref}.vw_reporting_zip_summary"
+    gap_base_view = f"{gold_ref}.vw_reporting_gap_base"
 
     client.query(f"""
     CREATE OR REPLACE VIEW `{zip_brand_view}` AS
@@ -1482,12 +1607,152 @@ def build_gold_layer() -> dict[str, Any]:
     WHERE state_code IS NOT NULL AND state_code != ''
     """).result()
 
+    client.query(f"""
+    CREATE OR REPLACE VIEW `{location_view}` AS
+    SELECT
+      l.listing_id,
+      l.business_id,
+      l.brand_name AS brand,
+      l.name,
+      l.address,
+      l.city_name,
+      l.state_code,
+      l.state_name,
+      l.county,
+      l.zip_code,
+      l.phone_number,
+      l.latitude,
+      l.longitude,
+      l.coordinate_source,
+      l.coordinate_confidence,
+      l.country,
+      l.last_observed_at,
+      z.population,
+      z.median_household_income,
+      z.median_age
+    FROM `{enriched_table}` l
+    LEFT JOIN `{silver_ref}.zip_reference` z ON l.zip_code = z.zip_code
+    WHERE l.listing_id IS NOT NULL
+    """).result()
+
+    client.query(f"""
+    CREATE OR REPLACE VIEW `{totals_view}` AS
+    SELECT
+      COUNT(DISTINCT zip_code) AS total_zips,
+      COUNT(DISTINCT state_code) AS total_states,
+      COUNT(DISTINCT city_name) AS total_cities,
+      COUNT(DISTINCT IF(brand_name IS NOT NULL AND location_count > 0, brand_name, NULL)) AS total_brands,
+      COALESCE(SUM(location_count), 0) AS total_stores,
+      COUNT(DISTINCT IF(brand_name IS NOT NULL AND location_count > 0, zip_code, NULL)) AS active_market_locations,
+      COUNT(DISTINCT IF(brand_name IS NOT NULL AND location_count > 0, state_code, NULL)) AS active_brand_states,
+      COUNT(DISTINCT IF(brand_name IS NOT NULL AND location_count > 0, city_name, NULL)) AS active_brand_cities,
+      MAX(last_observed_at) AS last_updated
+    FROM `{zip_brand_view}`
+    """).result()
+
+    client.query(f"""
+    CREATE OR REPLACE VIEW `{filters_view}` AS
+    SELECT 'brand' AS filter_type, brand_name AS filter_value, brand_name AS filter_label,
+      CAST(NULL AS STRING) AS state_code, CAST(NULL AS STRING) AS county, CAST(NULL AS STRING) AS city_name, CAST(NULL AS STRING) AS zip_code
+    FROM `{brand_view}`
+    UNION DISTINCT
+    SELECT 'brand', name, name, CAST(NULL AS STRING), CAST(NULL AS STRING), CAST(NULL AS STRING), CAST(NULL AS STRING)
+    FROM `{bronze_ref}.businesses`
+    WHERE is_deleted IS NOT TRUE AND COALESCE(status, 'active') = 'active'
+    UNION ALL
+    SELECT DISTINCT 'state', state_code, COALESCE(state_name, state_code), state_code, CAST(NULL AS STRING), CAST(NULL AS STRING), CAST(NULL AS STRING)
+    FROM `{zip_brand_view}` WHERE state_code IS NOT NULL
+    UNION ALL
+    SELECT DISTINCT 'county', county, county, state_code, county, CAST(NULL AS STRING), CAST(NULL AS STRING)
+    FROM `{zip_brand_view}` WHERE county IS NOT NULL
+    UNION ALL
+    SELECT DISTINCT 'city', city_name, city_name, state_code, county, city_name, CAST(NULL AS STRING)
+    FROM `{zip_brand_view}` WHERE city_name IS NOT NULL
+    UNION ALL
+    SELECT DISTINCT 'zip', zip_code, zip_code, state_code, county, city_name, zip_code
+    FROM `{zip_brand_view}` WHERE zip_code IS NOT NULL
+    """).result()
+
+    client.query(f"""
+    CREATE OR REPLACE VIEW `{state_brand_view}` AS
+    SELECT
+      state_code,
+      state_name,
+      brand_name,
+      SUM(location_count) AS location_count,
+      COUNT(DISTINCT county) AS county_count,
+      COUNT(DISTINCT city_name) AS city_count,
+      COUNT(DISTINCT zip_code) AS zip_count,
+      SUM(COALESCE(population, 0)) AS market_population
+    FROM `{zip_brand_view}`
+    GROUP BY state_code, state_name, brand_name
+    """).result()
+
+    client.query(f"""
+    CREATE OR REPLACE VIEW `{city_brand_view}` AS
+    SELECT
+      state_code,
+      state_name,
+      county,
+      city_name,
+      brand_name,
+      SUM(location_count) AS location_count,
+      COUNT(DISTINCT zip_code) AS zip_count,
+      SUM(COALESCE(population, 0)) AS market_population
+    FROM `{zip_brand_view}`
+    GROUP BY state_code, state_name, county, city_name, brand_name
+    """).result()
+
+    client.query(f"""
+    CREATE OR REPLACE VIEW `{zip_summary_view}` AS
+    SELECT
+      zip_code,
+      ANY_VALUE(state_code) AS state_code,
+      ANY_VALUE(state_name) AS state_name,
+      ANY_VALUE(county) AS county,
+      ANY_VALUE(city_name) AS city_name,
+      ANY_VALUE(population) AS population,
+      ANY_VALUE(median_household_income) AS median_household_income,
+      ANY_VALUE(median_age) AS median_age,
+      ANY_VALUE(latitude) AS latitude,
+      ANY_VALUE(longitude) AS longitude,
+      COUNT(DISTINCT IF(brand_name IS NOT NULL AND location_count > 0, brand_name, NULL)) AS active_brand_count,
+      COALESCE(SUM(location_count), 0) AS store_count,
+      MAX(last_observed_at) AS last_observed_at
+    FROM `{zip_brand_view}`
+    GROUP BY zip_code
+    """).result()
+
+    client.query(f"""
+    CREATE OR REPLACE VIEW `{gap_base_view}` AS
+    SELECT
+      z.zip_code,
+      z.state_code,
+      z.state_name,
+      z.county,
+      z.city_name,
+      z.population,
+      z.median_household_income,
+      z.median_age,
+      z.latitude,
+      z.longitude,
+      a.brand_name,
+      COALESCE(a.location_count, 0) AS location_count
+    FROM `{zip_summary_view}` z
+    LEFT JOIN `{zip_brand_view}` a ON z.zip_code = a.zip_code
+    """).result()
+
     invalidate_cache()
+    views = [
+        zip_brand_view, state_view, city_view, brand_view, quality_view, geo_view,
+        location_view, totals_view, filters_view, state_brand_view, city_brand_view,
+        zip_summary_view, gap_base_view,
+    ]
     return {
         "bronze_dataset": bronze_ref,
         "silver_dataset": silver_ref,
         "gold_dataset": gold_ref,
-        "views": [zip_brand_view, state_view, city_view, brand_view, quality_view, geo_view],
+        "views": views,
     }
 
 
@@ -1559,6 +1824,35 @@ def _start_silver_gold_scheduler() -> None:
     threading.Thread(target=run_forever, name="silver-gold-hourly-refresh", daemon=True).start()
 
 
+def _ensure_gold_reporting_views(client: Any, gold_ref: str) -> bool:
+    required_views = (
+        "vw_zip_brand_activity",
+        "vw_state_summary",
+        "vw_city_summary",
+        "vw_brand_summary",
+        "vw_listing_quality_summary",
+        "vw_geo_reference",
+        "vw_reporting_locations",
+        "vw_reporting_totals",
+        "vw_reporting_filter_options",
+        "vw_reporting_state_brand",
+        "vw_reporting_city_brand",
+        "vw_reporting_zip_summary",
+        "vw_reporting_gap_base",
+    )
+    try:
+        for view_name in required_views:
+            client.get_table(f"{gold_ref}.{view_name}")
+        return False
+    except Exception as exc:
+        if getattr(exc, "code", None) != 404:
+            raise
+    prepare_zipcodes()
+    build_silver_layer()
+    build_gold_layer()
+    return True
+
+
 def _empty_reporting_payload(source_table: str, params: dict[str, list[str]], warning: str = "") -> dict[str, Any]:
     return {
         "source_table": source_table,
@@ -1572,6 +1866,9 @@ def _empty_reporting_payload(source_table: str, params: dict[str, list[str]], wa
             "county": str(params.get("county", [""])[0]).strip(),
             "city": str(params.get("city", [""])[0]).strip(),
             "zip": str(params.get("zip", [""])[0]).strip(),
+            "min_population": _safe_float(params.get("min_population", [""])[0]),
+            "min_income": _safe_float(params.get("min_income", [""])[0]),
+            "max_median_age": _safe_float(params.get("max_median_age", [""])[0]),
         },
         "filter_options": {"brands": [], "states": [], "counties": [], "cities": [], "zips": []},
         "totals": {
@@ -1580,6 +1877,10 @@ def _empty_reporting_payload(source_table: str, params: dict[str, list[str]], wa
             "total_states": 0,
             "total_cities": 0,
             "total_zips": 0,
+            "total_stores": 0,
+            "active_market_locations": 0,
+            "active_brand_states": 0,
+            "active_brand_cities": 0,
             "last_updated": None,
         },
         "top_states": [],
@@ -1607,15 +1908,24 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         project_id, bronze_dataset_id, silver_dataset_id, gold_dataset_id, credentials_json = _medallion_settings()
         client = _bigquery_client(project_id, credentials_json)
         _ensure_businesses_table(client, project_id, bronze_dataset_id)
-        source_table = os.environ.get("REPORTING_LISTINGS_TABLE") or f"{project_id}.{silver_dataset_id}.listings_enriched"
+        gold_ref = f"{project_id}.{gold_dataset_id}"
+        gold_bootstrapped = _ensure_gold_reporting_views(client, gold_ref)
+        source_table = os.environ.get("REPORTING_LISTINGS_TABLE") or f"{gold_ref}.vw_zip_brand_activity"
         if source_table.count(".") == 1:
             source_table = f"{project_id}.{source_table}"
-        gold_ref = f"{project_id}.{gold_dataset_id}"
     except (ImportError, Exception) as init_err:
         LOGGER.warning("bigquery_reporting_fallback reason=%s", init_err)
         return _empty_reporting_payload("us_zipcodes_baseline", params, "Connected to geographic baseline data.")
     table_ref = f"`{source_table}`"
-    zip_ref = f"`{project_id}.{bronze_dataset_id}.us_zipcodes`"
+    gold_zip_ref = f"`{gold_ref}.vw_zip_brand_activity`"
+    gold_state_ref = f"`{gold_ref}.vw_state_summary`"
+    gold_city_ref = f"`{gold_ref}.vw_city_summary`"
+    gold_brand_ref = f"`{gold_ref}.vw_brand_summary`"
+    gold_quality_ref = f"`{gold_ref}.vw_listing_quality_summary`"
+    gold_location_ref = f"`{gold_ref}.vw_reporting_locations`"
+    gold_filters_ref = f"`{gold_ref}.vw_reporting_filter_options`"
+    gold_gap_ref = f"`{gold_ref}.vw_reporting_gap_base`"
+    zip_ref = gold_zip_ref
     refresh_started = _refresh_silver_background()
     
     main_brands = _csv_param(params.get("main_brands", [""])[0])
@@ -1628,6 +1938,9 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
     county_filter = str(params.get("county", [""])[0]).strip()
     city_filter = str(params.get("city", [""])[0]).strip()
     zip_filter = str(params.get("zip", [""])[0]).strip()
+    min_population = _safe_float(params.get("min_population", [""])[0])
+    min_income = _safe_float(params.get("min_income", [""])[0])
+    max_median_age = _safe_float(params.get("max_median_age", [""])[0])
     
     query_params: list[Any] = [
         bigquery.ArrayQueryParameter("selected_brands", "STRING", selected_brands),
@@ -1637,50 +1950,56 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         bigquery.ScalarQueryParameter("county", "STRING", county_filter),
         bigquery.ScalarQueryParameter("city", "STRING", city_filter),
         bigquery.ScalarQueryParameter("zip", "STRING", zip_filter),
+        bigquery.ScalarQueryParameter("min_population", "FLOAT64", min_population),
+        bigquery.ScalarQueryParameter("min_income", "FLOAT64", min_income),
+        bigquery.ScalarQueryParameter("max_median_age", "FLOAT64", max_median_age),
     ]
     job_config = bigquery.QueryJobConfig(query_parameters=query_params)
     
-    # Base CTE starts FROM us_zipcodes z as authoritative geographic source, LEFT JOINing silver listings l
+    # Base CTE starts from the gold ZIP/brand activity view. Silver owns
+    # enrichment; gold owns reporting shape.
     base_cte = f"""
     WITH base AS (
       SELECT
-        z.zip_code,
-        z.city_name AS zip_city,
-        z.state_code AS zip_state,
-        z.state_name AS zip_state_name,
-        z.county AS county,
-        z.population,
-        z.median_household_income,
-        z.median_age,
-        z.latitude AS zip_latitude,
-        z.longitude AS zip_longitude,
-        l.listing_id,
-        l.business_id,
-        COALESCE(l.brand_name, l.business_id) AS brand,
-        COALESCE(l.name, l.brand_name) AS name,
-        l.address,
-        COALESCE(l.city_name, z.city_name) AS city_name,
-        COALESCE(l.state_code, z.state_code) AS state_code,
-        COALESCE(l.state_name, z.state_name) AS state_name,
-        l.phone_number,
-        COALESCE(l.latitude, z.latitude) AS latitude,
-        COALESCE(l.longitude, z.longitude) AS longitude,
-        CASE WHEN l.latitude IS NOT NULL AND l.longitude IS NOT NULL THEN 'source_listing' WHEN z.latitude IS NOT NULL AND z.longitude IS NOT NULL THEN 'zip_centroid' ELSE 'unresolved' END AS coordinate_source,
-        CASE WHEN l.latitude IS NOT NULL AND l.longitude IS NOT NULL THEN 1.0 WHEN z.latitude IS NOT NULL AND z.longitude IS NOT NULL THEN 0.75 ELSE 0.0 END AS coordinate_confidence,
-        COALESCE(l.country, 'United States') AS country,
-        l.last_observed_at
-      FROM {zip_ref} z
-      LEFT JOIN {table_ref} l
-        ON z.zip_code = l.zip_code
-        AND (ARRAY_LENGTH(@selected_brands) = 0 OR COALESCE(l.brand_name, l.business_id) IN UNNEST(@selected_brands))
-      WHERE (@state = '' OR UPPER(z.state_code) = @state)
-        AND (@county = '' OR LOWER(COALESCE(z.county, '')) = LOWER(@county))
-        AND (@city = '' OR LOWER(COALESCE(z.city_name, '')) = LOWER(@city) OR LOWER(COALESCE(l.city_name, '')) = LOWER(@city))
-        AND (@zip = '' OR z.zip_code = @zip)
+        zip_code,
+        city_name AS zip_city,
+        state_code AS zip_state,
+        state_name AS zip_state_name,
+        county,
+        population,
+        median_household_income,
+        median_age,
+        latitude AS zip_latitude,
+        longitude AS zip_longitude,
+        IF(location_count > 0, CONCAT(COALESCE(brand_name, ''), '|', zip_code), NULL) AS listing_id,
+        CAST(NULL AS STRING) AS business_id,
+        brand_name AS brand,
+        brand_name AS name,
+        CAST(NULL AS STRING) AS address,
+        city_name,
+        state_code,
+        state_name,
+        CAST(NULL AS STRING) AS phone_number,
+        latitude,
+        longitude,
+        'gold_zip_brand_activity' AS coordinate_source,
+        1.0 AS coordinate_confidence,
+        'United States' AS country,
+        last_observed_at,
+        location_count
+      FROM {table_ref}
+      WHERE (@state = '' OR UPPER(state_code) = @state)
+        AND (@county = '' OR LOWER(COALESCE(county, '')) = LOWER(@county))
+        AND (@city = '' OR LOWER(COALESCE(city_name, '')) = LOWER(@city))
+        AND (@zip = '' OR zip_code = @zip)
+        AND (ARRAY_LENGTH(@selected_brands) = 0 OR brand_name IN UNNEST(@selected_brands))
+        AND (@min_population IS NULL OR COALESCE(population, 0) >= @min_population)
+        AND (@min_income IS NULL OR COALESCE(median_household_income, 0) >= @min_income)
+        AND (@max_median_age IS NULL OR COALESCE(median_age, 0) <= @max_median_age)
         AND (
-          COALESCE(l.latitude, z.latitude) IS NULL OR (
-            COALESCE(l.latitude, z.latitude) BETWEEN 13.0 AND 72.0 AND (
-              (COALESCE(l.longitude, z.longitude) BETWEEN -180.0 AND -64.0) OR (COALESCE(l.longitude, z.longitude) BETWEEN 144.0 AND 146.0)
+          latitude IS NULL OR (
+            latitude BETWEEN 13.0 AND 72.0 AND (
+              (longitude BETWEEN -180.0 AND -64.0) OR (longitude BETWEEN 144.0 AND 146.0)
             )
           )
         )
@@ -1689,14 +2008,15 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
 
     totals_query = base_cte + f"""
     SELECT
-      COALESCE(NULLIF(COUNT(DISTINCT listing_id), 0), COUNT(DISTINCT zip_code)) AS total_locations,
-      COALESCE(
-        NULLIF(COUNT(DISTINCT brand), 0),
-        (SELECT COUNT(DISTINCT name) FROM `{project_id}.{bronze_dataset_id}.businesses` WHERE is_deleted IS NOT TRUE AND COALESCE(status, 'active') = 'active')
-      ) AS total_brands,
       COUNT(DISTINCT zip_state) AS total_states,
-      COUNT(DISTINCT zip_city) AS total_cities,
       COUNT(DISTINCT zip_code) AS total_zips,
+      (SELECT COUNT(DISTINCT brand_name) FROM {gold_brand_ref}) AS total_brands,
+      COALESCE(SUM(location_count), 0) AS total_stores,
+      COUNT(DISTINCT IF(location_count > 0 AND brand IS NOT NULL, zip_code, NULL)) AS active_market_locations,
+      COUNT(DISTINCT IF(location_count > 0 AND brand IS NOT NULL, zip_state, NULL)) AS active_brand_states,
+      COUNT(DISTINCT IF(location_count > 0 AND brand IS NOT NULL, zip_city, NULL)) AS active_brand_cities,
+      COUNT(DISTINCT IF(location_count > 0, listing_id, NULL)) AS total_locations,
+      COUNT(DISTINCT zip_city) AS total_cities,
       MAX(last_observed_at) AS last_updated
     FROM base
     """
@@ -1735,7 +2055,7 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
     brand_query = base_cte + """
     SELECT
       brand,
-      COUNT(DISTINCT listing_id) AS locations,
+      SUM(location_count) AS locations,
       COUNT(DISTINCT zip_state) AS states,
       COUNT(DISTINCT county) AS counties,
       COUNT(DISTINCT zip_city) AS cities,
@@ -1749,42 +2069,36 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
     filter_options_query = f"""
     SELECT
       (
-        SELECT ARRAY_AGG(DISTINCT brand IGNORE NULLS ORDER BY brand)
-        FROM (
-          SELECT name AS brand
-          FROM `{project_id}.{bronze_dataset_id}.businesses`
-          WHERE is_deleted IS NOT TRUE AND COALESCE(status, 'active') = 'active'
-          UNION DISTINCT
-          SELECT COALESCE(brand_name, business_id) AS brand
-          FROM {table_ref}
-          WHERE listing_id IS NOT NULL
-        )
+        SELECT ARRAY_AGG(DISTINCT filter_value IGNORE NULLS ORDER BY filter_value)
+        FROM {gold_filters_ref}
+        WHERE filter_type = 'brand'
       ) AS brands,
-      ARRAY_AGG(DISTINCT state_code IGNORE NULLS ORDER BY state_code) AS states,
-      ARRAY_AGG(DISTINCT county IGNORE NULLS ORDER BY county LIMIT 500) AS counties,
-      ARRAY_AGG(DISTINCT city_name IGNORE NULLS ORDER BY city_name LIMIT 500) AS cities,
-      ARRAY_AGG(DISTINCT zip_code IGNORE NULLS ORDER BY zip_code LIMIT 500) AS zips
-    FROM {zip_ref}
+      (SELECT ARRAY_AGG(DISTINCT filter_value IGNORE NULLS ORDER BY filter_value) FROM {gold_filters_ref} WHERE filter_type = 'state') AS states,
+      (SELECT ARRAY_AGG(DISTINCT filter_value IGNORE NULLS ORDER BY filter_value LIMIT 500) FROM {gold_filters_ref} WHERE filter_type = 'county') AS counties,
+      (SELECT ARRAY_AGG(DISTINCT filter_value IGNORE NULLS ORDER BY filter_value LIMIT 500) FROM {gold_filters_ref} WHERE filter_type = 'city') AS cities,
+      (SELECT ARRAY_AGG(DISTINCT filter_value IGNORE NULLS ORDER BY filter_value LIMIT 500) FROM {gold_filters_ref} WHERE filter_type = 'zip') AS zips
     """
     gap_query = f"""
     WITH grouped AS (
       SELECT
-        z.state_code AS state,
-        z.state_name AS state_name,
-        z.county,
-        z.city_name AS city,
-        z.zip_code,
-        ARRAY_AGG(DISTINCT COALESCE(l.brand_name, l.business_id) IGNORE NULLS ORDER BY COALESCE(l.brand_name, l.business_id)) AS brands_present,
-        COUNTIF(COALESCE(l.brand_name, l.business_id) IN UNNEST(@main_brands)) AS subject_stores,
-        COUNTIF(COALESCE(l.brand_name, l.business_id) IN UNNEST(@competitor_brands)) AS competitor_stores,
-        ARRAY_AGG(DISTINCT CASE WHEN COALESCE(l.brand_name, l.business_id) IN UNNEST(@competitor_brands) THEN COALESCE(l.brand_name, l.business_id) ELSE NULL END IGNORE NULLS) AS competitor_brands_present
-      FROM {zip_ref} z
-      LEFT JOIN {table_ref} l ON z.zip_code = l.zip_code AND l.listing_id IS NOT NULL
-      WHERE (@state = '' OR UPPER(z.state_code) = @state)
-        AND (@county = '' OR LOWER(COALESCE(z.county, '')) = LOWER(@county))
-        AND (@city = '' OR LOWER(COALESCE(z.city_name, '')) = LOWER(@city))
-        AND (@zip = '' OR z.zip_code = @zip)
-      GROUP BY state, state_name, county, city, z.zip_code
+        state_code AS state,
+        state_name AS state_name,
+        county,
+        city_name AS city,
+        zip_code,
+        ARRAY_AGG(DISTINCT brand_name IGNORE NULLS ORDER BY brand_name) AS brands_present,
+        SUM(IF(brand_name IN UNNEST(@main_brands), location_count, 0)) AS subject_stores,
+        SUM(IF(brand_name IN UNNEST(@competitor_brands), location_count, 0)) AS competitor_stores,
+        ARRAY_AGG(DISTINCT IF(brand_name IN UNNEST(@competitor_brands), brand_name, NULL) IGNORE NULLS) AS competitor_brands_present
+      FROM {gold_gap_ref}
+      WHERE (@state = '' OR UPPER(state_code) = @state)
+        AND (@county = '' OR LOWER(COALESCE(county, '')) = LOWER(@county))
+        AND (@city = '' OR LOWER(COALESCE(city_name, '')) = LOWER(@city))
+        AND (@zip = '' OR zip_code = @zip)
+        AND (@min_population IS NULL OR COALESCE(population, 0) >= @min_population)
+        AND (@min_income IS NULL OR COALESCE(median_household_income, 0) >= @min_income)
+        AND (@max_median_age IS NULL OR COALESCE(median_age, 0) <= @max_median_age)
+      GROUP BY state, state_name, county, city, zip_code
     )
     SELECT
       g.state,
@@ -1815,12 +2129,18 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         ELSE 'None'
       END AS competition_level
     FROM grouped g
-    LEFT JOIN {zip_ref} z ON g.zip_code = z.zip_code
+    LEFT JOIN (
+      SELECT zip_code, ANY_VALUE(latitude) AS latitude, ANY_VALUE(longitude) AS longitude,
+        ANY_VALUE(population) AS population, ANY_VALUE(median_household_income) AS median_household_income,
+        ANY_VALUE(median_age) AS median_age
+      FROM {gold_gap_ref}
+      GROUP BY zip_code
+    ) z ON g.zip_code = z.zip_code
     WHERE (@state = '' OR UPPER(g.state) = @state)
     ORDER BY g.competitor_stores DESC, z.population DESC
     LIMIT 1000
     """
-    map_query = base_cte + """
+    map_query = f"""
     SELECT
       brand,
       name,
@@ -1833,13 +2153,21 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
       phone_number,
       latitude,
       longitude
-    FROM base
-    WHERE listing_id IS NOT NULL AND latitude IS NOT NULL AND longitude IS NOT NULL
+    FROM {gold_location_ref}
+    WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+      AND (@state = '' OR UPPER(state_code) = @state)
+      AND (@county = '' OR LOWER(COALESCE(county, '')) = LOWER(@county))
+      AND (@city = '' OR LOWER(COALESCE(city_name, '')) = LOWER(@city))
+      AND (@zip = '' OR zip_code = @zip)
+      AND (ARRAY_LENGTH(@selected_brands) = 0 OR brand IN UNNEST(@selected_brands))
+      AND (@min_population IS NULL OR COALESCE(population, 0) >= @min_population)
+      AND (@min_income IS NULL OR COALESCE(median_household_income, 0) >= @min_income)
+      AND (@max_median_age IS NULL OR COALESCE(median_age, 0) <= @max_median_age)
       AND (latitude BETWEEN 13.0 AND 72.0)
       AND ((longitude BETWEEN -180.0 AND -64.0) OR (longitude BETWEEN 144.0 AND 146.0))
     LIMIT 1000
     """
-    sample_query = base_cte + """
+    sample_query = f"""
     SELECT
       name,
       address,
@@ -1853,7 +2181,15 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
       longitude,
       country,
       last_observed_at
-    FROM base
+    FROM {gold_location_ref}
+    WHERE (@state = '' OR UPPER(state_code) = @state)
+      AND (@county = '' OR LOWER(COALESCE(county, '')) = LOWER(@county))
+      AND (@city = '' OR LOWER(COALESCE(city_name, '')) = LOWER(@city))
+      AND (@zip = '' OR zip_code = @zip)
+      AND (ARRAY_LENGTH(@selected_brands) = 0 OR brand IN UNNEST(@selected_brands))
+      AND (@min_population IS NULL OR COALESCE(population, 0) >= @min_population)
+      AND (@min_income IS NULL OR COALESCE(median_household_income, 0) >= @min_income)
+      AND (@max_median_age IS NULL OR COALESCE(median_age, 0) <= @max_median_age)
     ORDER BY last_observed_at DESC, name
     LIMIT 10
     """
@@ -1864,13 +2200,12 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
     # "looks healthy" placeholder.
     data_quality_query = f"""
     SELECT
-      COUNT(*) AS total_rows,
-      COUNTIF(latitude IS NOT NULL AND longitude IS NOT NULL) AS with_coordinates,
-      COUNTIF(zip_code IS NOT NULL AND zip_code != '') AS with_zip,
-      COUNT(DISTINCT CONCAT(COALESCE(brand_name, ''), '|', COALESCE(zip_code, ''), '|', COALESCE(address, ''))) AS distinct_rows,
+      MAX(total_rows) AS total_rows,
+      MAX(with_coordinates) AS with_coordinates,
+      MAX(with_zip) AS with_zip,
+      MAX(distinct_rows) AS distinct_rows,
       MAX(last_observed_at) AS last_observed_at
-    FROM {table_ref}
-    WHERE (ARRAY_LENGTH(@selected_brands) = 0 OR COALESCE(brand_name, business_id) IN UNNEST(@selected_brands))
+    FROM {gold_quality_ref}
     """
 
     def zip_only_payload(warning: str) -> dict[str, Any]:
@@ -1887,6 +2222,10 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
           COUNT(DISTINCT state_code) AS total_states,
           COUNT(DISTINCT city_name) AS total_cities,
           COUNT(DISTINCT zip_code) AS total_zips,
+          0 AS total_stores,
+          0 AS active_market_locations,
+          0 AS active_brand_states,
+          0 AS active_brand_cities,
           NULL AS last_updated
         FROM {zip_ref}
         {zip_where}
@@ -2223,6 +2562,9 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
             "county": county_filter,
             "city": city_filter,
             "zip": zip_filter,
+            "min_population": min_population,
+            "min_income": min_income,
+            "max_median_age": max_median_age,
             "tolerance_pct": int(tolerance_pct * 100),
         },
         "filter_options": filter_options,
@@ -2801,6 +3143,12 @@ def make_handler(ui_dir: Path):
                 city = params.get("city", [""])[0]
                 try:
                     _json_response(self, 200, search_zips(q, state, county, city))
+                except Exception as exc:
+                    _json_response(self, 400, {"error": str(exc)})
+                return
+            if self.path == "/api/sample/status":
+                try:
+                    _json_response(self, 200, sample_dataset_status())
                 except Exception as exc:
                     _json_response(self, 400, {"error": str(exc)})
                 return

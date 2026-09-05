@@ -28,7 +28,7 @@ class _FakeClient:
 
 
 class GoldLayerTests(unittest.TestCase):
-    def test_build_gold_layer_creates_all_five_views_over_silver(self) -> None:
+    def test_build_gold_layer_creates_reporting_views_over_silver(self) -> None:
         client = _FakeClient()
 
         with patch.object(workflow_server, "_medallion_settings", return_value=("project", "bronze", "silver", "gold", None)):
@@ -43,8 +43,15 @@ class GoldLayerTests(unittest.TestCase):
         self.assertIn("CREATE OR REPLACE VIEW `project.gold.vw_brand_summary`", sql)
         self.assertIn("CREATE OR REPLACE VIEW `project.gold.vw_listing_quality_summary`", sql)
         self.assertIn("CREATE OR REPLACE VIEW `project.gold.vw_geo_reference`", sql)
+        self.assertIn("CREATE OR REPLACE VIEW `project.gold.vw_reporting_locations`", sql)
+        self.assertIn("CREATE OR REPLACE VIEW `project.gold.vw_reporting_totals`", sql)
+        self.assertIn("CREATE OR REPLACE VIEW `project.gold.vw_reporting_filter_options`", sql)
+        self.assertIn("CREATE OR REPLACE VIEW `project.gold.vw_reporting_state_brand`", sql)
+        self.assertIn("CREATE OR REPLACE VIEW `project.gold.vw_reporting_city_brand`", sql)
+        self.assertIn("CREATE OR REPLACE VIEW `project.gold.vw_reporting_zip_summary`", sql)
+        self.assertIn("CREATE OR REPLACE VIEW `project.gold.vw_reporting_gap_base`", sql)
         self.assertEqual(result["gold_dataset"], "project.gold")
-        self.assertEqual(len(result["views"]), 6)
+        self.assertEqual(len(result["views"]), 13)
 
     def test_foundation_view_joins_silver_zip_reference_not_bronze(self) -> None:
         client = _FakeClient()

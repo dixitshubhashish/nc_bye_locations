@@ -1319,18 +1319,24 @@ async function loadExcelSheets() {
     }
 async function loadSampleDataset(reset = false) {
       const button = el("loadSampleDatasetBtn");
+      const reloadLink = el("reloadSampleDatasetLink");
+      if (!reset && button?.dataset.sampleLoaded === "true") return;
       if (button) button.disabled = true;
+      if (reloadLink) reloadLink.disabled = true;
       const status = el("reportStatus");
-      status.className = "report-status loading";
-      status.textContent = "Loading";
-      const estimatedSeconds = 50;
+      status.classList.add("hidden");
+      status.textContent = "";
+      const estimatedSeconds = reset ? 80 : 50;
       const startedAt = Date.now();
-      showLoadingOverlay("Loading sample dataset (0%)", `About ${estimatedSeconds}s left.`);
+      showLoadingOverlay(reset ? "Clearing and reloading sample dataset (0%)" : "Loading sample dataset (0%)", `About ${estimatedSeconds}s left.`);
       const progressTimer = window.setInterval(() => {
         const elapsed = Math.floor((Date.now() - startedAt) / 1000);
         const percent = Math.min(94, Math.round(elapsed / estimatedSeconds * 100));
         const remaining = Math.max(1, estimatedSeconds - elapsed);
-        updateLoadingOverlay(`Loading sample dataset (${percent}%)`, `About ${remaining}s left.`);
+        updateLoadingOverlay(
+          reset ? `Clearing and reloading sample dataset (${percent}%)` : `Loading sample dataset (${percent}%)`,
+          `About ${remaining}s left.`
+        );
       }, 1000);
       try {
         const response = await fetch("/api/sample/load", {
@@ -1341,7 +1347,7 @@ async function loadSampleDataset(reset = false) {
         });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not load sample dataset.");
-        updateLoadingOverlay("Loading sample dataset (100%)", "Finishing report.");
+        updateLoadingOverlay(reset ? "Clearing and reloading sample dataset (100%)" : "Loading sample dataset (100%)", "Finishing report.");
         await loadBrands();
         await loadTemplateFilters();
         reportLoaded = false;
@@ -1355,15 +1361,42 @@ async function loadSampleDataset(reset = false) {
         status.textContent = message;
         status.classList.remove("hidden");
         setStatus(message, "ok");
+        updateSampleDatasetControls(result);
       } catch (error) {
         status.className = "report-status";
         const message = error.name === "AbortError" ? "Cancelled. No changes." : productSafeError(error.message, "Could not load sample dataset.");
         status.textContent = message;
+        status.classList.remove("hidden");
         setStatus(message, error.name === "AbortError" ? "warn" : "error");
       } finally {
         window.clearInterval(progressTimer);
         hideLoadingOverlay();
-        if (button) button.disabled = false;
+        if (button && button.dataset.sampleLoaded !== "true") button.disabled = false;
+        if (reloadLink) reloadLink.disabled = false;
+      }
+    }
+function updateSampleDatasetControls(result = {}) {
+      const button = el("loadSampleDatasetBtn");
+      const reloadLink = el("reloadSampleDatasetLink");
+      if (!button || !reloadLink) return;
+      const loaded = Boolean(result.loaded || result.already_loaded || result.locations);
+      button.dataset.sampleLoaded = loaded ? "true" : "false";
+      button.disabled = loaded;
+      button.classList.toggle("ready", loaded);
+      button.title = loaded ? "Sample data already in place." : "";
+      button.textContent = loaded ? "Sample Dataset Loaded" : "Load Sample Dataset";
+      reloadLink.classList.toggle("hidden", !loaded);
+    }
+async function refreshSampleDatasetStatus() {
+      try {
+        const response = await fetch("/api/sample/status");
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not check sample dataset.");
+        updateSampleDatasetControls(result);
+        return result;
+      } catch (error) {
+        updateSampleDatasetControls({ loaded: false });
+        return null;
       }
     }
 async function saveMapper() {
@@ -1514,4 +1547,3 @@ async function toggleShowExistingBrands() {
         box.innerHTML = `<div style="color: var(--error);">${escapeHtml(err.message)}</div>`;
       }
     }
-

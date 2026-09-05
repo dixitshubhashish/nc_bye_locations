@@ -5,7 +5,7 @@ let reportingBrands = [];
 
 function renderEmptyReportingStructure() {
       el("reportContent").classList.remove("hidden");
-      ["reportLocations", "reportBrands", "reportStates", "reportCities", "reportZips", "reportWhitespaceGaps"].forEach((id) => {
+      ["reportLocations", "reportBrands", "reportStates", "reportCities", "reportZips", "reportStores", "reportBrandStates", "reportWhitespaceGaps"].forEach((id) => {
         if (el(id)) el(id).textContent = "0";
       });
       renderReportingMap([], [], defaultStateRecords);
@@ -83,6 +83,7 @@ let mapMarkerLayerGroup = null;
 let stateBoundaryLayerGroup = null;
 let staticMapZoom = 1;
 const DEFAULT_US_MAP_VIEW = { center: [39.8283, -98.5795], zoom: 4 };
+const DEFAULT_US_BOUNDS = [[24.3963, -125.0], [49.3844, -66.9346]];
 const stateNameToCode = {
       Alabama: "AL", Alaska: "AK", Arizona: "AZ", Arkansas: "AR", California: "CA", Colorado: "CO", Connecticut: "CT", Delaware: "DE",
       Florida: "FL", Georgia: "GA", Hawaii: "HI", Idaho: "ID", Illinois: "IL", Indiana: "IN", Iowa: "IA", Kansas: "KS",
@@ -118,6 +119,11 @@ const staticStateLayout = [
       "AK", "HI", "TX", "", "", "FL", "DC", "", "", "", "", ""
     ];
 let usStatesGeoJSONPromise = null;
+function selectedPrimaryBrand(fallbackFilters = {}) {
+      const fromSelect = el("reportMainBrandSelect")?.value || "";
+      const fromFilters = Array.isArray(fallbackFilters.main_brands) ? (fallbackFilters.main_brands[0] || "") : "";
+      return fromSelect || fromFilters;
+    }
 function getUSStatesGeoJSON() {
       if (!usStatesGeoJSONPromise) {
         usStatesGeoJSONPromise = fetch("vendor/geo/us-states-10m.json")
@@ -166,7 +172,7 @@ function renderStaticUSMap(stateRecords = []) {
         });
       });
     }
-function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = []) {
+function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [], filters = {}) {
       if (!el("reportingMap")) return;
       const displayStates = stateRecords.length ? stateRecords : defaultStateRecords;
       if (!window.L) {
@@ -192,9 +198,14 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [])
       mapMarkerLayerGroup.clearLayers();
       stateBoundaryLayerGroup.clearLayers();
 
-      const mainBrandSet = new Set([el("reportMainBrandSelect")?.value || ""].filter(Boolean).map((b) => b.toLowerCase()));
+      const primaryBrand = selectedPrimaryBrand(filters);
+      const primaryBrandKey = primaryBrand.toLowerCase();
       const bounds = [];
       const activeStateFilter = String(el("reportStateFilter")?.value || "").toUpperCase();
+      const activeCountyFilter = String(el("reportCountyFilter")?.value || "");
+      const activeCityFilter = String(el("reportCityFilter")?.value || "");
+      const activeZipFilter = String(el("reportZipFilter")?.value || "");
+      const shouldFocusFilteredArea = Boolean(activeStateFilter || activeCountyFilter || activeCityFilter || activeZipFilter);
       const boundaryStateCounts = new Map(
         (displayStates || [])
           .filter((row) => stateCentroids[String(row.state || "").toUpperCase()])
@@ -266,19 +277,19 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [])
         const lon = parseFloat(rec.longitude);
         if (!isUSLatLong(lat, lon)) return; // Discard non-US coordinates
         bounds.push([lat, lon]);
-        const isPrimary = mainBrandSet.has(String(rec.brand || "").toLowerCase());
-        // No primary brand selected yet -> every location is neutral blue,
-        // since there's nothing to distinguish "primary" from "competitor" against.
-        const color = mainBrandSet.size === 0 ? "#3b82f6" : (isPrimary ? "#16a34a" : "#dc2626");
+        const isPrimary = primaryBrandKey && String(rec.brand || "").toLowerCase() === primaryBrandKey;
+        const color = primaryBrandKey ? (isPrimary ? "#16a34a" : "#dc2626") : "#3b82f6";
         const stateLabel = rec.state_name || rec.state || "";
 
-        const marker = L.circleMarker([lat, lon], {
-          radius: 4,
-          fillColor: color,
-          color: color,
-          weight: 0,
-          opacity: 1,
-          fillOpacity: 0.9
+        const marker = L.marker([lat, lon], {
+          icon: L.divIcon({
+            className: "",
+            html: `<span class="brand-map-marker" style="display:block; background:${color};"></span>`,
+            iconSize: [16, 16],
+            iconAnchor: [8, 8],
+            popupAnchor: [0, -8]
+          }),
+          zIndexOffset: 500
         });
         marker.bindPopup(`
           <div style="font-family: sans-serif; font-size: 13px; line-height: 1.4;">
@@ -300,12 +311,12 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [])
         const stateLabel = gap.state_name || gap.state || "";
 
         const marker = L.circleMarker([lat, lon], {
-          radius: 8,
+          radius: 5,
           fillColor: "#f59e0b",
           color: "#ffffff",
-          weight: 2,
-          opacity: 1,
-          fillOpacity: 0.9
+          weight: 1.5,
+          opacity: 0.9,
+          fillOpacity: 0.85
         });
         marker.bindPopup(`
           <div style="font-family: sans-serif; font-size: 13px; line-height: 1.4;">
@@ -322,10 +333,10 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [])
         mapMarkerLayerGroup.addLayer(marker);
       });
 
-      if (bounds.length) {
+      if (bounds.length && shouldFocusFilteredArea) {
         reportingMap.fitBounds(bounds, { padding: [30, 30], maxZoom: 12 });
       } else {
-        reportingMap.setView(DEFAULT_US_MAP_VIEW.center, DEFAULT_US_MAP_VIEW.zoom);
+        reportingMap.fitBounds(DEFAULT_US_BOUNDS, { padding: [18, 18], maxZoom: DEFAULT_US_MAP_VIEW.zoom });
       }
       setTimeout(() => reportingMap.invalidateSize(), 200);
     }
@@ -495,14 +506,16 @@ async function loadReporting() {
         } else {
           status.classList.add("hidden");
         }
-        el("reportLocations").textContent = formatNumber(totals.total_locations);
+        el("reportLocations").textContent = formatNumber(totals.active_market_locations);
         el("reportBrands").textContent = formatNumber(totals.total_brands);
         el("reportStates").textContent = formatNumber(totals.total_states);
         el("reportCities").textContent = formatNumber(totals.total_cities);
         if (el("reportZips")) el("reportZips").textContent = formatNumber(totals.total_zips);
+        if (el("reportStores")) el("reportStores").textContent = formatNumber(totals.total_stores);
+        if (el("reportBrandStates")) el("reportBrandStates").textContent = formatNumber(totals.active_brand_states);
         if (el("reportWhitespaceGaps")) el("reportWhitespaceGaps").textContent = formatNumber((result.gaps || []).length);
 
-        renderReportingMap(result.map_records || [], result.gaps || [], result.top_states || []);
+        renderReportingMap(result.map_records || [], result.gaps || [], result.top_states || [], result.filters || {});
 
         const totalLocs = totals.total_locations || 1;
 
@@ -570,9 +583,15 @@ async function loadReporting() {
           { key: "locations", label: "ZIP Locations", format: formatNumber }
         ], result.top_cities || []);
 
-        const brandRows = result.brands || [];
-        const primaryBrandName = el("reportMainBrandSelect")?.value || (brandRows[0] ? brandRows[0].brand : "");
-        const primaryRow = brandRows.find((b) => b.brand === primaryBrandName) || brandRows[0];
+        const primaryBrandName = selectedPrimaryBrand(result.filters || "");
+        const brandRows = (result.brands || []).slice().sort((a, b) => {
+          const aIsPrimary = primaryBrandName && a.brand === primaryBrandName;
+          const bIsPrimary = primaryBrandName && b.brand === primaryBrandName;
+          if (aIsPrimary !== bIsPrimary) return aIsPrimary ? -1 : 1;
+          return Number(b.locations || 0) - Number(a.locations || 0);
+        });
+        const effectivePrimaryName = primaryBrandName || (brandRows[0] ? brandRows[0].brand : "");
+        const primaryRow = brandRows.find((b) => b.brand === effectivePrimaryName) || brandRows[0];
 
         renderSimpleTable("reportBrandsTable", [
           { key: "brand", label: "Brand" },
@@ -664,4 +683,3 @@ async function refreshReportingData() {
         target.textContent = productSafeError(error.message, "Could not refresh data.");
       }
     }
-

@@ -90,6 +90,30 @@
 
     .header-actions { display: flex; gap: 6px; align-items: center; }
     .header-actions button { font-size: 12px; padding: 6px 8px; }
+    .header-readiness {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 30px;
+      padding: 5px 9px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #ffffff;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .header-readiness::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: 0.75;
+    }
+    .header-readiness.ok { color: var(--ok); border-color: #b9d6c3; background: #f2fbf5; }
+    .header-readiness.warn { color: var(--warn); border-color: #e5cfaa; background: #fff9ed; }
+    .header-readiness.error { color: var(--error); border-color: #e8bbbb; background: #fff5f5; }
     .danger-dialog { border: 2px solid var(--error); border-radius: 8px; padding: 22px; color: var(--ink); }
     .danger-dialog::backdrop { background: rgba(31, 41, 51, 0.48); }
     .danger-dialog h2 { color: var(--error); font-size: 20px; }
@@ -127,12 +151,77 @@
       line-height: 1.15;
       letter-spacing: 0;
     }
+    .sample-load-actions {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 4px;
+    }
+    .sample-load-link {
+      border: 0;
+      background: transparent;
+      color: var(--accent);
+      padding: 0;
+      font-size: 12px;
+      text-decoration: underline;
+      cursor: pointer;
+    }
+    .sample-load-link:hover {
+      color: #005fd3;
+      background: transparent;
+      text-decoration-thickness: 2px;
+      text-underline-offset: 3px;
+    }
+    .sample-load-link:disabled {
+      color: var(--muted);
+      cursor: not-allowed;
+      text-decoration-color: transparent;
+    }
+    .sample-load-link.hidden { display: none; }
+    #loadSampleDatasetBtn.ready {
+      color: var(--ok);
+      border-color: #b9d6c3;
+      background: #f2fbf5;
+      cursor: default;
+    }
 
     .report-hero p { margin: 0; color: var(--muted); max-width: 780px; }
     .report-source { color: var(--muted); font-size: 12px; margin-top: 8px; overflow-wrap: anywhere; }
-    .report-filters { display: grid; grid-template-columns: 1.2fr 1.2fr 1fr; gap: 14px; margin: 18px 0; align-items: start; }
+    .report-filters { display: grid; gap: 12px; margin: 18px 0; align-items: start; }
     .report-filter-group { border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 12px; }
     .report-filter-group h2 { margin: 0 0 8px; font-size: 14px; color: var(--ink); }
+    .report-filter-row {
+      display: grid;
+      gap: 12px;
+      align-items: start;
+    }
+    .report-filter-row.primary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .report-filter-row.geo { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .report-filter-row.demographics { grid-template-columns: minmax(260px, 0.5fr); justify-content: center; }
+    .report-filter-group.demographics .demographic-inputs {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .report-filter-actions {
+      display: flex;
+      justify-content: center;
+      gap: 8px;
+      padding-top: 8px;
+      border-top: 1px solid var(--line);
+    }
+    .report-filter-actions button {
+      min-width: 132px;
+      padding: 7px 10px;
+      font-size: 12px;
+    }
+    .brand-map-marker {
+      width: 16px;
+      height: 16px;
+      border-radius: 999px;
+      border: 2px solid #ffffff;
+      box-shadow: 0 2px 7px rgba(15, 23, 42, 0.28);
+    }
     .report-checks { display: grid; gap: 6px; max-height: 150px; overflow: auto; }
     .report-checks label { display: flex; gap: 7px; align-items: center; color: var(--ink); font-weight: 650; }
     .report-checks input { width: auto; }
@@ -381,7 +470,7 @@
       font-size: 16px;
       font-weight: 700;
       margin-bottom: 8px;
-      letter-spacing: -0.01em;
+      letter-spacing: 0;
     }
     .loading-overlay-sub {
       font-size: 12px;
@@ -820,17 +909,17 @@
     .entity-field-source.mapped { color: var(--ok); }
     .entity-field-source.unmapped { color: #8a9298; font-style: italic; }
 
-    /* Birdeye-inspired product styling: navy navigation, blue actions, cool gray workspace. */
+    /* Birdeye-inspired product styling: bright blue actions, white navigation, cool gray workspace. */
     :root {
-      --bg: #f4f7fb;
+      --bg: #f5f8ff;
       --panel: #ffffff;
-      --ink: #17233f;
-      --muted: #68758d;
-      --line: #dce3ee;
-      --accent: #1769ff;
+      --ink: #1f2937;
+      --muted: #667085;
+      --line: #d9e2f1;
+      --accent: #0b70f0;
       --accent-ink: #ffffff;
-      --navy: #101d3b;
-      --navy-soft: #1b2c54;
+      --navy: #1f2937;
+      --navy-soft: #eef5ff;
       --cyan: #0bb5d8;
       --warn: #a86412;
       --error: #c43b54;
@@ -840,36 +929,36 @@
     body {
       background: var(--bg);
       color: var(--ink);
-      font-family: "DM Sans", "Avenir Next", ui-sans-serif, system-ui, sans-serif;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
 
     header {
       min-height: 72px;
-      border-bottom: 0;
-      background: var(--navy);
-      color: #ffffff;
+      border-bottom: 1px solid var(--line);
+      background: #ffffff;
+      color: var(--ink);
       padding: 14px 24px;
-      box-shadow: 0 4px 16px rgba(16, 29, 59, 0.14);
+      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.06);
     }
 
-    header h1 { color: #ffffff; letter-spacing: -0.02em; }
+    header h1 { color: var(--ink); letter-spacing: 0; }
     .top-tabs { gap: 4px; }
     .top-tab {
       background: transparent;
-      color: #b9c7e4;
+      color: var(--muted);
       border-color: transparent;
       border-radius: 5px;
       padding: 9px 11px;
     }
-    .top-tab:hover { color: #ffffff; background: var(--navy-soft); }
-    .top-tab.active { background: #ffffff; color: var(--navy); }
+    .top-tab:hover { color: var(--accent); background: var(--navy-soft); }
+    .top-tab.active { background: var(--accent); color: #ffffff; }
     .header-actions { gap: 6px; }
     .header-actions button.secondary {
-      background: transparent;
-      color: #dbe5ff;
-      border-color: #40557f;
+      background: #ffffff;
+      color: var(--ink);
+      border-color: #cbd6e6;
     }
-    .header-actions button.secondary:hover { background: var(--navy-soft); border-color: #6d84b3; }
+    .header-actions button.secondary:hover { background: var(--navy-soft); color: var(--accent); border-color: #9ebbe9; }
 
     main { min-height: calc(100vh - 72px); }
     aside { background: #edf2f8; border-right-color: var(--line); padding: 22px 18px; }
@@ -879,8 +968,8 @@
       border-radius: 7px;
       box-shadow: 0 2px 8px rgba(28, 51, 88, 0.04);
     }
-    .panel h2 { color: var(--navy); }
-    label { color: #53627d; letter-spacing: 0.01em; }
+    .panel h2 { color: var(--ink); }
+    label { color: #53627d; letter-spacing: 0; }
     input, select, textarea {
       border-color: #cfd9e8;
       border-radius: 5px;
@@ -892,8 +981,8 @@
       border-color: var(--accent);
     }
     button { border-radius: 5px; background: var(--accent); }
-    button:hover { background: #0759e8; }
-    button.secondary { border-color: #cbd6e6; color: var(--navy); }
+    button:hover { background: #005fd3; }
+    button.secondary { border-color: #cbd6e6; color: var(--ink); }
     button.secondary:hover { background: #edf4ff; border-color: #9ebbe9; }
     a.secondary { display: inline-block; text-decoration: none; }
     .login-box button:disabled {
@@ -908,11 +997,11 @@
     .progress-fill { background: linear-gradient(90deg, var(--accent), var(--cyan)); }
     .progress-track { background: #e0e8f3; }
     .mapping-grid, .entity-box, table { border-color: var(--line); }
-    th { background: #eef4fc; color: var(--navy); }
-    .entity-title { background: #eef4fc; color: var(--navy); }
+    th { background: #eef4fc; color: var(--ink); }
+    .entity-title { background: #eef4fc; color: var(--ink); }
     .entity-field { border-color: #e1e7f0; }
-    .tab { border-color: #cbd6e6; color: var(--navy); }
-    .tab.active { background: var(--navy); color: #ffffff; }
+    .tab { border-color: #cbd6e6; color: var(--ink); }
+    .tab.active { background: var(--accent); color: #ffffff; }
     .connector-editor { border-color: #b9c9e0; }
     .login-screen { background: radial-gradient(circle at 50% 0%, #dceaff 0, var(--bg) 42%); }
     .login-box { border-top: 4px solid var(--accent); }
@@ -924,7 +1013,7 @@
       color: inherit;
       font-size: 18px;
       font-weight: 800;
-      letter-spacing: -0.03em;
+      letter-spacing: 0;
       line-height: 1;
     }
     .brand-icon-crop {
@@ -944,7 +1033,7 @@
     .login-brand {
       justify-content: center;
       margin-bottom: 22px;
-      color: var(--navy);
+      color: var(--ink);
       font-size: 22px;
     }
     .login-brand .brand-icon-crop {
@@ -969,7 +1058,10 @@
       height: 42px;
       max-width: 100%;
     }
-    header .birdeye-full-logo text, .app-footer .birdeye-full-logo text {
+    header .birdeye-full-logo text {
+      fill: var(--ink) !important;
+    }
+    .app-footer .birdeye-full-logo text {
       fill: #ffffff !important;
     }
     header .birdeye-full-logo path[stroke="#1d2b4f"], .app-footer .birdeye-full-logo path[stroke="#1d2b4f"] {
@@ -982,8 +1074,9 @@
     .reference-login-button.warn { border-color: #d28a27; color: #a86412; }
     .reference-login-button:disabled { border-color: #c9d2dc; color: #8a98a8; background: #f4f6f8; cursor: not-allowed; }
     .reference-login-button:disabled:hover { border-color: #c9d2dc; color: #8a98a8; background: #f4f6f8; }
-    header .brand-lockup { color: #ffffff; flex: 0 0 auto; }
-    header .brand-logo-image, .app-footer .brand-logo-image { filter: brightness(0) invert(1); }
+    header .brand-lockup { color: var(--ink); flex: 0 0 auto; }
+    header .brand-logo-image { filter: none; }
+    .app-footer .brand-logo-image { filter: brightness(0) invert(1); }
     header .brand-mark { color: var(--cyan); }
     .app-title { display: flex; align-items: center; gap: 18px; }
     .app-title h1 { white-space: nowrap; }
@@ -1020,12 +1113,34 @@
       .header-actions #clearDataBtn { color: #ffd7df; border-color: #b94b65; background: rgba(196, 59, 84, 0.16); }
       .header-actions #clearDataBtn:hover { color: #ffffff; border-color: #dc7187; background: rgba(196, 59, 84, 0.32); }
       .header-actions #logoutBtn { color: #dbe5ff; border-color: #52678f; }
+      .report-filter-row.primary,
+      .report-filter-row.geo,
+      .report-filter-row.demographics {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .report-filter-group.demographics .demographic-inputs {
+        grid-template-columns: 1fr;
+      }
+      .report-filter-actions {
+        flex-wrap: wrap;
+      }
       aside { border-right: 0; border-bottom: 1px solid var(--line); }
       .mapping-grid { grid-template-columns: 1fr; }
       .mapping-head { display: none; }
       .source-row { grid-template-columns: 1fr; }
       .optional-fields-layout { grid-template-columns: 1fr; gap: 12px; }
       .app-footer { align-items: flex-start; flex-direction: column; padding: 18px 16px; }
+    }
+
+    @media (max-width: 560px) {
+      .report-filter-row.primary,
+      .report-filter-row.geo,
+      .report-filter-row.demographics {
+        grid-template-columns: 1fr;
+      }
+      .report-filter-actions button {
+        width: 100%;
+      }
     }
   </style>
 </head>
@@ -1078,6 +1193,7 @@
         <button class="secondary" id="resetMappingBtn" type="button">Reset Fields Mapping</button>
         <button class="secondary" id="restartMappingBtn" type="button">Restart Mapping</button>
         <button class="secondary" id="clearDataBtn" type="button">Clear Saved Data</button>
+        <div id="headerReadinessStatus" class="header-readiness">ZIPs not checked</div>
         <button class="secondary" id="logoutBtn" type="button">Log out</button>
       </div>
     </header>
@@ -1091,11 +1207,9 @@
       <div class="panel">
         <h2>Source Controls</h2>
         <div class="button-row" style="flex-wrap: wrap; gap: 6px;">
-          <button class="secondary" id="testReadinessBtn" type="button">Check Readiness</button>
           <button class="secondary" id="showExistingBrandsBtn" type="button">🏢 Show Existing Brands</button>
           <button class="secondary" id="clearDemoDataBtn" type="button" style="color: var(--error); border-color: var(--error);">🗑️ Clear Demo Data</button>
         </div>
-        <div id="readinessStatus" class="status hidden"></div>
         <div id="existingBrandsDialog" style="display: none; border: 1px solid var(--line); background: #f8fafc; border-radius: 6px; padding: 10px; margin-top: 8px; font-size: 12px;"></div>
         <label for="sourceType">Source format</label>
         <select id="sourceType">
@@ -1374,13 +1488,17 @@ else:
             <h1>Reporting</h1>
             <p>Locations, markets, and gaps.</p>
           </div>
-          <div style="display: flex; gap: 8px;">
-            <button class="secondary" id="loadSampleDatasetBtn" type="button">Load Sample Dataset</button>
+          <div style="display: flex; gap: 8px; align-items: flex-start;">
+            <div class="sample-load-actions">
+              <button class="secondary" id="loadSampleDatasetBtn" type="button">Load Sample Dataset</button>
+              <button class="sample-load-link hidden" id="reloadSampleDatasetLink" type="button">Clear sample data and reload</button>
+            </div>
             <button id="refreshReportBtn" type="button">Refresh Report</button>
           </div>
         </div>
         <div id="reportStatus" class="report-status">Ready</div>
-        <div class="report-filters" style="grid-template-columns: 1fr 1.2fr 1.5fr 1fr;">
+        <div class="report-filters" style="display: grid; gap: 12px;">
+          <div class="report-filter-row primary">
           <div class="report-filter-group">
             <h2>Primary Brand</h2>
             <select id="reportMainBrandSelect" style="width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); font-size: 13px; font-weight: 600; background: var(--panel);">
@@ -1399,44 +1517,57 @@ else:
               </div>
             </div>
           </div>
-          <div class="report-filter-group">
-            <h2>Geographic Filters</h2>
-            <div class="report-geo-filters" style="grid-template-columns: 1fr 1fr;">
-              <select id="reportStateFilter" style="padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 13px;">
+          </div>
+          <div class="report-filter-row geo">
+            <div class="report-filter-group">
+              <h2>State</h2>
+              <select id="reportStateFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 13px;">
                 <option value="">All States</option>
               </select>
-              <select id="reportCountyFilter" style="padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 13px;">
+            </div>
+            <div class="report-filter-group">
+              <h2>County</h2>
+              <select id="reportCountyFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 13px;">
                 <option value="">All Counties</option>
               </select>
-              <select id="reportCityFilter" style="padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 13px;">
+            </div>
+            <div class="report-filter-group">
+              <h2>City</h2>
+              <select id="reportCityFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 13px;">
                 <option value="">All Cities</option>
               </select>
-              <input id="reportZipFilter" list="zipSuggestions" placeholder="Search 30k+ ZIPs..." style="padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 13px;">
+            </div>
+            <div class="report-filter-group">
+              <h2>ZIP</h2>
+              <input id="reportZipFilter" list="zipSuggestions" placeholder="Search 30k+ ZIPs..." style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 13px;">
               <datalist id="zipSuggestions"></datalist>
             </div>
           </div>
-          <div class="report-filter-group">
-            <h2>Demographic Metrics</h2>
-            <div style="display: grid; gap: 6px;">
-              <input id="reportMinPopFilter" type="number" placeholder="Min Population (e.g. 10000)" style="padding: 5px; font-size: 12px;">
-              <input id="reportMinIncomeFilter" type="number" placeholder="Min Income (e.g. 50000)" style="padding: 5px; font-size: 12px;">
-              <input id="reportMaxAgeFilter" type="number" placeholder="Max Median Age (e.g. 50)" style="padding: 5px; font-size: 12px;">
+          <div class="report-filter-row demographics">
+            <div class="report-filter-group demographics">
+              <h2>Market Demographics</h2>
+              <div class="demographic-inputs">
+                <input id="reportMinPopFilter" type="number" placeholder="Min Population" style="padding: 7px; font-size: 12px;">
+                <input id="reportMinIncomeFilter" type="number" placeholder="Min Income" style="padding: 7px; font-size: 12px;">
+                <input id="reportMaxAgeFilter" type="number" placeholder="Max Median Age" style="padding: 7px; font-size: 12px;">
+              </div>
             </div>
-            <div style="display: flex; gap: 6px; margin-top: 8px;">
-              <button id="applyReportFiltersBtn" type="button" style="flex: 1; padding: 6px 8px; font-size: 12px;">Apply</button>
-              <button id="resetReportFiltersBtn" type="button" style="flex: 1; padding: 6px 8px; font-size: 12px; background: #94a3b8;">Reset</button>
-            </div>
+          </div>
+          <div class="report-filter-actions" aria-label="Report filter actions">
+            <button id="applyReportFiltersBtn" type="button">Apply All Filters</button>
+            <button id="resetReportFiltersBtn" type="button" class="secondary">Reset All</button>
           </div>
         </div>
 
         <div id="reportContent" class="hidden" style="margin-top: 20px;">
           <div class="report-grid" style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px;">
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportLocations" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Market Locations</span></div>
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportBrands" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Brands</span></div>
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportStates" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">States</span></div>
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportCities" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Cities</span></div>
+            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportStates" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Total State</span></div>
             <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportZips" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">ZIP Locations</span></div>
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportWhitespaceGaps" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Gap ZIPs</span></div>
+            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportBrands" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Brands</span></div>
+            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportStores" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Stores</span></div>
+            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportLocations" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Market Locations</span></div>
+            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportBrandStates" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Brand States</span></div>
+            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportCities" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Brand Cities</span></div>
           </div>
           <section class="report-section" style="margin-top: 0;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
@@ -1545,7 +1676,7 @@ else:
   <script src="js/mapper.js"></script>
   <script>
     el("parseBtn").addEventListener("click", parseSource);
-    el("testReadinessBtn").addEventListener("click", testReadiness);
+    el("testReadinessBtn")?.addEventListener("click", testReadiness);
     el("showExistingBrandsBtn").addEventListener("click", toggleShowExistingBrands);
     el("clearDemoDataBtn").addEventListener("click", clearSavedData);
     el("runPythonConnectorBtn").addEventListener("click", parseSource);
@@ -1750,6 +1881,7 @@ else:
           loadReporting();
         });
     el("loadSampleDatasetBtn").addEventListener("click", () => loadSampleDataset(false));
+    el("reloadSampleDatasetLink").addEventListener("click", () => loadSampleDataset(true));
     el("applyReportFiltersBtn")?.addEventListener("click", () => {
           reportLoaded = false;
           loadReporting();
@@ -1805,6 +1937,7 @@ else:
     setTimeout(() => prepareReferenceData(), 10);
     setupZipTypeahead();
     setupBrandDropdownListeners();
+    refreshSampleDatasetStatus();
     loadGeoOptions();
     const urlParams = new URLSearchParams(window.location.search);
     const activeTab = urlParams.get("view") || sessionStorage.getItem("activeTab") || "mapperView";
