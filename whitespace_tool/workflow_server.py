@@ -30,7 +30,11 @@ from whitespace_tool.sources.dominos_overpass import fetch_for_zips as fetch_dom
 from whitespace_tool.sources.dominos_store_locator import fetch_for_zips
 from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows, clear_dataset_tables, push_to_bigquery
 from whitespace_tool.storage_config import load_dotenv, load_storage_config
-from whitespace_tool.sqlite_cache import get_cached_query, set_cached_query, invalidate_cache
+from whitespace_tool.sqlite_cache import (
+    get_cached_query, set_cached_query, invalidate_cache,
+    replace_gold_mirror, get_mirror_status, fetch_mirror_zip_brand_activity,
+    fetch_mirror_reporting_locations, fetch_mirror_reporting_locations_by_brand, fetch_mirror_businesses,
+)
 from whitespace_tool.sample_data import SAMPLE_BATCH_ID, SAMPLE_BRANDS, generate_source_rows, mapper_for, source_configuration, source_label, stable_business_id, stable_template_id
 
 
@@ -1669,6 +1673,58 @@ def build_gold_layer() -> dict[str, Any]:
     }
 
 
+def sync_gold_mirror() -> dict[str, Any]:
+    """Pull the two gold master views (plus active businesses, needed for
+    the brand filter option list) into local SQLite, so reporting_summary()
+    can filter/aggregate locally instead of a live BigQuery round trip per
+    query. Called right after every build_gold_layer() - see
+    _rebuild_gold_and_mirror() - so the mirror is never more than one
+    refresh cycle behind BigQuery."""
+    project_id, bronze_dataset_id, _silver_dataset_id, gold_dataset_id, credentials_json = _medallion_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    gold_ref = f"{project_id}.{gold_dataset_id}"
+    bronze_ref = f"{project_id}.{bronze_dataset_id}"
+
+    zip_brand_rows = [dict(row) for row in client.query(f"""
+        SELECT zip_code, state_code, state_name, county, city_name, population,
+          median_household_income, median_age, latitude, longitude, brand_name,
+          location_count, last_observed_at
+        FROM `{gold_ref}.vw_zip_brand_activity`
+    """).result()]
+    location_rows = [dict(row) for row in client.query(f"""
+        SELECT listing_id, business_id, brand, name, address, city_name, state_code,
+          state_name, county, zip_code, phone_number, latitude, longitude,
+          coordinate_source, coordinate_confidence, country, last_observed_at,
+          population, median_household_income, median_age
+        FROM `{gold_ref}.vw_reporting_locations`
+    """).result()]
+    business_rows = [dict(row) for row in client.query(f"""
+        SELECT business_id, name FROM `{bronze_ref}.businesses`
+        WHERE is_deleted IS NOT TRUE AND COALESCE(status, 'active') = 'active'
+    """).result()]
+
+    replace_gold_mirror(zip_brand_rows, location_rows, business_rows)
+    result = {"zip_brand_rows": len(zip_brand_rows), "location_rows": len(location_rows), "business_rows": len(business_rows)}
+    LOGGER.info("gold_mirror_synced zip_brand_rows=%d location_rows=%d business_rows=%d",
+                result["zip_brand_rows"], result["location_rows"], result["business_rows"])
+    return result
+
+
+def _rebuild_gold_and_mirror() -> dict[str, Any]:
+    """Rebuild gold, then immediately sync the local SQLite mirror from it -
+    the single choke point every silver/gold refresh path routes through
+    (hourly tick, on-demand background refresh, sample load), so the
+    mirror syncs as soon as possible after any change without a separate,
+    independently-timed sync loop to keep correct."""
+    gold_result = build_gold_layer()
+    try:
+        mirror_result = sync_gold_mirror()
+    except Exception as exc:
+        LOGGER.warning("gold_mirror_sync_failed error=%s", exc)
+        mirror_result = {"error": str(exc)}
+    return {"gold": gold_result, "mirror": mirror_result}
+
+
 def _refresh_silver_background() -> bool:
     global REPORTING_REFRESHING
     with REPORTING_REFRESH_LOCK:
@@ -1680,12 +1736,12 @@ def _refresh_silver_background() -> bool:
         global REPORTING_REFRESHING
         try:
             build_silver_layer()
-            # Reporting reads exclusively from gold views - rebuilding silver
-            # alone would leave newly-ingested data (e.g. a brand just added
-            # via Mappings/Template Library) invisible to Reporting until the
-            # next hourly _run_silver_gold_tick(). Keep both layers in sync
-            # on every on-demand refresh, same as the hourly tick does.
-            build_gold_layer()
+            # Reporting reads from the gold layer (mirrored into SQLite) -
+            # rebuilding silver alone would leave newly-ingested data (e.g. a
+            # brand just added via Mappings/Template Library) invisible until
+            # the next hourly _run_silver_gold_tick(). Keep gold and the
+            # mirror in sync on every on-demand refresh too.
+            _rebuild_gold_and_mirror()
         except Exception as exc:
             LOGGER.warning("reporting_background_silver_refresh_failed error=%s", exc)
         finally:
@@ -1713,12 +1769,14 @@ def _run_silver_gold_tick() -> bool:
         REPORTING_REFRESHING = True
     try:
         silver_result = build_silver_layer()
-        gold_result = build_gold_layer()
+        combined = _rebuild_gold_and_mirror()
+        gold_result = combined["gold"]
         LOGGER.info(
-            "scheduled_medallion_refresh_succeeded silver_rows=%s invalid_rows=%s gold_views=%s",
+            "scheduled_medallion_refresh_succeeded silver_rows=%s invalid_rows=%s gold_views=%s mirror=%s",
             silver_result.get("rows"),
             silver_result.get("invalid_rows"),
             len(gold_result.get("views", [])),
+            combined.get("mirror"),
         )
     except Exception as exc:
         LOGGER.exception("scheduled_medallion_refresh_failed error=%s", exc)
@@ -1770,6 +1828,10 @@ def _ensure_gold_reporting_views(client: Any, gold_ref: str) -> bool:
         build_gold_layer()
     except Exception as exc:
         raise RuntimeError(f"gold bootstrap failed at build_gold_layer: {exc}") from exc
+    try:
+        sync_gold_mirror()
+    except Exception as exc:
+        LOGGER.warning("gold_mirror_sync_failed error=%s", exc)
     return True
 
 
@@ -1813,6 +1875,377 @@ def _empty_reporting_payload(source_table: str, params: dict[str, list[str]], wa
     }
 
 
+# --- SQLite gold-mirror fast path -------------------------------------------
+#
+# Mirrors the same filtering/aggregation semantics as the BigQuery queries in
+# reporting_summary() below (base_cte, totals_query, top_states_query,
+# top_cities_query, brand_query, gap_query, map_query, sample_query,
+# data_quality_query), reading from the local SQLite tables synced by
+# sync_gold_mirror() instead of issuing ~9 live BigQuery queries per request.
+# Falls back to None (triggering the BigQuery path) whenever the mirror
+# hasn't been synced yet.
+
+def _lat_lon_ok_or_null(lat: float | None, lon: float | None) -> bool:
+    """Matches base_cte's "latitude IS NULL OR (latitude/longitude within US
+    bounds)" - a missing coordinate passes through, but a present one must
+    be valid."""
+    if lat is None:
+        return True
+    if lon is None:
+        return False
+    return 13.0 <= lat <= 72.0 and ((-180.0 <= lon <= -64.0) or (144.0 <= lon <= 146.0))
+
+
+def _lat_lon_ok_strict(lat: float | None, lon: float | None) -> bool:
+    """Matches map_query's hard "latitude/longitude required and within US
+    bounds" - unlike base_cte, a missing coordinate is excluded."""
+    if lat is None or lon is None:
+        return False
+    return 13.0 <= lat <= 72.0 and ((-180.0 <= lon <= -64.0) or (144.0 <= lon <= 146.0))
+
+
+def _passes_brand_filter(brand_name: str | None, selected_brands: list[str]) -> bool:
+    return not selected_brands or brand_name in selected_brands
+
+
+def _passes_demographic_filters(
+    population: float | None, income: float | None, age: float | None,
+    min_population: float | None, min_income: float | None, max_median_age: float | None,
+) -> bool:
+    if min_population is not None and (population or 0) < min_population:
+        return False
+    if min_income is not None and (income or 0) < min_income:
+        return False
+    if max_median_age is not None and (age or 0) > max_median_age:
+        return False
+    return True
+
+
+def _mirror_base_rows(
+    zip_rows: list[dict[str, Any]], selected_brands: list[str],
+    min_population: float | None, min_income: float | None, max_median_age: float | None,
+) -> list[dict[str, Any]]:
+    """Python equivalent of base_cte: one row per (zip, brand) that survives
+    every filter, reshaped to the same field names base_cte produces."""
+    base_rows = []
+    for r in zip_rows:
+        if not _passes_brand_filter(r.get("brand_name"), selected_brands):
+            continue
+        if not _passes_demographic_filters(r.get("population"), r.get("median_household_income"), r.get("median_age"), min_population, min_income, max_median_age):
+            continue
+        if not _lat_lon_ok_or_null(r.get("latitude"), r.get("longitude")):
+            continue
+        location_count = r.get("location_count") or 0
+        zip_code = r.get("zip_code")
+        brand_name = r.get("brand_name")
+        base_rows.append({
+            "zip_code": zip_code,
+            "zip_city": r.get("city_name"),
+            "zip_state": r.get("state_code"),
+            "zip_state_name": r.get("state_name"),
+            "county": r.get("county"),
+            "population": r.get("population"),
+            "median_household_income": r.get("median_household_income"),
+            "median_age": r.get("median_age"),
+            "listing_id": f"{brand_name or ''}|{zip_code}" if location_count > 0 else None,
+            "brand": brand_name,
+            "last_observed_at": r.get("last_observed_at"),
+            "location_count": location_count,
+        })
+    return base_rows
+
+
+def _mirror_state_population_by_state(all_zip_rows: list[dict[str, Any]]) -> dict[str, float]:
+    """Matches top_states_query's population subquery: dedupe to one row
+    per zip (across its brand fan-out) before summing per state, and use
+    the full unfiltered mirror (population is a broad market-context stat,
+    not scoped to the current geo filter - matching the BigQuery query,
+    which reads {zip_ref} with no WHERE at all)."""
+    dedup: dict[str, tuple[str | None, float]] = {}
+    for r in all_zip_rows:
+        zip_code = r.get("zip_code")
+        population = r.get("population")
+        if zip_code is None or population is None:
+            continue
+        if zip_code not in dedup:
+            dedup[zip_code] = (r.get("state_code"), population)
+    totals: dict[str, float] = {}
+    for state_code, population in dedup.values():
+        if not state_code:
+            continue
+        totals[state_code] = totals.get(state_code, 0) + population
+    return totals
+
+
+def _mirror_totals(base_rows: list[dict[str, Any]], global_brand_count: int) -> dict[str, Any]:
+    zip_states = {r["zip_state"] for r in base_rows if r.get("zip_state")}
+    zip_codes = {r["zip_code"] for r in base_rows if r.get("zip_code")}
+    brands_present = {r["brand"] for r in base_rows if r.get("brand")}
+    zip_cities_all = {r["zip_city"] for r in base_rows if r.get("zip_city")}
+    active_rows = [r for r in base_rows if (r.get("location_count") or 0) > 0 and r.get("brand")]
+    active_zips = {r["zip_code"] for r in active_rows if r.get("zip_code")}
+    active_states = {r["zip_state"] for r in active_rows if r.get("zip_state")}
+    active_cities = {r["zip_city"] for r in active_rows if r.get("zip_city")}
+    total_locations = {r["listing_id"] for r in base_rows if (r.get("location_count") or 0) > 0 and r.get("listing_id")}
+    total_stores = sum(r.get("location_count") or 0 for r in base_rows)
+    last_updated = max((r.get("last_observed_at") for r in base_rows if r.get("last_observed_at")), default=None)
+    return {
+        "total_states": len(zip_states),
+        "total_zips": len(zip_codes),
+        "total_brands": len(brands_present) or global_brand_count,
+        "total_stores": total_stores,
+        "active_market_locations": len(active_zips),
+        "active_brand_states": len(active_states),
+        "active_brand_cities": len(active_cities),
+        "total_locations": len(total_locations),
+        "total_cities": len(zip_cities_all),
+        "last_updated": last_updated,
+    }
+
+
+def _mirror_top_states(base_rows: list[dict[str, Any]], state_population: dict[str, float]) -> list[dict[str, Any]]:
+    groups: dict[tuple[str, str], dict[str, set]] = {}
+    for r in base_rows:
+        key = (r.get("zip_state") or "", r.get("zip_state_name") or r.get("zip_state") or "")
+        group = groups.setdefault(key, {"zips": set(), "cities": set(), "brands": set()})
+        if r.get("zip_code"):
+            group["zips"].add(r["zip_code"])
+        if r.get("zip_city"):
+            group["cities"].add(r["zip_city"])
+        if r.get("brand"):
+            group["brands"].add(r["brand"])
+    rows = [
+        {
+            "state": state, "state_name": state_name,
+            "locations": len(group["zips"]), "cities": len(group["cities"]), "brands": len(group["brands"]),
+            "state_population": state_population.get(state, 0) or 0,
+        }
+        for (state, state_name), group in groups.items()
+    ]
+    rows.sort(key=lambda r: r["locations"], reverse=True)
+    return rows[:15]
+
+
+def _mirror_top_cities(base_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[tuple[str, str, str, str], set] = {}
+    for r in base_rows:
+        key = (r.get("zip_city") or "", r.get("zip_state") or "", r.get("zip_state_name") or r.get("zip_state") or "", r.get("county") or "")
+        groups.setdefault(key, set())
+        if r.get("zip_code"):
+            groups[key].add(r["zip_code"])
+    rows = [
+        {"city": city, "state": state, "state_name": state_name, "county": county, "locations": len(zips)}
+        for (city, state, state_name, county), zips in groups.items()
+    ]
+    rows.sort(key=lambda r: r["locations"], reverse=True)
+    return rows[:10]
+
+
+def _mirror_brand_query(base_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = {}
+    for r in base_rows:
+        if not r.get("listing_id") or not r.get("brand"):
+            continue
+        group = groups.setdefault(r["brand"], {"locations": 0, "states": set(), "counties": set(), "cities": set(), "zips": set()})
+        group["locations"] += r.get("location_count") or 0
+        if r.get("zip_state"):
+            group["states"].add(r["zip_state"])
+        if r.get("county"):
+            group["counties"].add(r["county"])
+        if r.get("zip_city"):
+            group["cities"].add(r["zip_city"])
+        if r.get("zip_code"):
+            group["zips"].add(r["zip_code"])
+    rows = [
+        {"brand": brand, "locations": g["locations"], "states": len(g["states"]), "counties": len(g["counties"]), "cities": len(g["cities"]), "zips": len(g["zips"])}
+        for brand, g in groups.items()
+    ]
+    rows.sort(key=lambda r: r["locations"], reverse=True)
+    return rows[:10]
+
+
+def _mirror_filter_options(all_zip_rows: list[dict[str, Any]], business_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Matches vw_reporting_filter_options: always the full unfiltered
+    mirror, not scoped to the current geo selection - filter dropdowns
+    should always offer every option, not just ones in the current view."""
+    brands = {r["brand_name"] for r in all_zip_rows if r.get("brand_name") and (r.get("location_count") or 0) > 0}
+    brands.update(b["name"] for b in business_rows if b.get("name"))
+    states = {r["state_code"] for r in all_zip_rows if r.get("state_code")}
+    counties = {r["county"] for r in all_zip_rows if r.get("county")}
+    cities = {r["city_name"] for r in all_zip_rows if r.get("city_name")}
+    zips = {r["zip_code"] for r in all_zip_rows if r.get("zip_code")}
+    return {
+        "brands": sorted(brands),
+        "states": sorted(states),
+        "counties": sorted(counties)[:500],
+        "cities": sorted(cities)[:500],
+        "zips": sorted(zips)[:500],
+    }
+
+
+def _mirror_gap_rows(
+    zip_rows: list[dict[str, Any]], main_brands: list[str], competitor_brands: list[str],
+    min_population: float | None, min_income: float | None, max_median_age: float | None, state_filter: str,
+) -> list[dict[str, Any]]:
+    """Matches gap_query: grouped by zip (geo/demographic filtered, but
+    NOT brand-filtered - it needs the full brand universe per zip to tell
+    subject-only from competitor-only zips)."""
+    main_set = set(main_brands)
+    competitor_set = set(competitor_brands)
+    groups: dict[str, dict[str, Any]] = {}
+    for r in zip_rows:
+        if not _passes_demographic_filters(r.get("population"), r.get("median_household_income"), r.get("median_age"), min_population, min_income, max_median_age):
+            continue
+        zip_code = r.get("zip_code")
+        if zip_code is None:
+            continue
+        group = groups.setdefault(zip_code, {
+            "state": r.get("state_code") or "", "state_name": r.get("state_name") or "",
+            "county": r.get("county"), "city": r.get("city_name"), "zip_code": zip_code,
+            "brands_present": set(), "subject_stores": 0, "competitor_stores": 0, "competitor_brands_present": set(),
+            "latitude": r.get("latitude"), "longitude": r.get("longitude"), "population": r.get("population"),
+            "median_household_income": r.get("median_household_income"), "median_age": r.get("median_age"),
+        })
+        brand_name = r.get("brand_name")
+        location_count = r.get("location_count") or 0
+        if brand_name:
+            group["brands_present"].add(brand_name)
+            if brand_name in main_set:
+                group["subject_stores"] += location_count
+            if brand_name in competitor_set:
+                group["competitor_stores"] += location_count
+                group["competitor_brands_present"].add(brand_name)
+
+    rows = []
+    for zip_code, g in groups.items():
+        population = g["population"] or 0
+        subject_stores = g["subject_stores"]
+        competitor_stores = g["competitor_stores"]
+        if subject_stores > 0 and competitor_stores > 0:
+            whitespace_type = "COMPETITIVE_MARKET"
+        elif subject_stores > 0 and competitor_stores == 0:
+            whitespace_type = "SUBJECT_PRESENT"
+        elif subject_stores == 0 and competitor_stores > 0:
+            whitespace_type = "COMPETITOR_WHITESPACE"
+        elif subject_stores == 0 and competitor_stores == 0 and population > 0:
+            whitespace_type = "OPEN_WHITESPACE"
+        else:
+            whitespace_type = "UNKNOWN_COVERAGE"
+        competition_level = "High" if competitor_stores >= 3 else ("Moderate" if competitor_stores >= 1 else "None")
+        rows.append({
+            "state": g["state"], "state_name": g["state_name"], "county": g["county"], "city": g["city"], "zip_code": zip_code,
+            "subject_stores": subject_stores, "competitor_stores": competitor_stores,
+            "competitor_brands": ", ".join(sorted(g["competitor_brands_present"])),
+            "competitor_brand_count": len(g["competitor_brands_present"]),
+            "brands_present": ", ".join(sorted(g["brands_present"])),
+            "latitude": g["latitude"], "longitude": g["longitude"],
+            "population": population, "median_household_income": g["median_household_income"] or 0, "median_age": g["median_age"] or 0,
+            "whitespace_type": whitespace_type, "competition_level": competition_level,
+        })
+    if state_filter:
+        rows = [r for r in rows if r["state"].upper() == state_filter]
+    rows.sort(key=lambda r: (-(r["competitor_stores"] or 0), -(r["population"] or 0)))
+    return rows[:1000]
+
+
+def _mirror_map_records(
+    location_rows: list[dict[str, Any]], selected_brands: list[str],
+    min_population: float | None, min_income: float | None, max_median_age: float | None,
+) -> list[dict[str, Any]]:
+    rows = []
+    for r in location_rows:
+        if not _passes_brand_filter(r.get("brand"), selected_brands):
+            continue
+        if not _passes_demographic_filters(r.get("population"), r.get("median_household_income"), r.get("median_age"), min_population, min_income, max_median_age):
+            continue
+        if not _lat_lon_ok_strict(r.get("latitude"), r.get("longitude")):
+            continue
+        rows.append({
+            "brand": r.get("brand"), "name": r.get("name"), "address": r.get("address"),
+            "city": r.get("city_name"), "state": r.get("state_code"), "state_name": r.get("state_name"),
+            "county": r.get("county"), "zip_code": r.get("zip_code"), "phone_number": r.get("phone_number"),
+            "latitude": r.get("latitude"), "longitude": r.get("longitude"),
+        })
+    return rows[:1000]
+
+
+def _mirror_sample_records(
+    location_rows: list[dict[str, Any]], selected_brands: list[str],
+    min_population: float | None, min_income: float | None, max_median_age: float | None,
+) -> list[dict[str, Any]]:
+    rows = []
+    for r in location_rows:
+        if not _passes_brand_filter(r.get("brand"), selected_brands):
+            continue
+        if not _passes_demographic_filters(r.get("population"), r.get("median_household_income"), r.get("median_age"), min_population, min_income, max_median_age):
+            continue
+        rows.append({
+            "name": r.get("name"), "address": r.get("address"), "city": r.get("city_name"),
+            "state": r.get("state_code"), "state_name": r.get("state_name"), "county": r.get("county"),
+            "zip_code": r.get("zip_code"), "phone_number": r.get("phone_number"),
+            "latitude": r.get("latitude"), "longitude": r.get("longitude"),
+            "country": r.get("country"), "last_observed_at": r.get("last_observed_at"),
+        })
+    # ORDER BY last_observed_at DESC, name ASC - stable two-pass sort:
+    # tiebreaker ascending first, then primary key descending.
+    rows.sort(key=lambda r: r.get("name") or "")
+    rows.sort(key=lambda r: r.get("last_observed_at") or "", reverse=True)
+    return rows[:10]
+
+
+def _mirror_data_quality(quality_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    total_rows = len(quality_rows)
+    with_coordinates = sum(1 for r in quality_rows if r.get("latitude") is not None and r.get("longitude") is not None)
+    with_zip = sum(1 for r in quality_rows if r.get("zip_code"))
+    distinct_keys = {f"{r.get('brand') or ''}|{r.get('zip_code') or ''}|{r.get('address') or ''}" for r in quality_rows}
+    last_observed_at = max((r.get("last_observed_at") for r in quality_rows if r.get("last_observed_at")), default=None)
+    return {
+        "total_rows": total_rows,
+        "with_coordinates": with_coordinates,
+        "with_zip": with_zip,
+        "distinct_rows": len(distinct_keys),
+        "last_observed_at": last_observed_at,
+    }
+
+
+def _reporting_data_from_mirror(
+    main_brands: list[str], competitor_brands: list[str], selected_brands: list[str],
+    state_filter: str, county_filter: str, city_filter: str, zip_filter: str,
+    min_population: float | None, min_income: float | None, max_median_age: float | None,
+) -> dict[str, Any] | None:
+    """Returns None (triggering the live BigQuery fallback) only when the
+    mirror has never been synced - once synced, an empty result set is a
+    legitimate answer, not a signal to fall back."""
+    if get_mirror_status() is None:
+        return None
+    try:
+        zip_rows = fetch_mirror_zip_brand_activity(state_filter, county_filter, city_filter, zip_filter)
+        all_zip_rows = fetch_mirror_zip_brand_activity()
+        location_rows = fetch_mirror_reporting_locations(state_filter, county_filter, city_filter, zip_filter)
+        quality_rows = fetch_mirror_reporting_locations_by_brand(selected_brands)
+        business_rows = fetch_mirror_businesses()
+    except Exception as exc:
+        LOGGER.warning("reporting_mirror_read_failed error=%s", exc)
+        return None
+
+    base_rows = _mirror_base_rows(zip_rows, selected_brands, min_population, min_income, max_median_age)
+    state_population = _mirror_state_population_by_state(all_zip_rows)
+    global_brand_count = len({r["brand_name"] for r in all_zip_rows if r.get("brand_name") and (r.get("location_count") or 0) > 0})
+
+    return {
+        "totals": _mirror_totals(base_rows, global_brand_count),
+        "top_states": _mirror_top_states(base_rows, state_population),
+        "top_cities": _mirror_top_cities(base_rows),
+        "brands": _mirror_brand_query(base_rows),
+        "filter_options": _mirror_filter_options(all_zip_rows, business_rows),
+        "raw_whitespace": _mirror_gap_rows(zip_rows, main_brands, competitor_brands, min_population, min_income, max_median_age, state_filter),
+        "map_records": _mirror_map_records(location_rows, selected_brands, min_population, min_income, max_median_age),
+        "sample_records": _mirror_sample_records(location_rows, selected_brands, min_population, min_income, max_median_age),
+        "data_quality_row": _mirror_data_quality(quality_rows),
+        "present_states": {r["zip_state"] for r in base_rows if r.get("zip_state")},
+    }
+
+
 def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, Any]:
     params = params or {}
     cache_key = f"reporting_summary:v3:{json.dumps(params, sort_keys=True)}"
@@ -1822,6 +2255,35 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         cached_payload["reporting_cache"] = "hit"
         cached_payload["refreshing"] = bool(refresh_started or REPORTING_REFRESHING)
         return cached_payload
+
+    main_brands = _csv_param(params.get("main_brands", [""])[0])
+    raw_competitor_brands = _csv_param(params.get("competitor_brands", [""])[0])
+    # Ensure same brand data is NEVER shown in competitor analysis
+    competitor_brands = [b for b in raw_competitor_brands if b not in main_brands]
+    selected_brands = sorted(set(main_brands + competitor_brands))
+
+    state_filter = str(params.get("state", [""])[0]).strip().upper()
+    county_filter = str(params.get("county", [""])[0]).strip()
+    city_filter = str(params.get("city", [""])[0]).strip()
+    zip_filter = str(params.get("zip", [""])[0]).strip()
+    min_population = _safe_float(params.get("min_population", [""])[0])
+    min_income = _safe_float(params.get("min_income", [""])[0])
+    max_median_age = _safe_float(params.get("max_median_age", [""])[0])
+
+    mirror_data = _reporting_data_from_mirror(
+        main_brands, competitor_brands, selected_brands, state_filter, county_filter,
+        city_filter, zip_filter, min_population, min_income, max_median_age,
+    )
+    if mirror_data is not None:
+        refresh_started = _refresh_silver_background()
+        return _finish_reporting_summary(
+            params, cache_key, mirror_data["totals"], mirror_data["top_states"], mirror_data["top_cities"],
+            mirror_data["brands"], mirror_data["filter_options"], mirror_data["raw_whitespace"],
+            mirror_data["map_records"], mirror_data["sample_records"], mirror_data["data_quality_row"],
+            mirror_data["present_states"], main_brands, competitor_brands, state_filter, county_filter,
+            city_filter, zip_filter, min_population, min_income, max_median_age,
+            "sqlite_gold_mirror", "mirror", refresh_started,
+        )
 
     try:
         from google.cloud import bigquery
@@ -1854,20 +2316,6 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
     gold_gap_ref = f"`{gold_ref}.vw_reporting_gap_base`"
     zip_ref = gold_zip_ref
     refresh_started = _refresh_silver_background() or gold_bootstrapped
-    
-    main_brands = _csv_param(params.get("main_brands", [""])[0])
-    raw_competitor_brands = _csv_param(params.get("competitor_brands", [""])[0])
-    # Ensure same brand data is NEVER shown in competitor analysis
-    competitor_brands = [b for b in raw_competitor_brands if b not in main_brands]
-    selected_brands = sorted(set(main_brands + competitor_brands))
-    
-    state_filter = str(params.get("state", [""])[0]).strip().upper()
-    county_filter = str(params.get("county", [""])[0]).strip()
-    city_filter = str(params.get("city", [""])[0]).strip()
-    zip_filter = str(params.get("zip", [""])[0]).strip()
-    min_population = _safe_float(params.get("min_population", [""])[0])
-    min_income = _safe_float(params.get("min_income", [""])[0])
-    max_median_age = _safe_float(params.get("max_median_age", [""])[0])
     
     query_params: list[Any] = [
         bigquery.ArrayQueryParameter("selected_brands", "STRING", selected_brands),
@@ -2240,6 +2688,46 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
             return payload
         raise
 
+    present_states_extra = {row["state"] for row in client.query(base_cte + "SELECT DISTINCT state_code AS state FROM base", job_config=job_config).result() if row.get("state")}
+    return _finish_reporting_summary(
+        params, cache_key, totals, top_states, top_cities, brands, filter_options, raw_whitespace,
+        map_records, sample_records, data_quality_row, present_states_extra,
+        main_brands, competitor_brands, state_filter, county_filter, city_filter, zip_filter,
+        min_population, min_income, max_median_age, source_table, "miss", refresh_started,
+    )
+
+
+def _finish_reporting_summary(
+    params: dict[str, list[str]],
+    cache_key: str,
+    totals: dict[str, Any],
+    top_states: list[dict[str, Any]],
+    top_cities: list[dict[str, Any]],
+    brands: list[dict[str, Any]],
+    filter_options: dict[str, Any],
+    raw_whitespace: list[dict[str, Any]],
+    map_records: list[dict[str, Any]],
+    sample_records: list[dict[str, Any]],
+    data_quality_row: dict[str, Any],
+    present_states_extra: set[str],
+    main_brands: list[str],
+    competitor_brands: list[str],
+    state_filter: str,
+    county_filter: str,
+    city_filter: str,
+    zip_filter: str,
+    min_population: float | None,
+    min_income: float | None,
+    max_median_age: float | None,
+    source_table: str,
+    reporting_cache_label: str,
+    refresh_started: bool,
+) -> dict[str, Any]:
+    """Shared downstream processing (opportunity scoring, KPIs, data quality,
+    head-to-head enrichment) for reporting_summary() - identical regardless
+    of whether the raw metrics above came from the SQLite gold mirror or a
+    live BigQuery query, so the two data sources can never silently drift
+    in how they compute derived numbers."""
     state_codes = {
         "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL",
         "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT",
@@ -2247,8 +2735,7 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY", "DC",
     }
     present_states = {row["state"] for row in top_states if row.get("state")}
-    all_present_query = base_cte + "SELECT DISTINCT state_code AS state FROM base"
-    present_states.update(row["state"] for row in client.query(all_present_query, job_config=job_config).result() if row.get("state"))
+    present_states.update(present_states_extra)
     states_without_locations = sorted(state_codes - present_states)
 
     # Reference metrics for Similar Market Analysis & Opportunity Scoring
@@ -2499,7 +2986,7 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
 
     result_payload = {
         "source_table": source_table,
-        "reporting_cache": "miss",
+        "reporting_cache": reporting_cache_label,
         "refreshing": bool(refresh_started or REPORTING_REFRESHING),
         "filters": {
             "main_brands": main_brands,
