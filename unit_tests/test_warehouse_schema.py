@@ -35,7 +35,7 @@ class WarehouseSchemaTests(unittest.TestCase):
             fields = {field["name"] for field in TABLE_SCHEMAS[table_name]}
             self.assertTrue({"template_id", "ingestion_id", "mapping_id"} <= fields)
 
-    def test_partition_creation_does_not_require_time_partition_type_enum(self) -> None:
+    def test_tables_are_created_without_partitioning(self) -> None:
         created_tables = []
 
         class FakeSchemaField:
@@ -109,9 +109,11 @@ class WarehouseSchemaTests(unittest.TestCase):
         with patch.dict(sys.modules, modules):
             push_to_bigquery("project", "dataset", {"listings": []})
 
+        # Partitioning was removed (see TABLE_PARTITION_SPECS) to avoid DML
+        # friction like partition-filter requirements and streaming-buffer
+        # UPDATE/DELETE restrictions - tables are created as plain tables.
         listings_table = next(table for table in created_tables if table.table_ref.endswith(".listings"))
-        self.assertEqual(listings_table.time_partitioning.type_, "DAY")
-        self.assertEqual(listings_table.time_partitioning.field, "first_observed_at")
+        self.assertIsNone(listings_table.time_partitioning)
 
     def _fake_bigquery_modules_for_skip_check_tests(self, get_table_calls: list, create_table_calls: list):
         class FakeSchemaField:

@@ -186,12 +186,20 @@ async function openEditRecordModal(record) {
         feedbackEl.className = "action-feedback";
       }
 
-      // City/State level ZIP & Lat/Long suggestion helper
+      // City/State level ZIP & lat/long suggestion helper. Coordinates come
+      // straight from us_zipcodes.latitude/longitude - real ZIP-centroid
+      // reference data already stored for every ZIP, not fabricated - so a
+      // suggestion is an honest "somewhere in this ZIP", not an exact
+      // address-level fix.
       const cityVal = String(getNestedRawValue(rawObj, mapperFields.city || "city") || rawObj.city || rawObj.City || "").trim();
       const stateVal = String(getNestedRawValue(rawObj, mapperFields.state || "state") || rawObj.state || rawObj.State || "").trim();
       const zipVal = String(getNestedRawValue(rawObj, mapperFields.postal_code || "postal_code") || rawObj.zip || rawObj.postal_code || "").trim();
+      const latVal = String(getNestedRawValue(rawObj, mapperFields.latitude || "latitude") || rawObj.latitude || "").trim();
+      const lonVal = String(getNestedRawValue(rawObj, mapperFields.longitude || "longitude") || rawObj.longitude || "").trim();
+      const needsZip = !zipVal || zipVal.length < 5;
+      const needsLatLon = !latVal || !lonVal || isNaN(parseFloat(latVal)) || isNaN(parseFloat(lonVal));
 
-      if (cityVal && (!zipVal || zipVal.length < 5)) {
+      if (cityVal && (needsZip || needsLatLon)) {
         try {
           fetch(`/api/zips/search?q=${encodeURIComponent(cityVal)}&state=${encodeURIComponent(stateVal)}&limit=5`)
             .then(res => res.json())
@@ -217,10 +225,14 @@ async function openEditRecordModal(record) {
                       if (cityInput && !cityInput.value) cityInput.value = '${escapeHtml(z.city_name || '')}';
                       const stateInput = document.querySelector('input[data-field-type=\\'state\\']');
                       if (stateInput && !stateInput.value) stateInput.value = '${escapeHtml(z.state_code || '')}';
+                      const latInput = document.querySelector('input[data-field-type=\\'latitude\\']');
+                      if (latInput && ${z.latitude !== null && z.latitude !== undefined}) latInput.value = '${z.latitude ?? ''}';
+                      const lonInput = document.querySelector('input[data-field-type=\\'longitude\\']');
+                      if (lonInput && ${z.longitude !== null && z.longitude !== undefined}) lonInput.value = '${z.longitude ?? ''}';
                     })()">📍 ${escapeHtml(z.zip_code)} (${escapeHtml(z.city_name || cityVal)}, ${escapeHtml(z.state_code || stateVal)})</button>
                 `).join('');
 
-                suggestionBox.innerHTML = `<strong>💡 Suggested ZIPs for ${escapeHtml(cityVal)}:</strong> <div style="margin-top: 4px;">${zipsListHtml}</div>`;
+                suggestionBox.innerHTML = `<strong>💡 Suggested ZIP + coordinates for ${escapeHtml(cityVal)}:</strong> <div style="margin-top: 4px;">${zipsListHtml}</div><div style="margin-top: 4px; font-size: 11px; color: #0050b3;">Coordinates are that ZIP's approximate center, not an exact address - fine for a nearby fix, not a precise pin.</div>`;
                 formEl.insertBefore(suggestionBox, formEl.firstChild);
               }
             })
@@ -375,13 +387,21 @@ el("submitEditRecordBtn")?.addEventListener("click", async () => {
         if (!response.ok) throw new Error(result.error || "Could not reprocess record.");
 
         if (result.mapped_rows > 0) {
-          showDialogSuccess(`✅ Record #${currentEditingRecord.row_number} successfully validated & moved from error listings to listings.`);
+          const cleanup = result.error_listings_cleanup;
+          if (cleanup && cleanup.attempted && !cleanup.ok) {
+            // The row is safely in listings, but the old error entry didn't
+            // get cleared - say so plainly instead of a blanket "success"
+            // that would leave the count silently stuck.
+            showDialogError(`Record moved to listings, but the old error entry could not be cleared (still counted in Review Error Listings). ${cleanup.error ? escapeHtml(cleanup.error) : "Please retry or check server logs."}`);
+          } else {
+            showDialogSuccess(`✅ Record #${currentEditingRecord.row_number} successfully validated & moved from error listings to listings.`);
+            setTimeout(() => {
+              el("editRecordDialog").close();
+            }, 1200);
+          }
           await loadRejectedRecords();
           await refreshReviewCount();
           setStatus(`Record #${currentEditingRecord.row_number} reprocessed successfully and moved to listings.`, "ok");
-          setTimeout(() => {
-            el("editRecordDialog").close();
-          }, 1200);
         } else {
           // If record still failed validation, keep modal open so user can fix issues directly in the same window
           await refreshReviewCount();

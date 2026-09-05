@@ -3107,7 +3107,7 @@ def search_zips(query: str = "", state: str = "", county: str = "", city: str = 
     table_ref = f"`{project_id}.{dataset_id}.us_zipcodes`"
 
     sql = f"""
-    SELECT zip_code, city_name, county, state_code, state_name, population, median_household_income, median_age
+    SELECT zip_code, city_name, county, state_code, state_name, latitude, longitude, population, median_household_income, median_age
     FROM {table_ref}
     WHERE (zip_code LIKE CONCAT(@q, '%') OR LOWER(city_name) LIKE CONCAT(LOWER(@q), '%'))
       AND (@state = '' OR UPPER(state_code) = UPPER(@state))
@@ -3250,6 +3250,13 @@ def reprocess_rejected(data: dict[str, Any]) -> dict[str, Any]:
     # Handle soft-deleting old error records:
     # 1) If mapped successfully into listings, delete from error_listings.
     # 2) If validation fails again, delete the old error record version so it is replaced by the newly generated row (preventing row count multiplication).
+    # This must not fail silently: a caller that reports "moved to
+    # listings" while the old error row secretly survives (and keeps
+    # counting toward the error total) is worse than surfacing the
+    # failure, so both an exception and a no-op UPDATE (0 rows affected,
+    # e.g. an event_id/row_number mismatch) are reported back to the
+    # caller via result["error_listings_cleanup"] instead of only logging.
+    result["error_listings_cleanup"] = {"attempted": bool(records and reprocessed_row_numbers), "ok": True, "rows_updated": 0}
     if records and reprocessed_row_numbers:
         try:
             project_id, dataset_id, credentials_json = _warehouse_settings()
@@ -3264,9 +3271,19 @@ def reprocess_rejected(data: dict[str, Any]) -> dict[str, Any]:
                 bigquery.ScalarQueryParameter("event_id", "STRING", event_id),
                 bigquery.ArrayQueryParameter("row_numbers", "INT64", reprocessed_row_numbers),
             ])
-            client.query(update_query, job_config=update_config).result()
+            update_job = client.query(update_query, job_config=update_config)
+            update_job.result()
+            rows_updated = update_job.num_dml_affected_rows or 0
+            result["error_listings_cleanup"]["rows_updated"] = rows_updated
+            if rows_updated < len(reprocessed_row_numbers):
+                LOGGER.warning(
+                    "error_listings_cleanup_incomplete event_id=%s expected=%d updated=%d row_numbers=%s",
+                    event_id, len(reprocessed_row_numbers), rows_updated, reprocessed_row_numbers,
+                )
+                result["error_listings_cleanup"]["ok"] = False
         except Exception as exc:
-            LOGGER.warning("error_listings_cleanup_failed event_id=%s error=%s", event_id, exc)
+            LOGGER.exception("error_listings_cleanup_failed event_id=%s row_numbers=%s", event_id, reprocessed_row_numbers)
+            result["error_listings_cleanup"] = {"attempted": True, "ok": False, "rows_updated": 0, "error": str(exc)}
 
     return result
 

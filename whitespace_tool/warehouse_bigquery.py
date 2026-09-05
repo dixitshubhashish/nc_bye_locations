@@ -300,10 +300,13 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
     ],
 }
 
-TABLE_PARTITION_SPECS: dict[str, dict[str, Any]] = {
-    "listings": {"field": "first_observed_at", "type": "DAY"},
-    "error_listings": {"field": "observed_at", "type": "DAY"},
-}
+# Intentionally empty: listings/error_listings were time-partitioned, but
+# partitioning adds DML friction (e.g. a partition-filter requirement, or
+# UPDATE/DELETE restrictions while data sits in a partition's streaming
+# buffer) that isn't worth it for this tool's data volume - error_listings
+# soft-delete UPDATEs in particular need to run without those constraints.
+# Plain (non-partitioned) tables keep the same schema/clustering either way.
+TABLE_PARTITION_SPECS: dict[str, dict[str, Any]] = {}
 
 TABLE_CLUSTER_SPECS: dict[str, list[str]] = {
     "listings": ["state_code", "zip_code", "business_id"],
