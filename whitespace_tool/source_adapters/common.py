@@ -17,9 +17,9 @@ def flatten_object(value: Any, prefix: str = "", output: dict[str, Any] | None =
     return output
 
 
-def collect_fields(rows: list[dict[str, Any]], limit: int = 50) -> list[str]:
+def collect_fields(rows: list[dict[str, Any]]) -> list[str]:
     fields: set[str] = set()
-    for row in rows[:limit]:
+    for row in rows:
         fields.update(field for field in flatten_object(row).keys() if field and str(field).strip())
     return sorted(fields)
 

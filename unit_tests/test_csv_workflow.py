@@ -11,6 +11,7 @@ from whitespace_tool.field_registry import load_field_registry
 from whitespace_tool.models import LocationRecord
 from whitespace_tool.normalization import clean_zip, normalize_location, optional_date, optional_float, optional_int, optional_timestamp
 from whitespace_tool.source_adapters import csv_source
+from whitespace_tool.source_adapters.common import preview_payload
 from whitespace_tool.source_adapters import json_source
 from whitespace_tool.source_adapters import xml_source
 from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows
@@ -64,6 +65,13 @@ class CsvWorkflowTests(unittest.TestCase):
         self.assertEqual(result["record_count"], 30)
         self.assertEqual(len(result["rows"]), 30)
         self.assertEqual(len(result["preview_rows"]), 25)
+
+    def test_preview_field_discovery_scans_all_rows(self) -> None:
+        rows = [{"store_id": index, "store_name": f"Store {index}"} for index in range(100)]
+        rows[80]["late_column"] = "present"
+        result = preview_payload(rows)
+
+        self.assertIn("late_column", result["fields"])
 
     def test_csv_preview_removes_blank_headers(self) -> None:
         result = csv_source.preview(b"name,,zip_code\nStore,,27601\n")
@@ -245,6 +253,45 @@ class CsvWorkflowTests(unittest.TestCase):
         self.assertEqual(result["error_listings"], 2)
         self.assertEqual(len(captured_rows["listings"]), 1)
         self.assertEqual(len(captured_rows["error_listings"]), 2)
+
+    def test_save_mapper_batch_flags_preserve_event_and_skip_duplicate_template(self) -> None:
+        captured_batches = []
+        rows = [
+            VALID_ROW,
+            {**VALID_ROW, "store_id": "bad-coords", "latitude": "not-a-latitude"},
+        ]
+
+        def fake_push(_project_id, _dataset_id, rows_by_table, _credentials_json):
+            captured_batches.append(rows_by_table)
+
+        with patch("whitespace_tool.workflow_server.field_catalog", side_effect=RuntimeError("catalog unavailable")):
+            with patch("whitespace_tool.workflow_server._load_mapped_zip_demographics", side_effect=RuntimeError("zip enrichment unavailable")):
+                with patch("whitespace_tool.workflow_server._warehouse_settings", return_value=("project", "dataset", None)):
+                    with patch("whitespace_tool.workflow_server.push_to_bigquery", side_effect=fake_push):
+                        first = save_mapper({
+                            "mapper": dict(VALID_MAPPER),
+                            "rows": [rows[0]],
+                            "source_fields": list(VALID_ROW),
+                            "batch_event_id": "batch-123",
+                            "row_offset": 0,
+                            "save_template": True,
+                        })
+                        second = save_mapper({
+                            "mapper": dict(VALID_MAPPER),
+                            "rows": [rows[1]],
+                            "source_fields": list(VALID_ROW),
+                            "batch_event_id": "batch-123",
+                            "row_offset": 1,
+                            "save_template": False,
+                        })
+
+        self.assertEqual(first["event_id"], "batch-123")
+        self.assertEqual(second["event_id"], "batch-123")
+        self.assertTrue(first["template_saved"])
+        self.assertFalse(second["template_saved"])
+        self.assertEqual(len(captured_batches[0]["workflow_templates"]), 1)
+        self.assertEqual(captured_batches[1]["workflow_templates"], [])
+        self.assertEqual(captured_batches[1]["error_listings"][0]["row_number"], 2)
 
     def test_standard_and_optional_fields_keep_expected_modes(self) -> None:
         required = {field["name"] for field in TABLE_SCHEMAS["listings"] if field["mode"] == "REQUIRED"}

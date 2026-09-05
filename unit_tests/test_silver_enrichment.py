@@ -52,6 +52,8 @@ class SilverEnrichmentTests(unittest.TestCase):
         self.assertIn("coordinate_source", sql)
         self.assertIn("coordinate_confidence", sql)
         self.assertIn("geocode_query", sql)
+        self.assertIn("state_code", sql)
+        self.assertIn("state_name", sql)
 
 
 if __name__ == "__main__":
