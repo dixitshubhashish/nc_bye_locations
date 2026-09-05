@@ -1435,7 +1435,6 @@ async function refreshSampleDatasetStatus() {
       }
     }
 async function saveMapper() {
-      if (activeTemplateId) return saveEditedTemplate();
       let mapper = getMapper();
       if (!mapper.brand) {
         setStatus("Please select or enter a Business/Brand name before saving.", "warn");
@@ -1450,6 +1449,29 @@ async function saveMapper() {
         }
         mapper = getMapper();
       }
+
+      // A template loaded from the library keeps its own workflow_templates
+      // row (activeTemplateId) - update that definition with any field-
+      // mapping edits up front, regardless of whether a source file has
+      // been (re)parsed yet below. Previously this button, when a template
+      // was loaded, ONLY did this and returned - so editing a loaded
+      // template's mapping and clicking "Save Template and Listing Data"
+      // never actually reprocessed the parsed rows into listings, despite
+      // the button's own label promising both.
+      if (activeTemplateId) {
+        try {
+          await saveEditedTemplate();
+        } catch (error) {
+          setStatus(productSafeError(error.message, "Could not update template."), "error");
+          return;
+        }
+      }
+
+      if (!sourceRows.length) {
+        if (!activeTemplateId) setStatus("Parse a source file before saving.", "warn");
+        return;
+      }
+
       const coverage = sourceFields.length ? Math.round(new Set(Object.values(mapper.fields).filter(Boolean)).size / sourceFields.length * 100) : 0;
       if (coverage < 50) {
         setStatus("Mapping coverage must reach 50% before saving.", "warn");
@@ -1478,7 +1500,9 @@ async function saveMapper() {
               source_fields: sourceFields,
               batch_event_id: batchEventId,
               row_offset: batch.rowOffset,
-              save_template: index === 0
+              // A loaded template's row is already kept in sync above -
+              // never mint a second, duplicate template row for it here.
+              save_template: !activeTemplateId && index === 0
             })
           });
           const result = await response.json();
@@ -1492,7 +1516,8 @@ async function saveMapper() {
         el("reviewEventId").value = lastSaveEventId;
         await refreshReviewCount();
         hideProgress();
-        setStatus(`Saved ${mappedRows} of ${sourceRows.length} records. ${errorListings} need review.`, "ok");
+        const prefix = activeTemplateId ? "Template updated. " : "";
+        setStatus(`${prefix}Saved ${mappedRows} of ${sourceRows.length} records. ${errorListings} need review.`, "ok");
       } catch (error) {
         hideProgress();
         setStatus(productSafeError(error.message, "Could not save template."), "error");
