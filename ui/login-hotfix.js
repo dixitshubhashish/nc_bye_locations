@@ -80,6 +80,15 @@
     } catch (error) {
       console.error("Post-login readiness initialization failed:", error);
     }
+    // Paint the Review Error Listings tab badge as soon as the app shell is
+    // shown, via whichever login path got us here. On a fresh sign-in force a
+    // live re-count so the number reflects the current warehouse; on an
+    // in-session restore the cheap cached (SQLite) read is enough.
+    try {
+      if (typeof window.refreshReviewCount === "function") window.refreshReviewCount(!isInitialRestore);
+    } catch (error) {
+      console.error("Post-login review-count initialization failed:", error);
+    }
   }
 
   async function safeLogin() {

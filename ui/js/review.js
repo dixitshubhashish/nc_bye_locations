@@ -415,11 +415,26 @@ el("submitEditRecordBtn")?.addEventListener("click", async () => {
             }, 1200);
           }
           await loadRejectedRecords();
-          await refreshReviewCount();
+          // reprocess already re-counted from BigQuery and wrote it back to
+          // SQLite; use the returned total directly for an instant, correct
+          // badge, falling back to a forced refresh if it wasn't returned.
+          if (typeof result.error_count_total === "number") {
+            el("reviewCount").textContent = result.error_count_total;
+          } else {
+            await refreshReviewCount(true);
+          }
+          await loadErrorBrandBreakdown();
           setStatus(`Record #${currentEditingRecord.row_number} reprocessed successfully and moved to listings.`, "ok");
         } else {
-          // If record still failed validation, keep modal open so user can fix issues directly in the same window
-          await refreshReviewCount();
+          // Still invalid: the queue didn't shrink, but a fresh error row may
+          // have replaced the old one - re-count from source and refresh the
+          // brand breakdown so both stay truthful.
+          if (typeof result.error_count_total === "number") {
+            el("reviewCount").textContent = result.error_count_total;
+          } else {
+            await refreshReviewCount(true);
+          }
+          await loadErrorBrandBreakdown();
           showDialogError("Record validation failed again. Please review required fields, valid ZIP Code, and coordinates.");
         }
       } catch (error) {
@@ -432,14 +447,91 @@ el("submitEditRecordBtn")?.addEventListener("click", async () => {
         if (cancelBtn) cancelBtn.disabled = false;
       }
     });
-async function refreshReviewCount() {
-      const businessId = selectedBrand?.business_id || "";
+// The tab badge shows the overall Review Error Listings total (all
+// businesses), not a per-brand slice - the per-brand split lives in the
+// brand-impact breakdown inside the tab. `refresh` forces a live BigQuery
+// re-count (and rewrites the SQLite cache); leave it false for cheap lazy
+// reads (tab open, app boot) that just want the last-known number instantly.
+async function refreshReviewCount(refresh = false) {
       try {
-        const response = await fetch(`/api/error-listings/count?business_id=${encodeURIComponent(businessId)}`);
+        const response = await fetch(`/api/error-listings/count?business_id=&refresh=${refresh ? "1" : "0"}`);
         const result = await response.json();
-        if (response.ok) el("reviewCount").textContent = result.count;
+        if (response.ok && typeof result.count === "number") el("reviewCount").textContent = result.count;
       } catch (error) {
-        el("reviewCount").textContent = "0";
+        // Keep whatever the badge already showed rather than blanking to 0 -
+        // a transient fetch failure shouldn't wipe a valid cached count.
+      }
+    }
+
+// Accessible, distinct categorical hues for the brand-impact donut. Reused
+// slice-to-slice so the table swatch and the arc always agree.
+const ERROR_BRAND_COLORS = ["#2f6f6a", "#c26a3d", "#4c6ef5", "#b5559e", "#3c9a5f", "#c0392b", "#8a6d3b", "#6741d9", "#128fb0", "#9c6b1f"];
+
+function _donutSvg(slices, total, size = 132) {
+      // slices: [{value, color}]. Renders an SVG donut; a single 100% slice
+      // is drawn as a full ring (an arc path can't express a 360 deg sweep).
+      const radius = size / 2;
+      const inner = radius * 0.58;
+      const cx = radius;
+      const cy = radius;
+      if (!total) return "";
+      const nonZero = slices.filter((s) => s.value > 0);
+      if (nonZero.length === 1) {
+        return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" role="img" aria-label="One brand accounts for all error listings">
+          <circle cx="${cx}" cy="${cy}" r="${(radius + inner) / 2}" fill="none" stroke="${nonZero[0].color}" stroke-width="${radius - inner}"></circle>
+          <text x="${cx}" y="${cy - 2}" text-anchor="middle" font-size="18" font-weight="700" fill="#1f2937">${total}</text>
+          <text x="${cx}" y="${cy + 14}" text-anchor="middle" font-size="9" fill="#6b7280">total</text>
+        </svg>`;
+      }
+      let angle = -Math.PI / 2;
+      const arcs = slices.map((slice) => {
+        if (slice.value <= 0) return "";
+        const sweep = (slice.value / total) * Math.PI * 2;
+        const a0 = angle;
+        const a1 = angle + sweep;
+        angle = a1;
+        const large = sweep > Math.PI ? 1 : 0;
+        const x0 = cx + radius * Math.cos(a0), y0 = cy + radius * Math.sin(a0);
+        const x1 = cx + radius * Math.cos(a1), y1 = cy + radius * Math.sin(a1);
+        const xi1 = cx + inner * Math.cos(a1), yi1 = cy + inner * Math.sin(a1);
+        const xi0 = cx + inner * Math.cos(a0), yi0 = cy + inner * Math.sin(a0);
+        return `<path d="M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${radius} ${radius} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)} L ${xi1.toFixed(2)} ${yi1.toFixed(2)} A ${inner} ${inner} 0 ${large} 0 ${xi0.toFixed(2)} ${yi0.toFixed(2)} Z" fill="${slice.color}"></path>`;
+      }).join("");
+      return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" role="img" aria-label="Error listings by brand">
+        ${arcs}
+        <text x="${cx}" y="${cy - 2}" text-anchor="middle" font-size="18" font-weight="700" fill="#1f2937">${total}</text>
+        <text x="${cx}" y="${cy + 14}" text-anchor="middle" font-size="9" fill="#6b7280">total</text>
+      </svg>`;
+    }
+
+async function loadErrorBrandBreakdown() {
+      const container = el("reviewBrandBreakdown");
+      if (!container) return;
+      try {
+        const response = await fetch("/api/error-listings/by-brand");
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not load brand breakdown.");
+        const brands = Array.isArray(result.brands) ? result.brands.filter((b) => b.count > 0) : [];
+        const total = result.total || brands.reduce((sum, b) => sum + b.count, 0);
+        if (!brands.length) {
+          container.style.display = "none";
+          return;
+        }
+        const withColor = brands.map((b, i) => ({ ...b, color: ERROR_BRAND_COLORS[i % ERROR_BRAND_COLORS.length] }));
+        el("reviewBrandChart").innerHTML = _donutSvg(withColor.map((b) => ({ value: b.count, color: b.color })), total);
+        el("reviewBrandBreakdownTotal").textContent = `${total} across ${brands.length} brand${brands.length === 1 ? "" : "s"}`;
+        el("reviewBrandTable").innerHTML = `<table style="width:100%; border-collapse: collapse; font-size: 12px;"><thead><tr>
+            <th style="text-align:left; padding:4px 8px; border-bottom:1px solid var(--line);">Brand</th>
+            <th style="text-align:right; padding:4px 8px; border-bottom:1px solid var(--line);">Errors</th>
+            <th style="text-align:right; padding:4px 8px; border-bottom:1px solid var(--line);">Share</th>
+          </tr></thead><tbody>${withColor.map((b) => `<tr>
+            <td style="padding:4px 8px;"><span style="display:inline-block; width:10px; height:10px; border-radius:2px; background:${b.color}; margin-right:6px; vertical-align:middle;"></span>${escapeHtml(b.brand || b.business_id)}</td>
+            <td style="padding:4px 8px; text-align:right; font-variant-numeric: tabular-nums;">${b.count}</td>
+            <td style="padding:4px 8px; text-align:right; color: var(--muted); font-variant-numeric: tabular-nums;">${total ? Math.round(b.count / total * 100) : 0}%</td>
+          </tr>`).join("")}</tbody></table>`;
+        container.style.display = "block";
+      } catch (error) {
+        container.style.display = "none";
       }
     }
 

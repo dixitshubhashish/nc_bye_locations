@@ -34,6 +34,7 @@ from whitespace_tool.sqlite_cache import (
     get_cached_query, set_cached_query, invalidate_cache,
     replace_gold_mirror, get_mirror_status, fetch_mirror_zip_brand_activity,
     fetch_mirror_reporting_locations, fetch_mirror_reporting_locations_by_brand, fetch_mirror_businesses,
+    get_error_count, set_error_count,
 )
 from whitespace_tool.sample_data import SAMPLE_BATCH_ID, SAMPLE_BRANDS, generate_source_rows, mapper_for, source_configuration, source_label, stable_business_id, stable_template_id
 
@@ -3185,7 +3186,10 @@ def list_rejected(event_id: str = "") -> dict[str, Any]:
     return {"records": records}
 
 
-def count_error_listings(business_id: str = "") -> int:
+def _count_error_listings_live(business_id: str = "") -> int:
+    """Live BigQuery count of non-deleted error listings for a business
+    (empty string = all businesses). The one source of truth; every SQLite
+    value is a copy of a number this returned."""
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
     query = f"SELECT COUNT(*) AS total FROM `{project_id}.{dataset_id}.error_listings` WHERE is_deleted IS NOT TRUE AND (@business_id = '' OR business_id = @business_id)"
@@ -3197,6 +3201,64 @@ def count_error_listings(business_id: str = "") -> int:
         if getattr(exc, "code", None) == 404:
             return 0
         raise
+
+
+def refresh_error_count(business_id: str = "") -> int:
+    """Re-count from BigQuery and write the result back to SQLite. Call this
+    right after anything that changes error_listings (a reprocess move, a
+    fresh mapper save) so the cached counter converges on the warehouse."""
+    total = _count_error_listings_live(business_id)
+    try:
+        set_error_count(business_id, total)
+    except Exception as exc:
+        LOGGER.warning("error_count_cache_write_failed business_id=%s error=%s", business_id, exc)
+    return total
+
+
+def count_error_listings(business_id: str = "", refresh: bool = False) -> int:
+    """Review Error Listings count. By default serves the fast SQLite value
+    (written from the last live count) so the tab paints instantly and lazy
+    reloads are cheap; only reaches BigQuery when SQLite has never been
+    seeded. refresh=True forces a live re-count and rewrites SQLite - used
+    when data has just moved and the cached number is known stale."""
+    if refresh:
+        return refresh_error_count(business_id)
+    cached = get_error_count(business_id)
+    if cached is not None:
+        return cached
+    # First read for this business - seed SQLite from a live count so every
+    # later read is fast.
+    return refresh_error_count(business_id)
+
+
+def error_listings_by_brand() -> dict[str, Any]:
+    """Per-brand breakdown of how many (non-deleted) error listings each
+    business has, resolving business_id -> brand name, highest count first.
+    Powers the Review tab's brand-impact table/chart."""
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    query = f"""
+    SELECT
+      e.business_id AS business_id,
+      COALESCE(b.name, e.business_id) AS brand,
+      COUNT(*) AS count
+    FROM `{project_id}.{dataset_id}.error_listings` e
+    LEFT JOIN `{project_id}.{dataset_id}.businesses` b
+      ON b.business_id = e.business_id AND b.is_deleted IS NOT TRUE
+    WHERE e.is_deleted IS NOT TRUE
+    GROUP BY business_id, brand
+    ORDER BY count DESC
+    """
+    try:
+        rows = [
+            {"business_id": row["business_id"], "brand": row["brand"], "count": int(row["count"])}
+            for row in client.query(query).result()
+        ]
+    except Exception as exc:
+        if getattr(exc, "code", None) == 404:
+            return {"brands": [], "total": 0}
+        raise
+    return {"brands": rows, "total": sum(row["count"] for row in rows)}
 
 
 def reprocess_rejected(data: dict[str, Any]) -> dict[str, Any]:
@@ -3238,6 +3300,15 @@ def reprocess_rejected(data: dict[str, Any]) -> dict[str, Any]:
     if not reprocessed_row_numbers and records:
         reprocessed_row_numbers = [int(rec["row_number"]) for rec in records if "row_number" in rec]
 
+    # Timestamp captured before save_mapper runs. save_mapper may re-insert a
+    # NEW error row for the same (event_id, row_number) if the row is still
+    # invalid, stamped with a fresh observed_at >= this cutoff. The cleanup
+    # UPDATE below only soft-deletes rows observed strictly before it, so it
+    # clears the OLD error row without ever deleting the just-created
+    # replacement (which would otherwise make a still-invalid retry silently
+    # vanish from the review queue).
+    cleanup_cutoff = utc_now_iso()
+
     result = save_mapper({
         "mapper": mapper,
         "rows": rows,
@@ -3249,7 +3320,9 @@ def reprocess_rejected(data: dict[str, Any]) -> dict[str, Any]:
 
     # Handle soft-deleting old error records:
     # 1) If mapped successfully into listings, delete from error_listings.
-    # 2) If validation fails again, delete the old error record version so it is replaced by the newly generated row (preventing row count multiplication).
+    # 2) If validation fails again, the OLD error row is deleted and the
+    #    fresh one (observed >= cutoff) is kept, so the count reflects one
+    #    still-broken row rather than multiplying.
     # This must not fail silently: a caller that reports "moved to
     # listings" while the old error row secretly survives (and keeps
     # counting toward the error total) is worse than surfacing the
@@ -3257,6 +3330,7 @@ def reprocess_rejected(data: dict[str, Any]) -> dict[str, Any]:
     # e.g. an event_id/row_number mismatch) are reported back to the
     # caller via result["error_listings_cleanup"] instead of only logging.
     result["error_listings_cleanup"] = {"attempted": bool(records and reprocessed_row_numbers), "ok": True, "rows_updated": 0}
+    affected_business_id = str(mapper.get("business_id") or "").strip()
     if records and reprocessed_row_numbers:
         try:
             project_id, dataset_id, credentials_json = _warehouse_settings()
@@ -3265,11 +3339,15 @@ def reprocess_rejected(data: dict[str, Any]) -> dict[str, Any]:
             update_query = f"""
             UPDATE `{project_id}.{dataset_id}.error_listings`
             SET is_deleted = TRUE, deleted_on = CURRENT_TIMESTAMP()
-            WHERE event_id = @event_id AND row_number IN UNNEST(@row_numbers)
+            WHERE event_id = @event_id
+              AND row_number IN UNNEST(@row_numbers)
+              AND is_deleted IS NOT TRUE
+              AND (observed_at IS NULL OR observed_at < TIMESTAMP(@cutoff))
             """
             update_config = bigquery.QueryJobConfig(query_parameters=[
                 bigquery.ScalarQueryParameter("event_id", "STRING", event_id),
                 bigquery.ArrayQueryParameter("row_numbers", "INT64", reprocessed_row_numbers),
+                bigquery.ScalarQueryParameter("cutoff", "STRING", cleanup_cutoff),
             ])
             update_job = client.query(update_query, job_config=update_config)
             update_job.result()
@@ -3284,6 +3362,18 @@ def reprocess_rejected(data: dict[str, Any]) -> dict[str, Any]:
         except Exception as exc:
             LOGGER.exception("error_listings_cleanup_failed event_id=%s row_numbers=%s", event_id, reprocessed_row_numbers)
             result["error_listings_cleanup"] = {"attempted": True, "ok": False, "rows_updated": 0, "error": str(exc)}
+
+    # The error_listings table just changed (rows soft-deleted, and possibly
+    # a fresh error row inserted by save_mapper). Re-count from BigQuery -
+    # the source of truth - and write the fresh numbers back to SQLite, so
+    # the tab's counter converges instead of showing a stale value. Return
+    # them so the UI can update instantly without a second round trip.
+    try:
+        result["error_count_total"] = refresh_error_count("")
+        if affected_business_id:
+            result["error_count"] = refresh_error_count(affected_business_id)
+    except Exception as exc:
+        LOGGER.warning("error_count_refresh_after_reprocess_failed event_id=%s error=%s", event_id, exc)
 
     return result
 
@@ -3681,11 +3771,19 @@ def make_handler(ui_dir: Path):
                 except Exception as exc:
                     _json_response(self, 400, {"error": str(exc)})
                 return
+            if self.path.startswith("/api/error-listings/by-brand"):
+                try:
+                    _json_response(self, 200, error_listings_by_brand())
+                except Exception as exc:
+                    _json_response(self, 400, {"error": str(exc)})
+                return
             if self.path.startswith("/api/error-listings/count"):
                 from urllib.parse import parse_qs, urlsplit
-                business_id = parse_qs(urlsplit(self.path).query).get("business_id", [""])[0]
+                count_params = parse_qs(urlsplit(self.path).query)
+                business_id = count_params.get("business_id", [""])[0]
+                refresh = count_params.get("refresh", ["0"])[0] in ("1", "true", "True")
                 try:
-                    _json_response(self, 200, {"count": count_error_listings(business_id)})
+                    _json_response(self, 200, {"count": count_error_listings(business_id, refresh=refresh)})
                 except Exception as exc:
                     _json_response(self, 400, {"error": str(exc)})
                 return

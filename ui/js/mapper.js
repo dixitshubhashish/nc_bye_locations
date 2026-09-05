@@ -60,6 +60,12 @@ let jsonRecordPaths = [];
 let autoMappedKeys = new Set();
 let learnedSuggestions = {};
 let sourceParsed = false;
+// True while a template loaded from the Template Library is being edited
+// without a freshly parsed source file. The mapping grid and Save must work
+// off the template's stored source_fields (there are no live sourceRows),
+// so this flag stands in for sourceParsed wherever the mapper only needs the
+// column list, not actual row data.
+let templateEditMode = false;
 let selectedBrand = null;
 let csvFunctionMode = "new";
 let jsonFunctionMode = "new";
@@ -282,6 +288,7 @@ function resetSourceInputsForNewMode(sourceType = el("sourceType").value) {
       jsonRecordPaths = [];
       resolvedRecordPath = "";
       sourceParsed = false;
+      templateEditMode = false;
       mappingSelections = {};
       autoMappedKeys = new Set();
       optionalMappingKeys = new Set();
@@ -1015,6 +1022,15 @@ function getMapper() {
       const enteredBrandName = el("newBrandName")?.value.trim() || "";
       const resolvedBrand = selectedBrand?.name || selectedOptionText || enteredBrandName;
 
+      // Persist the FULL source-field universe (every parsed column plus any
+      // mapped path), not just the mapped subset. On reload from the Template
+      // Library there's no live source to re-derive columns from, so without
+      // this the unmapped columns are lost and you can't re-point a mapping
+      // to a column you'd previously skipped.
+      const sourceFieldUniverse = Array.from(new Set([
+        ...sourceFields,
+        ...Object.values(fields).filter(Boolean),
+      ]));
       const mapper = {
         brand: resolvedBrand,
         business_id: selectedBrand?.business_id || (selectedOption && selectedOption.value !== "__create_new__" ? selectedOption.value : "") || "",
@@ -1022,6 +1038,7 @@ function getMapper() {
         source_name: el("sourceName").value.trim(),
         source_type: el("sourceType").value,
         fields,
+        source_fields: sourceFieldUniverse,
         aliases: customAliases
       };
       if (el("sourceInputMode").value === "url" && el("sourceUrl").value.trim()) {
@@ -1119,10 +1136,11 @@ function updateOutput() {
       const percentage = el("mappingPercentage");
       percentage.textContent = `${coverage}%`;
       percentage.className = `mapping-percentage ${coverage < 50 ? "low" : coverage <= 75 ? "medium" : "high"}`;
-      el("saveBtn").disabled = !sourceParsed || coverage < 50;
-      el("saveActionWrap").dataset.tooltip = !sourceParsed || coverage < 50
-        ? "Map at least 50% before saving."
-        : "Ready to save.";
+      const canSave = (sourceParsed || templateEditMode) && coverage >= 50;
+      el("saveBtn").disabled = !canSave;
+      el("saveActionWrap").dataset.tooltip = canSave
+        ? (templateEditMode ? "Save the updated template mapping." : "Ready to save.")
+        : "Map at least 50% before saving.";
       el("mappingCoverageDetail").textContent = sourceFields.length ? `${mappedSourceFields.size} of ${sourceFields.length} columns mapped` : "Parse to measure coverage.";
       el("mapperOutput").value = JSON.stringify(mapper, null, 2);
       validateMapper(mapper);
@@ -1280,6 +1298,7 @@ async function parseSource() {
         sourceFields = [...new Set((result.fields || []).filter((field) => field !== null && field !== undefined && String(field).trim()))];
         jsonRecordPaths = result.record_paths || [];
         sourceParsed = true;
+        templateEditMode = false;
         populateJsonRecordPaths(jsonRecordPaths);
         learnedSuggestions = {};
         try {
@@ -1514,7 +1533,10 @@ async function saveMapper() {
         }
         lastSaveEventId = eventId || batchEventId;
         el("reviewEventId").value = lastSaveEventId;
-        await refreshReviewCount();
+        // A save just created new error listings - force a live re-count so
+        // the tab badge reflects them (and the SQLite cache is refreshed).
+        await refreshReviewCount(true);
+        if (typeof loadErrorBrandBreakdown === "function") loadErrorBrandBreakdown();
         hideProgress();
         const prefix = activeTemplateId ? "Template updated. " : "";
         setStatus(`${prefix}Saved ${mappedRows} of ${sourceRows.length} records. ${errorListings} need review.`, "ok");
@@ -1549,6 +1571,7 @@ async function performClearSavedData() {
 
 function resetMapping() {
       activeTemplateId = "";
+      templateEditMode = false;
       mappingSelections = {};
       autoMappedKeys = new Set();
       optionalMappingKeys = new Set();

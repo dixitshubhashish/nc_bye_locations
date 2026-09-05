@@ -158,6 +158,7 @@ function switchView(viewId) {
       if (viewId === "reviewView") {
         loadRejectedRecords();
         refreshReviewCount();
+        if (typeof loadErrorBrandBreakdown === "function") loadErrorBrandBreakdown();
       }
     }
 
@@ -262,9 +263,13 @@ async function login() {
         el("appShell").classList.remove("hidden");
         switchView("mapperView");
         refreshHeaderReadiness();
-        
+
         // Asynchronous non-blocking background data load
         loadAppData();
+        // Fresh login: pull a live error-listings count once so the tab badge
+        // reflects the current warehouse state rather than a prior session's
+        // cached number (later reads stay cheap off SQLite).
+        if (typeof refreshReviewCount === "function") refreshReviewCount(true);
       } catch (error) {
         status.className = "status error";
         status.textContent = productSafeError(error.message, "Invalid username or password.");

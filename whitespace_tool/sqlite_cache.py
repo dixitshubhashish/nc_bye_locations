@@ -109,6 +109,20 @@ def init_sqlite_cache() -> None:
                 business_rows INTEGER
             );
         """)
+        # Last-known Review Error Listings count, keyed by business_id
+        # (empty string = the all-businesses total shown on the tab). The UI
+        # reads this instantly on load and after every lazy refresh; the
+        # value is only ever (re)written from a live BigQuery count, so it
+        # trails the warehouse by at most one refresh and never drifts on
+        # its own. A refreshed_at lets the reader decide when a value is too
+        # stale to trust without a live re-count.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS error_listing_counts (
+                business_id TEXT PRIMARY KEY,
+                count INTEGER NOT NULL,
+                refreshed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
         conn.commit()
 
 
@@ -181,6 +195,32 @@ def invalidate_cache(cache_key: str | None = None) -> None:
             conn.execute("DELETE FROM query_cache WHERE cache_key = ?;", (cache_key,))
         else:
             conn.execute("DELETE FROM query_cache;")
+        conn.commit()
+
+
+def get_error_count(business_id: str = "") -> int | None:
+    """Return the last-known Review Error Listings count for a business
+    (empty string = the all-businesses total), or None if it has never been
+    written. None means "no cached value yet", distinct from a real 0."""
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT count FROM error_listing_counts WHERE business_id = ? LIMIT 1;",
+            (business_id or "",),
+        ).fetchone()
+    return int(row["count"]) if row is not None else None
+
+
+def set_error_count(business_id: str, count: int) -> None:
+    """Persist a freshly-computed error count. Only ever called with a value
+    that just came from the warehouse, so SQLite stays a faithful (if
+    slightly delayed) mirror rather than an independently-mutated counter."""
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO error_listing_counts (business_id, count, refreshed_at) VALUES (?, ?, CURRENT_TIMESTAMP);",
+            (business_id or "", int(count)),
+        )
         conn.commit()
 
 
