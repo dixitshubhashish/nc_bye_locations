@@ -9,8 +9,9 @@
   <script>document.getElementById("appFavicon").href = window.APP_CONSTANTS.birdeyeFaviconUrl;</script>
   <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.0/min/vs/loader.js"></script>
   <script src="https://cdn.jsdelivr.net/pyodide/v0.27.0/full/pyodide.js"></script>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <script src="vendor/topojson/topojson-client.min.js"></script>
 
   <style>
     :root {
@@ -1415,9 +1416,9 @@ else:
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
               <h2>Location Map</h2>
               <div style="font-size: 12px; color: var(--muted);">
-                <span style="display: inline-block; width: 10px; height: 10px; background: #2563eb; border-radius: 50%; margin-right: 4px;"></span>Primary Brand
+                <span style="display: inline-block; width: 10px; height: 10px; background: #16a34a; border-radius: 50%; margin-right: 4px;"></span>Primary Brand
                 <span style="display: inline-block; width: 10px; height: 10px; background: #dc2626; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Competitor Brands
-                <span style="display: inline-block; width: 10px; height: 10px; background: #16a34a; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Gap ZIPs
+                <span style="display: inline-block; width: 10px; height: 10px; background: #f59e0b; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Gap ZIPs
               </div>
             </div>
             <div id="reportingMapContainer" style="border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #e5e7eb; position: relative;">
@@ -1831,6 +1832,20 @@ else:
       "AK", "HI", "TX", "", "", "FL", "DC", "", "", "", "", ""
     ];
 
+    let usStatesGeoJSONPromise = null;
+    function getUSStatesGeoJSON() {
+      if (!usStatesGeoJSONPromise) {
+        usStatesGeoJSONPromise = fetch("vendor/geo/us-states-10m.json")
+          .then((response) => (response.ok ? response.json() : null))
+          .then((topo) => {
+            if (!topo || !window.topojson) return null;
+            return topojson.feature(topo, topo.objects.states);
+          })
+          .catch(() => null);
+      }
+      return usStatesGeoJSONPromise;
+    }
+
     function isUSLatLong(lat, lon) {
       if (isNaN(lat) || isNaN(lon)) return false;
       if (lat < 13.0 || lat > 72.0) return false;
@@ -1896,39 +1911,46 @@ else:
 
       const mainBrandSet = new Set([el("reportMainBrandSelect")?.value || ""].filter(Boolean).map((b) => b.toLowerCase()));
       const bounds = [];
+      const activeStateFilter = String(el("reportStateFilter")?.value || "").toUpperCase();
+      const boundaryStateCounts = new Map(
+        (displayStates || [])
+          .filter((row) => stateCentroids[String(row.state || "").toUpperCase()])
+          .map((row) => [String(row.state || "").toUpperCase(), Number(row.locations || 0)])
+      );
+
+      getUSStatesGeoJSON()
+        .then((geojson) => {
+          if (!geojson || !stateBoundaryLayerGroup) return;
+          stateBoundaryLayerGroup.clearLayers();
+          L.geoJSON(geojson, {
+            style: (feature) => {
+              const code = stateNameToCode[feature?.properties?.name] || "";
+              const isSelected = activeStateFilter && code === activeStateFilter;
+              const hasData = boundaryStateCounts.has(code);
+              return {
+                color: isSelected ? "#16a34a" : (hasData ? "#2563eb" : "#94a3b8"),
+                weight: isSelected ? 2.2 : (hasData ? 1.4 : 0.8),
+                fillColor: isSelected ? "#bbf7d0" : (hasData ? "#dbeafe" : "#f8fafc"),
+                fillOpacity: isSelected ? 0.32 : (hasData ? 0.22 : 0.08)
+              };
+            },
+            onEachFeature: (feature, layer) => {
+              const code = stateNameToCode[feature?.properties?.name] || "";
+              if (!code) return;
+              layer.bindTooltip(feature.properties.name || code, { sticky: true, className: "state-code-label" });
+              layer.bindPopup(`
+                <div style="font-family: sans-serif; font-size: 13px; line-height: 1.4;">
+                  <strong>${escapeHtml(feature.properties.name || code)}</strong><br/>
+                  <span>${formatNumber(boundaryStateCounts.get(code) || 0)} ZIP locations</span>
+                </div>
+              `);
+            }
+          }).addTo(stateBoundaryLayerGroup);
+        })
+        .catch(() => {});
 
       if (!mapRecords.length && !gapRecords.length) {
         const states = (displayStates || []).filter((row) => stateCentroids[String(row.state || "").toUpperCase()]);
-        const stateCounts = new Map(states.map((row) => [String(row.state || "").toUpperCase(), Number(row.locations || 0)]));
-        fetch("https://raw.githubusercontent.com/PublicaMundi/MappingAPI/master/data/geojson/us-states.json")
-          .then((response) => response.ok ? response.json() : null)
-          .then((geojson) => {
-            if (!geojson || !stateBoundaryLayerGroup) return;
-            stateBoundaryLayerGroup.clearLayers();
-            L.geoJSON(geojson, {
-              style: (feature) => {
-                const code = stateNameToCode[feature?.properties?.name] || "";
-                return {
-                  color: stateCounts.has(code) ? "#2563eb" : "#94a3b8",
-                  weight: stateCounts.has(code) ? 1.4 : 0.8,
-                  fillColor: stateCounts.has(code) ? "#dbeafe" : "#f8fafc",
-                  fillOpacity: stateCounts.has(code) ? 0.22 : 0.08
-                };
-              },
-              onEachFeature: (feature, layer) => {
-                const code = stateNameToCode[feature?.properties?.name] || "";
-                if (!code) return;
-                layer.bindTooltip(feature.properties.name || code, { sticky: true, className: "state-code-label" });
-                layer.bindPopup(`
-                  <div style="font-family: sans-serif; font-size: 13px; line-height: 1.4;">
-                    <strong>${escapeHtml(feature.properties.name || code)}</strong><br/>
-                    <span>${formatNumber(stateCounts.get(code) || 0)} ZIP locations</span>
-                  </div>
-                `);
-              }
-            }).addTo(stateBoundaryLayerGroup);
-          })
-          .catch(() => {});
         states.forEach((row) => {
           const stateCode = String(row.state || "").toUpperCase();
           const [lat, lon] = stateCentroids[stateCode];
@@ -1962,7 +1984,7 @@ else:
         if (!isUSLatLong(lat, lon)) return; // Discard non-US coordinates
         bounds.push([lat, lon]);
         const isPrimary = mainBrandSet.has(String(rec.brand || "").toLowerCase());
-        const color = isPrimary ? "#2563eb" : "#dc2626";
+        const color = isPrimary ? "#16a34a" : "#dc2626";
         const stateLabel = rec.state_name || rec.state || "";
 
         const marker = L.circleMarker([lat, lon], {
@@ -1994,7 +2016,7 @@ else:
 
         const marker = L.circleMarker([lat, lon], {
           radius: 8,
-          fillColor: "#16a34a",
+          fillColor: "#f59e0b",
           color: "#ffffff",
           weight: 2,
           opacity: 1,
@@ -2002,7 +2024,7 @@ else:
         });
         marker.bindPopup(`
           <div style="font-family: sans-serif; font-size: 13px; line-height: 1.4;">
-            <strong style="color: #16a34a; font-size: 14px;">📍 Whitespace Candidate ZIP ${escapeHtml(gap.zip_code)}</strong><br/>
+            <strong style="color: #f59e0b; font-size: 14px;">📍 Whitespace Candidate ZIP ${escapeHtml(gap.zip_code)}</strong><br/>
             <span>${escapeHtml(gap.city || "")}, ${escapeHtml(stateLabel)} (${escapeHtml(gap.county || "")})</span><br/>
             <span style="color: #64748b; font-size: 11px;">🌐 Lat: ${lat.toFixed(4)}, Lon: ${lon.toFixed(4)}</span>
             <hr style="margin: 6px 0; border: none; border-top: 1px solid #e2e8f0;"/>
