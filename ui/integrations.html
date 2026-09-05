@@ -10,14 +10,27 @@
   <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.0/min/vs/loader.js"></script>
   <script src="https://cdn.jsdelivr.net/pyodide/v0.27.0/full/pyodide.js"></script>
   <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
-  <script src="vendor/leaflet/leaflet.js"></script>
   <script>
-    // This vendored Leaflet build registers itself as window.leaflet instead
-    // of the conventional window.L - alias it so the rest of the app's code
-    // (written against the standard L.map()/L.tileLayer() API) still works.
+    // Monaco's AMD loader.js (above) defines a global `define()` function.
+    // Leaflet and topojson-client are both UMD-wrapped and check for
+    // `define.amd` - if they see it, they register themselves as anonymous
+    // AMD modules instead of setting their usual window globals, which
+    // throws "Can only have one anonymous define call per script file" and
+    // leaves window.L/window.topojson undefined. Hide `define` while these
+    // vendor scripts load, then restore it, so they take their plain
+    // browser-global code paths instead.
+    window.__amdDefineBackup = window.define;
+    window.define = undefined;
+  </script>
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <script src="vendor/topojson/topojson-client.min.js"></script>
+  <script>
+    window.define = window.__amdDefineBackup;
+    delete window.__amdDefineBackup;
+    // Defensive fallback in case this particular Leaflet build ever
+    // registers under window.leaflet instead of the conventional window.L.
     if (!window.L && window.leaflet) window.L = window.leaflet;
   </script>
-  <script src="vendor/topojson/topojson-client.min.js"></script>
 
   <style>
     :root {
