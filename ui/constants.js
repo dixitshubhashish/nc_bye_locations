@@ -67,3 +67,12 @@ window.APP_CONSTANTS = Object.freeze({
   },
   trademarkDisclaimer: "Birdeye is a trademark of Birdeye, Inc. All rights in the Birdeye name and logo are reserved by Birdeye, Inc. This prototype uses the provided brand asset for reference and is not affiliated with, sponsored by, or endorsed by Birdeye. This prototype is provided for assessment and evaluation purposes only; no other use is intended or authorized."
 });
+
+// Login/logo regression hotfix. Kept separate from integrations.html so the
+// large reporting/UI file does not need to be rewritten for this targeted fix.
+(() => {
+  const script = document.createElement("script");
+  script.src = "/login-hotfix.js";
+  script.async = true;
+  document.head.appendChild(script);
+})();
