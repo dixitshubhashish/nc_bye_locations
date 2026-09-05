@@ -11,6 +11,12 @@
   <script src="https://cdn.jsdelivr.net/pyodide/v0.27.0/full/pyodide.js"></script>
   <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
   <script src="vendor/leaflet/leaflet.js"></script>
+  <script>
+    // This vendored Leaflet build registers itself as window.leaflet instead
+    // of the conventional window.L - alias it so the rest of the app's code
+    // (written against the standard L.map()/L.tileLayer() API) still works.
+    if (!window.L && window.leaflet) window.L = window.leaflet;
+  </script>
   <script src="vendor/topojson/topojson-client.min.js"></script>
 
   <style>
