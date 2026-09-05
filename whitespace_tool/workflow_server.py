@@ -30,7 +30,7 @@ from whitespace_tool.sources.dominos_overpass import fetch_for_zips as fetch_dom
 from whitespace_tool.sources.dominos_store_locator import fetch_for_zips
 from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows, clear_dataset_tables, push_to_bigquery
 from whitespace_tool.storage_config import load_dotenv, load_storage_config
-from whitespace_tool.sqlite_cache import cache_zipcodes, get_cached_query, set_cached_query, invalidate_cache, init_sqlite_cache
+from whitespace_tool.sqlite_cache import get_cached_query, set_cached_query, invalidate_cache
 from whitespace_tool.sample_data import SAMPLE_BATCH_ID, SAMPLE_BRANDS, generate_source_rows, mapper_for, source_configuration, source_label, stable_business_id, stable_template_id
 
 
@@ -781,8 +781,6 @@ def create_brand(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def learn_mappings(data: dict[str, Any]) -> dict[str, Any]:
-    from google.cloud import bigquery
-
     source_type = str(data.get("source_type", ""))
     source_fields = data.get("source_fields", [])
     if not source_type or not isinstance(source_fields, list):
@@ -842,8 +840,6 @@ def list_templates(search: str = "", business_id: str = "", source_type_id: str 
 
 
 def list_source_types() -> dict[str, Any]:
-    from google.cloud import bigquery
-
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
     _ensure_source_types_table(client, project_id, dataset_id)
@@ -891,8 +887,6 @@ def _reset_sample_data(client: Any, project_id: str, dataset_id: str) -> None:
         {"businesses": [], "listings": [], "workflow_templates": [], "error_listings": []},
         credentials_json,
     )
-    from google.cloud import bigquery
-
     for table_name in ("businesses", "listings", "workflow_templates", "error_listings"):
         table_ref = f"{project_id}.{dataset_id}.{table_name}"
         try:
@@ -1693,7 +1687,6 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         pop = item.get("population") or 0
         inc = item.get("median_household_income") or 0
         comp_stores = item.get("competitor_stores") or 0
-        subj_stores = item.get("subject_stores") or 0
         ws_type = item.get("whitespace_type") or "UNKNOWN_COVERAGE"
 
         pop_diff_pct = abs(pop - subject_median_pop) / max(subject_median_pop, 1)
@@ -1764,7 +1757,6 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
     shared_zips = len([r for r in raw_whitespace if r.get("subject_stores", 0) > 0 and r.get("competitor_stores", 0) > 0])
     subject_only_zips = len([r for r in raw_whitespace if r.get("subject_stores", 0) > 0 and r.get("competitor_stores", 0) == 0])
     competitor_only_zips = len([r for r in raw_whitespace if r.get("subject_stores", 0) == 0 and r.get("competitor_stores", 0) > 0])
-    total_active_zips = max(shared_zips + subject_only_zips + competitor_only_zips, 1)
     exposure_rate = round((shared_zips / max(shared_zips + subject_only_zips, 1)) * 100, 1)
 
     # Enrich state distribution with Brand Footprint Share %, Pop per store, Competitor Whitespace ZIPs, Open Whitespace ZIPs
@@ -2305,7 +2297,7 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
     rows_by_table["workflow_templates"] = [{
         "workflow_template_id": template_id,
         "business_id": business_id, "source_type_id": source_type_id, "name": source_name,
-        "components": json.dumps({"mapper": mapper, "source_type_id": source_type_id, "sample_meta": sample_meta}, sort_keys=True),
+        "components": json.dumps({"mapper": config_json, "source_type_id": source_type_id, "sample_meta": sample_meta}, sort_keys=True),
         "archived_components": None,
         "source_configuration": json.dumps(sample_meta.get("source_configuration") or {}, sort_keys=True),
         "is_sample_data": bool(sample_meta.get("is_sample_data")),
