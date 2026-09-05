@@ -79,7 +79,7 @@ function loadTemplateIntoEditor(template) {
       activeTemplateId = template.workflow_template_id;
       const brandOption = document.querySelector(`#brandSelect option[value="${CSS.escape(template.business_id)}"]`);
       if (brandOption) el("brandSelect").value = template.business_id;
-      applyBusinessSourceType(selectedBrand);
+      applyBusinessSourceType(selectedBrand, { preserveSourceType: false });
       el("sourceName").value = components.source_name || template.name || "";
       mappingSelections = { ...(components.fields || {}) };
       optionalMappingKeys = new Set(Object.keys(mappingSelections).filter((key) => !primaryMappingKeys.has(key)));
@@ -95,4 +95,3 @@ async function saveEditedTemplate() {
       if (!response.ok) throw new Error(result.error || "Could not update template.");
       setStatus("Template saved.", "ok");
     }
-

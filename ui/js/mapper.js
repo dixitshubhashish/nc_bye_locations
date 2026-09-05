@@ -62,13 +62,17 @@ let learnedSuggestions = {};
 let sourceParsed = false;
 let selectedBrand = null;
 let csvFunctionMode = "new";
+let excelFunctionMode = "new";
 let jsonFunctionMode = "new";
 let apiFunctionMode = "new";
 let customAliases = {};
 let lastSaveEventId = "";
 let activeTemplateId = "";
+let templateSaveLocked = false;
 let connectorEditor = null;
 let pyodideRuntimePromise = null;
+let activeCsvPresetConfig = null;
+let presetBrandEditMode = false;
 
 const draftStorageKey = "competitive_whitespace_mapping_draft";
 const draftPreviewRowLimit = 10;
@@ -77,6 +81,58 @@ const saveBatchMinRows = 250;
 
 function normalizeName(value) {
       return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    }
+async function fallbackDisplayBusinessId(brand = {}) {
+      const payload = JSON.stringify({
+        name: brand.name || "",
+        slug: brand.slug || "",
+        description: brand.description || "",
+        logo_url: brand.logo_url || "",
+        website_url: brand.website_url || "",
+        status: brand.status || "",
+        meta_title: brand.meta_title || "",
+        meta_description: brand.meta_description || "",
+        country_of_origin: brand.country_of_origin || "",
+        is_reference_data: Boolean(brand.is_reference_data),
+        reference_key: brand.reference_key || "",
+        default_source_url: brand.default_source_url || "",
+        default_source_name: brand.default_source_name || "",
+        source_type_id: brand.source_type_id || ""
+      });
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(payload));
+      const hex = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      return `BID ${hex.slice(0, 8).toUpperCase()}`;
+    }
+function similarBusinessKey(name = "") {
+      return normalizeName(name).replace(/\b(inc|llc|ltd|usa|us|global|stores|locations)\b/g, "");
+    }
+function duplicateBusinessGroups(brands = []) {
+      const groups = new Map();
+      brands.forEach((brand) => {
+        const key = similarBusinessKey(brand.name || "");
+        if (!key) return;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(brand);
+      });
+      return [...groups.values()].filter((group) => group.length > 1);
+    }
+function businessCreatedTime(brand = {}) {
+      const value = Date.parse(brand.created_at || "");
+      return Number.isFinite(value) ? value : 0;
+    }
+function businessOptionLabel(brand = {}, newestCreatedAt = 0) {
+      const newest = newestCreatedAt && businessCreatedTime(brand) === newestCreatedAt ? "Newest, " : "";
+      return `${brand.name || "Unnamed"} (${brand.display_business_id || "BID --------"}, ${formatNumber(brand.listing_count || 0)} listings, ${newest}created ${brand.created_at ? new Date(brand.created_at).toLocaleDateString() : "unknown"})`;
+    }
+async function mergeDuplicateBusinesses(targetId, sourceIds) {
+      const response = await fetch("/api/brands/merge", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ target_business_id: targetId, source_business_ids: sourceIds })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not merge businesses.");
+      return result;
     }
 
 function sourceTypeNameToFormat(name) {
@@ -102,6 +158,31 @@ function setNewBusinessSourceType(format) {
       const match = Array.from(el("newBrandSourceType").options).find((option) => option.dataset.format === format || option.value === format);
       if (match) el("newBrandSourceType").value = match.value;
     }
+function fillBrandFields(brand = {}, fallback = {}) {
+      setNewBusinessSourceType(el("sourceType").value);
+      el("newBrandName").value = brand.name || fallback.name || "";
+      el("newBrandSlug").value = brand.slug || fallback.slug || "";
+      el("newBrandDescription").value = brand.description || fallback.description || "";
+      el("newBrandLogo").value = brand.logo_url || fallback.logoUrl || "";
+      el("newBrandWebsite").value = brand.website_url || fallback.websiteUrl || "";
+      el("newBrandStatus").value = brand.status || fallback.status || "active";
+      el("newBrandMetaTitle").value = brand.meta_title || fallback.metaTitle || "";
+      el("newBrandMetaDescription").value = brand.meta_description || fallback.metaDescription || "";
+      el("newBrandOrigin").value = brand.country_of_origin || fallback.countryOfOrigin || "";
+    }
+function presetMetadata(config = activeCsvPresetConfig || {}) {
+      return {
+        is_reference_data: true,
+        reference_key: config.mode || "",
+        default_source_url: el("sourceUrl")?.value.trim() || config.url || "",
+        default_source_name: el("sourceName")?.value.trim() || config.sourceName || ""
+      };
+    }
+function lockBrandFields(locked) {
+      ["newBrandName", "newBrandSourceType", "newBrandSlug", "newBrandDescription", "newBrandLogo", "newBrandWebsite", "newBrandStatus", "newBrandMetaTitle", "newBrandMetaDescription", "newBrandOrigin", "createBrandBtn"].forEach((id) => {
+        if (el(id)) el(id).disabled = Boolean(locked);
+      });
+    }
 function populateSourceTypeSelects() {
       const options = sourceTypes.length
         ? sourceTypes.map((source) => `<option value="${escapeHtml(source.source_type_id)}" data-format="${escapeHtml(sourceTypeNameToFormat(source.name))}">${escapeHtml(source.name)}</option>`).join("")
@@ -116,21 +197,23 @@ function populateSourceTypeSelects() {
     }
 function resetTemplateSelection() {
       activeTemplateId = "";
+      templateSaveLocked = false;
       el("templateSearch").value = "";
       el("templateResults").className = "status";
       el("templateResults").textContent = "Search saved templates to edit an existing mapping.";
     }
-function applyBusinessSourceType(business) {
+function applyBusinessSourceType(business, options = {}) {
+      const preserveSourceType = options.preserveSourceType !== false;
       const sourceTypeId = business?.source_type_id || "";
       const format = sourceTypeIdToFormat(sourceTypeId) || sourceTypeNameToFormat(business?.source_type_name || "");
-      el("sourceType").disabled = Boolean(format);
-      if (format) {
+      if (format && !preserveSourceType) {
         el("sourceType").value = format;
-        resetSourceInputsForNewMode(format);
         updateSourceVisibility();
       }
+      el("sourceType").disabled = false;
+      el("sourceInputMode").disabled = false;
       el("templateBusinessFilter").value = business?.business_id || "";
-      el("templateSourceFilter").value = sourceTypeId;
+      el("templateSourceFilter").value = currentSourceTypeId();
     }
 async function refreshTemplatesForBusiness() {
       resetTemplateSelection();
@@ -181,21 +264,17 @@ function syncBrandSelection(brandConfig) {
         selectedBrand = existing;
         el("brandSelect").value = existing.business_id;
         el("newBrandFields").classList.add("hidden");
+        fillBrandFields(existing, brandConfig);
+        lockBrandFields(Boolean(activeCsvPresetConfig));
         applyBusinessSourceType(existing);
+        updatePresetBrandPanel(brandConfig, true);
       } else {
         selectedBrand = null;
         el("brandSelect").value = "__create_new__";
-        el("newBrandFields").classList.remove("hidden");
-        setNewBusinessSourceType(el("sourceType").value);
-        el("newBrandName").value = brandConfig.name || "";
-        el("newBrandSlug").value = brandConfig.slug || "";
-        el("newBrandDescription").value = brandConfig.description || "";
-        el("newBrandLogo").value = "";
-        el("newBrandWebsite").value = brandConfig.websiteUrl || "";
-        el("newBrandStatus").value = brandConfig.status || "active";
-        el("newBrandMetaTitle").value = brandConfig.metaTitle || "";
-        el("newBrandMetaDescription").value = brandConfig.metaDescription || "";
-        el("newBrandOrigin").value = brandConfig.countryOfOrigin || "";
+        el("newBrandFields").classList.toggle("hidden", Boolean(activeCsvPresetConfig));
+        fillBrandFields({}, brandConfig);
+        lockBrandFields(false);
+        updatePresetBrandPanel(brandConfig, false);
       }
     }
 function fillDominosBrand() {
@@ -246,7 +325,7 @@ function setLockedValue(id, value) {
 function setPresetLocked(locked, controlIds) {
       // Keep all controls and mapping elements 100% enabled & fully editable
       (controlIds || []).forEach((id) => { if (el(id)) el(id).disabled = false; });
-      ["newBrandName", "newBrandSlug", "newBrandDescription", "newBrandLogo", "newBrandWebsite", "newBrandStatus", "newBrandMetaTitle", "newBrandMetaDescription", "newBrandOrigin"].forEach((id) => { if (el(id)) el(id).disabled = false; });
+      if (!activeCsvPresetConfig || !selectedBrand) lockBrandFields(false);
       document.querySelectorAll("select[data-field]").forEach((select) => { select.disabled = false; });
       document.querySelectorAll("button[data-remove-field]").forEach((button) => { button.disabled = false; });
       if (el("addOptionalFieldBtn")) el("addOptionalFieldBtn").disabled = false;
@@ -259,13 +338,63 @@ const sourceUrlPlaceholders = {
       excel: "https://example.com/locations.xls",
       xml: "https://example.com/locations.xml"
     };
+function remoteFileNameForSource(sourceResult, sourceUrl, fallbackName = "remote_source") {
+      const rawName = sourceResult?.file_name || fallbackName;
+      const hasExtension = /\.[a-z0-9]+$/i.test(rawName);
+      if (hasExtension) return rawName;
+      try {
+        const url = new URL(sourceUrl);
+        const output = (url.searchParams.get("output") || "").toLowerCase().replace(/^\./, "");
+        if (["csv", "xlsx", "xls", "json", "xml"].includes(output)) return `${rawName}.${output}`;
+      } catch (_error) {
+        // Keep the server-provided name when the URL is not parseable in this browser.
+      }
+      return rawName;
+    }
 function setSourceUrlLocked(locked) {
       el("sourceUrl").toggleAttribute("readonly", Boolean(locked));
       el("sourceUrl").classList.toggle("demo-url", Boolean(locked));
+      const editButton = el("sourceUrlEditBtn");
+      if (editButton) {
+        editButton.classList.toggle("hidden", !locked || el("sourceInputMode").value !== "url");
+        editButton.textContent = locked ? "Edit URL" : "URL editable";
+      }
+    }
+function updatePresetBrandPanel(brandConfig = activeCsvPresetConfig?.brand || null, exists = Boolean(selectedBrand)) {
+      const panel = el("presetBrandPanel");
+      if (!panel) return;
+      const isPreset = Boolean(activeCsvPresetConfig && brandConfig?.name);
+      panel.classList.toggle("hidden", !isPreset);
+      if (!isPreset) return;
+      el("presetBrandTitle").textContent = brandConfig.name;
+      el("presetBrandCreateBtn").textContent = exists ? "Save Changes" : "Create Brand";
+      el("presetBrandCreateBtn").classList.toggle("hidden", exists && !presetBrandEditMode);
+      el("presetBrandEditBtn").classList.toggle("hidden", !exists && !presetBrandEditMode);
+      el("presetBrandEditBtn").textContent = presetBrandEditMode ? "Cancel Edit" : "Edit Brand Details";
+      el("createBrandBtn").classList.toggle("hidden", exists);
+      el("brandSelect").disabled = Boolean(exists);
+      el("brandSelect").classList.remove("hidden");
+      el("brandSelectLabel")?.classList.remove("hidden");
+      lockBrandFields(Boolean(exists && !presetBrandEditMode));
+      el("presetBrandStatus").textContent = exists
+        ? "Locked to the existing business. Edit only if these details need to change."
+        : "No existing business found. Create it once, then parse as usual.";
+    }
+function hidePresetBrandPanel() {
+      activeCsvPresetConfig = null;
+      presetBrandEditMode = false;
+      el("presetBrandPanel")?.classList.add("hidden");
+      el("brandSelect").disabled = false;
+      el("brandSelect")?.classList.remove("hidden");
+      el("brandSelectLabel")?.classList.remove("hidden");
+      lockBrandFields(false);
+      el("createBrandBtn")?.classList.remove("hidden");
+      el("newBrandFields")?.classList.toggle("hidden", el("brandSelect")?.value !== "__create_new__");
     }
 function resetSourceInputsForNewMode(sourceType = el("sourceType").value) {
       setPresetLocked(false, []);
       setSourceUrlLocked(false);
+      hidePresetBrandPanel();
       el("sourceUrl").value = "";
       el("sourceUrl").placeholder = sourceUrlPlaceholders[sourceType] || "https://example.com/locations.json";
       el("apiUrl").value = "";
@@ -292,6 +421,29 @@ function resetSourceInputsForNewMode(sourceType = el("sourceType").value) {
 function fillBrandFromConfig(brand) {
       syncBrandSelection(brand);
     }
+function applyCsvPreset(config) {
+      activeCsvPresetConfig = config;
+      csvFunctionMode = config.mode;
+      el("sourceType").value = "csv";
+      fillBrandFromConfig(config.brand || {});
+      el("sourceInputMode").value = "url";
+      const dbSourceUrl = selectedBrand?.reference_key === config.mode ? selectedBrand.default_source_url : "";
+      const dbSourceName = selectedBrand?.reference_key === config.mode ? selectedBrand.default_source_name : "";
+      el("sourceUrl").value = dbSourceUrl || config.url || "";
+      el("sourceUrl").placeholder = dbSourceUrl || config.url || sourceUrlPlaceholders.csv;
+      setSourceUrlLocked(true);
+      el("sourceName").value = dbSourceName || config.sourceName || "";
+      el("recordPath").value = "";
+      sourceFields = [];
+      sourceRows = [];
+      sourceParsed = false;
+      mappingSelections = {};
+      updateSourceVisibility();
+      renderMappings();
+      updateOutput();
+      updatePresetBrandPanel(config.brand || {}, Boolean(selectedBrand));
+      setStatus(config.status || "CSV preset ready. Click Parse.", config.statusType || "ok");
+    }
 function setPizzaHutMappings() {
       mappingSelections = {
         location_id: "id",
@@ -312,22 +464,15 @@ function setPizzaHutLocked(locked) {
       setPresetLocked(false, []);
     }
 function applyPizzaHutCsvDemo() {
-      csvFunctionMode = "pizza_hut";
-      el("sourceType").value = "csv";
-      el("sourceInputMode").value = "url";
-      el("sourceUrl").value = window.APP_CONSTANTS.pizzaHutCsvDemoUrl || "";
-      setSourceUrlLocked(true);
-      el("sourceName").value = "pizza_hut_locations_csv";
-      el("recordPath").value = "";
-      fillBrandFromConfig(window.APP_CONSTANTS.pizzaHutBrand || {});
-      mappingSelections = {};
-      sourceFields = [];
-      sourceParsed = false;
-      updateSourceVisibility();
-      renderMappings();
+      applyCsvPreset({
+        mode: "pizza_hut",
+        brand: window.APP_CONSTANTS.pizzaHutBrand || {},
+        url: window.APP_CONSTANTS.pizzaHutCsvDemoUrl || "",
+        sourceName: "pizza_hut_locations_csv",
+        status: "Pizza Hut CSV URL is ready. Click Parse.",
+        statusType: "ok"
+      });
       setPizzaHutLocked(false);
-      updateOutput();
-      setStatus("Pizza Hut ready. Click Parse.", "ok");
     }
 function setGlobalHotelsMappings() {
       mappingSelections = {
@@ -347,22 +492,15 @@ function setGlobalHotelsMappings() {
       autoMappedKeys = new Set(Object.keys(mappingSelections));
     }
 function applyGlobalHotelsCsvDemo() {
-      csvFunctionMode = "global_hotels";
-      el("sourceType").value = "csv";
-      el("sourceInputMode").value = "url";
-      el("sourceUrl").value = window.APP_CONSTANTS.globalHotelsCorruptDemoUrl || "";
-      setSourceUrlLocked(true);
-      el("sourceName").value = "global_hotels_mixed_csv";
-      el("recordPath").value = "";
-      fillBrandFromConfig(window.APP_CONSTANTS.globalHotelsBrand || {});
-      mappingSelections = {};
-      sourceFields = [];
-      sourceParsed = false;
-      updateSourceVisibility();
-      renderMappings();
+      applyCsvPreset({
+        mode: "global_hotels",
+        brand: window.APP_CONSTANTS.globalHotelsBrand || {},
+        url: window.APP_CONSTANTS.globalHotelsCorruptDemoUrl || "",
+        sourceName: "global_hotels_mixed_csv",
+        status: "Global Hotels CSV URL is ready. Click Parse.",
+        statusType: "warn"
+      });
       setPresetLocked(false, []);
-      updateOutput();
-      setStatus("Global Hotels ready. Click Parse.", "warn");
     }
 function resetCsvDemoLock() {
       csvFunctionMode = "new";
@@ -372,6 +510,76 @@ function updateCsvFunctionSelection(value) {
       if (value === "pizza_hut") applyPizzaHutCsvDemo();
       else if (value === "global_hotels") applyGlobalHotelsCsvDemo();
       else resetCsvDemoLock();
+    }
+function firstExistingBrand() {
+      const brands = JSON.parse(el("brandSelect")?.dataset.brands || "[]");
+      return brands.find((brand) => brand?.business_id && String(brand.status || "active").toLowerCase() === "active")
+        || brands.find((brand) => brand?.business_id)
+        || null;
+    }
+function applyBrandToCurrentSelection(brand) {
+      selectedBrand = brand || null;
+      if (!selectedBrand) {
+        el("brandSelect").value = "__create_new__";
+        el("newBrandFields").classList.remove("hidden");
+        return;
+      }
+      el("brandSelect").value = selectedBrand.business_id;
+      el("newBrandFields").classList.add("hidden");
+      applyBusinessSourceType(selectedBrand);
+    }
+function setDemoRestaurantExcelMappings() {
+      mappingSelections = {
+        name: "restaurant_name",
+        address: "street_address",
+        city: "city_name",
+        state: "state",
+        postal_code: "postal_code",
+        latitude: "latitude",
+        longitude: "longitude",
+        country: "country_name",
+        phone_number: "phone",
+        franchise_name: "franchise_name",
+        concept_type: "concept_type",
+        cuisine_type: "cuisine",
+        neighborhood: "neighborhood",
+        district: "district",
+        website_url: "website",
+        google_maps_link: "google_maps_url"
+      };
+      optionalMappingKeys = new Set(["latitude", "longitude", "country", "phone_number", "franchise_name", "concept_type", "cuisine_type", "neighborhood", "district", "website_url", "google_maps_link"]);
+      hiddenMappingKeys = new Set();
+      autoMappedKeys = new Set(Object.keys(mappingSelections));
+    }
+function applyDemoRestaurantExcel() {
+      excelFunctionMode = "demo_restaurant";
+      activeCsvPresetConfig = null;
+      presetBrandEditMode = false;
+      el("sourceType").value = "excel";
+      el("sourceInputMode").value = "url";
+      el("sourceUrl").value = window.APP_CONSTANTS.demoRestaurantExcelUrl || "";
+      el("sourceUrl").placeholder = window.APP_CONSTANTS.demoRestaurantExcelUrl || sourceUrlPlaceholders.excel;
+      setSourceUrlLocked(true);
+      el("sourceName").value = "demo_restaurant_locations_excel";
+      el("recordPath").value = "Sheet1";
+      applyBrandToCurrentSelection(firstExistingBrand());
+      sourceFields = [];
+      sourceRows = [];
+      sourceParsed = false;
+      mappingSelections = {};
+      updateSourceVisibility();
+      loadExcelSheets();
+      renderMappings();
+      updateOutput();
+      setStatus(selectedBrand ? "Demo Restaurant Excel URL is ready with an existing business. Click Parse." : "Demo Restaurant Excel URL is ready. Choose or create a business, then click Parse.", selectedBrand ? "ok" : "warn");
+    }
+function resetExcelDemoLock() {
+      excelFunctionMode = "new";
+      resetSourceInputsForNewMode("excel");
+    }
+function updateExcelFunctionSelection(value) {
+      if (value === "demo_restaurant") applyDemoRestaurantExcel();
+      else resetExcelDemoLock();
     }
 function fillLaCityDemoBrand() {
       const brand = window.APP_CONSTANTS.laCityJsonDemoBrand || {};
@@ -463,9 +671,10 @@ function isNewSourceMode() {
       const sourceType = el("sourceType").value;
       return (
         sourceType === "csv" && csvFunctionMode === "new"
+        || sourceType === "excel" && excelFunctionMode === "new"
         || sourceType === "json" && jsonFunctionMode === "new"
         || sourceType === "api_get_json" && apiFunctionMode === "new"
-        || !["csv", "json", "api_get_json"].includes(sourceType)
+        || !["csv", "excel", "json", "api_get_json"].includes(sourceType)
       );
     }
 function initializeConnectorEditor() {
@@ -560,6 +769,7 @@ function saveDraft() {
         sessionId,
         sourceType: el("sourceType").value,
         csvFunction: document.querySelector("input[name='csvFunction']:checked")?.value || "new",
+        excelFunction: document.querySelector("input[name='excelFunction']:checked")?.value || "new",
         jsonFunction: document.querySelector("input[name='jsonFunction']:checked")?.value || "new",
         brandSelect: el("brandSelect").value,
         selectedBrand,
@@ -627,10 +837,13 @@ function restoreDraft() {
         customAliases = draft.customAliases || {};
         activeTemplateId = draft.activeTemplateId || "";
         csvFunctionMode = draft.csvFunction || "new";
+        excelFunctionMode = draft.excelFunction || "new";
         jsonFunctionMode = draft.jsonFunction || "new";
         el("sourceType").value = draft.sourceType || "csv";
         const csvFunctionOption = document.querySelector(`input[name='csvFunction'][value="${CSS.escape(csvFunctionMode)}"]`);
         if (csvFunctionOption) csvFunctionOption.checked = true;
+        const excelFunctionOption = document.querySelector(`input[name='excelFunction'][value="${CSS.escape(excelFunctionMode)}"]`);
+        if (excelFunctionOption) excelFunctionOption.checked = true;
         const jsonFunctionOption = document.querySelector(`input[name='jsonFunction'][value="${CSS.escape(jsonFunctionMode)}"]`);
         if (jsonFunctionOption) jsonFunctionOption.checked = true;
         el("sourceName").value = draft.sourceName || "";
@@ -786,18 +999,25 @@ function updateSourceVisibility() {
       document.querySelectorAll(".api-field").forEach((field) => field.classList.toggle("hidden", !isApi));
       document.querySelectorAll(".api-function-field").forEach((field) => field.classList.toggle("hidden", !isApi));
       document.querySelectorAll(".csv-function-field").forEach((field) => field.classList.toggle("hidden", !isCsv));
+      document.querySelectorAll(".excel-function-field").forEach((field) => field.classList.toggle("hidden", !isExcel));
       document.querySelectorAll(".json-function-field").forEach((field) => field.classList.toggle("hidden", !isJson));
       document.querySelectorAll(".python-connector-field").forEach((field) => field.classList.toggle("hidden", !isPythonConnector));
       document.querySelectorAll(".excel-field").forEach((field) => field.classList.toggle("hidden", !isExcel));
       document.querySelectorAll(".file-field").forEach((field) => field.classList.toggle("hidden", isApi || isPythonConnector));
       document.querySelectorAll(".file-upload-control").forEach((field) => field.classList.toggle("hidden", !isFileSource || el("sourceInputMode").value !== "file"));
       document.querySelectorAll(".source-url-control").forEach((field) => field.classList.toggle("hidden", !isFileSource || el("sourceInputMode").value !== "url"));
+      const sourceUrlEditBtn = el("sourceUrlEditBtn");
+      if (sourceUrlEditBtn) {
+        sourceUrlEditBtn.classList.toggle("hidden", !isFileSource || el("sourceInputMode").value !== "url" || !el("sourceUrl").hasAttribute("readonly"));
+      }
       document.querySelectorAll(".record-field").forEach((field) => field.classList.toggle("hidden", !hasRecordPath));
       document.querySelectorAll(".json-record-path-field").forEach((field) => field.classList.toggle("hidden", sourceType !== "json"));
 
       document.querySelector("main").classList.toggle("connector-active", isPythonConnector);
 
       updateFileAccept();
+      el("sourceType").disabled = false;
+      el("sourceInputMode").disabled = false;
       el("fileInput").disabled = isApi || isPythonConnector;
       el("apiUrl").disabled = !isApi;
       el("sheetName").disabled = !isExcel || !el("sheetName").options.length;
@@ -1018,7 +1238,7 @@ function getMapper() {
       const mapper = {
         brand: resolvedBrand,
         business_id: selectedBrand?.business_id || (selectedOption && selectedOption.value !== "__create_new__" ? selectedOption.value : "") || "",
-        source_type_id: selectedBrand?.source_type_id || currentSourceTypeId(),
+        source_type_id: currentSourceTypeId(),
         source_name: el("sourceName").value.trim(),
         source_type: el("sourceType").value,
         fields,
@@ -1058,7 +1278,7 @@ async function loadBrands(search = "") {
         setStatus(productSafeError(error.message, "Could not load businesses."), "error");
       }
     }
-async function createNewBrand(brandNameOverride = "") {
+async function createNewBrand(brandNameOverride = "", extra = {}) {
       const name = (brandNameOverride || el("newBrandName").value).trim();
       if (!name) { setStatus("Brand name is required.", "warn"); return null; }
       const sourceTypeId = el("newBrandSourceType").value || currentSourceTypeId();
@@ -1067,7 +1287,7 @@ async function createNewBrand(brandNameOverride = "") {
       if (!sourceTypeId) { setStatus("Source format is required.", "warn"); return null; }
       try {
         const response = await fetch("/api/brands", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
-          name, source_type_id: sourceTypeId, source_type: sourceType, slug: el("newBrandSlug").value.trim(), description: el("newBrandDescription").value.trim(), logo_url: el("newBrandLogo").value.trim(), website_url: el("newBrandWebsite").value.trim(), status: el("newBrandStatus").value, meta_title: el("newBrandMetaTitle").value.trim(), meta_description: el("newBrandMetaDescription").value.trim(), country_of_origin: el("newBrandOrigin").value.trim()
+          name, source_type_id: sourceTypeId, source_type: sourceType, slug: el("newBrandSlug").value.trim(), description: el("newBrandDescription").value.trim(), logo_url: el("newBrandLogo").value.trim(), website_url: el("newBrandWebsite").value.trim(), status: el("newBrandStatus").value, meta_title: el("newBrandMetaTitle").value.trim(), meta_description: el("newBrandMetaDescription").value.trim(), country_of_origin: el("newBrandOrigin").value.trim(), ...extra
         }) });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not create brand.");
@@ -1085,6 +1305,72 @@ async function createNewBrand(brandNameOverride = "") {
         setStatus(productSafeError(error.message, "Could not create business."), "error");
         return null;
       }
+    }
+function brandPayloadFromFields(extra = {}) {
+      return {
+        ...extra,
+        name: el("newBrandName").value.trim(),
+        source_type_id: el("newBrandSourceType").value || currentSourceTypeId(),
+        source_type: el("sourceType").value,
+        slug: el("newBrandSlug").value.trim(),
+        description: el("newBrandDescription").value.trim(),
+        logo_url: el("newBrandLogo").value.trim(),
+        website_url: el("newBrandWebsite").value.trim(),
+        status: el("newBrandStatus").value,
+        meta_title: el("newBrandMetaTitle").value.trim(),
+        meta_description: el("newBrandMetaDescription").value.trim(),
+        country_of_origin: el("newBrandOrigin").value.trim()
+      };
+    }
+async function updateExistingBrand() {
+      if (!selectedBrand?.business_id) return null;
+      try {
+        const response = await fetch("/api/brands/update", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+        body: JSON.stringify(brandPayloadFromFields({ business_id: selectedBrand.business_id, ...(activeCsvPresetConfig ? presetMetadata() : {}) }))
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not update brand.");
+        selectedBrand = result.brand;
+        await loadBrands(selectedBrand.name);
+        el("brandSelect").value = selectedBrand.business_id;
+        fillBrandFields(selectedBrand, activeCsvPresetConfig?.brand || {});
+        presetBrandEditMode = false;
+        el("newBrandFields").classList.add("hidden");
+        updatePresetBrandPanel(activeCsvPresetConfig?.brand || selectedBrand, true);
+        updateOutput();
+        setStatus(`Business ${selectedBrand.name} updated.`, "ok");
+        return selectedBrand;
+      } catch (error) {
+        setStatus(productSafeError(error.message, "Could not update business."), "error");
+        return null;
+      }
+    }
+async function createOrUsePresetBrand() {
+      if (!activeCsvPresetConfig?.brand?.name) return null;
+      if (selectedBrand?.business_id && presetBrandEditMode) {
+        return updateExistingBrand();
+      }
+      if (selectedBrand?.name && selectedBrand.name.toLowerCase() === activeCsvPresetConfig.brand.name.toLowerCase()) {
+        updatePresetBrandPanel(activeCsvPresetConfig.brand, true);
+        setStatus(`${selectedBrand.name} already exists and is selected.`, "ok");
+        return selectedBrand;
+      }
+      fillBrandFromConfig(activeCsvPresetConfig.brand);
+      if (selectedBrand) {
+        updatePresetBrandPanel(activeCsvPresetConfig.brand, true);
+        setStatus(`${selectedBrand.name} already exists and is selected.`, "ok");
+        return selectedBrand;
+      }
+      el("newBrandFields").classList.add("hidden");
+      const created = await createNewBrand(activeCsvPresetConfig.brand.name, presetMetadata());
+      if (created) {
+        el("newBrandFields").classList.add("hidden");
+        lockBrandFields(true);
+        updatePresetBrandPanel(activeCsvPresetConfig.brand, true);
+      }
+      return created;
     }
 function normalizedRows() {
       const mapper = getMapper();
@@ -1298,6 +1584,7 @@ async function parseSource() {
         autoMappedKeys = new Set();
         if (csvFunctionMode === "pizza_hut") setPizzaHutMappings();
         else if (csvFunctionMode === "global_hotels") setGlobalHotelsMappings();
+        else if (excelFunctionMode === "demo_restaurant") setDemoRestaurantExcelMappings();
         else if (jsonFunctionMode === "la_city") setLaCityDemoMappings();
         else if (document.querySelector("input[name='pythonFunction']:checked")?.value === "dominos") setDominosMappings();
         sessionStorage.removeItem(draftStorageKey);
@@ -1317,14 +1604,34 @@ async function parseSource() {
     }
 async function loadExcelSheets() {
       const file = el("fileInput").files[0];
-      el("sheetName").innerHTML = '<option value="">Upload Excel to load sheets</option>';
+      const isUrlMode = el("sourceInputMode").value === "url";
+      el("sheetName").innerHTML = `<option value="">${isUrlMode ? "Enter Excel URL to load sheets" : "Upload Excel to load sheets"}</option>`;
       el("sheetName").disabled = true;
-      if (!isExcelFile(file)) return;
+      if (el("sourceType").value !== "excel") return;
+      if (!isUrlMode && !isExcelFile(file)) return;
+      if (isUrlMode && !el("sourceUrl").value.trim()) return;
       try {
-        const payload = {
-          file_name: file.name,
-          content_base64: await fileToBase64(file)
-        };
+        let payload;
+        if (isUrlMode) {
+          el("sheetName").innerHTML = '<option value="">Loading sheets from URL...</option>';
+          const sourceUrl = el("sourceUrl").value.trim();
+          const sourceResponse = await fetch("/api/source-url", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ url: sourceUrl })
+          });
+          const sourceResult = await sourceResponse.json();
+          if (!sourceResponse.ok) throw new Error(sourceResult.error || "Could not fetch the public Excel URL.");
+          payload = {
+            file_name: remoteFileNameForSource(sourceResult, sourceUrl, "remote_workbook"),
+            content_base64: sourceResult.content_base64
+          };
+        } else {
+          payload = {
+            file_name: file.name,
+            content_base64: await fileToBase64(file)
+          };
+        }
         const response = await fetch("/api/sheets", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -1333,7 +1640,9 @@ async function loadExcelSheets() {
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not load sheets.");
         const sheets = result.sheets || [];
-        el("sheetName").innerHTML = sheets.map((sheet) => `<option value="${escapeHtml(sheet)}">${escapeHtml(sheet)}</option>`).join("");
+        el("sheetName").innerHTML = sheets.length
+          ? sheets.map((sheet) => `<option value="${escapeHtml(sheet)}">${escapeHtml(sheet)}</option>`).join("")
+          : '<option value="">No sheets found</option>';
         el("sheetName").disabled = sheets.length === 0;
         if (sheets.length) {
           el("recordPath").value = sheets[0];
@@ -1601,7 +1910,29 @@ async function toggleShowExistingBrands() {
           box.innerHTML = `<div style="color: var(--muted);">No existing businesses found.</div>`;
           return;
         }
-        const optionsHtml = '<option class="create-new-option" value="__create_new__">+ Create New Business</option>' + brands.map(b => `<option value="${escapeHtml(b.business_id)}">${escapeHtml(b.name)} (ID: ${escapeHtml(b.business_id)})</option>`).join('');
+        const brandsWithDisplayIds = await Promise.all(brands.map(async (brand) => ({
+          ...brand,
+          display_business_id: brand.display_business_id || await fallbackDisplayBusinessId(brand)
+        })));
+        const optionsHtml = '<option value="">Select an active business</option>' + brandsWithDisplayIds.map(b => `<option value="${escapeHtml(b.business_id)}">${escapeHtml(businessOptionLabel(b))}</option>`).join('');
+        const duplicateGroups = duplicateBusinessGroups(brandsWithDisplayIds);
+        const mergeHtml = duplicateGroups.length ? `
+          <div style="border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px;">
+            <strong style="display: block; margin-bottom: 6px; color: var(--navy);">Similar Businesses</strong>
+            ${duplicateGroups.map((group, index) => {
+              const newestCreatedAt = Math.max(...group.map(businessCreatedTime));
+              return `
+              <div data-merge-group="${index}" style="border: 1px solid var(--line); border-radius: 6px; padding: 8px; margin-top: 8px; background: #ffffff;">
+                <div style="font-weight: 700; margin-bottom: 6px;">${escapeHtml(group[0].name || "Similar business")}</div>
+                <label style="font-size: 12px;">Keep</label>
+                <select data-merge-target="${index}" style="width: 100%; margin: 4px 0 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px;">
+                  ${group.map((brand) => `<option value="${escapeHtml(brand.business_id)}">${escapeHtml(businessOptionLabel(brand, newestCreatedAt))}</option>`).join("")}
+                </select>
+                <button type="button" class="secondary" data-merge-action="${index}">Merge Others Into Keep</button>
+              </div>
+            `}).join("")}
+          </div>
+        ` : "";
         box.innerHTML = `
           <label style="display: block; font-weight: 700; margin-bottom: 4px; color: var(--navy);" for="activeBusinessesDropdown">
             Active Businesses (${brands.length})
@@ -1609,12 +1940,34 @@ async function toggleShowExistingBrands() {
           <select id="activeBusinessesDropdown" style="width: 100%; padding: 6px 8px; border-radius: 4px; border: 1px solid var(--line); background: #ffffff;">
             ${optionsHtml}
           </select>
+          ${mergeHtml}
         `;
         el("activeBusinessesDropdown").addEventListener("change", (event) => {
-          if (event.target.value === "__create_new__") {
-            el("brandSelect").value = "__create_new__";
-            el("brandSelect").dispatchEvent(new Event("change"));
-          }
+          if (!event.target.value) return;
+          el("brandSelect").value = event.target.value;
+          el("brandSelect").dispatchEvent(new Event("change"));
+          box.style.display = "none";
+        });
+        box.querySelectorAll("[data-merge-action]").forEach((button) => {
+          button.addEventListener("click", async () => {
+            const index = Number(button.dataset.mergeAction);
+            const group = duplicateGroups[index] || [];
+            const targetId = box.querySelector(`[data-merge-target="${index}"]`)?.value || "";
+            const sourceIds = group.map((brand) => brand.business_id).filter((id) => id && id !== targetId);
+            if (!targetId || !sourceIds.length) return;
+            button.disabled = true;
+            button.textContent = "Merging...";
+            try {
+              const result = await mergeDuplicateBusinesses(targetId, sourceIds);
+              await loadBrands("");
+              setStatus(`Merged ${result.merged_count} business record${result.merged_count === 1 ? "" : "s"}.`, "ok");
+              box.style.display = "none";
+            } catch (err) {
+              button.disabled = false;
+              button.textContent = "Merge Others Into Keep";
+              setStatus(productSafeError(err.message, "Could not merge businesses."), "error");
+            }
+          });
         });
       } catch (err) {
         box.innerHTML = `<div style="color: var(--error);">${escapeHtml(err.message)}</div>`;

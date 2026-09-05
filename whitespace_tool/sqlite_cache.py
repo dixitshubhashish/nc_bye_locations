@@ -27,7 +27,13 @@ MIRROR_LOCATION_COLUMNS = (
     "coordinate_source", "coordinate_confidence", "country", "last_observed_at",
     "population", "median_household_income", "median_age",
 )
-MIRROR_BUSINESS_COLUMNS = ("business_id", "name")
+MIRROR_BUSINESS_COLUMNS = (
+    "business_id", "name", "slug", "description", "logo_url", "website_url", "status",
+    "created_at", "updated_at", "listing_count",
+    "meta_title", "meta_description", "country_of_origin", "is_reference_data",
+    "reference_key", "default_source_url", "default_source_name", "source_type_id",
+    "source_type_name", "display_business_id",
+)
 
 
 @contextmanager
@@ -97,9 +103,32 @@ def init_sqlite_cache() -> None:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS mirror_businesses (
                 business_id TEXT PRIMARY KEY,
-                name TEXT
+                name TEXT,
+                slug TEXT,
+                description TEXT,
+                logo_url TEXT,
+                website_url TEXT,
+                status TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                listing_count INTEGER,
+                meta_title TEXT,
+                meta_description TEXT,
+                country_of_origin TEXT,
+                is_reference_data INTEGER,
+                reference_key TEXT,
+                default_source_url TEXT,
+                default_source_name TEXT,
+                source_type_id TEXT,
+                source_type_name TEXT,
+                display_business_id TEXT
             );
         """)
+        existing_business_columns = {row["name"] for row in conn.execute("PRAGMA table_info(mirror_businesses)").fetchall()}
+        for column in MIRROR_BUSINESS_COLUMNS:
+            if column not in existing_business_columns:
+                column_type = "INTEGER" if column in {"is_reference_data", "listing_count"} else "TEXT"
+                conn.execute(f"ALTER TABLE mirror_businesses ADD COLUMN {column} {column_type};")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS mirror_meta (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -217,7 +246,8 @@ def replace_gold_mirror(
             )
             conn.execute("DELETE FROM mirror_businesses")
             conn.executemany(
-                "INSERT INTO mirror_businesses (business_id, name) VALUES (:business_id, :name)",
+                f"INSERT INTO mirror_businesses ({', '.join(MIRROR_BUSINESS_COLUMNS)}) "
+                f"VALUES ({', '.join(':' + c for c in MIRROR_BUSINESS_COLUMNS)})",
                 [{c: _normalize_mirror_value(row.get(c)) for c in MIRROR_BUSINESS_COLUMNS} for row in business_rows],
             )
             conn.execute(
@@ -294,4 +324,4 @@ def fetch_mirror_reporting_locations_by_brand(selected_brands: list[str]) -> lis
 
 def fetch_mirror_businesses() -> list[dict[str, Any]]:
     with get_db_connection() as conn:
-        return [dict(row) for row in conn.execute("SELECT business_id, name FROM mirror_businesses").fetchall()]
+        return [dict(row) for row in conn.execute("SELECT * FROM mirror_businesses ORDER BY name").fetchall()]
