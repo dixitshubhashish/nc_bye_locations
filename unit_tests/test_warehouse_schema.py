@@ -18,6 +18,22 @@ class WarehouseSchemaTests(unittest.TestCase):
                 f"{table_name} partitions on missing field {spec['field']}",
             )
 
+    def test_business_and_template_source_type_metadata_exists(self) -> None:
+        business_fields = {field["name"] for field in TABLE_SCHEMAS["businesses"]}
+        template_fields = {field["name"] for field in TABLE_SCHEMAS["workflow_templates"]}
+
+        self.assertIn("source_type_id", business_fields)
+        self.assertIn("source_type_id", template_fields)
+
+    def test_sample_lineage_fields_exist(self) -> None:
+        for table_name in ("businesses", "listings", "workflow_templates", "error_listings"):
+            fields = {field["name"] for field in TABLE_SCHEMAS[table_name]}
+            self.assertIn("is_sample_data", fields)
+            self.assertIn("sample_batch_id", fields)
+        for table_name in ("listings", "error_listings"):
+            fields = {field["name"] for field in TABLE_SCHEMAS[table_name]}
+            self.assertTrue({"template_id", "ingestion_id", "mapping_id"} <= fields)
+
     def test_partition_creation_does_not_require_time_partition_type_enum(self) -> None:
         created_tables = []
 

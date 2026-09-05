@@ -8,6 +8,7 @@ import logging
 import os
 from pathlib import Path
 import socketserver
+import threading
 from time import perf_counter
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import urllib.request
@@ -17,6 +18,7 @@ import re
 from logging.handlers import TimedRotatingFileHandler
 
 from whitespace_tool.source_adapters import api_get_source, csv_source, excel_source, json_source, python_connector_source, xml_source
+from whitespace_tool.source_adapters.common import collect_fields
 from whitespace_tool.data_validation import validate_normalized_location, validate_source_row
 from whitespace_tool.normalization import normalize_location
 from whitespace_tool.models import utc_now_iso
@@ -28,13 +30,15 @@ from whitespace_tool.sources.dominos_store_locator import fetch_for_zips
 from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows, clear_dataset_tables, push_to_bigquery
 from whitespace_tool.storage_config import load_dotenv, load_storage_config
 from whitespace_tool.sqlite_cache import cache_zipcodes, get_cached_query, set_cached_query, invalidate_cache, init_sqlite_cache
+from whitespace_tool.sample_data import SAMPLE_BATCH_ID, SAMPLE_BRANDS, generate_source_rows, mapper_for, source_configuration, source_label, stable_business_id, stable_template_id
 
 
 SUPPORTED_SOURCE_TYPES = {"csv", "excel", "json", "xml", "api_get_json", "python_editor"}
 MINIMUM_US_ZIP_REFERENCE_ROWS = 30000
-MAX_REMOTE_SOURCE_BYTES = 25 * 1024 * 1024
-MIN_REMOTE_SOURCE_ROW_LIMIT = 500
-REMOTE_SOURCE_ROW_LIMITS = (50000, 25000, 10000, 5000, 2500, 1000, MIN_REMOTE_SOURCE_ROW_LIMIT)
+MAX_REMOTE_SOURCE_BYTES = int(os.environ.get("MAPPER_MAX_REMOTE_SOURCE_MB", "150")) * 1024 * 1024
+REMOTE_SOURCE_TIMEOUT_SECONDS = int(os.environ.get("MAPPER_REMOTE_SOURCE_TIMEOUT_SECONDS", "60"))
+MIN_REMOTE_SOURCE_ROW_LIMIT = 10000
+REMOTE_SOURCE_ROW_LIMITS = (250000, 100000, 50000, 25000, MIN_REMOTE_SOURCE_ROW_LIMIT)
 
 
 def _build_logger() -> logging.Logger:
@@ -60,6 +64,8 @@ def _build_logger() -> logging.Logger:
 
 LOGGER = _build_logger()
 ZIP_REFERENCE_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+REPORTING_REFRESH_LOCK = threading.Lock()
+REPORTING_REFRESHING = False
 load_dotenv()
 
 
@@ -127,7 +133,7 @@ def source_sheets(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _remote_source_request(url: str) -> tuple[bytes, str]:
     request = urllib.request.Request(url, headers={"User-Agent": "CompetitiveWhitespaceTool/1.0"})
-    with urllib.request.urlopen(request, timeout=60) as response:
+    with urllib.request.urlopen(request, timeout=REMOTE_SOURCE_TIMEOUT_SECONDS) as response:
         return response.read(MAX_REMOTE_SOURCE_BYTES + 1), Path(urlsplit(url).path).name or "remote_source"
 
 
@@ -170,7 +176,7 @@ def fetch_public_source(payload: dict[str, Any]) -> dict[str, Any]:
                 break
     if len(content) > MAX_REMOTE_SOURCE_BYTES:
         raise ValueError(
-            "Remote source exceeds the 25 MB limit. "
+            f"Remote source exceeds the {MAX_REMOTE_SOURCE_BYTES // 1024 // 1024} MB loading limit. "
             f"Automatic limiting will not load fewer than {MIN_REMOTE_SOURCE_ROW_LIMIT} rows; "
             "use a source URL with a filter before loading it."
         )
@@ -180,7 +186,7 @@ def fetch_public_source(payload: dict[str, Any]) -> dict[str, Any]:
             "limited": True,
             "limited_url": limited_url,
             "limited_rows": limited_rows,
-            "warning": f"Remote source exceeded 25 MB, so the mapper loaded the first {limited_rows} rows from a limited source URL.",
+            "warning": f"Remote source was larger than the app loading window, so the mapper loaded the first {limited_rows} rows from a limited source URL.",
         })
     return response
 
@@ -575,6 +581,18 @@ def test_storage_connection() -> dict[str, Any]:
     }
 
 
+def ping_storage_connection() -> dict[str, Any]:
+    project_id, _dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    probe = list(client.query("SELECT 1 AS ok").result())
+    if not probe or probe[0]["ok"] != 1:
+        raise RuntimeError("Readiness check did not return the expected result")
+    return {
+        "ok": True,
+        "status": "ready",
+    }
+
+
 def _ensure_businesses_table(client: Any, project_id: str, dataset_id: str) -> None:
     from google.cloud import bigquery
 
@@ -595,18 +613,17 @@ def _ensure_businesses_table(client: Any, project_id: str, dataset_id: str) -> N
         client.create_table(bigquery.Table(table_ref, schema=schema))
         return
     existing_names = {field.name for field in existing.schema}
-    required_names = {field["name"] for field in TABLE_SCHEMAS["businesses"]}
-    if not required_names.issubset(existing_names):
-        LOGGER.warning("legacy_brands_table_detected table=%s columns=%s; recreating_empty_table", table_ref, sorted(existing_names))
-        client.delete_table(table_ref, not_found_ok=True)
-        schema = [
-            bigquery.SchemaField(
-                field["name"], field["type"], mode=field["mode"],
-                default_value_expression=field.get("default"),
-            )
-            for field in TABLE_SCHEMAS["businesses"]
-        ]
-        client.create_table(bigquery.Table(table_ref, schema=schema))
+    missing_fields = [
+        bigquery.SchemaField(
+            field["name"], field["type"], mode=field["mode"],
+            default_value_expression=field.get("default"),
+        )
+        for field in TABLE_SCHEMAS["businesses"]
+        if field["name"] not in existing_names
+    ]
+    if missing_fields:
+        existing.schema = list(existing.schema) + missing_fields
+        client.update_table(existing, ["schema"])
 
 
 def list_brands(search: str = "") -> dict[str, Any]:
@@ -620,18 +637,37 @@ def list_brands(search: str = "") -> dict[str, Any]:
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
     _ensure_businesses_table(client, project_id, dataset_id)
-    query = f"SELECT business_id, name, slug, website_url, status FROM `{project_id}.{dataset_id}.businesses` WHERE is_deleted IS NOT TRUE AND (@search = '' OR LOWER(name) LIKE CONCAT('%', LOWER(@search), '%')) ORDER BY name LIMIT 100"
+    _ensure_source_types_table(client, project_id, dataset_id)
+    _ensure_workflow_templates_table(client, project_id, dataset_id)
+    query = f"""
+    SELECT
+      b.business_id,
+      b.name,
+      b.slug,
+      b.website_url,
+      b.status,
+      COALESCE(b.source_type_id, t.source_type_id, JSON_VALUE(t.components, '$.source_type_id'), JSON_VALUE(t.components, '$.mapper.source_type_id')) AS source_type_id,
+      st.name AS source_type_name
+    FROM `{project_id}.{dataset_id}.businesses` b
+    LEFT JOIN `{project_id}.{dataset_id}.workflow_templates` t
+      ON b.business_id = t.business_id
+    LEFT JOIN `{project_id}.{dataset_id}.source_types` st
+      ON COALESCE(b.source_type_id, t.source_type_id, JSON_VALUE(t.components, '$.source_type_id'), JSON_VALUE(t.components, '$.mapper.source_type_id')) = st.source_type_id
+    WHERE b.is_deleted IS NOT TRUE
+      AND (@search = '' OR LOWER(b.name) LIKE CONCAT('%', LOWER(@search), '%'))
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY b.business_id ORDER BY t.updated_at DESC NULLS LAST) = 1
+    ORDER BY b.name
+    LIMIT 100
+    """
     config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("search", "STRING", search)])
     res = {"brands": [dict(row) for row in client.query(query, job_config=config).result()]}
     set_cached_query(cache_key, res)
     return res
 
 
-def ensure_source_type(source_type: str) -> str:
+def _ensure_source_types_table(client: Any, project_id: str, dataset_id: str) -> None:
     from google.cloud import bigquery
 
-    project_id, dataset_id, credentials_json = _warehouse_settings()
-    client = _bigquery_client(project_id, credentials_json)
     _ensure_dataset(client, project_id, dataset_id)
     table_ref = f"{project_id}.{dataset_id}.source_types"
     schema = [bigquery.SchemaField(field["name"], field["type"], mode=field["mode"], default_value_expression=field.get("default")) for field in TABLE_SCHEMAS["source_types"]]
@@ -641,6 +677,48 @@ def ensure_source_type(source_type: str) -> str:
         if getattr(exc, "code", None) != 404:
             raise
         client.create_table(bigquery.Table(table_ref, schema=schema))
+
+
+def _ensure_workflow_templates_table(client: Any, project_id: str, dataset_id: str) -> None:
+    from google.cloud import bigquery
+
+    _ensure_dataset(client, project_id, dataset_id)
+    table_ref = f"{project_id}.{dataset_id}.workflow_templates"
+    schema = [
+        bigquery.SchemaField(
+            field["name"], field["type"], mode=field["mode"],
+            default_value_expression=field.get("default"),
+        )
+        for field in TABLE_SCHEMAS["workflow_templates"]
+    ]
+    try:
+        existing = client.get_table(table_ref)
+    except Exception as exc:
+        if getattr(exc, "code", None) != 404:
+            raise
+        client.create_table(bigquery.Table(table_ref, schema=schema))
+        return
+    existing_names = {field.name for field in existing.schema}
+    missing_fields = [
+        bigquery.SchemaField(
+            field["name"], field["type"], mode=field["mode"],
+            default_value_expression=field.get("default"),
+        )
+        for field in TABLE_SCHEMAS["workflow_templates"]
+        if field["name"] not in existing_names
+    ]
+    if missing_fields:
+        existing.schema = list(existing.schema) + missing_fields
+        client.update_table(existing, ["schema"])
+
+
+def ensure_source_type(source_type: str) -> str:
+    from google.cloud import bigquery
+
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    table_ref = f"{project_id}.{dataset_id}.source_types"
+    _ensure_source_types_table(client, project_id, dataset_id)
     query = f"SELECT source_type_id FROM `{table_ref}` WHERE name = @name LIMIT 1"
     params = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("name", "STRING", source_type)])
     found = list(client.query(query, job_config=params).result())
@@ -662,23 +740,38 @@ def create_brand(data: dict[str, Any]) -> dict[str, Any]:
     if not name:
         raise ValueError("Brand name is required")
     slug = str(data.get("slug") or re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-"))
+    source_type = str(data.get("source_type", "")).strip()
+    raw_source_type_id = str(data.get("source_type_id", "")).strip()
+    source_type_id = ensure_source_type(source_type or raw_source_type_id) if raw_source_type_id in SUPPORTED_SOURCE_TYPES else raw_source_type_id
+    source_type_id = source_type_id or (ensure_source_type(source_type) if source_type else "")
+    if not source_type_id:
+        raise ValueError("Source type is required")
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
     _ensure_businesses_table(client, project_id, dataset_id)
     query = f"""
     INSERT INTO `{project_id}.{dataset_id}.businesses`
-      (name, slug, description, logo_url, website_url, status, created_at, updated_at, meta_title, meta_description, country_of_origin)
-    VALUES (@name, @slug, @description, @logo_url, @website_url, @status, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), @meta_title, @meta_description, @country_of_origin)
+      (name, slug, source_type_id, description, logo_url, website_url, status, created_at, updated_at, meta_title, meta_description, country_of_origin)
+    VALUES (@name, @slug, @source_type_id, @description, @logo_url, @website_url, @status, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), @meta_title, @meta_description, @country_of_origin)
     """
     params = [
         bigquery.ScalarQueryParameter("name", "STRING", name), bigquery.ScalarQueryParameter("slug", "STRING", slug),
+        bigquery.ScalarQueryParameter("source_type_id", "STRING", source_type_id),
         bigquery.ScalarQueryParameter("description", "STRING", data.get("description")), bigquery.ScalarQueryParameter("logo_url", "STRING", data.get("logo_url")),
         bigquery.ScalarQueryParameter("website_url", "STRING", data.get("website_url")), bigquery.ScalarQueryParameter("status", "STRING", data.get("status") or "active"),
         bigquery.ScalarQueryParameter("meta_title", "STRING", data.get("meta_title")), bigquery.ScalarQueryParameter("meta_description", "STRING", data.get("meta_description")),
         bigquery.ScalarQueryParameter("country_of_origin", "STRING", data.get("country_of_origin")),
     ]
     client.query(query, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
-    lookup = f"SELECT business_id, name, slug, website_url, status FROM `{project_id}.{dataset_id}.businesses` WHERE is_deleted IS NOT TRUE AND slug = @slug ORDER BY created_at DESC LIMIT 1"
+    lookup = f"""
+    SELECT b.business_id, b.name, b.slug, b.website_url, b.status, b.source_type_id, st.name AS source_type_name
+    FROM `{project_id}.{dataset_id}.businesses` b
+    LEFT JOIN `{project_id}.{dataset_id}.source_types` st
+      ON b.source_type_id = st.source_type_id
+    WHERE b.is_deleted IS NOT TRUE AND b.slug = @slug
+    ORDER BY b.created_at DESC
+    LIMIT 1
+    """
     result = list(client.query(lookup, job_config=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("slug", "STRING", slug)])).result())
     if not result:
         raise RuntimeError("Brand was created but its database-generated ID could not be read back")
@@ -710,7 +803,22 @@ def list_templates(search: str = "", business_id: str = "", source_type_id: str 
 
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
-    query = f"SELECT workflow_template_id, business_id, name, components, created_at, updated_at FROM `{project_id}.{dataset_id}.workflow_templates` WHERE (@search = '' OR LOWER(name) LIKE CONCAT('%', LOWER(@search), '%')) AND (@business_id = '' OR business_id = @business_id) AND (@source_type_id = '' OR JSON_VALUE(components, '$.source_type_id') = @source_type_id OR JSON_VALUE(components, '$.mapper.source_type_id') = @source_type_id) ORDER BY updated_at DESC LIMIT 100"
+    _ensure_workflow_templates_table(client, project_id, dataset_id)
+    query = f"""
+    SELECT workflow_template_id, business_id, source_type_id, name, components, created_at, updated_at
+    FROM `{project_id}.{dataset_id}.workflow_templates`
+    WHERE is_deleted IS NOT TRUE
+      AND (@search = '' OR LOWER(name) LIKE CONCAT('%', LOWER(@search), '%'))
+      AND (@business_id = '' OR business_id = @business_id)
+      AND (
+        @source_type_id = ''
+        OR source_type_id = @source_type_id
+        OR JSON_VALUE(components, '$.source_type_id') = @source_type_id
+        OR JSON_VALUE(components, '$.mapper.source_type_id') = @source_type_id
+      )
+    ORDER BY updated_at DESC
+    LIMIT 100
+    """
     config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("search", "STRING", search), bigquery.ScalarQueryParameter("business_id", "STRING", business_id), bigquery.ScalarQueryParameter("source_type_id", "STRING", source_type_id)])
     templates = []
     for row in client.query(query, job_config=config).result():
@@ -721,13 +829,25 @@ def list_templates(search: str = "", business_id: str = "", source_type_id: str 
             item["updated_at"] = item["updated_at"].isoformat()
         if isinstance(item.get("components"), str):
             item["components"] = json.loads(item["components"])
+        components = item.get("components") if isinstance(item.get("components"), dict) else {}
+        mapper = components.get("mapper") if isinstance(components.get("mapper"), dict) else components
+        item["template_id"] = item.get("workflow_template_id")
+        item["template_name"] = item.get("name")
+        item["source_type_id"] = item.get("source_type_id") or components.get("source_type_id") or mapper.get("source_type_id")
+        item["source_type"] = mapper.get("source_type")
+        item["status"] = item.get("status", "active")
         templates.append(item)
     return {"templates": templates}
 
 
 def list_source_types() -> dict[str, Any]:
+    from google.cloud import bigquery
+
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
+    _ensure_source_types_table(client, project_id, dataset_id)
+    for source_type in ("csv", "json", "excel", "xml", "api_get_json", "python_editor"):
+        ensure_source_type(source_type)
     try:
         rows = client.query(f"SELECT source_type_id, name FROM `{project_id}.{dataset_id}.source_types` ORDER BY name").result()
     except Exception as exc:
@@ -735,6 +855,158 @@ def list_source_types() -> dict[str, Any]:
             return {"source_types": []}
         raise
     return {"source_types": [dict(row) for row in rows]}
+
+
+def _sample_loader_enabled() -> bool:
+    explicit = os.environ.get("ENABLE_SAMPLE_DATA_LOADER")
+    if explicit is not None:
+        return explicit.strip().lower() in {"1", "true", "yes", "on"}
+    environment = os.environ.get("APP_ENV") or os.environ.get("ENVIRONMENT") or os.environ.get("RENDER_ENV")
+    return str(environment or "local").strip().lower() not in {"prod", "production"}
+
+
+def _sample_data_status(client: Any, project_id: str, dataset_id: str) -> dict[str, int]:
+    from google.cloud import bigquery
+
+    push_to_bigquery(
+        project_id,
+        dataset_id,
+        {"businesses": [], "listings": [], "workflow_templates": [], "error_listings": []},
+        _warehouse_settings()[2],
+    )
+    counts: dict[str, int] = {}
+    for table_name in ("businesses", "listings", "workflow_templates", "error_listings"):
+        is_deleted_filter = "AND is_deleted IS NOT TRUE"
+        query = f"SELECT COUNT(*) AS total FROM `{project_id}.{dataset_id}.{table_name}` WHERE is_sample_data IS TRUE {is_deleted_filter}"
+        counts[table_name] = int(next(iter(client.query(query, job_config=bigquery.QueryJobConfig()).result()))["total"])
+    return counts
+
+
+def _reset_sample_data(client: Any, project_id: str, dataset_id: str) -> None:
+    _, _, credentials_json = _warehouse_settings()
+    push_to_bigquery(
+        project_id,
+        dataset_id,
+        {"businesses": [], "listings": [], "workflow_templates": [], "error_listings": []},
+        credentials_json,
+    )
+    from google.cloud import bigquery
+
+    for table_name in ("businesses", "listings", "workflow_templates", "error_listings"):
+        table_ref = f"{project_id}.{dataset_id}.{table_name}"
+        try:
+            client.query(
+                f"UPDATE `{table_ref}` SET is_deleted = TRUE, deleted_on = CURRENT_TIMESTAMP() WHERE is_sample_data IS TRUE AND is_deleted IS NOT TRUE"
+            ).result()
+        except Exception as exc:
+            if getattr(exc, "code", None) != 404:
+                raise
+
+
+def load_sample_dataset(reset: bool = False) -> dict[str, Any]:
+    if not _sample_loader_enabled():
+        raise ValueError("Sample dataset loader is disabled for this environment")
+
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    _ensure_businesses_table(client, project_id, dataset_id)
+    _ensure_source_types_table(client, project_id, dataset_id)
+    _ensure_workflow_templates_table(client, project_id, dataset_id)
+    if reset:
+        _reset_sample_data(client, project_id, dataset_id)
+    else:
+        sample_status = _sample_data_status(client, project_id, dataset_id)
+        if sample_status["businesses"] and sample_status["listings"] and sample_status["workflow_templates"]:
+            try:
+                silver_result = build_silver_layer()
+            except Exception as exc:
+                LOGGER.warning("sample_existing_silver_refresh_failed error=%s", exc)
+                silver_result = {"warning": "Sample dataset exists, but reporting refresh could not complete automatically."}
+            return {
+                "already_loaded": True,
+                "sample_batch_id": SAMPLE_BATCH_ID,
+                "message": "Sample dataset already loaded.",
+                "businesses": sample_status["businesses"],
+                "locations": sample_status["listings"],
+                "errors": sample_status["error_listings"],
+                "silver": silver_result,
+            }
+        if sample_status["businesses"] or sample_status["listings"] or sample_status["workflow_templates"] or sample_status["error_listings"]:
+            _reset_sample_data(client, project_id, dataset_id)
+
+    now = utc_now_iso()
+    source_type_ids = {source_type: ensure_source_type(source_type) for source_type in sorted({brand.source_type for brand in SAMPLE_BRANDS})}
+    business_rows = []
+    for brand in SAMPLE_BRANDS:
+        business_rows.append({
+            "business_id": stable_business_id(brand.key),
+            "name": brand.business_name,
+            "slug": brand.key.replace("_", "-"),
+            "source_type_id": source_type_ids[brand.source_type],
+            "description": f"Sample {source_label(brand.source_type)} restaurant brand for QA and product demos.",
+            "logo_url": None,
+            "website_url": f"https://{brand.key.replace('_', '')}.example.com",
+            "status": "active",
+            "created_at": now,
+            "updated_at": now,
+            "meta_title": brand.business_name,
+            "meta_description": "Sample business generated through the normal ingestion workflow.",
+            "country_of_origin": brand.geographies[0],
+            "is_sample_data": True,
+            "sample_batch_id": SAMPLE_BATCH_ID,
+            "is_deleted": False,
+            "deleted_on": None,
+        })
+    push_to_bigquery(project_id, dataset_id, {"businesses": business_rows}, credentials_json)
+
+    summary = {
+        "already_loaded": False,
+        "sample_batch_id": SAMPLE_BATCH_ID,
+        "businesses": len(SAMPLE_BRANDS),
+        "locations": 0,
+        "valid": 0,
+        "errors": 0,
+        "countries": set(),
+        "source_types": {},
+    }
+    for brand in SAMPLE_BRANDS:
+        business_id = stable_business_id(brand.key)
+        source_type_id = source_type_ids[brand.source_type]
+        mapper = mapper_for(brand, business_id, source_type_id)
+        rows = generate_source_rows(brand, source_type_id, SAMPLE_BATCH_ID)
+        config = source_configuration(brand)
+        result = save_mapper({
+            "mapper": mapper,
+            "rows": rows,
+            "source_fields": collect_fields(rows),
+            "batch_event_id": f"sample_event_{brand.key}_{SAMPLE_BATCH_ID}",
+            "save_template": True,
+            "sample_meta": {
+                "is_sample_data": True,
+                "sample_batch_id": SAMPLE_BATCH_ID,
+                "template_id": stable_template_id(brand.key),
+                "ingestion_id": f"sample_ingestion_{brand.key}_{SAMPLE_BATCH_ID}",
+                "mapping_id": f"sample_mapping_{brand.key}",
+                "source_configuration": config,
+            },
+        })
+        summary["locations"] += result["total_rows"]
+        summary["valid"] += result["mapped_rows"]
+        summary["errors"] += result["error_listings"]
+        summary["source_types"].setdefault(source_label(brand.source_type), 0)
+        summary["source_types"][source_label(brand.source_type)] += 1
+        summary["countries"].update(brand.geographies)
+
+    try:
+        silver_result = build_silver_layer()
+        summary["silver"] = silver_result
+    except Exception as exc:
+        LOGGER.warning("sample_silver_refresh_failed error=%s", exc)
+        summary["silver_warning"] = "Sample data loaded, but reporting refresh could not complete automatically."
+    summary["countries"] = len(summary["countries"])
+    summary["validation_success_pct"] = round(summary["valid"] / max(summary["locations"], 1) * 100, 1)
+    invalidate_cache()
+    return summary
 
 
 def _csv_param(value: str) -> list[str]:
@@ -858,6 +1130,7 @@ def build_silver_layer() -> dict[str, Any]:
       city_name,
       county,
       state_code,
+      state_name,
       country,
       zip_code,
       latitude,
@@ -876,13 +1149,14 @@ def build_silver_layer() -> dict[str, Any]:
       city_name,
       county,
       state_code,
+      state_name,
       country,
       COUNT(*) AS location_count,
       MAX(population) AS population,
       MAX(median_household_income) AS median_household_income,
       MAX(income_per_capita) AS income_per_capita
     FROM `{enriched_table}`
-    GROUP BY brand_name, zip_code, city_name, county, state_code, country
+    GROUP BY brand_name, zip_code, city_name, county, state_code, state_name, country
     """).result()
     table = client.get_table(enriched_table)
     invalidate_cache()
@@ -895,17 +1169,75 @@ def build_silver_layer() -> dict[str, Any]:
     }
 
 
-def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, Any]:
-    from google.cloud import bigquery
+def _refresh_silver_background() -> bool:
+    global REPORTING_REFRESHING
+    with REPORTING_REFRESH_LOCK:
+        if REPORTING_REFRESHING:
+            return False
+        REPORTING_REFRESHING = True
 
+    def refresh() -> None:
+        global REPORTING_REFRESHING
+        try:
+            build_silver_layer()
+        except Exception as exc:
+            LOGGER.warning("reporting_background_silver_refresh_failed error=%s", exc)
+        finally:
+            with REPORTING_REFRESH_LOCK:
+                REPORTING_REFRESHING = False
+
+    threading.Thread(target=refresh, name="reporting-silver-refresh", daemon=True).start()
+    return True
+
+
+def _empty_reporting_payload(source_table: str, params: dict[str, list[str]], warning: str = "") -> dict[str, Any]:
+    return {
+        "source_table": source_table,
+        "reporting_cache": "empty",
+        "refreshing": bool(REPORTING_REFRESHING),
+        "warning": warning,
+        "filters": {
+            "main_brands": _csv_param(params.get("main_brands", [""])[0]),
+            "competitor_brands": _csv_param(params.get("competitor_brands", [""])[0]),
+            "state": str(params.get("state", [""])[0]).strip().upper(),
+            "county": str(params.get("county", [""])[0]).strip(),
+            "city": str(params.get("city", [""])[0]).strip(),
+            "zip": str(params.get("zip", [""])[0]).strip(),
+        },
+        "filter_options": {"brands": [], "states": [], "counties": [], "cities": [], "zips": []},
+        "totals": {
+            "total_locations": 0,
+            "total_brands": 0,
+            "total_states": 0,
+            "total_cities": 0,
+            "total_zips": 0,
+            "last_updated": None,
+        },
+        "top_states": [],
+        "top_cities": [],
+        "brands": [],
+        "gaps": [],
+        "map_records": [],
+        "states_without_locations": [],
+        "sample_records": [],
+    }
+
+
+def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, Any]:
     params = params or {}
-    cache_key = f"reporting_summary:{json.dumps(params, sort_keys=True)}"
+    cache_key = f"reporting_summary:v3:{json.dumps(params, sort_keys=True)}"
     cached_payload = get_cached_query(cache_key)
     if cached_payload:
+        refresh_started = _refresh_silver_background()
+        cached_payload["reporting_cache"] = "hit"
+        cached_payload["refreshing"] = bool(refresh_started or REPORTING_REFRESHING)
         return cached_payload
+
+    from google.cloud import bigquery
 
     project_id, bronze_dataset_id, silver_dataset_id, credentials_json = _medallion_settings()
     client = _bigquery_client(project_id, credentials_json)
+    _ensure_businesses_table(client, project_id, bronze_dataset_id)
     
     # Silver layer enriched listings table as primary source
     source_table = os.environ.get("REPORTING_LISTINGS_TABLE") or f"{project_id}.{silver_dataset_id}.listings_enriched"
@@ -913,6 +1245,7 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         source_table = f"{project_id}.{source_table}"
     table_ref = f"`{source_table}`"
     zip_ref = f"`{project_id}.{bronze_dataset_id}.us_zipcodes`"
+    refresh_started = _refresh_silver_background()
     
     main_brands = _csv_param(params.get("main_brands", [""])[0])
     raw_competitor_brands = _csv_param(params.get("competitor_brands", [""])[0])
@@ -943,6 +1276,7 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         z.zip_code,
         z.city_name AS zip_city,
         z.state_code AS zip_state,
+        z.state_name AS zip_state_name,
         z.county AS county,
         z.population,
         z.median_household_income,
@@ -956,6 +1290,7 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         l.address,
         COALESCE(l.city_name, z.city_name) AS city_name,
         COALESCE(l.state_code, z.state_code) AS state_code,
+        COALESCE(l.state_name, z.state_name) AS state_name,
         l.phone_number,
         COALESCE(l.latitude, z.latitude) AS latitude,
         COALESCE(l.longitude, z.longitude) AS longitude,
@@ -983,19 +1318,19 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
 
     totals_query = base_cte + """
     SELECT
-      COUNT(DISTINCT listing_id) AS total_locations,
+      COUNT(DISTINCT zip_code) AS total_locations,
       COUNT(DISTINCT brand) AS total_brands,
       COUNT(DISTINCT zip_state) AS total_states,
       COUNT(DISTINCT zip_city) AS total_cities,
       COUNT(DISTINCT zip_code) AS total_zips,
       MAX(last_observed_at) AS last_updated
     FROM base
-    WHERE listing_id IS NOT NULL
     """
     top_states_query = base_cte + f"""
     SELECT
       COALESCE(b.zip_state, '') AS state,
-      COUNT(DISTINCT b.listing_id) AS locations,
+      COALESCE(b.zip_state_name, b.zip_state, '') AS state_name,
+      COUNT(DISTINCT b.zip_code) AS locations,
       COUNT(DISTINCT b.zip_city) AS cities,
       COUNT(DISTINCT b.brand) AS brands,
       COALESCE(MAX(sp.state_pop), 0) AS state_population
@@ -1006,8 +1341,7 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
       WHERE population IS NOT NULL
       GROUP BY state_code
     ) sp ON b.zip_state = sp.state_code
-    WHERE b.listing_id IS NOT NULL
-    GROUP BY state
+    GROUP BY state, state_name
     ORDER BY locations DESC
     LIMIT 15
     """
@@ -1016,11 +1350,11 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
     SELECT
       COALESCE(zip_city, '') AS city,
       COALESCE(zip_state, '') AS state,
+      COALESCE(zip_state_name, zip_state, '') AS state_name,
       COALESCE(county, '') AS county,
-      COUNT(DISTINCT listing_id) AS locations
+      COUNT(DISTINCT zip_code) AS locations
     FROM base
-    WHERE listing_id IS NOT NULL
-    GROUP BY city, state, county
+    GROUP BY city, state, state_name, county
     ORDER BY locations DESC
     LIMIT 10
     """
@@ -1040,17 +1374,29 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
     """
     filter_options_query = f"""
     SELECT
-      ARRAY_AGG(DISTINCT COALESCE(brand_name, business_id) IGNORE NULLS ORDER BY COALESCE(brand_name, business_id)) AS brands,
+      (
+        SELECT ARRAY_AGG(DISTINCT brand IGNORE NULLS ORDER BY brand)
+        FROM (
+          SELECT name AS brand
+          FROM `{project_id}.{bronze_dataset_id}.businesses`
+          WHERE is_deleted IS NOT TRUE AND COALESCE(status, 'active') = 'active'
+          UNION DISTINCT
+          SELECT COALESCE(brand_name, business_id) AS brand
+          FROM {table_ref}
+          WHERE listing_id IS NOT NULL
+        )
+      ) AS brands,
       ARRAY_AGG(DISTINCT state_code IGNORE NULLS ORDER BY state_code) AS states,
       ARRAY_AGG(DISTINCT county IGNORE NULLS ORDER BY county LIMIT 500) AS counties,
       ARRAY_AGG(DISTINCT city_name IGNORE NULLS ORDER BY city_name LIMIT 500) AS cities,
       ARRAY_AGG(DISTINCT zip_code IGNORE NULLS ORDER BY zip_code LIMIT 500) AS zips
-    FROM {table_ref}
+    FROM {zip_ref}
     """
     gap_query = f"""
     WITH grouped AS (
       SELECT
         z.state_code AS state,
+        z.state_name AS state_name,
         z.county,
         z.city_name AS city,
         z.zip_code,
@@ -1063,10 +1409,11 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         AND (@county = '' OR LOWER(COALESCE(z.county, '')) = LOWER(@county))
         AND (@city = '' OR LOWER(COALESCE(z.city_name, '')) = LOWER(@city))
         AND (@zip = '' OR z.zip_code = @zip)
-      GROUP BY state, county, city, z.zip_code
+      GROUP BY state, state_name, county, city, z.zip_code
     )
     SELECT
       g.state,
+      g.state_name,
       g.county,
       g.city,
       g.zip_code,
@@ -1093,6 +1440,7 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
       address,
       city_name AS city,
       state_code AS state,
+      state_name,
       county,
       zip_code,
       phone_number,
@@ -1110,6 +1458,7 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
       address,
       city_name AS city,
       state_code AS state,
+      state_name,
       county,
       zip_code,
       phone_number,
@@ -1122,6 +1471,72 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
     LIMIT 10
     """
 
+    def zip_only_payload(warning: str) -> dict[str, Any]:
+        zip_where = """
+        WHERE (@state = '' OR UPPER(state_code) = @state)
+          AND (@county = '' OR LOWER(COALESCE(county, '')) = LOWER(@county))
+          AND (@city = '' OR LOWER(COALESCE(city_name, '')) = LOWER(@city))
+          AND (@zip = '' OR zip_code = @zip)
+        """
+        zip_totals_query = f"""
+        SELECT
+          COUNT(DISTINCT zip_code) AS total_locations,
+          0 AS total_brands,
+          COUNT(DISTINCT state_code) AS total_states,
+          COUNT(DISTINCT city_name) AS total_cities,
+          COUNT(DISTINCT zip_code) AS total_zips,
+          NULL AS last_updated
+        FROM {zip_ref}
+        {zip_where}
+        """
+        zip_states_query = f"""
+        SELECT
+          COALESCE(state_code, '') AS state,
+          COALESCE(state_name, state_code, '') AS state_name,
+          COUNT(DISTINCT zip_code) AS locations,
+          COUNT(DISTINCT city_name) AS cities,
+          0 AS brands,
+          COALESCE(SUM(population), 0) AS state_population
+        FROM {zip_ref}
+        {zip_where}
+        GROUP BY state, state_name
+        ORDER BY locations DESC
+        LIMIT 15
+        """
+        zip_cities_query = f"""
+        SELECT
+          COALESCE(city_name, '') AS city,
+          COALESCE(state_code, '') AS state,
+          COALESCE(state_name, state_code, '') AS state_name,
+          COALESCE(county, '') AS county,
+          COUNT(DISTINCT zip_code) AS locations
+        FROM {zip_ref}
+        {zip_where}
+        GROUP BY city, state, state_name, county
+        ORDER BY locations DESC
+        LIMIT 10
+        """
+        zip_filter_query = f"""
+        SELECT
+          (
+            SELECT ARRAY_AGG(DISTINCT name IGNORE NULLS ORDER BY name)
+            FROM `{project_id}.{bronze_dataset_id}.businesses`
+            WHERE is_deleted IS NOT TRUE AND COALESCE(status, 'active') = 'active'
+          ) AS brands,
+          ARRAY_AGG(DISTINCT state_code IGNORE NULLS ORDER BY state_code) AS states,
+          ARRAY_AGG(DISTINCT county IGNORE NULLS ORDER BY county LIMIT 500) AS counties,
+          ARRAY_AGG(DISTINCT city_name IGNORE NULLS ORDER BY city_name LIMIT 500) AS cities,
+          ARRAY_AGG(DISTINCT zip_code IGNORE NULLS ORDER BY zip_code LIMIT 500) AS zips
+        FROM {zip_ref}
+        """
+        payload = _empty_reporting_payload(source_table, params, warning)
+        payload["totals"] = dict(next(iter(client.query(zip_totals_query, job_config=job_config).result())))
+        payload["top_states"] = [dict(row) for row in client.query(zip_states_query, job_config=job_config).result()]
+        payload["top_cities"] = [dict(row) for row in client.query(zip_cities_query, job_config=job_config).result()]
+        payload["filter_options"] = dict(next(iter(client.query(zip_filter_query).result())))
+        payload["reporting_cache"] = "zip_base"
+        return payload
+
     try:
         totals = dict(next(iter(client.query(totals_query, job_config=job_config).result())))
         top_states = [dict(row) for row in client.query(top_states_query, job_config=job_config).result()]
@@ -1133,19 +1548,9 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         sample_records = [dict(row) for row in client.query(sample_query, job_config=job_config).result()]
     except Exception as exc:
         if getattr(exc, "code", None) == 404:
-            return {
-                "source_table": source_table,
-                "totals": {},
-                "top_states": [],
-                "top_cities": [],
-                "brands": [],
-                "gaps": [],
-                "map_records": [],
-                "filter_options": {"brands": [], "states": [], "counties": [], "cities": [], "zips": []},
-                "states_without_locations": [],
-                "sample_records": [],
-                "message": "No reporting data found yet. Save mapped listings first.",
-            }
+            payload = zip_only_payload("Preparing business data.")
+            set_cached_query(cache_key, payload)
+            return payload
         raise
 
     state_codes = {
@@ -1167,6 +1572,8 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
 
     result_payload = {
         "source_table": source_table,
+        "reporting_cache": "miss",
+        "refreshing": bool(refresh_started or REPORTING_REFRESHING),
         "filters": {
             "main_brands": main_brands,
             "competitor_brands": competitor_brands,
@@ -1184,6 +1591,7 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         "map_records": map_records,
         "states_without_locations": states_without_locations,
         "sample_records": sample_records,
+        "warning": "Updating." if refresh_started or REPORTING_REFRESHING else "",
     }
     set_cached_query(cache_key, result_payload)
     return result_payload
@@ -1201,8 +1609,14 @@ def geo_options(state: str = "", county: str = "") -> dict[str, Any]:
     client = _bigquery_client(project_id, credentials_json)
     table_ref = f"`{project_id}.{dataset_id}.us_zipcodes`"
 
-    states_query = f"SELECT DISTINCT state_code FROM {table_ref} WHERE state_code IS NOT NULL AND state_code != '' ORDER BY state_code"
-    states = [row["state_code"] for row in client.query(states_query).result()]
+    states_query = f"""
+    SELECT state_code, ANY_VALUE(state_name) AS state_name
+    FROM {table_ref}
+    WHERE state_code IS NOT NULL AND state_code != ''
+    GROUP BY state_code
+    ORDER BY state_name, state_code
+    """
+    states = [{"code": row["state_code"], "name": row["state_name"] or row["state_code"]} for row in client.query(states_query).result()]
 
     counties_query = f"""
     SELECT DISTINCT county 
@@ -1250,7 +1664,7 @@ def search_zips(query: str = "", state: str = "", county: str = "", city: str = 
     table_ref = f"`{project_id}.{dataset_id}.us_zipcodes`"
 
     sql = f"""
-    SELECT zip_code, city_name, county, state_code, population, median_household_income, median_age
+    SELECT zip_code, city_name, county, state_code, state_name, population, median_household_income, median_age
     FROM {table_ref}
     WHERE (zip_code LIKE CONCAT(@q, '%') OR LOWER(city_name) LIKE CONCAT(LOWER(@q), '%'))
       AND (@state = '' OR UPPER(state_code) = UPPER(@state))
@@ -1289,8 +1703,15 @@ def save_template_version(data: dict[str, Any]) -> dict[str, Any]:
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
     table_ref = f"{project_id}.{dataset_id}.workflow_templates"
-    query = f"UPDATE `{table_ref}` SET archived_components = components, components = @components, updated_at = CURRENT_TIMESTAMP() WHERE workflow_template_id = @template_id"
-    config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("template_id", "STRING", template_id), bigquery.ScalarQueryParameter("components", "JSON", json.dumps(components, sort_keys=True))])
+    _ensure_workflow_templates_table(client, project_id, dataset_id)
+    mapper = components.get("mapper") if isinstance(components.get("mapper"), dict) else components
+    source_type_id = str(components.get("source_type_id") or mapper.get("source_type_id") or "").strip() or None
+    query = f"UPDATE `{table_ref}` SET archived_components = components, components = @components, source_type_id = @source_type_id, updated_at = CURRENT_TIMESTAMP() WHERE workflow_template_id = @template_id"
+    config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("template_id", "STRING", template_id),
+        bigquery.ScalarQueryParameter("components", "JSON", json.dumps(components, sort_keys=True)),
+        bigquery.ScalarQueryParameter("source_type_id", "STRING", source_type_id),
+    ])
     client.query(query, job_config=config).result()
     return {"workflow_template_id": template_id, "updated": True}
 
@@ -1368,6 +1789,10 @@ def _row_error_listing(
     row_errors: list[dict[str, Any]],
     observed_at: str,
 ) -> dict[str, Any]:
+    meta = row.get("__meta", {}) if isinstance(row, dict) and isinstance(row.get("__meta"), dict) else {}
+    first_error = row_errors[0] if row_errors else {}
+    nested_location = row.get("location", {}) if isinstance(row, dict) and isinstance(row.get("location"), dict) else {}
+    country = row.get("country") or row.get("Country") or nested_location.get("country") if isinstance(row, dict) else None
     return {
         "event_id": event_id,
         "business_id": business_id,
@@ -1376,6 +1801,13 @@ def _row_error_listing(
         "errors": _safe_json_dumps(row_errors),
         "raw_record": _safe_json_dumps(row),
         "observed_at": observed_at,
+        "template_id": meta.get("template_id"),
+        "ingestion_id": meta.get("ingestion_id"),
+        "mapping_id": meta.get("mapping_id"),
+        "validation_error_type": first_error.get("reason") or first_error.get("field"),
+        "country": country,
+        "is_sample_data": bool(meta.get("is_sample_data")),
+        "sample_batch_id": meta.get("sample_batch_id"),
         "is_deleted": False,
         "deleted_on": None,
     }
@@ -1409,12 +1841,27 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
     business_id = str(mapper.get("business_id", "")).strip()
     if not business_id:
         raise ValueError("Select an existing business or create a new business before saving")
-    event_id = str(payload.get("event_id") or uuid4().hex)
+    event_id = str(payload.get("batch_event_id") or payload.get("event_id") or uuid4().hex)
+    row_offset = int(payload.get("row_offset") or 0)
+    save_template = payload.get("save_template", True) is not False
+    sample_meta = payload.get("sample_meta") if isinstance(payload.get("sample_meta"), dict) else {}
+    template_id = str(sample_meta.get("template_id") or uuid4())
+    ingestion_id = str(sample_meta.get("ingestion_id") or event_id)
+    mapping_id = str(sample_meta.get("mapping_id") or mapper_id if "mapper_id" in locals() else "")
     mapper["business_id"] = business_id
     mapper["source_type_id"] = source_type_id
     locations = []
     error_listings = []
     for index, row in enumerate(rows):
+        source_index = row_offset + index
+        if sample_meta.get("is_sample_data") and isinstance(row, dict):
+            row.setdefault("__meta", {
+                "template_id": template_id,
+                "ingestion_id": ingestion_id,
+                "mapping_id": mapping_id,
+                "is_sample_data": True,
+                "sample_batch_id": sample_meta.get("sample_batch_id"),
+            })
         observed_at = utc_now_iso()
         row_errors: list[dict[str, Any]] = []
         location = None
@@ -1422,7 +1869,7 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(row, dict):
                 raise ValueError("Row must be an object with named fields")
             row_errors = validate_source_row(row, mapper)
-            location = normalize_location(row, mapper, source_name, index)
+            location = normalize_location(row, mapper, source_name, source_index)
             if location is not None:
                 observed_at = location.observed_at
             if location is None:
@@ -1442,7 +1889,7 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
             if location is not None:
                 row_errors.extend(validate_normalized_location(location, field_definitions))
         except Exception as exc:
-            LOGGER.exception("row_validation_failed event_id=%s row_number=%d", event_id, index + 1)
+            LOGGER.exception("row_validation_failed event_id=%s row_number=%d", event_id, source_index + 1)
             row_errors.append({
                 "field": "row",
                 "reason": "row could not be processed",
@@ -1450,29 +1897,47 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
                 "value": str(exc),
             })
         if row_errors:
-            error_listings.append(_row_error_listing(event_id, business_id, source_type_id, index, row, row_errors, observed_at))
+            error_listings.append(_row_error_listing(event_id, business_id, source_type_id, source_index, row, row_errors, observed_at))
         elif location is not None:
             locations.append(location)
     project_id, dataset_id, credentials_json = _warehouse_settings()
 
     mapper_id = f"mapper_{uuid4().hex}"
+    mapping_id = mapping_id or mapper_id
     config_json = _scrub_mapper(mapper)
     try:
         demographics = _load_mapped_zip_demographics({location.zip5 for location in locations})
     except Exception as exc:
         LOGGER.warning("zip_enrichment_lookup_failed_continuing error=%s", exc)
         demographics = {}
+    sample_row_meta = {
+        "template_id": template_id,
+        "ingestion_id": ingestion_id,
+        "mapping_id": mapping_id,
+        "validation_status": "VALID",
+        "is_sample_data": bool(sample_meta.get("is_sample_data")),
+        "sample_batch_id": sample_meta.get("sample_batch_id"),
+    }
+    for location in locations:
+        if isinstance(location.raw, dict):
+            location.raw.setdefault("__meta", sample_row_meta)
     rows_by_table = build_table_rows(locations, demographics)
     rows_by_table["businesses"] = []
     for record in error_listings:
         record["source_type_id"] = source_type_id
     rows_by_table["source_types"] = []
     rows_by_table["workflow_templates"] = [{
-        "workflow_template_id": str(uuid4()),
-        "business_id": business_id, "name": source_name,
-        "components": json.dumps({"mapper": mapper, "source_type_id": source_type_id}, sort_keys=True),
-        "archived_components": None, "created_at": utc_now_iso(), "updated_at": utc_now_iso(),
-    }]
+        "workflow_template_id": template_id,
+        "business_id": business_id, "source_type_id": source_type_id, "name": source_name,
+        "components": json.dumps({"mapper": mapper, "source_type_id": source_type_id, "sample_meta": sample_meta}, sort_keys=True),
+        "archived_components": None,
+        "source_configuration": json.dumps(sample_meta.get("source_configuration") or {}, sort_keys=True),
+        "is_sample_data": bool(sample_meta.get("is_sample_data")),
+        "sample_batch_id": sample_meta.get("sample_batch_id"),
+        "is_deleted": False,
+        "deleted_on": None,
+        "created_at": utc_now_iso(), "updated_at": utc_now_iso(),
+    }] if save_template else []
     rows_by_table["error_listings"] = error_listings
     push_to_bigquery(project_id, dataset_id, rows_by_table, credentials_json)
     invalidate_cache()
@@ -1483,7 +1948,7 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
         len(locations),
         len(mapper["fields"]),
     )
-    return {"event_id": event_id, "mapper_id": mapper_id, "total_rows": len(rows), "mapped_rows": len(locations), "error_listings": len(error_listings), "field_count": len(mapper["fields"]), "dataset": f"{project_id}.{dataset_id}"}
+    return {"event_id": event_id, "mapper_id": mapper_id, "total_rows": len(rows), "mapped_rows": len(locations), "error_listings": len(error_listings), "field_count": len(mapper["fields"]), "dataset": f"{project_id}.{dataset_id}", "row_offset": row_offset, "template_saved": save_template}
 
 
 def clear_saved_data() -> dict[str, Any]:
@@ -1513,7 +1978,12 @@ def make_handler(ui_dir: Path):
 
         def do_GET(self) -> None:
             if self.path == "/api/ping":
-                _json_response(self, 200, {"status": "ok", "db": "ready", "timestamp": utc_now_iso()})
+                try:
+                    result = ping_storage_connection()
+                    result["timestamp"] = utc_now_iso()
+                    _json_response(self, 200, result)
+                except Exception as exc:
+                    _json_response(self, 400, {"ok": False, "status": "warming", "error": str(exc), "timestamp": utc_now_iso()})
                 return
             if self.path == "/api/schema":
                 result = mapper_targets_with_status()
@@ -1633,7 +2103,7 @@ def make_handler(ui_dir: Path):
             super().do_GET()
 
         def do_POST(self) -> None:
-            if self.path not in {"/api/login", "/api/preview", "/api/source-url", "/api/sheets", "/api/save", "/api/clear", "/api/brands", "/api/learning", "/api/reprocess", "/api/field-alias", "/api/custom-field", "/api/templates/save", "/api/silver/enrich"}:
+            if self.path not in {"/api/login", "/api/preview", "/api/source-url", "/api/sheets", "/api/save", "/api/clear", "/api/brands", "/api/learning", "/api/reprocess", "/api/field-alias", "/api/custom-field", "/api/templates/save", "/api/silver/enrich", "/api/reporting/refresh", "/api/sample/load"}:
                 _json_response(self, 404, {"error": "Not found"})
                 return
             request_id = uuid4().hex
@@ -1664,8 +2134,10 @@ def make_handler(ui_dir: Path):
                     _json_response(self, 200, create_custom_field(payload))
                 elif self.path == "/api/templates/save":
                     _json_response(self, 200, save_template_version(payload))
-                elif self.path == "/api/silver/enrich":
+                elif self.path in {"/api/silver/enrich", "/api/reporting/refresh"}:
                     _json_response(self, 200, build_silver_layer())
+                elif self.path == "/api/sample/load":
+                    _json_response(self, 200, load_sample_dataset(bool(payload.get("reset"))))
                 else:
                     _json_response(self, 200, preview_source(payload))
             except Exception as exc:

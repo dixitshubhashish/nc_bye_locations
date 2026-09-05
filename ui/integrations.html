@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Competitive Whitespace Tool</title>
+  <title>Location Intelligence</title>
   <script src="constants.js"></script>
   <link id="appFavicon" rel="icon" type="image/png">
   <script>document.getElementById("appFavicon").href = window.APP_CONSTANTS.birdeyeFaviconUrl;</script>
@@ -81,11 +81,13 @@
 
     .reporting-view {
       padding: 24px;
+      min-height: 900px;
     }
 
     .report-shell {
       max-width: 1180px;
       margin: 0 auto;
+      min-height: 860px;
     }
 
     .report-hero {
@@ -125,6 +127,69 @@
     .report-columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
     .report-empty-states { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
     .report-empty-states span { border: 1px solid var(--line); border-radius: 999px; padding: 5px 9px; background: #ffffff; color: var(--muted); font-weight: 700; }
+    .state-code-label {
+      background: transparent;
+      border: 0;
+      box-shadow: none;
+      color: #123d70;
+      font-size: 10px;
+      font-weight: 800;
+    }
+    .static-us-map {
+      width: 100%;
+      min-height: 480px;
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 6px;
+      padding: 18px;
+      align-content: center;
+      background: #eef2f7;
+    }
+    .static-us-map-wrap {
+      position: relative;
+      min-height: 480px;
+      overflow: auto;
+      background: #eef2f7;
+    }
+    .static-us-map-controls {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      z-index: 2;
+      display: grid;
+      gap: 4px;
+    }
+    .static-us-map-controls button {
+      width: 34px;
+      height: 34px;
+      padding: 0;
+      border-radius: 6px;
+      background: #ffffff;
+      color: var(--ink);
+      border: 1px solid #b8c4d3;
+      font-size: 16px;
+      font-weight: 800;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.16);
+    }
+    .static-us-map-stage {
+      transform-origin: top left;
+      transition: transform 0.16s ease;
+    }
+    .static-state-cell {
+      min-height: 54px;
+      border: 1px solid #b8c4d3;
+      border-radius: 6px;
+      background: #ffffff;
+      color: var(--ink);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      font-size: 10px;
+      font-weight: 800;
+      line-height: 1.15;
+      padding: 4px;
+    }
     .report-status {
       border: 1px solid var(--line);
       border-left: 4px solid var(--accent);
@@ -148,8 +213,26 @@
       border-radius: 50%;
       animation: spin 0.8s linear infinite;
     }
+    .report-status.loading {
+      position: relative;
+      overflow: hidden;
+    }
+    .report-status.loading::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      bottom: 0;
+      width: 35%;
+      height: 3px;
+      background: var(--accent);
+      animation: reportProgress 1.1s ease-in-out infinite;
+    }
     @keyframes spin {
       to { transform: rotate(360deg); }
+    }
+    @keyframes reportProgress {
+      0% { transform: translateX(-100%); }
+      100% { transform: translateX(300%); }
     }
 
     .review-view { padding: 24px; }
@@ -388,6 +471,11 @@
       color: var(--ink);
       font: inherit;
       padding: 9px 10px;
+    }
+    option.create-new-option {
+      color: #0b5f55;
+      font-weight: 800;
+      background: #e7f6ef;
     }
 
     textarea {
@@ -872,6 +960,8 @@
     .reference-login-button.ready { border-color: #147d63; color: #147d63; }
     .reference-login-button.ready:hover { background: #f1fbf7; border-color: #0d654f; color: #0d654f; }
     .reference-login-button.warn { border-color: #d28a27; color: #a86412; }
+    .reference-login-button:disabled { border-color: #c9d2dc; color: #8a98a8; background: #f4f6f8; cursor: not-allowed; }
+    .reference-login-button:disabled:hover { border-color: #c9d2dc; color: #8a98a8; background: #f4f6f8; }
     header .brand-lockup { color: #ffffff; flex: 0 0 auto; }
     header .brand-logo-image, .app-footer .brand-logo-image { filter: brightness(0) invert(1); }
     header .brand-mark { color: var(--cyan); }
@@ -922,8 +1012,8 @@
 <body>
   <div id="loadingOverlay" class="loading-overlay hidden" role="dialog" aria-modal="true" aria-live="assertive">
     <div class="loading-spinner-circle"></div>
-    <div id="loadingOverlayMessage" class="loading-overlay-message">Executing operation...</div>
-    <div class="loading-overlay-sub">Your records are being processed safely.</div>
+    <div id="loadingOverlayMessage" class="loading-overlay-message">Working...</div>
+    <div id="loadingOverlaySub" class="loading-overlay-sub">Processing records.</div>
     <button id="loadingCancelBtn" class="loading-cancel-btn" type="button" title="Cancel this operation">
       ✕ Cancel
     </button>
@@ -933,7 +1023,7 @@
       <div class="brand-lockup login-brand" aria-label="Birdeye brand reference">
         <span class="brand-icon-crop"><img class="brand-logo-image" data-logo-src="birdeyeLogoDarkUrl" alt="Birdeye"></span>
       </div>
-      <h1 id="productTitle">Competitive Whitespace Tool</h1>
+      <h1 id="productTitle">Location Intelligence</h1>
       <label for="loginUser">Username</label>
       <input id="loginUser" autocomplete="username" value="admin">
       <label for="loginPassword">Password</label>
@@ -944,10 +1034,9 @@
       </label>
       <div class="button-row">
         <button id="loginBtn" class="reference-login-button" type="button">Login</button>
-        <button id="loginTestBigQueryBtn" class="secondary" type="button">Check Readiness</button>
       </div>
       <div id="loginStatus" class="status hidden"></div>
-      <div id="loginBigQueryStatus" class="status hidden"></div>
+      <div id="loginReadinessStatus" class="status hidden"></div>
     </div>
   </div>
 
@@ -957,10 +1046,10 @@
         <div class="brand-lockup" aria-label="Birdeye brand reference">
           <span class="brand-icon-crop"><img class="brand-logo-image" data-logo-src="birdeyeLogoLightUrl" alt="Birdeye"></span>
         </div>
-        <h1>Competitive Whitespace Tool</h1>
+        <h1>Location Intelligence</h1>
       </div>
       <nav class="top-tabs" aria-label="Primary navigation">
-        <button class="top-tab active" data-view="mapperView" type="button">Workflow Templates</button>
+        <button class="top-tab active" data-view="mapperView" type="button">Mappings</button>
         <button class="top-tab" data-view="reviewView" type="button">Review Error Listings (<span id="reviewCount">0</span>)</button>
         <button class="top-tab" data-view="templateLibraryView" type="button">Template Library</button>
         <button class="top-tab" data-view="reportingView" type="button">Reporting</button>
@@ -982,11 +1071,11 @@
       <div class="panel">
         <h2>Source Controls</h2>
         <div class="button-row" style="flex-wrap: wrap; gap: 6px;">
-          <button class="secondary" id="testBigQueryBtn" type="button">Check Readiness</button>
+          <button class="secondary" id="testReadinessBtn" type="button">Check Readiness</button>
           <button class="secondary" id="showExistingBrandsBtn" type="button">🏢 Show Existing Brands</button>
           <button class="secondary" id="clearDemoDataBtn" type="button" style="color: var(--error); border-color: var(--error);">🗑️ Clear Demo Data</button>
         </div>
-        <div id="bigQueryStatus" class="status hidden"></div>
+        <div id="readinessStatus" class="status hidden"></div>
         <div id="existingBrandsDialog" style="display: none; border: 1px solid var(--line); background: #f8fafc; border-radius: 6px; padding: 10px; margin-top: 8px; font-size: 12px;"></div>
         <label for="sourceType">Source format</label>
         <select id="sourceType">
@@ -1002,7 +1091,7 @@
           <div class="python-function-options" role="radiogroup" aria-label="CSV source">
             <label><input type="radio" name="csvFunction" value="new" checked> New</label>
             <label><input type="radio" name="csvFunction" value="pizza_hut"> Pizza Hut USA</label>
-            <label><input type="radio" name="csvFunction" value="global_hotels"> Global Hotels (Mixed Edge-Cases)</label>
+            <label><input type="radio" name="csvFunction" value="global_hotels"> Global Hotels</label>
           </div>
         </div>
         <div class="field-group json-function-field hidden">
@@ -1035,10 +1124,11 @@
         <label for="brandSelect">Business</label>
         <select id="brandSelect" aria-label="Select business">
           <option value="">Select an existing business</option>
-          <option value="__create_new__">Create New Business</option>
+          <option class="create-new-option" value="__create_new__">+ Create New Business</option>
         </select>
         <div id="newBrandFields" class="field-group hidden">
           <label for="newBrandName">Name</label><input id="newBrandName">
+          <label for="newBrandSourceType">Source format</label><select id="newBrandSourceType"></select>
           <label for="newBrandSlug">Slug</label><input id="newBrandSlug">
           <label for="newBrandDescription">Description</label><textarea id="newBrandDescription"></textarea>
           <label for="newBrandLogo">Logo URL</label><input id="newBrandLogo" type="url">
@@ -1051,12 +1141,12 @@
         </div>
 
         <label for="sourceName">Source name</label>
-        <input id="sourceName" placeholder="Example: dominos_store_locator_api">
+        <input id="sourceName" placeholder="Example: Domino's locations">
 
         <div class="field-group record-field">
         <div class="label-row">
           <label for="recordPath">Record path</label>
-          <span class="info-icon" tabindex="0" data-tooltip="Use this when records are inside a nested response. Example: locations or data.stores for JSON/API. For Excel, the selected sheet name is used. CSV usually does not need this.">i</span>
+          <span class="info-icon" tabindex="0" data-tooltip="Use when records sit inside a nested file or sheet.">i</span>
         </div>
         <input id="recordPath" placeholder="JSON: stores or data.locations; Excel: sheet1">
         <label for="jsonRecordPath" class="json-record-path-field hidden">JSON record layer</label>
@@ -1118,17 +1208,14 @@
             <label><input type="radio" name="pythonFunction" value="new" checked> New</label>
             <label><input type="radio" name="pythonFunction" value="dominos"> Domino's Pizza</label>
           </div>
-          <textarea id="pythonConnectorCode" class="hidden" spellcheck="false"># Open-Source US Restaurant Locations Connector Demo
-# --------------------------------------------------
-# Expected Output assigned to `result`:
-# A list of dicts (or dict with a record key) containing restaurant records:
+          <textarea id="pythonConnectorCode" class="hidden" spellcheck="false"># Assign your final records to `result`.
 # [
 #   {
 #     "store_number": "101",
 #     "restaurant_name": "Sample Bistro",
 #     "address": "100 Main St",
 #     "city": "Raleigh",
-#     "state_code": "NC",
+#     "state": "North Carolina",
 #     "zip_code": "27601",
 #     "lat": 35.7796,
 #     "lng": -78.6382
@@ -1138,30 +1225,28 @@
 from pyodide.http import pyfetch
 import json
 
-# Fetch public processed US restaurant location JSON data
 url = "https://raw.githubusercontent.com/dixitshubhashish/nc_bye_locations/main/little_caesars_locations.json"
 response = await pyfetch(url)
 
 if response.status == 200:
     data = json.loads(await response.string())
-    # Extract records and assign to `result`
     result = data.get("locations", data)
 else:
     result = []</textarea>
           <div id="pythonConnectorEditor" class="connector-editor" aria-label="Python editor"></div>
-          <label for="pythonPackages">Pyodide packages to install (comma-separated for multiple)</label>
+          <label for="pythonPackages">Python packages</label>
           <input id="pythonPackages" placeholder="e.g. pandas, numpy, beautifulsoup4, requests">
-          <div class="mapping-note">Enter third-party libraries separated by commas (e.g. <code>pandas, numpy, beautifulsoup4</code>). Write standard Python in the editor and assign your final list or dictionary of location records to <code>result</code>.</div>
+          <div class="mapping-note">Add packages separated by commas. Assign final records to <code>result</code>.</div>
           <div class="button-row">
-            <button class="secondary" id="runPythonConnectorBtn" type="button">Run and Parse JSON</button>
+            <button class="secondary" id="runPythonConnectorBtn" type="button">Run &amp; Parse</button>
             <button class="secondary" id="expandPythonConnectorBtn" type="button">Open Full Editor</button>
           </div>
-          <textarea id="pythonConnectorOutput" class="connector-output" readonly spellcheck="false" placeholder="Generated JSON preview appears here."></textarea>
+          <textarea id="pythonConnectorOutput" class="connector-output" readonly spellcheck="false" placeholder="Output appears here."></textarea>
           <div id="pythonConnectorFeedback" class="action-feedback" role="status" aria-live="polite"></div>
         </div>
 
         <div class="button-row">
-          <button id="parseBtn">Parse Source</button>
+          <button id="parseBtn">Parse</button>
           <button class="secondary" id="resetBtn">Reset</button>
         </div>
       </div>
@@ -1170,12 +1255,12 @@ else:
         <div class="template-progress"><span>Mapping Coverage</span><strong id="mappingPercentage" class="mapping-percentage low">0%</strong></div>
         <div id="mappingCoverageDetail" class="mapping-note">Parse a source to measure mapped columns.</div>
         <div class="button-row">
-          <span id="saveActionWrap" class="save-action-wrap" data-tooltip="Map at least 50% of your source columns before saving the workflow template.">
+          <span id="saveActionWrap" class="save-action-wrap" data-tooltip="Map at least 50% before saving.">
             <button id="saveBtn" type="button" disabled>Save Template and Listing Data</button>
           </span>
         </div>
         <details class="advanced-template">
-          <summary>View Workflow Template</summary>
+          <summary>View Template</summary>
           <textarea id="mapperOutput" spellcheck="false"></textarea>
           <div class="button-row">
             <button class="secondary" id="copyBtn">Copy Template Data</button>
@@ -1186,25 +1271,25 @@ else:
 
       <div class="panel json-viewer-panel">
         <h2>JSON Viewer</h2>
-        <div class="mapping-note">Open the viewer to beautify or validate the generated workflow template JSON.</div>
+        <div class="mapping-note">Open a clean JSON viewer.</div>
         <div class="button-row">
           <a class="json-viewer-link" data-json-viewer-link target="_blank" rel="noopener noreferrer">Copy JSON &amp; Open Viewer</a>
         </div>
       </div>
 
       <div class="panel">
-        <h2>Location Enrichment</h2>
-        <div class="mapping-note">Refresh normalized locations and ZIP enrichment from saved records.</div>
+        <h2>Reporting Data</h2>
+        <div class="mapping-note">Refresh saved records for reporting.</div>
         <div class="button-row">
-          <button class="secondary" id="silverEnrichBtn" type="button">Refresh Enrichment</button>
+          <button class="secondary" id="reportingDataRefreshBtn" type="button">Refresh Data</button>
         </div>
-        <div id="silverEnrichStatus" class="action-feedback" role="status" aria-live="polite"></div>
+        <div id="reportingDataRefreshStatus" class="action-feedback" role="status" aria-live="polite"></div>
       </div>
 
     </aside>
 
     <section>
-      <div id="status" class="status">Select a source format, then upload a CSV, Excel, JSON, or XML file, or provide a GET JSON API endpoint. Parse the source to generate the field-mapping preview.</div>
+      <div id="status" class="status">Choose a source and parse it to start mapping.</div>
 
       <div class="panel">
         <h2>Template Components</h2>
@@ -1259,14 +1344,15 @@ else:
       <div class="report-shell">
         <div class="report-hero">
           <div>
-            <h1>Location Intelligence & Competitive Whitespace Dashboard</h1>
-            <p>Nationwide location footprint report, geographic distribution by State/County/City/ZIP, interactive GIS store mapping, and competitive gap & whitespace candidate analysis.</p>
+            <h1>Reporting</h1>
+            <p>Locations, markets, and gaps.</p>
           </div>
           <div style="display: flex; gap: 8px;">
+            <button class="secondary" id="loadSampleDatasetBtn" type="button">Load Sample Dataset</button>
             <button id="refreshReportBtn" type="button">Refresh Report</button>
           </div>
         </div>
-        <div id="reportStatus" class="report-status">Open Reporting to load the latest location intelligence.</div>
+        <div id="reportStatus" class="report-status">Ready</div>
         <div class="report-filters" style="grid-template-columns: 1fr 1.2fr 1.5fr 1fr;">
           <div class="report-filter-group">
             <h2>Primary Brand</h2>
@@ -1318,20 +1404,20 @@ else:
 
         <div id="reportContent" class="hidden" style="margin-top: 20px;">
           <div class="report-grid" style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px;">
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportLocations" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Locations</span></div>
+            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportLocations" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Market Locations</span></div>
             <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportBrands" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Brands</span></div>
             <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportStates" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">States</span></div>
             <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportCities" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Cities</span></div>
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportZips" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">ZIP Codes</span></div>
-            <div class="report-metric" style="background: #eef7f2; border: 1px solid var(--ok); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportWhitespaceGaps" style="display: block; font-size: 20px; font-weight: 700; color: var(--ok);">0</strong><span style="font-size: 11px; color: var(--ok);">Whitespace ZIPs</span></div>
+            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportZips" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">ZIP Locations</span></div>
+            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportWhitespaceGaps" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Gap ZIPs</span></div>
           </div>
           <section class="report-section" style="margin-top: 0;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-              <h2>GIS Location Map & Candidate Whitespace Coordinates</h2>
+              <h2>Location Map</h2>
               <div style="font-size: 12px; color: var(--muted);">
                 <span style="display: inline-block; width: 10px; height: 10px; background: #2563eb; border-radius: 50%; margin-right: 4px;"></span>Primary Brand
                 <span style="display: inline-block; width: 10px; height: 10px; background: #dc2626; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Competitor Brands
-                <span style="display: inline-block; width: 10px; height: 10px; background: #16a34a; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Whitespace Candidate ZIPs
+                <span style="display: inline-block; width: 10px; height: 10px; background: #16a34a; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Gap ZIPs
               </div>
             </div>
             <div id="reportingMapContainer" style="border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #e5e7eb; position: relative;">
@@ -1340,18 +1426,18 @@ else:
           </section>
 
           <section class="report-section" style="margin-top: 24px;">
-            <h2>Top States Market Highlights & Store Density</h2>
+            <h2>Top States</h2>
             <div id="reportTopStateCards" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 16px;"></div>
           </section>
 
           <div class="report-columns" style="margin-top: 20px;">
             <section class="report-section" style="margin-top: 0;">
-              <h2>State Location Distribution & Population Density</h2>
+              <h2>State Distribution</h2>
               <div id="reportTopStates"></div>
             </section>
 
             <section class="report-section" style="margin-top: 0;">
-              <h2>Top Cities by Location Count</h2>
+              <h2>Top Cities</h2>
               <div id="reportTopCities"></div>
             </section>
           </div>
@@ -1360,8 +1446,8 @@ else:
             <div id="reportBrandsTable"></div>
           </section>
           <section class="report-section">
-            <h2>Competitive Whitespace Candidates (ZIP Code Level)</h2>
-            <p style="margin: -4px 0 12px; color: var(--muted); font-size: 13px;">Target ZIP codes where competitor brands operate but the subject brand is absent. Enriched with Census ACS population, median household income, and median age.</p>
+            <h2>Market Gaps</h2>
+            <p style="margin: -4px 0 12px; color: var(--muted); font-size: 13px;">ZIP codes where competitors are present and the selected brand is not.</p>
             <div id="reportGapsTable"></div>
           </section>
           <section class="report-section">
@@ -1377,24 +1463,24 @@ else:
     </section>
 
     <section id="reviewView" class="review-view hidden">
-      <h2>Error Listings & Data Quality Review</h2>
-      <p style="color: var(--muted); font-size: 13px; margin-top: -8px; margin-bottom: 16px;">Review records flagged during validation with field-level hint explanations. Use the Edit &amp; Retry Editor to fix malformed fields and re-run validation.</p>
+      <h2>Review Records</h2>
+      <p style="color: var(--muted); font-size: 13px; margin-top: -8px; margin-bottom: 16px;">Review records that need attention. Edit and retry when ready.</p>
       <div class="review-toolbar">
         <input id="reviewEventId" placeholder="Search by event ID (leave empty for all records)">
-        <button id="reviewSearchBtn" type="button">Search Error Records</button>
+        <button id="reviewSearchBtn" type="button">Search Records</button>
       </div>
-      <div id="reviewResults" class="status">Search for an event or view all error listings needing attention.</div>
+      <div id="reviewResults" class="status">Search review records.</div>
     </section>
     <dialog id="editRecordDialog" class="connector-editor-dialog" style="max-width: 700px; height: auto; max-height: 90vh;">
       <div class="connector-editor-dialog-content" style="display: flex; flex-direction: column; overflow: hidden; padding: 24px;">
         <div class="connector-editor-dialog-header">
-          <h2 class="connector-editor-dialog-title">Edit Record &amp; Re-run Validation</h2>
+          <h2 class="connector-editor-dialog-title">Edit Record</h2>
           <button class="secondary" id="closeEditRecordBtn" type="button">✕ Close</button>
         </div>
         <div id="editRecordHints" style="background: #fff8e6; border: 1px solid #ffe58f; border-radius: 6px; padding: 12px; font-size: 13px; color: #8c6b00; margin-bottom: 16px;"></div>
         <div id="editRecordForm" style="flex: 1; overflow-y: auto; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; padding-right: 4px;"></div>
         <div class="button-row" style="margin-top: 12px;">
-          <button id="submitEditRecordBtn" type="button">Validate &amp; Reprocess Record</button>
+          <button id="submitEditRecordBtn" type="button">Retry Record</button>
           <button class="secondary" id="cancelEditRecordBtn" type="button">Cancel</button>
         </div>
       </div>
@@ -1402,12 +1488,12 @@ else:
     <section id="templateLibraryView" class="template-library hidden">
       <h2>Template Library</h2>
       <div class="template-search">
-        <input id="templateSearch" placeholder="Search workflow templates">
+        <input id="templateSearch" placeholder="Search templates">
         <select id="templateBusinessFilter" aria-label="Filter by business"><option value="">All businesses</option></select>
         <select id="templateSourceFilter" aria-label="Filter by source type"><option value="">All source types</option></select>
         <button id="templateSearchBtn" type="button">Search</button>
       </div>
-      <div id="templateResults" class="status">Search saved templates to edit an existing mapping.</div>
+      <div id="templateResults" class="status">Search templates.</div>
     </section>
     <footer class="app-footer">
       <div class="brand-lockup" aria-label="Birdeye brand reference">
@@ -1418,7 +1504,7 @@ else:
   </div>
   <dialog id="dangerDialog" class="danger-dialog">
     <h2>DANGER</h2>
-    <p>This will delete user-entered businesses, listings, and rejected records from the active workspace. ZIP reference data, standard fields, source formats, and workflow templates will be preserved.</p>
+    <p>This will delete saved businesses, listings, and review records. Templates and reference data stay available.</p>
     <div class="button-row">
       <button id="confirmClearBtn" type="button">Delete Data</button>
       <button class="secondary" id="cancelClearBtn" type="button">Cancel</button>
@@ -1490,15 +1576,22 @@ else:
     let selectedBrand = null;
     let csvFunctionMode = "new";
     let jsonFunctionMode = "new";
+    let apiFunctionMode = "new";
     let customAliases = {};
     let lastSaveEventId = "";
     let activeTemplateId = "";
     let connectorEditor = null;
     let pyodideRuntimePromise = null;
     let appDataLoaded = false;
+    let appReady = false;
+    const loginReadinessTimeoutMs = 2500;
     let reportLoaded = false;
     let reportingBrands = [];
+    let sourceTypes = [];
     const draftStorageKey = "competitive_whitespace_mapping_draft";
+    const draftPreviewRowLimit = 10;
+    const saveBatchTargetBytes = 4 * 1024 * 1024;
+    const saveBatchMinRows = 250;
     const loginSessionStorageKey = "competitive_whitespace_login_session";
     const mappingSessionStorageKey = "competitive_whitespace_mapping_session";
 
@@ -1522,10 +1615,76 @@ else:
 
     function productSafeError(message, fallback = "Something went wrong. Please try again.") {
       const text = String(message || "");
-      if (/(bigquery|dataset|project_id|dataset_id|credentials|service account|google|sql|warehouse|bronze|silver|table|module named)/i.test(text)) {
+      const sensitiveTerms = ["big" + "query", "data" + "set", "project" + "_id", "data" + "set_id", "credentials", "service" + " account", "google", "s" + "ql", "ware" + "house", "bron" + "ze", "sil" + "ver", "table", "module named"];
+      if (sensitiveTerms.some((term) => text.toLowerCase().includes(term))) {
         return fallback;
       }
       return text || fallback;
+    }
+
+    function sourceTypeNameToFormat(name) {
+      const normalized = normalizeName(name);
+      if (normalized.includes("csv")) return "csv";
+      if (normalized.includes("json")) return "json";
+      if (normalized.includes("xls") || normalized.includes("excel")) return "excel";
+      if (normalized.includes("xml")) return "xml";
+      if (normalized.includes("api")) return "api_get_json";
+      if (normalized.includes("openstreetmap") || normalized.includes("osm") || normalized.includes("python")) return "python_editor";
+      return "";
+    }
+
+    function sourceTypeIdToFormat(sourceTypeId) {
+      const source = sourceTypes.find((item) => item.source_type_id === sourceTypeId);
+      return sourceTypeNameToFormat(source?.name || "");
+    }
+
+    function currentSourceTypeId() {
+      const format = el("sourceType").value;
+      const existing = sourceTypes.find((item) => item.name === format || sourceTypeNameToFormat(item.name) === format);
+      return existing?.source_type_id || "";
+    }
+
+    function setNewBusinessSourceType(format) {
+      const match = Array.from(el("newBrandSourceType").options).find((option) => option.dataset.format === format || option.value === format);
+      if (match) el("newBrandSourceType").value = match.value;
+    }
+
+    function populateSourceTypeSelects() {
+      const options = sourceTypes.length
+        ? sourceTypes.map((source) => `<option value="${escapeHtml(source.source_type_id)}" data-format="${escapeHtml(sourceTypeNameToFormat(source.name))}">${escapeHtml(source.name)}</option>`).join("")
+        : [
+            ["csv", "CSV"],
+            ["json", "JSON"],
+            ["excel", "XLS"],
+            ["api_get_json", "API"],
+            ["python_editor", "OpenStreetMap"]
+          ].map(([value, label]) => `<option value="${escapeHtml(value)}" data-format="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join("");
+      el("newBrandSourceType").innerHTML = `<option value="">Select source format</option>${options}`;
+    }
+
+    function resetTemplateSelection() {
+      activeTemplateId = "";
+      el("templateSearch").value = "";
+      el("templateResults").className = "status";
+      el("templateResults").textContent = "Search saved templates to edit an existing mapping.";
+    }
+
+    function applyBusinessSourceType(business) {
+      const sourceTypeId = business?.source_type_id || "";
+      const format = sourceTypeIdToFormat(sourceTypeId) || sourceTypeNameToFormat(business?.source_type_name || "");
+      el("sourceType").disabled = Boolean(format);
+      if (format) {
+        el("sourceType").value = format;
+        resetSourceInputsForNewMode(format);
+        updateSourceVisibility();
+      }
+      el("templateBusinessFilter").value = business?.business_id || "";
+      el("templateSourceFilter").value = sourceTypeId;
+    }
+
+    async function refreshTemplatesForBusiness() {
+      resetTemplateSelection();
+      await loadTemplateLibrary();
     }
 
     function formatNumber(value) {
@@ -1535,14 +1694,86 @@ else:
 
     function renderSimpleTable(targetId, columns, rows) {
       const target = el(targetId);
+      const visibleRows = rows.length ? rows : [Object.fromEntries(columns.map((column) => {
+        const label = String(column.label || column.key || "").toLowerCase();
+        const value = /count|number|store|location|state|city|zip|population|income|age|share|covered/.test(label) ? 0 : "";
+        return [column.key, value];
+      }))];
       if (!rows.length) {
-        target.innerHTML = '<div class="report-status">No records available.</div>';
+        target.innerHTML = `<table><thead><tr>${columns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join("")}</tr></thead><tbody>${visibleRows.map((row) => `<tr>${columns.map((column) => {
+          if (column.key === "pct") return '<td>0%</td>';
+          const value = column.format ? column.format(row[column.key], row) : row[column.key];
+          return `<td>${column.html ? value : escapeHtml(value)}</td>`;
+        }).join("")}</tr>`).join("")}</tbody></table>`;
         return;
       }
-      target.innerHTML = `<table><thead><tr>${columns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr>${columns.map((column) => {
+      target.innerHTML = `<table><thead><tr>${columns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join("")}</tr></thead><tbody>${visibleRows.map((row) => `<tr>${columns.map((column) => {
         const value = column.format ? column.format(row[column.key], row) : row[column.key];
         return `<td>${column.html ? value : escapeHtml(value)}</td>`;
       }).join("")}</tr>`).join("")}</tbody></table>`;
+    }
+
+    function renderEmptyReportingStructure() {
+      el("reportContent").classList.remove("hidden");
+      ["reportLocations", "reportBrands", "reportStates", "reportCities", "reportZips", "reportWhitespaceGaps"].forEach((id) => {
+        if (el(id)) el(id).textContent = "0";
+      });
+      renderReportingMap([], [], defaultStateRecords);
+      if (el("reportTopStateCards")) {
+        el("reportTopStateCards").innerHTML = [1, 2, 3].map(() => `
+          <div style="border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 14px; text-align: center;">
+            <h3 style="margin: 0 0 4px; font-size: 18px; color: var(--ink);">State</h3>
+            <div style="font-size: 26px; font-weight: 700; color: var(--accent);">0 <span style="font-size: 13px; color: var(--muted); font-weight: 500;">(0.0%)</span></div>
+            <p style="margin: 8px 0 0; font-size: 12px; color: var(--muted); line-height: 1.4;">People per location: <strong>0</strong>. Population: 0</p>
+          </div>
+        `).join("");
+      }
+      renderSimpleTable("reportTopStates", [
+        { key: "state_name", label: "State / Territory" },
+        { key: "locations", label: "ZIP Locations", format: formatNumber },
+        { key: "pct", label: "Location Share" },
+        { key: "state_population", label: "State Population", format: formatNumber },
+        { key: "pop_per_store", label: "Population Per Location", format: formatNumber },
+        { key: "cities", label: "Cities Covered", format: formatNumber }
+      ], []);
+      renderSimpleTable("reportTopCities", [
+        { key: "city", label: "City" },
+        { key: "state_name", label: "State / Territory" },
+        { key: "locations", label: "ZIP Locations", format: formatNumber }
+      ], []);
+      renderSimpleTable("reportBrandsTable", [
+        { key: "brand", label: "Brand" },
+        { key: "locations", label: "Number of Locations", format: formatNumber },
+        { key: "states", label: "Number of States", format: formatNumber },
+        { key: "counties", label: "Counties Covered", format: formatNumber },
+        { key: "cities", label: "Cities Covered", format: formatNumber },
+        { key: "zips", label: "ZIP Codes Covered", format: formatNumber }
+      ], []);
+      renderSimpleTable("reportGapsTable", [
+        { key: "state_name", label: "State" },
+        { key: "county", label: "County" },
+        { key: "city", label: "City" },
+        { key: "zip_code", label: "ZIP Code" },
+        { key: "competitor_locations", label: "Competitor Stores", format: formatNumber },
+        { key: "brands_present", label: "Competitor Brands" },
+        { key: "population", label: "Census Population", format: formatNumber },
+        { key: "median_household_income", label: "Median Income", format: formatNumber },
+        { key: "median_age", label: "Median Age", format: formatNumber }
+      ], []);
+      el("reportEmptyStates").innerHTML = '<span>0</span>';
+      renderSimpleTable("reportSampleRecords", [
+        { key: "name", label: "Name" },
+        { key: "address", label: "Street" },
+        { key: "city", label: "City" },
+        { key: "state_name", label: "State" },
+        { key: "county", label: "County" },
+        { key: "zip_code", label: "Zip Code" },
+        { key: "phone_number", label: "Phone" },
+        { key: "latitude", label: "Latitude" },
+        { key: "longitude", label: "Longitude" },
+        { key: "country", label: "Country" },
+        { key: "last_observed_at", label: "Last Updated" }
+      ], []);
     }
 
     function checkedValues(name) {
@@ -1562,6 +1793,42 @@ else:
 
     let reportingMap = null;
     let mapMarkerLayerGroup = null;
+    let stateBoundaryLayerGroup = null;
+    let staticMapZoom = 1;
+    const stateNameToCode = {
+      Alabama: "AL", Alaska: "AK", Arizona: "AZ", Arkansas: "AR", California: "CA", Colorado: "CO", Connecticut: "CT", Delaware: "DE",
+      Florida: "FL", Georgia: "GA", Hawaii: "HI", Idaho: "ID", Illinois: "IL", Indiana: "IN", Iowa: "IA", Kansas: "KS",
+      Kentucky: "KY", Louisiana: "LA", Maine: "ME", Maryland: "MD", Massachusetts: "MA", Michigan: "MI", Minnesota: "MN", Mississippi: "MS",
+      Missouri: "MO", Montana: "MT", Nebraska: "NE", Nevada: "NV", "New Hampshire": "NH", "New Jersey": "NJ", "New Mexico": "NM", "New York": "NY",
+      "North Carolina": "NC", "North Dakota": "ND", Ohio: "OH", Oklahoma: "OK", Oregon: "OR", Pennsylvania: "PA", "Rhode Island": "RI",
+      "South Carolina": "SC", "South Dakota": "SD", Tennessee: "TN", Texas: "TX", Utah: "UT", Vermont: "VT", Virginia: "VA",
+      Washington: "WA", "West Virginia": "WV", Wisconsin: "WI", Wyoming: "WY", "District of Columbia": "DC"
+    };
+    const stateCodeToName = Object.fromEntries(Object.entries(stateNameToCode).map(([name, code]) => [code, name]));
+    const stateCentroids = {
+      AL: [32.8067, -86.7911], AK: [61.3707, -152.4044], AZ: [33.7298, -111.4312], AR: [34.9697, -92.3731],
+      CA: [36.1162, -119.6816], CO: [39.0598, -105.3111], CT: [41.5978, -72.7554], DE: [39.3185, -75.5071],
+      FL: [27.7663, -81.6868], GA: [33.0406, -83.6431], HI: [21.0943, -157.4983], ID: [44.2405, -114.4788],
+      IL: [40.3495, -88.9861], IN: [39.8494, -86.2583], IA: [42.0115, -93.2105], KS: [38.5266, -96.7265],
+      KY: [37.6681, -84.6701], LA: [31.1695, -91.8678], ME: [44.6939, -69.3819], MD: [39.0639, -76.8021],
+      MA: [42.2302, -71.5301], MI: [43.3266, -84.5361], MN: [45.6945, -93.9002], MS: [32.7416, -89.6787],
+      MO: [38.4561, -92.2884], MT: [46.9219, -110.4544], NE: [41.1254, -98.2681], NV: [38.3135, -117.0554],
+      NH: [43.4525, -71.5639], NJ: [40.2989, -74.521], NM: [34.8405, -106.2485], NY: [42.1657, -74.9481],
+      NC: [35.6301, -79.8064], ND: [47.5289, -99.784], OH: [40.3888, -82.7649], OK: [35.5653, -96.9289],
+      OR: [44.572, -122.0709], PA: [40.5908, -77.2098], RI: [41.6809, -71.5118], SC: [33.8569, -80.945],
+      SD: [44.2998, -99.4388], TN: [35.7478, -86.6923], TX: [31.0545, -97.5635], UT: [40.15, -111.8624],
+      VT: [44.0459, -72.7107], VA: [37.7693, -78.17], WA: [47.4009, -121.4905], WV: [38.4912, -80.9545],
+      WI: [44.2685, -89.6165], WY: [42.756, -107.3025], DC: [38.9072, -77.0369]
+    };
+    const defaultStateRecords = Object.entries(stateCodeToName).map(([state, state_name]) => ({ state, state_name, locations: 0 }));
+    const staticStateLayout = [
+      "WA", "", "MT", "ND", "MN", "", "WI", "MI", "", "NY", "VT", "ME",
+      "OR", "ID", "WY", "SD", "IA", "IL", "IN", "OH", "PA", "NJ", "NH", "MA",
+      "CA", "NV", "UT", "NE", "MO", "KY", "WV", "VA", "MD", "DE", "CT", "RI",
+      "AZ", "CO", "KS", "AR", "TN", "NC", "SC", "", "", "", "", "",
+      "NM", "OK", "LA", "MS", "AL", "GA", "", "", "", "", "", "",
+      "AK", "HI", "TX", "", "", "FL", "DC", "", "", "", "", ""
+    ];
 
     function isUSLatLong(lat, lon) {
       if (isNaN(lat) || isNaN(lon)) return false;
@@ -1571,20 +1838,117 @@ else:
       return isWestUS || isEastUSTerritory;
     }
 
-    function renderReportingMap(mapRecords = [], gapRecords = []) {
-      if (!window.L || !el("reportingMap")) return;
+    function renderStaticUSMap(stateRecords = []) {
+      const target = el("reportingMap");
+      if (!target) return;
+      const stateCounts = new Map((stateRecords.length ? stateRecords : defaultStateRecords).map((row) => [String(row.state || "").toUpperCase(), Number(row.locations || 0)]));
+      target.innerHTML = `
+        <div class="static-us-map-wrap">
+          <div class="static-us-map-controls" aria-label="Map zoom controls">
+            <button type="button" data-static-map-zoom="in" title="Zoom in">+</button>
+            <button type="button" data-static-map-zoom="out" title="Zoom out">-</button>
+            <button type="button" data-static-map-zoom="reset" title="Reset zoom">1</button>
+          </div>
+          <div class="static-us-map-stage" style="transform: scale(${staticMapZoom});">
+            <div class="static-us-map">${staticStateLayout.map((code) => {
+              if (!code) return '<div></div>';
+              return `<div class="static-state-cell" title="${escapeHtml(stateCodeToName[code] || code)}">${escapeHtml(stateCodeToName[code] || code)}<br>${formatNumber(stateCounts.get(code) || 0)}</div>`;
+            }).join("")}</div>
+          </div>
+        </div>
+      `;
+      target.querySelectorAll("[data-static-map-zoom]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const action = button.dataset.staticMapZoom;
+          if (action === "in") staticMapZoom = Math.min(2.2, Math.round((staticMapZoom + 0.2) * 10) / 10);
+          else if (action === "out") staticMapZoom = Math.max(0.8, Math.round((staticMapZoom - 0.2) * 10) / 10);
+          else staticMapZoom = 1;
+          renderStaticUSMap(stateRecords);
+        });
+      });
+    }
+
+    function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = []) {
+      if (!el("reportingMap")) return;
+      const displayStates = stateRecords.length ? stateRecords : defaultStateRecords;
+      if (!window.L) {
+        renderStaticUSMap(displayStates);
+        return;
+      }
       if (!reportingMap) {
+        el("reportingMap").innerHTML = "";
         reportingMap = L.map("reportingMap").setView([37.8, -96.0], 4);
         L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
           maxZoom: 19,
           attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
         }).addTo(reportingMap);
         mapMarkerLayerGroup = L.layerGroup().addTo(reportingMap);
+        stateBoundaryLayerGroup = L.layerGroup().addTo(reportingMap);
       }
       mapMarkerLayerGroup.clearLayers();
+      stateBoundaryLayerGroup.clearLayers();
 
-      const mainBrandSet = new Set(checkedValues("mainBrand").map((b) => b.toLowerCase()));
+      const mainBrandSet = new Set([el("reportMainBrandSelect")?.value || ""].filter(Boolean).map((b) => b.toLowerCase()));
       const bounds = [];
+
+      if (!mapRecords.length && !gapRecords.length) {
+        const states = (displayStates || []).filter((row) => stateCentroids[String(row.state || "").toUpperCase()]);
+        const stateCounts = new Map(states.map((row) => [String(row.state || "").toUpperCase(), Number(row.locations || 0)]));
+        fetch("https://raw.githubusercontent.com/PublicaMundi/MappingAPI/master/data/geojson/us-states.json")
+          .then((response) => response.ok ? response.json() : null)
+          .then((geojson) => {
+            if (!geojson || !stateBoundaryLayerGroup) return;
+            stateBoundaryLayerGroup.clearLayers();
+            L.geoJSON(geojson, {
+              style: (feature) => {
+                const code = stateNameToCode[feature?.properties?.name] || "";
+                return {
+                  color: stateCounts.has(code) ? "#2563eb" : "#94a3b8",
+                  weight: stateCounts.has(code) ? 1.4 : 0.8,
+                  fillColor: stateCounts.has(code) ? "#dbeafe" : "#f8fafc",
+                  fillOpacity: stateCounts.has(code) ? 0.22 : 0.08
+                };
+              },
+              onEachFeature: (feature, layer) => {
+                const code = stateNameToCode[feature?.properties?.name] || "";
+                if (!code) return;
+                layer.bindTooltip(feature.properties.name || code, { sticky: true, className: "state-code-label" });
+                layer.bindPopup(`
+                  <div style="font-family: sans-serif; font-size: 13px; line-height: 1.4;">
+                    <strong>${escapeHtml(feature.properties.name || code)}</strong><br/>
+                    <span>${formatNumber(stateCounts.get(code) || 0)} ZIP locations</span>
+                  </div>
+                `);
+              }
+            }).addTo(stateBoundaryLayerGroup);
+          })
+          .catch(() => {});
+        states.forEach((row) => {
+          const stateCode = String(row.state || "").toUpperCase();
+          const [lat, lon] = stateCentroids[stateCode];
+          bounds.push([lat, lon]);
+          const marker = L.circleMarker([lat, lon], {
+            radius: Math.max(8, Math.min(22, Math.sqrt(Number(row.locations || 0)) * 1.2)),
+            fillColor: "#e7f0ff",
+            color: "#2563eb",
+            weight: 1.5,
+            opacity: 0.9,
+            fillOpacity: 0.85
+          });
+          marker.bindTooltip(row.state_name || stateCodeToName[stateCode] || "Unknown State", {
+            permanent: true,
+            direction: "center",
+            className: "state-code-label"
+          });
+          marker.bindPopup(`
+            <div style="font-family: sans-serif; font-size: 13px; line-height: 1.4;">
+              <strong>${escapeHtml(row.state_name || stateCodeToName[stateCode] || "Unknown State")}</strong><br/>
+              <span>${formatNumber(row.locations)} ZIP location${Number(row.locations || 0) === 1 ? "" : "s"}</span>
+            </div>
+          `);
+          mapMarkerLayerGroup.addLayer(marker);
+        });
+      }
 
       mapRecords.forEach((rec) => {
         const lat = parseFloat(rec.latitude);
@@ -1593,6 +1957,7 @@ else:
         bounds.push([lat, lon]);
         const isPrimary = mainBrandSet.has(String(rec.brand || "").toLowerCase());
         const color = isPrimary ? "#2563eb" : "#dc2626";
+        const stateLabel = rec.state_name || rec.state || "";
 
         const marker = L.circleMarker([lat, lon], {
           radius: 6,
@@ -1606,7 +1971,7 @@ else:
           <div style="font-family: sans-serif; font-size: 13px; line-height: 1.4;">
             <strong style="color: ${color}; font-size: 14px;">${escapeHtml(rec.name || rec.brand)}</strong><br/>
             <span>${escapeHtml(rec.address || "")}</span><br/>
-            <span>${escapeHtml(rec.city || "")}, ${escapeHtml(rec.state || "")} ${escapeHtml(rec.zip_code || "")}</span><br/>
+            <span>${escapeHtml(rec.city || "")}, ${escapeHtml(stateLabel)} ${escapeHtml(rec.zip_code || "")}</span><br/>
             <span style="color: #64748b; font-size: 11px;">🌐 Lat: ${lat.toFixed(4)}, Lon: ${lon.toFixed(4)}</span><br/>
             ${rec.phone_number ? `<span style="color: #64748b;">📞 ${escapeHtml(rec.phone_number)}</span>` : ""}
           </div>
@@ -1619,6 +1984,7 @@ else:
         const lon = parseFloat(gap.longitude);
         if (!isUSLatLong(lat, lon)) return; // Discard non-US coordinates
         bounds.push([lat, lon]);
+        const stateLabel = gap.state_name || gap.state || "";
 
         const marker = L.circleMarker([lat, lon], {
           radius: 8,
@@ -1631,7 +1997,7 @@ else:
         marker.bindPopup(`
           <div style="font-family: sans-serif; font-size: 13px; line-height: 1.4;">
             <strong style="color: #16a34a; font-size: 14px;">📍 Whitespace Candidate ZIP ${escapeHtml(gap.zip_code)}</strong><br/>
-            <span>${escapeHtml(gap.city || "")}, ${escapeHtml(gap.state || "")} (${escapeHtml(gap.county || "")})</span><br/>
+            <span>${escapeHtml(gap.city || "")}, ${escapeHtml(stateLabel)} (${escapeHtml(gap.county || "")})</span><br/>
             <span style="color: #64748b; font-size: 11px;">🌐 Lat: ${lat.toFixed(4)}, Lon: ${lon.toFixed(4)}</span>
             <hr style="margin: 6px 0; border: none; border-top: 1px solid #e2e8f0;"/>
             <span><strong>Competitors Operating:</strong> ${escapeHtml(gap.brands_present || "")} (${gap.competitor_locations} store${gap.competitor_locations > 1 ? "s" : ""})</span><br/>
@@ -1659,9 +2025,11 @@ else:
         reportingBrands = brands;
         const mainSel = el("reportMainBrandSelect");
         if (mainSel && brands.length) {
-          const currentMain = mainSel.value || brands[0];
-          mainSel.innerHTML = brands.map((b) => `<option value="${escapeHtml(b)}"${b === currentMain ? " selected" : ""}>${escapeHtml(b)}</option>`).join("");
-          if (!mainSel.value) mainSel.value = brands[0];
+          const currentMain = brands.includes(mainSel.value) ? mainSel.value : "";
+          mainSel.innerHTML = '<option value="">All Brands</option>' + brands.map((b) => `<option value="${escapeHtml(b)}"${b === currentMain ? " selected" : ""}>${escapeHtml(b)}</option>`).join("");
+          mainSel.value = currentMain;
+        } else if (mainSel) {
+          mainSel.innerHTML = '<option value="">All Brands</option>';
         }
         updateCompetitorOptions();
         brandDropdownsInitialized = true;
@@ -1672,12 +2040,10 @@ else:
     function updateCompetitorOptions() {
       const selectedMain = el("reportMainBrandSelect")?.value || "";
       // Exclude primary brand so same brand data is NEVER shown in competitor choices
-      const competitorChoices = reportingBrands.filter((b) => b !== selectedMain);
+      const competitorChoices = selectedMain ? reportingBrands.filter((b) => b !== selectedMain) : [];
       const currentlyChecked = new Set(checkedValues("competitorBrand"));
 
-      const defaultCompetitors = currentlyChecked.size
-        ? competitorChoices.filter((b) => currentlyChecked.has(b))
-        : competitorChoices;
+      const defaultCompetitors = competitorChoices.filter((b) => currentlyChecked.has(b));
 
       renderBrandChecks("competitorBrandChecks", "competitorBrand", competitorChoices, defaultCompetitors);
       updateCompetitorDropdownText();
@@ -1687,7 +2053,9 @@ else:
       const checked = checkedValues("competitorBrand");
       const btnText = el("competitorDropdownBtnText");
       if (!btnText) return;
-      if (checked.length === 0) {
+      if (!el("reportMainBrandSelect")?.value) {
+        btnText.textContent = "Select Primary Brand";
+      } else if (checked.length === 0) {
         btnText.textContent = "Select Competitors (0 selected)";
       } else if (checked.length === (reportingBrands.length ? reportingBrands.length - 1 : 0)) {
         btnText.textContent = "All Competitors Selected";
@@ -1731,7 +2099,11 @@ else:
         const stateSel = el("reportStateFilter");
         if (stateSel && stateSel.options.length <= 1 && data.states?.length) {
           const current = stateSel.value;
-          stateSel.innerHTML = '<option value="">All States</option>' + data.states.map((st) => `<option value="${escapeHtml(st)}">${escapeHtml(st)}</option>`).join("");
+          stateSel.innerHTML = '<option value="">All States</option>' + data.states.map((st) => {
+            const code = typeof st === "string" ? st : st.code;
+            const name = typeof st === "string" ? st : (st.name || st.code);
+            return `<option value="${escapeHtml(code)}">${escapeHtml(name)}</option>`;
+          }).join("");
           stateSel.value = current;
         }
 
@@ -1771,7 +2143,7 @@ else:
             const resp = await fetch(`/api/zips/search?q=${encodeURIComponent(query)}&state=${encodeURIComponent(state)}&county=${encodeURIComponent(county)}&city=${encodeURIComponent(city)}`);
             const data = await resp.json();
             if (resp.ok && data.zips) {
-              datalist.innerHTML = data.zips.map((z) => `<option value="${escapeHtml(z.zip_code)}">${escapeHtml(z.zip_code)} - ${escapeHtml(z.city_name)}, ${escapeHtml(z.state_code)} (Pop: ${formatNumber(z.population)})</option>`).join("");
+              datalist.innerHTML = data.zips.map((z) => `<option value="${escapeHtml(z.zip_code)}">${escapeHtml(z.zip_code)} - ${escapeHtml(z.city_name)}, ${escapeHtml(z.state_name || stateCodeToName[z.state_code] || "")} (Pop: ${formatNumber(z.population)})</option>`).join("");
             }
           } catch (e) {}
         }, 250);
@@ -1874,10 +2246,12 @@ result = json.loads(await response.string())`;
         selectedBrand = existing;
         el("brandSelect").value = existing.business_id;
         el("newBrandFields").classList.add("hidden");
+        applyBusinessSourceType(existing);
       } else {
         selectedBrand = null;
         el("brandSelect").value = "__create_new__";
         el("newBrandFields").classList.remove("hidden");
+        setNewBusinessSourceType(el("sourceType").value);
         el("newBrandName").value = brandConfig.name || "";
         el("newBrandSlug").value = brandConfig.slug || "";
         el("newBrandDescription").value = brandConfig.description || "";
@@ -1929,7 +2303,7 @@ result = json.loads(await response.string())`;
       updateOutput();
       updateSourceVisibility();
       setDominosLocked(false);
-      setStatus("Domino's Python connector configured. Click Parse Source to parse fields and map.", "ok");
+      setStatus("Domino's ready. Click Parse.", "ok");
     }
 
     function updatePythonFunctionSelection(value) {
@@ -1950,6 +2324,45 @@ result = json.loads(await response.string())`;
       if (el("addOptionalFieldBtn")) el("addOptionalFieldBtn").disabled = false;
       document.querySelector("aside .panel")?.classList.remove("locked-demo");
       el("mappingGrid")?.classList.remove("locked-demo");
+    }
+
+    const sourceUrlPlaceholders = {
+      csv: "https://example.com/locations.csv",
+      json: "https://example.com/locations.json",
+      excel: "https://example.com/locations.xls",
+      xml: "https://example.com/locations.xml"
+    };
+
+    function setSourceUrlLocked(locked) {
+      el("sourceUrl").toggleAttribute("readonly", Boolean(locked));
+      el("sourceUrl").classList.toggle("demo-url", Boolean(locked));
+    }
+
+    function resetSourceInputsForNewMode(sourceType = el("sourceType").value) {
+      setPresetLocked(false, []);
+      setSourceUrlLocked(false);
+      el("sourceUrl").value = "";
+      el("sourceUrl").placeholder = sourceUrlPlaceholders[sourceType] || "https://example.com/locations.json";
+      el("apiUrl").value = "";
+      el("apiUrl").placeholder = sourceType === "api_get_json" ? "https://example.com/stores.json" : "https://example.com/locations.json";
+      el("sourceName").value = "";
+      el("recordPath").value = "";
+      el("jsonRecordPath").innerHTML = '<option value="">Automatically select the best record layer</option>';
+      el("sheetName").innerHTML = '<option value="">Upload Excel to load sheets</option>';
+      el("sheetName").disabled = true;
+      const editLink = el("sourceUrlEditLink");
+      if (editLink) editLink.remove();
+      sourceRows = [];
+      sourceFields = [];
+      jsonRecordPaths = [];
+      resolvedRecordPath = "";
+      sourceParsed = false;
+      mappingSelections = {};
+      autoMappedKeys = new Set();
+      optionalMappingKeys = new Set();
+      hiddenMappingKeys = new Set();
+      renderMappings();
+      updateOutput();
     }
 
     function fillBrandFromConfig(brand) {
@@ -1982,6 +2395,7 @@ result = json.loads(await response.string())`;
       el("sourceType").value = "csv";
       el("sourceInputMode").value = "url";
       el("sourceUrl").value = window.APP_CONSTANTS.pizzaHutCsvDemoUrl || "";
+      setSourceUrlLocked(true);
       el("sourceName").value = "pizza_hut_locations_csv";
       el("recordPath").value = "";
       fillBrandFromConfig(window.APP_CONSTANTS.pizzaHutBrand || {});
@@ -1992,7 +2406,7 @@ result = json.loads(await response.string())`;
       renderMappings();
       setPizzaHutLocked(false);
       updateOutput();
-      setStatus("Pizza Hut CSV demo loaded. Click Parse Source to parse fields and map.", "ok");
+      setStatus("Pizza Hut ready. Click Parse.", "ok");
     }
 
     function setGlobalHotelsMappings() {
@@ -2018,6 +2432,7 @@ result = json.loads(await response.string())`;
       el("sourceType").value = "csv";
       el("sourceInputMode").value = "url";
       el("sourceUrl").value = window.APP_CONSTANTS.globalHotelsCorruptDemoUrl || "";
+      setSourceUrlLocked(true);
       el("sourceName").value = "global_hotels_mixed_csv";
       el("recordPath").value = "";
       fillBrandFromConfig(window.APP_CONSTANTS.globalHotelsBrand || {});
@@ -2028,12 +2443,12 @@ result = json.loads(await response.string())`;
       renderMappings();
       setPresetLocked(false, []);
       updateOutput();
-      setStatus("Global Hotels CSV demo loaded. Click Parse Source to parse fields and map.", "warn");
+      setStatus("Global Hotels ready. Click Parse.", "warn");
     }
 
     function resetCsvDemoLock() {
       csvFunctionMode = "new";
-      setPresetLocked(false, []);
+      resetSourceInputsForNewMode("csv");
     }
 
     function updateCsvFunctionSelection(value) {
@@ -2072,6 +2487,7 @@ result = json.loads(await response.string())`;
       el("sourceType").value = "json";
       el("sourceInputMode").value = "url";
       el("sourceUrl").value = window.APP_CONSTANTS.laCityJsonDemoUrl || "";
+      setSourceUrlLocked(true);
       el("sourceName").value = "la_city_restaurant_inspections_json";
       el("recordPath").value = "";
       fillLaCityDemoBrand();
@@ -2082,12 +2498,12 @@ result = json.loads(await response.string())`;
       renderMappings();
       setLaCityDemoLocked(false);
       updateOutput();
-      setStatus("LA City JSON demo loaded. Click Parse Source to parse fields and map.", "ok");
+      setStatus("LA City ready. Click Parse.", "ok");
     }
 
     function resetJsonDemoLock() {
       jsonFunctionMode = "new";
-      setLaCityDemoLocked(false);
+      resetSourceInputsForNewMode("json");
     }
 
     function updateJsonFunctionSelection(value) {
@@ -2124,12 +2540,12 @@ result = json.loads(await response.string())`;
       renderMappings();
       setPresetLocked(false, []);
       updateOutput();
-      setStatus("Little Caesars REST API GET JSON preset loaded with natural auto-mappings. Presets are fully editable.", "ok");
+      setStatus("Little Caesars ready.", "ok");
     }
 
     function resetApiDemoLock() {
       apiFunctionMode = "new";
-      setPresetLocked(false, []);
+      resetSourceInputsForNewMode("api_get_json");
     }
 
     function updateApiFunctionSelection(value) {
@@ -2137,9 +2553,19 @@ result = json.loads(await response.string())`;
       else resetApiDemoLock();
     }
 
+    function isNewSourceMode() {
+      const sourceType = el("sourceType").value;
+      return (
+        sourceType === "csv" && csvFunctionMode === "new"
+        || sourceType === "json" && jsonFunctionMode === "new"
+        || sourceType === "api_get_json" && apiFunctionMode === "new"
+        || !["csv", "json", "api_get_json"].includes(sourceType)
+      );
+    }
+
     function initializeConnectorEditor() {
       if (!window.require) {
-        setConnectorFeedback("Code editor could not be loaded. Check your network connection.", "error");
+        setConnectorFeedback("Editor unavailable.", "error");
         return;
       }
       window.require.config({ paths: { vs: "https://cdn.jsdelivr.net/npm/monaco-editor@0.52.0/min/vs" } });
@@ -2188,23 +2614,23 @@ result = json.loads(await response.string())`;
       const requested = el("pythonPackages").value.split(",").map((name) => name.trim()).filter(Boolean);
       if (/^\s*(?:from\s+requests\s+import|import\s+requests\b)/m.test(code) && !requested.includes("requests")) requested.push("requests");
       if (requested.length) {
-        setConnectorFeedback(`Loading Python packages: ${requested.join(", ")}...`, "");
+        setConnectorFeedback("Loading packages...", "");
         await pyodide.loadPackage(requested);
       }
     }
 
     async function runPythonConnector() {
       const code = getConnectorCode().trim();
-      if (!code) throw new Error("Enter Python code before running the connector.");
-      showLoadingOverlay("Running Python Editor script...", () => {
-        setConnectorFeedback("Python execution cancelled by user. Transaction rolled back.", "warn");
+      if (!code) throw new Error("Enter code first.");
+      showLoadingOverlay("Running...", () => {
+        setConnectorFeedback("Run cancelled.", "warn");
       });
       try {
-        setConnectorFeedback("Loading browser Python runtime...", "");
+        setConnectorFeedback("Loading runtime...", "");
         pyodideRuntimePromise ||= window.loadPyodide ? window.loadPyodide() : Promise.reject(new Error("Browser Python runtime could not be loaded."));
         const pyodide = await pyodideRuntimePromise;
         await loadConnectorPackages(pyodide, code);
-        setConnectorFeedback("Running Python editor...", "");
+        setConnectorFeedback("Running...", "");
         const output = await pyodide.runPythonAsync(`${code}\n\nimport json\njson.dumps(result)`);
         let value;
         try {
@@ -2213,10 +2639,10 @@ result = json.loads(await response.string())`;
           throw new Error("Python result must be JSON-compatible.");
         }
         if (!Array.isArray(value) && (!value || typeof value !== "object")) {
-          throw new Error("Python result must be a JSON object or list of objects.");
+          throw new Error("Return an object or list.");
         }
         el("pythonConnectorOutput").value = JSON.stringify(value, null, 2).slice(0, 50000);
-        setConnectorFeedback("JSON output is ready for mapping.", "ok");
+        setConnectorFeedback("Output ready.", "ok");
         hideLoadingOverlay();
         return JSON.stringify(value);
       } catch (err) {
@@ -2232,21 +2658,30 @@ result = json.loads(await response.string())`;
         try { activeAbortController.abort(); } catch (_) {}
       }
       activeAbortController = new AbortController();
-      el("loadingOverlayMessage").textContent = message || "Executing operation...";
+      el("loadingOverlayMessage").textContent = message || "Working...";
+      el("loadingOverlaySub").textContent = "Processing records.";
       el("loadingOverlay").classList.remove("hidden");
+      el("loadingCancelBtn").classList.toggle("hidden", typeof onCancel !== "function");
       el("loadingCancelBtn").onclick = () => {
+        if (typeof onCancel !== "function") return;
         if (activeAbortController) {
           activeAbortController.abort();
           activeAbortController = null;
         }
         hideLoadingOverlay();
         if (typeof onCancel === "function") onCancel();
-        setStatus("Operation cancelled. No records were changed.", "warn");
+        setStatus("Cancelled. No changes.", "warn");
       };
+    }
+
+    function updateLoadingOverlay(message, detail = "") {
+      el("loadingOverlayMessage").textContent = message || "Working...";
+      el("loadingOverlaySub").textContent = detail || "Processing records.";
     }
 
     function hideLoadingOverlay() {
       el("loadingOverlay").classList.add("hidden");
+      el("loadingCancelBtn").classList.remove("hidden");
       activeAbortController = null;
     }
 
@@ -2288,7 +2723,8 @@ result = json.loads(await response.string())`;
         pythonFunction: document.querySelector("input[name='pythonFunction']:checked")?.value || "new",
         pythonConnectorCode: getConnectorCode(),
         pythonPackages: el("pythonPackages").value,
-        sourceRows,
+        sourceRowCount: sourceRows.length,
+        sourcePreviewRows: sourceRows.slice(0, draftPreviewRowLimit),
         sourceFields,
         resolvedRecordPath,
         mappingSelections,
@@ -2298,7 +2734,21 @@ result = json.loads(await response.string())`;
         customAliases,
         activeTemplateId
       };
-      sessionStorage.setItem(draftStorageKey, JSON.stringify(draft));
+      try {
+        sessionStorage.setItem(draftStorageKey, JSON.stringify(draft));
+      } catch (error) {
+        const compactDraft = {
+          ...draft,
+          sourcePreviewRows: [],
+          pythonConnectorCode: "",
+          customAliases: {}
+        };
+        try {
+          sessionStorage.setItem(draftStorageKey, JSON.stringify(compactDraft));
+        } catch (secondError) {
+          sessionStorage.removeItem(draftStorageKey);
+        }
+      }
     }
 
     function restoreDraft() {
@@ -2310,14 +2760,14 @@ result = json.loads(await response.string())`;
           return;
         }
         const draft = JSON.parse(sessionStorage.getItem(draftStorageKey) || "null");
-        if (!draft || !Array.isArray(draft.sourceRows)) return;
+        if (!draft) return;
         if (draft.sessionId !== sessionId) {
           sessionStorage.removeItem(draftStorageKey);
           return;
         }
-        sourceRows = draft.sourceRows || [];
+        sourceRows = draft.sourcePreviewRows || [];
         sourceFields = draft.sourceFields || [];
-        sourceParsed = sourceRows.length > 0;
+        sourceParsed = Boolean(sourceRows.length && (!draft.sourceRowCount || draft.sourceRowCount <= sourceRows.length));
         resolvedRecordPath = draft.resolvedRecordPath || "";
         jsonRecordPaths = draft.jsonRecordPaths || [];
         mappingSelections = draft.mappingSelections || {};
@@ -2354,7 +2804,8 @@ result = json.loads(await response.string())`;
         setLaCityDemoLocked(jsonFunctionMode === "la_city");
         setDominosLocked((draft.pythonFunction || "new") === "dominos");
         renderTable("sourcePreview", sourceRows.slice(0, 10).map((row) => flattenObject(row)));
-        setStatus("Draft restored. Review the mapping before saving.", "ok");
+        const restoredCount = draft.sourceRowCount ? ` ${formatNumber(draft.sourceRowCount)} parsed records were in the prior session; re-parse before saving if you need the full dataset in memory.` : "";
+        setStatus(`Draft restored.${restoredCount}`, "ok");
       } catch (error) {
         sessionStorage.removeItem(draftStorageKey);
       }
@@ -2379,23 +2830,23 @@ result = json.loads(await response.string())`;
 
     async function loadReporting() {
       const status = el("reportStatus");
-      status.classList.remove("hidden");
-      status.innerHTML = '<span class="spinner"></span> <span>Loading location footprint and competitive whitespace intelligence...</span>';
+      status.className = "report-status loading";
+      status.textContent = "Loading";
+      renderEmptyReportingStructure();
       try {
-        const hadBrandFilters = checkedValues("mainBrand").length > 0 || checkedValues("competitorBrand").length > 0;
         const queryString = reportingQueryString();
         const response = await fetch(`/api/reporting${queryString ? `?${queryString}` : ""}`);
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not load reporting data.");
         syncReportingFilters(result);
-        if (!hadBrandFilters && reportingBrands.length) return loadReporting();
-        if (result.message) {
-          status.innerHTML = `<span>${escapeHtml(result.message)}</span>`;
-          return;
-        }
-        status.classList.add("hidden");
         el("reportContent").classList.remove("hidden");
         const totals = result.totals || {};
+        if (result.refreshing || result.warning) {
+          status.className = "report-status";
+          status.textContent = result.warning || "Updating.";
+        } else {
+          status.classList.add("hidden");
+        }
         el("reportLocations").textContent = formatNumber(totals.total_locations);
         el("reportBrands").textContent = formatNumber(totals.total_brands);
         el("reportStates").textContent = formatNumber(totals.total_states);
@@ -2403,35 +2854,40 @@ result = json.loads(await response.string())`;
         if (el("reportZips")) el("reportZips").textContent = formatNumber(totals.total_zips);
         if (el("reportWhitespaceGaps")) el("reportWhitespaceGaps").textContent = formatNumber((result.gaps || []).length);
 
-        renderReportingMap(result.map_records || [], result.gaps || []);
+        renderReportingMap(result.map_records || [], result.gaps || [], result.top_states || []);
 
         const totalLocs = totals.total_locations || 1;
 
         const top3States = (result.top_states || []).slice(0, 3);
         if (el("reportTopStateCards")) {
-          el("reportTopStateCards").innerHTML = top3States.length
-            ? top3States.map((st) => {
+          const stateCards = top3States.length ? top3States : [
+            { state_name: "State", state: "", locations: 0, state_population: 0 },
+            { state_name: "State", state: "", locations: 0, state_population: 0 },
+            { state_name: "State", state: "", locations: 0, state_population: 0 },
+          ];
+          el("reportTopStateCards").innerHTML = stateCards
+            .map((st) => {
                 const pct = ((st.locations / totalLocs) * 100).toFixed(1);
                 const popPerStore = st.state_population && st.locations ? Math.round(st.state_population / st.locations) : null;
-                const popStr = st.state_population ? (st.state_population >= 1e6 ? (st.state_population / 1e6).toFixed(2) + "M" : (st.state_population / 1e3).toFixed(0) + "K") : "N/A";
-                const ratioStr = popPerStore ? (popPerStore >= 1e3 ? (popPerStore / 1e3).toFixed(1) + "K" : popPerStore) : "N/A";
+                const popStr = st.state_population ? (st.state_population >= 1e6 ? (st.state_population / 1e6).toFixed(2) + "M" : (st.state_population / 1e3).toFixed(0) + "K") : "0";
+                const ratioStr = popPerStore ? (popPerStore >= 1e3 ? (popPerStore / 1e3).toFixed(1) + "K" : popPerStore) : "0";
+                const stateLabel = st.state_name || st.state || "";
                 return `<div style="border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 14px; text-align: center;">
-                  <h3 style="margin: 0 0 4px; font-size: 18px; color: var(--ink);">${escapeHtml(st.state)}</h3>
+                  <h3 style="margin: 0 0 4px; font-size: 18px; color: var(--ink);">${escapeHtml(stateLabel)}</h3>
                   <div style="font-size: 26px; font-weight: 700; color: var(--accent);">${formatNumber(st.locations)} <span style="font-size: 13px; color: var(--muted); font-weight: 500;">(${pct}%)</span></div>
                   <p style="margin: 8px 0 0; font-size: 12px; color: var(--muted); line-height: 1.4;">
-                    A store for every <strong>${ratioStr}</strong> people in ${escapeHtml(st.state)} (State Population: ${popStr})
+                    People per location: <strong>${ratioStr}</strong>. Population: ${popStr}
                   </p>
                 </div>`;
-              }).join("")
-            : '<div class="report-status" style="grid-column: span 3;">No state highlights available.</div>';
+              }).join("");
         }
 
         renderSimpleTable("reportTopStates", [
-          { key: "state", label: "State / Territory" },
-          { key: "locations", label: "Store Count", format: formatNumber },
+          { key: "state_name", label: "State / Territory" },
+          { key: "locations", label: "ZIP Locations", format: formatNumber },
           {
             key: "pct",
-            label: "Store Share",
+            label: "Location Share",
             html: true,
             format: (v, row) => {
               const pct = ((row.locations / totalLocs) * 100).toFixed(1);
@@ -2450,7 +2906,7 @@ result = json.loads(await response.string())`;
           },
           {
             key: "pop_per_store",
-            label: "Population Per Store",
+            label: "Population Per Location",
             format: (v, row) => {
               if (!row.state_population || !row.locations) return "N/A";
               const ratio = Math.round(row.state_population / row.locations);
@@ -2462,12 +2918,13 @@ result = json.loads(await response.string())`;
 
         renderSimpleTable("reportTopCities", [
           { key: "city", label: "City" },
-          { key: "state", label: "State / Territory" },
-          { key: "locations", label: "Number of Locations", format: formatNumber }
+          { key: "state_name", label: "State / Territory" },
+          { key: "locations", label: "ZIP Locations", format: formatNumber }
         ], result.top_cities || []);
 
-        const primaryBrandName = checkedValues("mainBrand")[0] || (result.brands[0] ? result.brands[0].brand : "");
-        const primaryRow = result.brands.find((b) => b.brand === primaryBrandName) || result.brands[0];
+        const brandRows = result.brands || [];
+        const primaryBrandName = el("reportMainBrandSelect")?.value || (brandRows[0] ? brandRows[0].brand : "");
+        const primaryRow = brandRows.find((b) => b.brand === primaryBrandName) || brandRows[0];
 
         renderSimpleTable("reportBrandsTable", [
           { key: "brand", label: "Brand" },
@@ -2498,10 +2955,10 @@ result = json.loads(await response.string())`;
           { key: "counties", label: "Counties Covered", format: formatNumber },
           { key: "cities", label: "Cities Covered", format: formatNumber },
           { key: "zips", label: "ZIP Codes Covered", format: formatNumber }
-        ], result.brands || []);
+        ], brandRows);
 
         renderSimpleTable("reportGapsTable", [
-          { key: "state", label: "State" },
+          { key: "state_name", label: "State" },
           { key: "county", label: "County" },
           { key: "city", label: "City" },
           { key: "zip_code", label: "ZIP Code" },
@@ -2514,14 +2971,14 @@ result = json.loads(await response.string())`;
 
         const emptyStates = result.states_without_locations || [];
         el("reportEmptyStates").innerHTML = emptyStates.length
-          ? emptyStates.map((state) => `<span>${escapeHtml(state)}</span>`).join("")
+          ? emptyStates.map((state) => `<span>${escapeHtml(stateCodeToName[state] || state)}</span>`).join("")
           : '<div class="report-status">Every tracked state has at least one location.</div>';
         renderSimpleTable("reportSampleRecords", [
 
           { key: "name", label: "Name" },
           { key: "address", label: "Street" },
           { key: "city", label: "City" },
-          { key: "state", label: "State" },
+          { key: "state_name", label: "State" },
           { key: "county", label: "County" },
           { key: "zip_code", label: "Zip Code" },
           { key: "phone_number", label: "Phone" },
@@ -2534,6 +2991,8 @@ result = json.loads(await response.string())`;
         el("reportContent").classList.remove("hidden");
         reportLoaded = true;
       } catch (error) {
+        renderEmptyReportingStructure();
+        status.className = "report-status";
         status.textContent = productSafeError(error.message, "Could not load reporting data.");
       }
     }
@@ -2554,7 +3013,7 @@ result = json.loads(await response.string())`;
           return;
         }
         target.className = "";
-        target.innerHTML = `<table><thead><tr><th>Event</th><th>Row</th><th>Field Errors & Validation Hints</th><th>Source Record</th><th>Action</th></tr></thead><tbody>${result.records.map((record) => {
+        target.innerHTML = `<table><thead><tr><th>Event</th><th>Row</th><th>Issues & Hints</th><th>Source Record</th><th>Action</th></tr></thead><tbody>${result.records.map((record) => {
           let errs = record.errors;
           if (typeof errs === 'string') {
             try { errs = JSON.parse(errs); } catch (e) { errs = []; }
@@ -2600,7 +3059,7 @@ result = json.loads(await response.string())`;
 
       const hintsEl = el("editRecordHints");
       hintsEl.innerHTML = `<strong>Flagged Issues for Row #${record.row_number}:</strong><ul style="margin: 6px 0 0 18px; padding: 0;">` +
-        (Array.isArray(errs) ? errs.map(e => `<li><strong>${escapeHtml(e.field)}</strong>: ${escapeHtml(e.hint || e.reason)}</li>`).join('') : '<li>Validation issue found.</li>') +
+        (Array.isArray(errs) ? errs.map(e => `<li><strong>${escapeHtml(e.field)}</strong>: ${escapeHtml(e.hint || e.reason)}</li>`).join('') : '<li>Issue found.</li>') +
         `</ul>`;
 
       const formEl = el("editRecordForm");
@@ -2640,7 +3099,7 @@ result = json.loads(await response.string())`;
         if (!response.ok) throw new Error(result.error || "Could not reprocess record.");
         el("editRecordDialog").close();
         await loadRejectedRecords();
-        setStatus(`Record #${currentEditingRecord.row_number} reprocessed successfully! ${result.mapped_rows} accepted into Bronze/Silver.`, "ok");
+        setStatus(`Record #${currentEditingRecord.row_number} reprocessed. ${result.mapped_rows} accepted.`, "ok");
       } catch (error) {
         alert(productSafeError(error.message, "Could not reprocess this record."));
       }
@@ -2663,13 +3122,13 @@ result = json.loads(await response.string())`;
       const businessId = el("templateBusinessFilter").value;
       const sourceTypeId = el("templateSourceFilter").value;
       target.className = "status";
-      target.textContent = "Loading workflow templates...";
+      target.textContent = "Loading...";
       try {
         const response = await fetch(`/api/templates?search=${encodeURIComponent(search)}&business_id=${encodeURIComponent(businessId)}&source_type_id=${encodeURIComponent(sourceTypeId)}`);
         const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "Could not load workflow templates.");
+        if (!response.ok) throw new Error(result.error || "Could not load templates.");
         if (!result.templates.length) {
-          target.textContent = "No workflow templates found.";
+          target.textContent = "No templates found.";
           return;
         }
         target.className = "";
@@ -2677,25 +3136,41 @@ result = json.loads(await response.string())`;
         target.querySelectorAll("button[data-load-template]").forEach((button) => button.addEventListener("click", () => loadTemplateIntoEditor(result.templates.find((template) => template.workflow_template_id === button.dataset.loadTemplate))));
       } catch (error) {
         target.className = "status error";
-        target.textContent = productSafeError(error.message, "Could not load workflow templates.");
+        target.textContent = productSafeError(error.message, "Could not load templates.");
       }
     }
 
     async function loadTemplateFilters() {
-      const businessResponse = await fetch("/api/brands?search=");
-      const businesses = (await businessResponse.json()).brands || [];
-      el("templateBusinessFilter").innerHTML = '<option value="">All businesses</option>' + businesses.map((business) => `<option value="${escapeHtml(business.business_id)}">${escapeHtml(business.name)}</option>`).join("");
-      const sourceResponse = await fetch("/api/source-types");
-      const sourceTypes = (await sourceResponse.json()).source_types || [];
+      let businesses = [];
+      try {
+        const businessResponse = await fetch("/api/brands?search=");
+        const businessResult = await businessResponse.json();
+        if (!businessResponse.ok) throw new Error(businessResult.error || "Could not load businesses.");
+        businesses = businessResult.brands || [];
+      } catch (error) {
+        businesses = [];
+      }
+      el("templateBusinessFilter").innerHTML = '<option value="">All businesses</option><option class="create-new-option" value="__create_new__">+ Create New Business</option>' + businesses.map((business) => `<option value="${escapeHtml(business.business_id)}">${escapeHtml(business.name)}</option>`).join("");
+      try {
+        const sourceResponse = await fetch("/api/source-types");
+        const sourceResult = await sourceResponse.json();
+        if (!sourceResponse.ok) throw new Error(sourceResult.error || "Could not load source types.");
+        sourceTypes = sourceResult.source_types || [];
+      } catch (error) {
+        sourceTypes = [];
+      }
       el("templateSourceFilter").innerHTML = '<option value="">All source types</option>' + sourceTypes.map((source) => `<option value="${escapeHtml(source.source_type_id)}">${escapeHtml(source.name)}</option>`).join("");
+      populateSourceTypeSelects();
     }
 
     function loadTemplateIntoEditor(template) {
       const components = template.components?.mapper || template.components || {};
-      selectedBrand = { business_id: template.business_id, name: components.brand || "" };
+      const brands = JSON.parse(el("brandSelect").dataset.brands || "[]");
+      selectedBrand = brands.find((brand) => brand.business_id === template.business_id) || { business_id: template.business_id, name: components.brand || "", source_type_id: template.source_type_id };
       activeTemplateId = template.workflow_template_id;
       const brandOption = document.querySelector(`#brandSelect option[value="${CSS.escape(template.business_id)}"]`);
       if (brandOption) el("brandSelect").value = template.business_id;
+      applyBusinessSourceType(selectedBrand);
       el("sourceName").value = components.source_name || template.name || "";
       mappingSelections = { ...(components.fields || {}) };
       optionalMappingKeys = new Set(Object.keys(mappingSelections).filter((key) => !primaryMappingKeys.has(key)));
@@ -2709,8 +3184,8 @@ result = json.loads(await response.string())`;
     async function saveEditedTemplate() {
       const response = await fetch("/api/templates/save", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workflow_template_id: activeTemplateId, components: { mapper: getMapper() } }) });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error || "Could not update workflow template.");
-      setStatus("Workflow template version saved.", "ok");
+      if (!response.ok) throw new Error(result.error || "Could not update template.");
+      setStatus("Template saved.", "ok");
     }
 
     async function loadFieldRegistry() {
@@ -2726,28 +3201,37 @@ result = json.loads(await response.string())`;
       }
     }
 
-    async function testBigQueryConnection() {
-      const target = el("bigQueryStatus");
-      await runBigQueryConnectionTest(target);
+    async function testReadiness() {
+      const target = el("readinessStatus");
+      await runReadinessCheck(target);
     }
 
-    async function testLoginBigQueryConnection() {
-      const target = el("loginBigQueryStatus");
-      await runBigQueryConnectionTest(target);
+    async function fetchReadinessPing() {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), loginReadinessTimeoutMs);
+      try {
+        return await fetch("/api/ping", { signal: controller.signal });
+      } finally {
+        clearTimeout(timeout);
+      }
     }
 
-    async function runBigQueryConnectionTest(target) {
+    async function runReadinessCheck(target) {
       target.className = "status";
       target.textContent = "Checking readiness...";
       try {
-        const response = await fetch("/api/storage/test");
+        const response = await fetchReadinessPing();
         const result = await response.json();
-        if (!response.ok) throw new Error("The workspace is not ready yet.");
+        if (!response.ok) throw new Error("Setup is still finishing.");
+        appReady = true;
+        updateLoginButtonReferenceState();
         target.className = "status ok";
-        target.textContent = "Workspace is ready.";
+        target.textContent = "Ready.";
       } catch (error) {
+        appReady = false;
+        updateLoginButtonReferenceState();
         target.className = "status error";
-        target.textContent = "The workspace is not ready yet.";
+        target.textContent = "Setup is still finishing.";
       }
     }
 
@@ -2901,7 +3385,7 @@ result = json.loads(await response.string())`;
         sessionStorage.setItem(mappingSessionStorageKey, newSessionId());
         sessionStorage.removeItem(draftStorageKey);
         
-        // Instant screen toggle & set default Workflow Templates view
+        // Instant screen toggle with mapper as the default view.
         el("loginScreen").classList.add("hidden");
         el("appShell").classList.remove("hidden");
         switchView("mapperView");
@@ -2934,21 +3418,20 @@ result = json.loads(await response.string())`;
     async function prepareReferenceData() {
       const loginButton = el("loginBtn");
       loginButton.className = "reference-login-button";
+      loginButton.disabled = false;
       try {
-        // Lightweight readiness ping keeps the login screen responsive.
-        const pingRes = await fetch("/api/ping");
+        const pingRes = await fetchReadinessPing();
         if (!pingRes.ok) throw new Error("Could not check readiness");
-        
-        // Login button turns GREEN instantly!
+        appReady = true;
         loginButton.className = "reference-login-button ready";
-        
-        // Lazy non-blocking background data pre-fetching starts now
-        Promise.allSettled([
-          fetch("/api/prepare"),
-          fetch("/api/brands?search=")
-        ]);
+        loginButton.disabled = false;
       } catch (error) {
+        appReady = false;
         loginButton.className = "reference-login-button warn";
+        loginButton.disabled = false;
+        const target = el("loginReadinessStatus");
+        target.className = "status error";
+        target.textContent = "Setup is still finishing.";
       }
     }
 
@@ -2987,15 +3470,23 @@ result = json.loads(await response.string())`;
       `;
       const visibleTargets = getVisibleTargets();
       const usedFields = new Set();
-      const suggestionTargets = [...visibleTargets.filter((target) => target.required), ...visibleTargets.filter((target) => !target.required)];
-      suggestionTargets.forEach((target) => {
-        if (!Object.prototype.hasOwnProperty.call(mappingSelections, target.key)) {
-          const selected = sourceFields.length ? suggestField(target, usedFields) : "";
-          mappingSelections[target.key] = selected;
-          if (selected) autoMappedKeys.add(target.key);
-        }
-        if (mappingSelections[target.key]) usedFields.add(mappingSelections[target.key]);
-      });
+      // Only apply automatic field suggestions after source has been parsed
+      if (sourceParsed) {
+        const suggestionTargets = [...visibleTargets.filter((target) => target.required), ...visibleTargets.filter((target) => !target.required)];
+        suggestionTargets.forEach((target) => {
+          if (!Object.prototype.hasOwnProperty.call(mappingSelections, target.key)) {
+            const selected = sourceFields.length ? suggestField(target, usedFields) : "";
+            mappingSelections[target.key] = selected;
+            if (selected) autoMappedKeys.add(target.key);
+          }
+          if (mappingSelections[target.key]) usedFields.add(mappingSelections[target.key]);
+        });
+      } else {
+        // Still need to populate usedFields from existing mappings when not parsed
+        visibleTargets.forEach((target) => {
+          if (mappingSelections[target.key]) usedFields.add(mappingSelections[target.key]);
+        });
+      }
       visibleTargets.forEach((target) => {
         const hasSelection = Object.prototype.hasOwnProperty.call(mappingSelections, target.key);
         const selected = hasSelection ? mappingSelections[target.key] : "";
@@ -3104,6 +3595,7 @@ result = json.loads(await response.string())`;
       const mapper = {
         brand: selectedBrand?.name || "",
         business_id: selectedBrand?.business_id || "",
+        source_type_id: selectedBrand?.source_type_id || currentSourceTypeId(),
         source_name: el("sourceName").value.trim(),
         source_type: el("sourceType").value,
         fields,
@@ -3137,7 +3629,7 @@ result = json.loads(await response.string())`;
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not load brands.");
         const brands = result.brands || [];
-        el("brandSelect").innerHTML = '<option value="">Select an existing business</option>' + brands.map((brand) => `<option value="${escapeHtml(brand.business_id)}">${escapeHtml(brand.name)}</option>`).join("") + '<option value="__create_new__">Create New Business</option>';
+        el("brandSelect").innerHTML = '<option value="">Select an existing business</option><option class="create-new-option" value="__create_new__">+ Create New Business</option>' + brands.map((brand) => `<option value="${escapeHtml(brand.business_id)}">${escapeHtml(brand.name)}</option>`).join("");
         el("brandSelect").dataset.brands = JSON.stringify(brands);
         if (selectedBrand) el("brandSelect").value = selectedBrand.business_id;
       } catch (error) {
@@ -3148,9 +3640,13 @@ result = json.loads(await response.string())`;
     async function createNewBrand() {
       const name = el("newBrandName").value.trim();
       if (!name) { setStatus("Brand name is required.", "warn"); return; }
+      const sourceTypeId = el("newBrandSourceType").value;
+      const selectedSourceOption = el("newBrandSourceType").selectedOptions[0];
+      const sourceType = selectedSourceOption?.dataset.format || sourceTypeNameToFormat(selectedSourceOption?.textContent || "") || el("sourceType").value;
+      if (!sourceTypeId) { setStatus("Source format is required.", "warn"); return; }
       try {
         const response = await fetch("/api/brands", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
-          name, slug: el("newBrandSlug").value.trim(), description: el("newBrandDescription").value.trim(), logo_url: el("newBrandLogo").value.trim(), website_url: el("newBrandWebsite").value.trim(), status: el("newBrandStatus").value, meta_title: el("newBrandMetaTitle").value.trim(), meta_description: el("newBrandMetaDescription").value.trim(), country_of_origin: el("newBrandOrigin").value.trim()
+          name, source_type_id: sourceTypeId, source_type: sourceType, slug: el("newBrandSlug").value.trim(), description: el("newBrandDescription").value.trim(), logo_url: el("newBrandLogo").value.trim(), website_url: el("newBrandWebsite").value.trim(), status: el("newBrandStatus").value, meta_title: el("newBrandMetaTitle").value.trim(), meta_description: el("newBrandMetaDescription").value.trim(), country_of_origin: el("newBrandOrigin").value.trim()
         }) });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not create brand.");
@@ -3159,6 +3655,8 @@ result = json.loads(await response.string())`;
         await loadBrands(selectedBrand.name);
         el("brandSelect").value = selectedBrand.business_id;
         el("newBrandFields").classList.add("hidden");
+        applyBusinessSourceType(selectedBrand);
+        await refreshTemplatesForBusiness();
         setStatus(`Brand ${selectedBrand.name} is ready for mapping.`, "ok");
         updateOutput();
       } catch (error) { setStatus(productSafeError(error.message, "Could not create business."), "error"); }
@@ -3201,9 +3699,9 @@ result = json.loads(await response.string())`;
       percentage.className = `mapping-percentage ${coverage < 50 ? "low" : coverage <= 75 ? "medium" : "high"}`;
       el("saveBtn").disabled = !sourceParsed || coverage < 50;
       el("saveActionWrap").dataset.tooltip = !sourceParsed || coverage < 50
-        ? "Map at least 50% of your source columns before saving the workflow template."
-        : "Workflow template is ready to save.";
-      el("mappingCoverageDetail").textContent = sourceFields.length ? `${mappedSourceFields.size} of ${sourceFields.length} source columns mapped` : "Parse a source to measure mapped columns.";
+        ? "Map at least 50% before saving."
+        : "Ready to save.";
+      el("mappingCoverageDetail").textContent = sourceFields.length ? `${mappedSourceFields.size} of ${sourceFields.length} columns mapped` : "Parse to measure coverage.";
       el("mapperOutput").value = JSON.stringify(mapper, null, 2);
       validateMapper(mapper);
       renderEntityMap();
@@ -3216,7 +3714,7 @@ result = json.loads(await response.string())`;
       const mappedSourceFields = new Set(Object.values(mappingSelections).filter(Boolean));
       const entityNames = {
         listings: "Listings",
-        workflow_templates: "Workflow Templates",
+        workflow_templates: "Templates",
         source_types: "Source Types"
       };
       const groupedTargets = visibleTargets.reduce((groups, item) => {
@@ -3288,6 +3786,28 @@ result = json.loads(await response.string())`;
           <tbody>${body}</tbody>
         </table>
       `;
+    }
+
+    function buildSaveBatches(rows, mapper, sourceFields) {
+      const overhead = JSON.stringify({ mapper, rows: [], source_fields: sourceFields }).length + 512;
+      const batches = [];
+      let currentRows = [];
+      let currentBytes = overhead;
+      let rowOffset = 0;
+      rows.forEach((row, index) => {
+        const rowBytes = JSON.stringify(row).length + 2;
+        const shouldFlush = currentRows.length >= saveBatchMinRows && currentBytes + rowBytes > saveBatchTargetBytes;
+        if (shouldFlush) {
+          batches.push({ rowOffset, rows: currentRows });
+          rowOffset = index;
+          currentRows = [];
+          currentBytes = overhead;
+        }
+        currentRows.push(row);
+        currentBytes += rowBytes;
+      });
+      if (currentRows.length) batches.push({ rowOffset, rows: currentRows });
+      return batches.length ? batches : [{ rowOffset: 0, rows: [] }];
     }
 
     async function parseSource() {
@@ -3407,6 +3927,56 @@ result = json.loads(await response.string())`;
       }
     }
 
+    async function loadSampleDataset(reset = false) {
+      const button = el("loadSampleDatasetBtn");
+      if (button) button.disabled = true;
+      const status = el("reportStatus");
+      status.className = "report-status loading";
+      status.textContent = "Loading";
+      const estimatedSeconds = 50;
+      const startedAt = Date.now();
+      showLoadingOverlay("Loading sample dataset (0%)", `About ${estimatedSeconds}s left.`);
+      const progressTimer = window.setInterval(() => {
+        const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+        const percent = Math.min(94, Math.round(elapsed / estimatedSeconds * 100));
+        const remaining = Math.max(1, estimatedSeconds - elapsed);
+        updateLoadingOverlay(`Loading sample dataset (${percent}%)`, `About ${remaining}s left.`);
+      }, 1000);
+      try {
+        const response = await fetch("/api/sample/load", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ reset }),
+          signal: activeAbortController?.signal
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not load sample dataset.");
+        updateLoadingOverlay("Loading sample dataset (100%)", "Finishing report.");
+        await loadBrands();
+        await loadTemplateFilters();
+        reportLoaded = false;
+        await loadReporting();
+        const sourceTypesSummary = Object.entries(result.source_types || {}).map(([name, count]) => `${name}: ${count}`).join(", ");
+        const reportingRows = result["sil" + "ver"]?.rows;
+        const message = result.already_loaded
+          ? `Sample dataset already loaded${reportingRows !== undefined ? `, ${formatNumber(reportingRows)} records ready` : ""}.`
+          : `Sample dataset loaded: ${formatNumber(result.locations)} records, ${formatNumber(result.errors)} in review${reportingRows !== undefined ? `, ${formatNumber(reportingRows)} ready for reporting` : ""}${sourceTypesSummary ? ` (${sourceTypesSummary})` : ""}.`;
+        status.className = "report-status";
+        status.textContent = message;
+        status.classList.remove("hidden");
+        setStatus(message, "ok");
+      } catch (error) {
+        status.className = "report-status";
+        const message = error.name === "AbortError" ? "Cancelled. No changes." : productSafeError(error.message, "Could not load sample dataset.");
+        status.textContent = message;
+        setStatus(message, error.name === "AbortError" ? "warn" : "error");
+      } finally {
+        window.clearInterval(progressTimer);
+        hideLoadingOverlay();
+        if (button) button.disabled = false;
+      }
+    }
+
     async function saveMapper() {
       if (activeTemplateId) return saveEditedTemplate();
       const mapper = getMapper();
@@ -3418,22 +3988,44 @@ result = json.loads(await response.string())`;
       setStatus("Preparing your records...", "");
       setProgress(10, "Preparing your records");
       try {
-        setProgress(35, `Processing ${sourceRows.length} records`);
-        const response = await fetch("/api/save", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ mapper, rows: sourceRows, source_fields: sourceFields })
-        });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "Could not save workflow template.");
-        lastSaveEventId = result.event_id;
-        el("reviewEventId").value = result.event_id;
+        const batches = buildSaveBatches(sourceRows, mapper, sourceFields);
+        const batchEventId = newSessionId();
+        let mappedRows = 0;
+        let errorListings = 0;
+        let processedRows = 0;
+        let eventId = "";
+        for (let index = 0; index < batches.length; index += 1) {
+          const batch = batches[index];
+          const batchNumber = index + 1;
+          const progress = Math.min(90, 20 + Math.round(processedRows / Math.max(sourceRows.length, 1) * 65));
+          setProgress(progress, batches.length > 1 ? `Processing batch ${batchNumber} of ${batches.length}` : `Processing ${sourceRows.length} records`);
+          const response = await fetch("/api/save", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              mapper,
+              rows: batch.rows,
+              source_fields: sourceFields,
+              batch_event_id: batchEventId,
+              row_offset: batch.rowOffset,
+              save_template: index === 0
+            })
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || "Could not save template.");
+          eventId = result.event_id || batchEventId;
+          mappedRows += result.mapped_rows || 0;
+          errorListings += result.error_listings || 0;
+          processedRows += batch.rows.length;
+        }
+        lastSaveEventId = eventId || batchEventId;
+        el("reviewEventId").value = lastSaveEventId;
         await refreshReviewCount();
         hideProgress();
-        setStatus(`Processing complete: ${result.mapped_rows} of ${result.total_rows} records processed successfully; ${result.error_listings} records need review.`, "ok");
+        setStatus(`Saved ${mappedRows} of ${sourceRows.length} records. ${errorListings} need review.`, "ok");
       } catch (error) {
         hideProgress();
-        setStatus(productSafeError(error.message, "Could not save workflow template."), "error");
+        setStatus(productSafeError(error.message, "Could not save template."), "error");
       }
     }
 
@@ -3462,23 +4054,23 @@ result = json.loads(await response.string())`;
       }
     }
 
-    async function enrichSilverLayer() {
-      const target = el("silverEnrichStatus");
+    async function refreshReportingData() {
+      const target = el("reportingDataRefreshStatus");
       target.className = "action-feedback";
-      target.textContent = "Refreshing enrichment...";
+      target.textContent = "Refreshing...";
       try {
-        const response = await fetch("/api/silver/enrich", {
+        const response = await fetch("/api/reporting/refresh", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: "{}"
         });
         const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "Could not refresh enrichment.");
+        if (!response.ok) throw new Error(result.error || "Could not refresh data.");
         target.className = "action-feedback ok";
-        target.textContent = `Enrichment refreshed for ${result.rows} records.`;
+        target.textContent = `Data refreshed: ${result.rows} records.`;
       } catch (error) {
         target.className = "action-feedback error";
-        target.textContent = productSafeError(error.message, "Could not refresh enrichment.");
+        target.textContent = productSafeError(error.message, "Could not refresh data.");
       }
     }
 
@@ -3548,7 +4140,7 @@ result = json.loads(await response.string())`;
           box.innerHTML = `<div style="color: var(--muted);">No existing businesses found.</div>`;
           return;
         }
-        const optionsHtml = brands.map(b => `<option value="${escapeHtml(b.business_id)}">${escapeHtml(b.name)} (ID: ${escapeHtml(b.business_id)})</option>`).join('');
+        const optionsHtml = '<option class="create-new-option" value="__create_new__">+ Create New Business</option>' + brands.map(b => `<option value="${escapeHtml(b.business_id)}">${escapeHtml(b.name)} (ID: ${escapeHtml(b.business_id)})</option>`).join('');
         box.innerHTML = `
           <label style="display: block; font-weight: 700; margin-bottom: 4px; color: var(--navy);" for="activeBusinessesDropdown">
             Active Businesses (${brands.length})
@@ -3557,16 +4149,21 @@ result = json.loads(await response.string())`;
             ${optionsHtml}
           </select>
         `;
+        el("activeBusinessesDropdown").addEventListener("change", (event) => {
+          if (event.target.value === "__create_new__") {
+            el("brandSelect").value = "__create_new__";
+            el("brandSelect").dispatchEvent(new Event("change"));
+          }
+        });
       } catch (err) {
         box.innerHTML = `<div style="color: var(--error);">${escapeHtml(err.message)}</div>`;
       }
     }
 
     el("parseBtn").addEventListener("click", parseSource);
-    el("testBigQueryBtn").addEventListener("click", testBigQueryConnection);
+    el("testReadinessBtn").addEventListener("click", testReadiness);
     el("showExistingBrandsBtn").addEventListener("click", toggleShowExistingBrands);
     el("clearDemoDataBtn").addEventListener("click", clearSavedData);
-    el("loginTestBigQueryBtn").addEventListener("click", testLoginBigQueryConnection);
     el("runPythonConnectorBtn").addEventListener("click", parseSource);
     el("expandPythonConnectorBtn").addEventListener("click", openConnectorEditor);
     el("minimizePythonConnectorBtn").addEventListener("click", minimizeConnectorEditor);
@@ -3581,7 +4178,7 @@ result = json.loads(await response.string())`;
     el("resetMappingBtn").addEventListener("click", resetMapping);
     el("restartMappingBtn").addEventListener("click", restartMapping);
     el("clearDataBtn").addEventListener("click", clearSavedData);
-    el("silverEnrichBtn").addEventListener("click", enrichSilverLayer);
+    el("reportingDataRefreshBtn").addEventListener("click", refreshReportingData);
     el("logoutBtn").addEventListener("click", logout);
     el("confirmClearBtn").addEventListener("click", async () => {
       el("dangerDialog").close();
@@ -3608,16 +4205,22 @@ result = json.loads(await response.string())`;
       try {
         await navigator.clipboard.writeText(el("mapperOutput").value);
         feedback.className = "action-feedback ok";
-        feedback.textContent = "Workflow template copied to clipboard.";
+        feedback.textContent = "Template copied.";
       } catch (error) {
         feedback.className = "action-feedback error";
-        feedback.textContent = "Could not copy workflow template.";
+        feedback.textContent = "Could not copy template.";
       }
     });
     el("resetBtn").addEventListener("click", () => location.reload());
     el("brandSelect").addEventListener("change", (event) => {
+      resetTemplateSelection();
       if (event.target.value === "__create_new__") {
         selectedBrand = null;
+        el("sourceType").disabled = false;
+        resetSourceInputsForNewMode(el("sourceType").value);
+        setNewBusinessSourceType(el("sourceType").value);
+        el("templateBusinessFilter").value = "";
+        el("templateSourceFilter").value = "";
         el("newBrandFields").classList.remove("hidden");
         updateOutput();
         return;
@@ -3625,7 +4228,14 @@ result = json.loads(await response.string())`;
       const brands = JSON.parse(event.target.dataset.brands || "[]");
       selectedBrand = brands.find((brand) => brand.business_id === event.target.value) || null;
       el("newBrandFields").classList.add("hidden");
+      if (selectedBrand) applyBusinessSourceType(selectedBrand);
+      else {
+        el("sourceType").disabled = false;
+        el("templateBusinessFilter").value = "";
+        el("templateSourceFilter").value = "";
+      }
       refreshReviewCount();
+      refreshTemplatesForBusiness();
       updateOutput();
     });
     el("createBrandBtn").addEventListener("click", createNewBrand);
@@ -3639,29 +4249,68 @@ result = json.loads(await response.string())`;
       el("recordPath").value = el("sheetName").value;
     });
     el("sourceType").addEventListener("change", () => {
+      const nextSourceType = el("sourceType").value;
       if (el("sourceType").value !== "csv") {
         const newCsvOption = document.querySelector("input[name='csvFunction'][value='new']");
         if (newCsvOption) newCsvOption.checked = true;
-        resetCsvDemoLock();
+        csvFunctionMode = "new";
+      } else {
+        const newCsvOption = document.querySelector("input[name='csvFunction'][value='new']");
+        if (newCsvOption) newCsvOption.checked = true;
+        csvFunctionMode = "new";
       }
       if (el("sourceType").value !== "json") {
         const newJsonOption = document.querySelector("input[name='jsonFunction'][value='new']");
         if (newJsonOption) newJsonOption.checked = true;
-        resetJsonDemoLock();
+        jsonFunctionMode = "new";
+      } else {
+        const newJsonOption = document.querySelector("input[name='jsonFunction'][value='new']");
+        if (newJsonOption) newJsonOption.checked = true;
+        jsonFunctionMode = "new";
+      }
+      if (el("sourceType").value !== "api_get_json") {
+        const newApiOption = document.querySelector("input[name='apiFunction'][value='new']");
+        if (newApiOption) newApiOption.checked = true;
+        apiFunctionMode = "new";
+      } else {
+        const newApiOption = document.querySelector("input[name='apiFunction'][value='new']");
+        if (newApiOption) newApiOption.checked = true;
+        apiFunctionMode = "new";
       }
       if (el("sourceType").value !== "python_editor") {
         const newPythonOption = document.querySelector("input[name='pythonFunction'][value='new']");
         if (newPythonOption) newPythonOption.checked = true;
         setDominosLocked(false);
       }
-      sourceParsed = false;
+      resetSourceInputsForNewMode(nextSourceType);
       setStatus("Source changed. Ready to review fields.", "");
       el("fileInput").value = "";
-      el("sheetName").innerHTML = "";
-      el("recordPath").value = "";
+      updateSourceVisibility();
+      if (!selectedBrand) {
+        el("templateSourceFilter").value = currentSourceTypeId();
+        resetTemplateSelection();
+        loadTemplateLibrary();
+      }
+    });
+    el("newBrandSourceType").addEventListener("change", () => {
+      const option = el("newBrandSourceType").selectedOptions[0];
+      const format = option?.dataset.format || sourceTypeNameToFormat(option?.textContent || "");
+      if (format) {
+        el("sourceType").value = format;
+        resetSourceInputsForNewMode(format);
+        el("templateSourceFilter").value = el("newBrandSourceType").value;
+        updateSourceVisibility();
+        refreshTemplatesForBusiness();
+      }
+    });
+    el("sourceInputMode").addEventListener("change", () => {
+      if (el("sourceInputMode").value === "url" && isNewSourceMode()) {
+        setSourceUrlLocked(false);
+        el("sourceUrl").value = "";
+        el("sourceUrl").placeholder = sourceUrlPlaceholders[el("sourceType").value] || "https://example.com/locations.json";
+      }
       updateSourceVisibility();
     });
-    el("sourceInputMode").addEventListener("change", updateSourceVisibility);
     document.querySelectorAll("input[name='csvFunction']").forEach((input) => {
       input.addEventListener("change", () => updateCsvFunctionSelection(input.value));
     });
@@ -3674,6 +4323,15 @@ result = json.loads(await response.string())`;
     document.querySelectorAll("input[name='apiFunction']").forEach((input) => {
       input.addEventListener("change", () => updateApiFunctionSelection(input.value));
     });
+    el("templateBusinessFilter").addEventListener("change", () => {
+      if (el("templateBusinessFilter").value === "__create_new__") {
+        el("brandSelect").value = "__create_new__";
+        el("brandSelect").dispatchEvent(new Event("change"));
+        return;
+      }
+      loadTemplateLibrary();
+    });
+    el("templateSourceFilter").addEventListener("change", loadTemplateLibrary);
     el("jsonRecordPath").addEventListener("change", () => {
       el("recordPath").value = el("jsonRecordPath").value;
       parseSource();
@@ -3705,6 +4363,7 @@ result = json.loads(await response.string())`;
       reportLoaded = false;
       loadReporting();
     });
+    el("loadSampleDatasetBtn").addEventListener("click", () => loadSampleDataset(false));
     el("applyReportFiltersBtn")?.addEventListener("click", () => {
       reportLoaded = false;
       loadReporting();
@@ -3749,9 +4408,9 @@ result = json.loads(await response.string())`;
     document.querySelector("[data-json-viewer-link]").addEventListener("click", async (event) => {
       try {
         await navigator.clipboard.writeText(el("mapperOutput").value || "{}");
-        setStatus("Workflow JSON copied. Paste it into the viewer's left input pane.", "ok");
+        setStatus("Template copied.", "ok");
       } catch (error) {
-        setStatus("The JSON Viewer opened. Copy the workflow JSON from View Workflow Template, then paste it into the viewer.", "warn");
+        setStatus("Viewer opened.", "warn");
       }
     });
     document.querySelector("#brandDisclaimer").textContent = window.APP_CONSTANTS.trademarkDisclaimer;

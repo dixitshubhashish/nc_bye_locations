@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.businesses` (
   business_id STRING NOT NULL DEFAULT GENERATE_UUID(),
   name STRING NOT NULL,
   slug STRING NOT NULL,
+  source_type_id STRING,
   description STRING,
   logo_url STRING,
   website_url STRING,
@@ -47,6 +48,8 @@ CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.businesses` (
   meta_title STRING,
   meta_description STRING,
   country_of_origin STRING,
+  is_sample_data BOOL DEFAULT FALSE,
+  sample_batch_id STRING,
   is_deleted BOOL DEFAULT FALSE,
   deleted_on TIMESTAMP
 );
@@ -68,6 +71,12 @@ CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.listings` (
   longitude FLOAT64,
   first_observed_at TIMESTAMP,
   last_observed_at TIMESTAMP
+  ,template_id STRING
+  ,ingestion_id STRING
+  ,mapping_id STRING
+  ,validation_status STRING
+  ,is_sample_data BOOL DEFAULT FALSE
+  ,sample_batch_id STRING
   ,franchise_name STRING
   ,concept_type STRING
   ,cuisine_type STRING
@@ -100,9 +109,15 @@ CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.listings` (
 CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.workflow_templates` (
   workflow_template_id STRING NOT NULL DEFAULT GENERATE_UUID(),
   business_id STRING NOT NULL,
+  source_type_id STRING,
   name STRING NOT NULL,
   components JSON NOT NULL,
   archived_components JSON,
+  source_configuration JSON,
+  is_sample_data BOOL DEFAULT FALSE,
+  sample_batch_id STRING,
+  is_deleted BOOL DEFAULT FALSE,
+  deleted_on TIMESTAMP,
   created_at TIMESTAMP NOT NULL,
   updated_at TIMESTAMP NOT NULL
 );
@@ -122,7 +137,13 @@ CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.error_listings` (
   errors JSON NOT NULL,
   raw_record JSON NOT NULL,
   observed_at TIMESTAMP NOT NULL,
+  template_id STRING,
+  ingestion_id STRING,
+  mapping_id STRING,
+  validation_error_type STRING,
+  country STRING,
+  is_sample_data BOOL DEFAULT FALSE,
+  sample_batch_id STRING,
   is_deleted BOOL DEFAULT FALSE,
   deleted_on TIMESTAMP
 );
-
