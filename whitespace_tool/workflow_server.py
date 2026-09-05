@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import socketserver
 import threading
-from time import perf_counter
+from time import perf_counter, sleep
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import urllib.request
 from typing import Any
@@ -450,12 +450,13 @@ def _warehouse_settings() -> tuple[str, str, str | None]:
     return storage_config["project_id"], storage_config["bronze_dataset_id"], storage_config.get("credentials_json")
 
 
-def _medallion_settings() -> tuple[str, str, str, str | None]:
+def _medallion_settings() -> tuple[str, str, str, str, str | None]:
     storage_config = load_storage_config(os.environ.get("WORKFLOW_STORAGE_CONFIG", "config/connections/storage.json"))
     if not storage_config.get("project_id") or not storage_config.get("bronze_dataset_id"):
         raise ValueError("Storage project and bronze dataset are missing from the configuration")
     silver_dataset_id = storage_config.get("silver_dataset_id") or "birdeye_silver_listings"
-    return storage_config["project_id"], storage_config["bronze_dataset_id"], silver_dataset_id, storage_config.get("credentials_json")
+    gold_dataset_id = storage_config.get("gold_dataset_id") or "birdeye_gold_listings"
+    return storage_config["project_id"], storage_config["bronze_dataset_id"], silver_dataset_id, gold_dataset_id, storage_config.get("credentials_json")
 
 
 def _load_mapped_zip_demographics(zip_codes: set[str]) -> dict[str, Any]:
@@ -1106,23 +1107,91 @@ def _proper_case_sql(column_expr: str) -> str:
 
 
 def build_silver_layer() -> dict[str, Any]:
-    project_id, bronze_dataset_id, silver_dataset_id, credentials_json = _medallion_settings()
+    project_id, bronze_dataset_id, silver_dataset_id, _gold_dataset_id, credentials_json = _medallion_settings()
     client = _bigquery_client(project_id, credentials_json)
     _ensure_dataset(client, project_id, bronze_dataset_id)
     _ensure_dataset(client, project_id, silver_dataset_id)
     bronze_ref = f"{project_id}.{bronze_dataset_id}"
     silver_ref = f"{project_id}.{silver_dataset_id}"
+    zip_reference_table = f"{silver_ref}.zip_reference"
     enriched_table = f"{silver_ref}.listings_enriched"
+    invalid_table = f"{silver_ref}.listings_invalid"
     top_view = f"{silver_ref}.vw_brand_location_top10"
     brand_zip_view = f"{silver_ref}.vw_brand_zip_income"
     client.query(f"DROP TABLE IF EXISTS `{enriched_table}`").result()
+    client.query(f"DROP TABLE IF EXISTS `{invalid_table}`").result()
+
+    zip_city_case = _proper_case_sql("city_name")
+    zip_county_case = _proper_case_sql("county")
+    zip_state_name_case = _proper_case_sql("state_name")
+
+    # US ZIP code + income/demographic reference data, refined and deduped
+    # once here in silver, kept separate from listings so it can be joined
+    # independently (by both listings enrichment below and the gold layer)
+    # rather than every consumer re-deriving it from bronze each time.
+    client.query(f"""
+    CREATE OR REPLACE TABLE `{zip_reference_table}`
+    CLUSTER BY state_code, zip_code
+    AS
+    SELECT
+      zip_code,
+      {zip_city_case} AS city_name,
+      {zip_county_case} AS county,
+      UPPER(TRIM(state_code)) AS state_code,
+      {zip_state_name_case} AS state_name,
+      latitude,
+      longitude,
+      population,
+      median_household_income,
+      median_age,
+      income_per_capita,
+      households,
+      poverty,
+      employed_population,
+      unemployed_population,
+      housing_units,
+      source,
+      CURRENT_TIMESTAMP() AS silver_updated_at
+    FROM `{bronze_ref}.us_zipcodes`
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY zip_code ORDER BY population DESC NULLS LAST) = 1
+    """).result()
+
     brand_name_case = _proper_case_sql("COALESCE(b.name, l.business_id)")
     location_name_case = _proper_case_sql("l.name")
     city_name_case = _proper_case_sql("COALESCE(z.city_name, NULLIF(TRIM(l.city_name), ''))")
     county_case = _proper_case_sql("z.county")
     state_name_case = _proper_case_sql("z.state_name")
+
+    # Mandatory analysis fields: a listing missing any of these, or one that
+    # never resolves to a coordinate (source, ZIP centroid, or city/state
+    # centroid), is not valid for reporting - it lands in listings_invalid
+    # instead of being silently dropped or silently kept with nulls.
+    mandatory_check = """
+      brand_name IS NOT NULL AND brand_name != ''
+      AND name IS NOT NULL AND name != ''
+      AND address IS NOT NULL AND address != ''
+      AND city_name IS NOT NULL AND city_name != ''
+      AND state_code IS NOT NULL AND state_code != ''
+      AND zip_code IS NOT NULL AND zip_code != ''
+      AND latitude IS NOT NULL AND longitude IS NOT NULL
+    """
+    rejection_reason_expr = """
+      ARRAY_TO_STRING(ARRAY(
+        SELECT reason FROM UNNEST([
+          IF(brand_name IS NULL OR brand_name = '', 'missing_brand', NULL),
+          IF(name IS NULL OR name = '', 'missing_name', NULL),
+          IF(address IS NULL OR address = '', 'missing_address', NULL),
+          IF(city_name IS NULL OR city_name = '', 'missing_city', NULL),
+          IF(state_code IS NULL OR state_code = '', 'missing_state', NULL),
+          IF(zip_code IS NULL OR zip_code = '', 'missing_zip', NULL),
+          IF(latitude IS NULL OR longitude IS NULL, 'unresolved_coordinates', NULL)
+        ]) AS reason
+        WHERE reason IS NOT NULL
+      ), ', ')
+    """
+
     query = f"""
-    CREATE OR REPLACE TABLE `{enriched_table}`
+    CREATE OR REPLACE TABLE `{silver_ref}._listings_staging`
     PARTITION BY DATE(first_observed_at)
     CLUSTER BY state_code, zip_code, business_id
     AS
@@ -1137,14 +1206,12 @@ def build_silver_layer() -> dict[str, Any]:
       WHERE is_deleted IS NOT TRUE
     ),
     unique_zips AS (
-      SELECT *
-      FROM `{bronze_ref}.us_zipcodes`
-      QUALIFY ROW_NUMBER() OVER (PARTITION BY zip_code ORDER BY population DESC NULLS LAST) = 1
+      SELECT * FROM `{zip_reference_table}`
     ),
     city_geos AS (
       SELECT
         LOWER(TRIM(city_name)) AS normalized_city_name,
-        UPPER(TRIM(state_code)) AS normalized_state_code,
+        state_code AS normalized_state_code,
         AVG(latitude) AS latitude,
         AVG(longitude) AS longitude
       FROM unique_zips
@@ -1196,12 +1263,17 @@ def build_silver_layer() -> dict[str, Any]:
         ', '
       ) AS geocode_query,
       l.phone_number,
+      l.content_hash,
       l.first_observed_at_coalesced AS first_observed_at,
       l.last_observed_at,
       z.population,
       z.median_household_income,
       z.median_age,
       z.income_per_capita,
+      -- Lightweight "similar stores" signal: how many listings (any brand)
+      -- share this exact ZIP + address, which can indicate co-located or
+      -- duplicate-across-source listings without a full fuzzy matcher.
+      COUNT(*) OVER (PARTITION BY l.normalized_zip_code, LOWER(TRIM(l.address))) AS similar_address_count,
       CURRENT_TIMESTAMP() AS silver_updated_at
     FROM normalized_listings l
     LEFT JOIN `{bronze_ref}.businesses` b
@@ -1225,6 +1297,27 @@ def build_silver_layer() -> dict[str, Any]:
       )
     """
     client.query(query).result()
+
+    staging_table = f"{silver_ref}._listings_staging"
+    client.query(f"""
+    CREATE OR REPLACE TABLE `{enriched_table}`
+    PARTITION BY DATE(first_observed_at)
+    CLUSTER BY state_code, zip_code, business_id
+    AS
+    SELECT * FROM `{staging_table}`
+    WHERE {mandatory_check}
+    """).result()
+    client.query(f"""
+    CREATE OR REPLACE TABLE `{invalid_table}`
+    PARTITION BY DATE(first_observed_at)
+    CLUSTER BY state_code, zip_code, business_id
+    AS
+    SELECT *, {rejection_reason_expr} AS rejection_reason
+    FROM `{staging_table}`
+    WHERE NOT ({mandatory_check})
+    """).result()
+    client.query(f"DROP TABLE IF EXISTS `{staging_table}`").result()
+
     client.query(f"""
     CREATE OR REPLACE VIEW `{top_view}` AS
     SELECT
@@ -1263,13 +1356,137 @@ def build_silver_layer() -> dict[str, Any]:
     GROUP BY brand_name, zip_code, city_name, county, state_code, state_name, country
     """).result()
     table = client.get_table(enriched_table)
+    invalid_rows = client.get_table(invalid_table)
     invalidate_cache()
     return {
         "bronze_dataset": bronze_ref,
         "silver_dataset": silver_ref,
+        "zip_reference_table": zip_reference_table,
         "enriched_table": enriched_table,
+        "invalid_table": invalid_table,
         "views": [top_view, brand_zip_view],
         "rows": int(table.num_rows or 0),
+        "invalid_rows": int(invalid_rows.num_rows or 0),
+    }
+
+
+def build_gold_layer() -> dict[str, Any]:
+    """Pre-aggregated reporting views over the silver listings_enriched table.
+
+    Grain of the foundation view (vw_zip_brand_activity) is (zip_code,
+    brand_name), with one brand_name=NULL row per zip that has zero
+    listings. This lets callers get brand-agnostic zip/city coverage via
+    COUNT(DISTINCT zip_code) (fan-out safe) while still supporting
+    per-brand rollups by filtering/grouping on brand_name - mirroring the
+    reporting queries' existing "zip coverage is geo-filtered only;
+    listing/brand counts are also brand-filtered" split.
+    """
+    project_id, bronze_dataset_id, silver_dataset_id, gold_dataset_id, credentials_json = _medallion_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    _ensure_dataset(client, project_id, gold_dataset_id)
+    bronze_ref = f"{project_id}.{bronze_dataset_id}"
+    silver_ref = f"{project_id}.{silver_dataset_id}"
+    gold_ref = f"{project_id}.{gold_dataset_id}"
+    enriched_table = f"{silver_ref}.listings_enriched"
+
+    zip_brand_view = f"{gold_ref}.vw_zip_brand_activity"
+    state_view = f"{gold_ref}.vw_state_summary"
+    city_view = f"{gold_ref}.vw_city_summary"
+    brand_view = f"{gold_ref}.vw_brand_summary"
+    quality_view = f"{gold_ref}.vw_listing_quality_summary"
+    geo_view = f"{gold_ref}.vw_geo_reference"
+
+    client.query(f"""
+    CREATE OR REPLACE VIEW `{zip_brand_view}` AS
+    SELECT
+      z.zip_code,
+      z.state_code,
+      z.state_name,
+      z.county,
+      z.city_name,
+      z.population,
+      z.median_household_income,
+      z.median_age,
+      z.latitude,
+      z.longitude,
+      l.brand_name,
+      COUNT(l.listing_id) AS location_count,
+      MAX(l.last_observed_at) AS last_observed_at
+    FROM `{silver_ref}.zip_reference` z
+    LEFT JOIN `{enriched_table}` l ON z.zip_code = l.zip_code
+    GROUP BY z.zip_code, z.state_code, z.state_name, z.county, z.city_name,
+      z.population, z.median_household_income, z.median_age, z.latitude, z.longitude, l.brand_name
+    """).result()
+
+    client.query(f"""
+    CREATE OR REPLACE VIEW `{state_view}` AS
+    SELECT
+      state_code,
+      state_name,
+      brand_name,
+      SUM(location_count) AS location_count,
+      COUNT(DISTINCT city_name) AS city_count,
+      COUNT(DISTINCT zip_code) AS zip_count
+    FROM `{zip_brand_view}`
+    GROUP BY state_code, state_name, brand_name
+    """).result()
+
+    client.query(f"""
+    CREATE OR REPLACE VIEW `{city_view}` AS
+    SELECT
+      city_name,
+      state_code,
+      state_name,
+      county,
+      brand_name,
+      SUM(location_count) AS location_count,
+      COUNT(DISTINCT zip_code) AS zip_count
+    FROM `{zip_brand_view}`
+    GROUP BY city_name, state_code, state_name, county, brand_name
+    """).result()
+
+    client.query(f"""
+    CREATE OR REPLACE VIEW `{brand_view}` AS
+    SELECT
+      brand_name,
+      SUM(location_count) AS location_count,
+      COUNT(DISTINCT state_code) AS state_count,
+      COUNT(DISTINCT county) AS county_count,
+      COUNT(DISTINCT city_name) AS city_count,
+      COUNT(DISTINCT zip_code) AS zip_count
+    FROM `{zip_brand_view}`
+    WHERE brand_name IS NOT NULL AND location_count > 0
+    GROUP BY brand_name
+    """).result()
+
+    client.query(f"""
+    CREATE OR REPLACE VIEW `{quality_view}` AS
+    SELECT
+      COUNT(*) AS total_rows,
+      COUNTIF(latitude IS NOT NULL AND longitude IS NOT NULL) AS with_coordinates,
+      COUNTIF(zip_code IS NOT NULL AND zip_code != '') AS with_zip,
+      COUNT(DISTINCT CONCAT(COALESCE(brand_name, ''), '|', COALESCE(zip_code, ''), '|', COALESCE(address, ''))) AS distinct_rows,
+      MAX(last_observed_at) AS last_observed_at
+    FROM `{enriched_table}`
+    """).result()
+
+    client.query(f"""
+    CREATE OR REPLACE VIEW `{geo_view}` AS
+    SELECT DISTINCT
+      state_code,
+      state_name,
+      county,
+      city_name
+    FROM `{silver_ref}.zip_reference`
+    WHERE state_code IS NOT NULL AND state_code != ''
+    """).result()
+
+    invalidate_cache()
+    return {
+        "bronze_dataset": bronze_ref,
+        "silver_dataset": silver_ref,
+        "gold_dataset": gold_ref,
+        "views": [zip_brand_view, state_view, city_view, brand_view, quality_view, geo_view],
     }
 
 
@@ -1292,6 +1509,53 @@ def _refresh_silver_background() -> bool:
 
     threading.Thread(target=refresh, name="reporting-silver-refresh", daemon=True).start()
     return True
+
+
+SILVER_GOLD_REFRESH_INTERVAL_SECONDS = 3600
+
+
+def _run_silver_gold_tick() -> bool:
+    """One scheduled refresh attempt: rebuild silver + gold, guarded by the
+    same lock/flag _refresh_silver_background uses so an hourly tick and an
+    on-demand refresh never run at the same time. Returns True if it ran
+    (False if a refresh was already in flight). Split out from the
+    infinite loop below so it can be unit tested directly, one call at a
+    time, without touching threading.Thread or an actual sleep loop."""
+    global REPORTING_REFRESHING
+    with REPORTING_REFRESH_LOCK:
+        if REPORTING_REFRESHING:
+            return False
+        REPORTING_REFRESHING = True
+    try:
+        silver_result = build_silver_layer()
+        gold_result = build_gold_layer()
+        LOGGER.info(
+            "scheduled_medallion_refresh_succeeded silver_rows=%s invalid_rows=%s gold_views=%s",
+            silver_result.get("rows"),
+            silver_result.get("invalid_rows"),
+            len(gold_result.get("views", [])),
+        )
+    except Exception as exc:
+        LOGGER.exception("scheduled_medallion_refresh_failed error=%s", exc)
+    finally:
+        with REPORTING_REFRESH_LOCK:
+            REPORTING_REFRESHING = False
+    return True
+
+
+def _start_silver_gold_scheduler() -> None:
+    """Rebuild silver + gold on a fixed hourly cadence, as a time-based
+    floor under the existing on-demand refresh (_refresh_silver_background,
+    triggered opportunistically when a stale cached reporting query is
+    served). Call once from serve() only - never at import time, so
+    importing this module in tests doesn't start a background thread."""
+
+    def run_forever() -> None:
+        while True:
+            sleep(SILVER_GOLD_REFRESH_INTERVAL_SECONDS)
+            _run_silver_gold_tick()
+
+    threading.Thread(target=run_forever, name="silver-gold-hourly-refresh", daemon=True).start()
 
 
 def _empty_reporting_payload(source_table: str, params: dict[str, list[str]], warning: str = "") -> dict[str, Any]:
@@ -1339,12 +1603,13 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
 
     try:
         from google.cloud import bigquery
-        project_id, bronze_dataset_id, silver_dataset_id, credentials_json = _medallion_settings()
+        project_id, bronze_dataset_id, silver_dataset_id, gold_dataset_id, credentials_json = _medallion_settings()
         client = _bigquery_client(project_id, credentials_json)
         _ensure_businesses_table(client, project_id, bronze_dataset_id)
         source_table = os.environ.get("REPORTING_LISTINGS_TABLE") or f"{project_id}.{silver_dataset_id}.listings_enriched"
         if source_table.count(".") == 1:
             source_table = f"{project_id}.{source_table}"
+        gold_ref = f"{project_id}.{gold_dataset_id}"
     except (ImportError, Exception) as init_err:
         LOGGER.warning("bigquery_reporting_fallback reason=%s", init_err)
         return _empty_reporting_payload("us_zipcodes_baseline", params, "Connected to geographic baseline data.")
@@ -2215,7 +2480,55 @@ def _row_error_listing(
     }
 
 
-def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
+def _dedupe_listings_against_bronze(client: Any, project_id: str, dataset_id: str, listing_rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Drop listing rows whose content_hash already exists in bronze for
+    the same business (the same real-world listing observed again),
+    instead bumping that existing row's last_observed_at. Returns
+    (rows to actually insert, count of duplicates skipped)."""
+    if not listing_rows:
+        return listing_rows, 0
+    from google.cloud import bigquery
+
+    hashes = sorted({row["content_hash"] for row in listing_rows if row.get("content_hash")})
+    if not hashes:
+        return listing_rows, 0
+    table_ref = f"{project_id}.{dataset_id}.listings"
+    try:
+        query = f"""
+        SELECT listing_id, business_id, content_hash, last_observed_at
+        FROM `{table_ref}`
+        WHERE is_deleted IS NOT TRUE AND content_hash IN UNNEST(@hashes)
+        """
+        job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ArrayQueryParameter("hashes", "STRING", hashes)])
+        existing = {
+            (row["business_id"], row["content_hash"]): row
+            for row in client.query(query, job_config=job_config).result()
+        }
+    except Exception as exc:
+        if getattr(exc, "code", None) == 404:
+            return listing_rows, 0  # bronze listings table doesn't exist yet
+        raise
+
+    new_rows: list[dict[str, Any]] = []
+    duplicate_count = 0
+    for row in listing_rows:
+        match = existing.get((row.get("business_id"), row.get("content_hash")))
+        if match is None:
+            new_rows.append(row)
+            continue
+        duplicate_count += 1
+        new_observed = row.get("last_observed_at")
+        if new_observed and (not match["last_observed_at"] or str(new_observed) > str(match["last_observed_at"])):
+            update_query = f"UPDATE `{table_ref}` SET last_observed_at = @observed_at WHERE listing_id = @listing_id"
+            update_config = bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ScalarQueryParameter("observed_at", "TIMESTAMP", new_observed),
+                bigquery.ScalarQueryParameter("listing_id", "STRING", match["listing_id"]),
+            ])
+            client.query(update_query, job_config=update_config).result()
+    return new_rows, duplicate_count
+
+
+def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_invalidation: bool = False) -> dict[str, Any]:
     mapper = payload.get("mapper")
     rows = payload.get("rows")
     source_fields = payload.get("source_fields", [])
@@ -2306,6 +2619,7 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
         elif location is not None:
             locations.append(location)
     project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = client or _bigquery_client(project_id, credentials_json)
 
     mapper_id = f"mapper_{uuid4().hex}"
     mapping_id = mapping_id or mapper_id
@@ -2327,6 +2641,7 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
         if isinstance(location.raw, dict):
             location.raw.setdefault("__meta", sample_row_meta)
     rows_by_table = build_table_rows(locations, demographics)
+    rows_by_table["listings"], duplicate_listings_skipped = _dedupe_listings_against_bronze(client, project_id, dataset_id, rows_by_table["listings"])
     rows_by_table["businesses"] = []
     for record in error_listings:
         record["source_type_id"] = source_type_id
@@ -2344,16 +2659,18 @@ def save_mapper(payload: dict[str, Any]) -> dict[str, Any]:
         "created_at": utc_now_iso(), "updated_at": utc_now_iso(),
     }] if save_template else []
     rows_by_table["error_listings"] = error_listings
-    push_to_bigquery(project_id, dataset_id, rows_by_table, credentials_json)
-    invalidate_cache()
+    push_to_bigquery(project_id, dataset_id, rows_by_table, credentials_json, client=client)
+    if not skip_cache_invalidation:
+        invalidate_cache()
     LOGGER.info(
-        "save_succeeded mapper_id=%s dataset=%s mapped_rows=%d mapped_fields=%d",
+        "save_succeeded mapper_id=%s dataset=%s mapped_rows=%d mapped_fields=%d duplicate_listings_skipped=%d",
         mapper_id,
         f"{project_id}.{dataset_id}",
         len(locations),
         len(mapper["fields"]),
+        duplicate_listings_skipped,
     )
-    return {"event_id": event_id, "mapper_id": mapper_id, "total_rows": len(rows), "mapped_rows": len(locations), "error_listings": len(error_listings), "field_count": len(mapper["fields"]), "dataset": f"{project_id}.{dataset_id}", "row_offset": row_offset, "template_saved": save_template}
+    return {"event_id": event_id, "mapper_id": mapper_id, "total_rows": len(rows), "mapped_rows": len(locations), "error_listings": len(error_listings), "field_count": len(mapper["fields"]), "dataset": f"{project_id}.{dataset_id}", "row_offset": row_offset, "template_saved": save_template, "duplicate_listings_skipped": duplicate_listings_skipped}
 
 
 def clear_saved_data() -> dict[str, Any]:
@@ -2558,6 +2875,7 @@ def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
     ui_dir = Path("ui").resolve()
     handler = make_handler(ui_dir)
     socketserver.ThreadingTCPServer.allow_reuse_address = True
+    _start_silver_gold_scheduler()
     with socketserver.ThreadingTCPServer((host, port), handler) as httpd:
         print(f"Workflow UI running at http://{host}:{port}/")
         httpd.serve_forever()

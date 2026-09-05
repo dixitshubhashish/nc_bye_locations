@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -7,6 +8,35 @@ from typing import Any
 from uuid import uuid4
 
 from whitespace_tool.models import LocationRecord, ZipDemographics
+
+
+# Fields that describe the physical location itself, not the ingestion run
+# that produced this row. Deliberately excludes: listing_id (generated
+# uuid), location_key (often an index-based fallback id that can differ
+# between runs for the same real-world store), source_type_id/template_id/
+# ingestion_id/mapping_id/sample_batch_id (ingestion-run metadata, not
+# content), first_observed_at/last_observed_at (time-varying by design),
+# and is_deleted/deleted_on (mutable state).
+CONTENT_HASH_FIELDS: tuple[str, ...] = (
+    "business_id", "name", "address", "city_name", "town", "state_code", "province",
+    "zip_code", "country", "latitude", "longitude", "franchise_name", "concept_type",
+    "cuisine_type", "neighborhood", "district", "phone_number", "website_url",
+    "google_maps_link", "social_media_handles", "operating_hours", "seating_capacity",
+    "service_types", "opening_date", "status", "annual_revenue", "average_ticket_size",
+    "daily_footfall", "monthly_footfall", "rental_cost", "lease_cost",
+    "population_density", "average_household_income", "competitor_count",
+    "foot_traffic_score", "parking_availability",
+)
+
+
+def content_hash(row: dict[str, Any]) -> str:
+    """Deterministic SHA-256 over a listing's content fields (see
+    CONTENT_HASH_FIELDS), independent of its generated id or observation
+    timestamps - two ingested rows describing the same real-world listing
+    hash identically even if observed on different runs."""
+    canonical = {key: ("" if row.get(key) is None else str(row.get(key))) for key in CONTENT_HASH_FIELDS}
+    payload = json.dumps(canonical, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 LOGGER = logging.getLogger("whitespace_tool.workflow")
@@ -115,6 +145,7 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "competitor_count", "type": "INTEGER", "mode": "NULLABLE"},
         {"name": "foot_traffic_score", "type": "FLOAT", "mode": "NULLABLE"},
         {"name": "parking_availability", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
         {"name": "is_deleted", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "deleted_on", "type": "TIMESTAMP", "mode": "NULLABLE"},
     ],
@@ -184,6 +215,58 @@ def _scrub_config(value: Any) -> Any:
     return value
 
 
+def _listing_row(row: LocationRecord) -> dict[str, Any]:
+    listing = {
+        **(row.raw.get("__meta", {}) if isinstance(row.raw, dict) and isinstance(row.raw.get("__meta"), dict) else {}),
+        "listing_id": str(uuid4()),
+        "business_id": getattr(row, "business_id", row.brand),
+        "source_type_id": getattr(row, "source_type_id", ""),
+        "location_key": row.location_id,
+        "name": row.name,
+        "address": row.address,
+        "city_name": row.city,
+        "town": row.town,
+        "state_code": row.state,
+        "province": row.province,
+        "zip_code": row.zip5,
+        "country": row.country,
+        "latitude": row.latitude,
+        "longitude": row.longitude,
+        "first_observed_at": row.observed_at,
+        "last_observed_at": row.observed_at,
+        # Enhanced location fields
+        "franchise_name": row.franchise_name,
+        "concept_type": row.concept_type,
+        "cuisine_type": row.cuisine_type,
+        "neighborhood": row.neighborhood,
+        "district": row.district,
+        "phone_number": row.phone_number,
+        "website_url": row.website_url,
+        "google_maps_link": row.google_maps_link,
+        "social_media_handles": row.social_media_handles,
+        "operating_hours": row.operating_hours,
+        "seating_capacity": row.seating_capacity,
+        "service_types": row.service_types,
+        "opening_date": row.opening_date,
+        "status": row.status,
+        "annual_revenue": row.annual_revenue,
+        "average_ticket_size": row.average_ticket_size,
+        "daily_footfall": row.daily_footfall,
+        "monthly_footfall": row.monthly_footfall,
+        "rental_cost": row.rental_cost,
+        "lease_cost": row.lease_cost,
+        "population_density": row.population_density,
+        "average_household_income": row.average_household_income,
+        "competitor_count": row.competitor_count,
+        "foot_traffic_score": row.foot_traffic_score,
+        "parking_availability": row.parking_availability,
+        "is_deleted": False,
+        "deleted_on": None,
+    }
+    listing["content_hash"] = content_hash(listing)
+    return listing
+
+
 def build_table_rows(
     locations: list[LocationRecord],
     demographics: dict[str, ZipDemographics],
@@ -216,56 +299,7 @@ def build_table_rows(
             for demo in demographics.values()
         ],
         "businesses": [],
-        "listings": [
-            {
-                **(row.raw.get("__meta", {}) if isinstance(row.raw, dict) and isinstance(row.raw.get("__meta"), dict) else {}),
-                "listing_id": str(uuid4()),
-                "business_id": getattr(row, "business_id", row.brand),
-                "source_type_id": getattr(row, "source_type_id", ""),
-                "location_key": row.location_id,
-                "name": row.name,
-                "address": row.address,
-                "city_name": row.city,
-                "town": row.town,
-                "state_code": row.state,
-                "province": row.province,
-                "zip_code": row.zip5,
-                "country": row.country,
-                "latitude": row.latitude,
-                "longitude": row.longitude,
-                "first_observed_at": row.observed_at,
-                "last_observed_at": row.observed_at,
-                # Enhanced location fields
-                "franchise_name": row.franchise_name,
-                "concept_type": row.concept_type,
-                "cuisine_type": row.cuisine_type,
-                "neighborhood": row.neighborhood,
-                "district": row.district,
-                "phone_number": row.phone_number,
-                "website_url": row.website_url,
-                "google_maps_link": row.google_maps_link,
-                "social_media_handles": row.social_media_handles,
-                "operating_hours": row.operating_hours,
-                "seating_capacity": row.seating_capacity,
-                "service_types": row.service_types,
-                "opening_date": row.opening_date,
-                "status": row.status,
-                "annual_revenue": row.annual_revenue,
-                "average_ticket_size": row.average_ticket_size,
-                "daily_footfall": row.daily_footfall,
-                "monthly_footfall": row.monthly_footfall,
-                "rental_cost": row.rental_cost,
-                "lease_cost": row.lease_cost,
-                "population_density": row.population_density,
-                "average_household_income": row.average_household_income,
-                "competitor_count": row.competitor_count,
-                "foot_traffic_score": row.foot_traffic_score,
-                "parking_availability": row.parking_availability,
-                "is_deleted": False,
-                "deleted_on": None,
-            }
-            for row in locations
-        ],
+        "listings": [_listing_row(row) for row in locations],
         "workflow_templates": [],
         "source_types": [],
         "error_listings": [],
@@ -297,6 +331,7 @@ def push_to_bigquery(
     rows_by_table: dict[str, list[dict[str, Any]]],
     credentials_json: str | None = None,
     write_disposition: str | None = None,
+    client: Any = None,
 ) -> None:
     try:
         from google.cloud import bigquery
@@ -304,11 +339,12 @@ def push_to_bigquery(
     except ImportError as exc:
         raise RuntimeError("Install google-cloud-bigquery and google-auth to push directly to BigQuery.") from exc
 
-    if credentials_json:
-        credentials = service_account.Credentials.from_service_account_file(credentials_json)
-        client = bigquery.Client(project=project_id, credentials=credentials)
-    else:
-        client = bigquery.Client(project=project_id)
+    if client is None:
+        if credentials_json:
+            credentials = service_account.Credentials.from_service_account_file(credentials_json)
+            client = bigquery.Client(project=project_id, credentials=credentials)
+        else:
+            client = bigquery.Client(project=project_id)
     dataset_ref = bigquery.Dataset(f"{project_id}.{dataset_id}")
     client.create_dataset(dataset_ref, exists_ok=True)
 
