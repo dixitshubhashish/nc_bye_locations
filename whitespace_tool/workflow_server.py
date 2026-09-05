@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timezone
 from functools import lru_cache
 import json
 import http.server
@@ -1278,11 +1279,11 @@ def _empty_reporting_payload(source_table: str, params: dict[str, list[str]], wa
         },
         "filter_options": {"brands": [], "states": [], "counties": [], "cities": [], "zips": []},
         "totals": {
-            "total_locations": 33120,
+            "total_locations": 0,
             "total_brands": 0,
-            "total_states": 51,
-            "total_cities": 18485,
-            "total_zips": 33120,
+            "total_states": 0,
+            "total_cities": 0,
+            "total_zips": 0,
             "last_updated": None,
         },
         "top_states": [],
@@ -1560,6 +1561,21 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
     LIMIT 10
     """
 
+    # Real data-quality signals computed straight from the silver-enriched
+    # listings table (not the zip-joined base CTE), so completeness/duplicate
+    # rates reflect the actual ingested records rather than a fabricated
+    # "looks healthy" placeholder.
+    data_quality_query = f"""
+    SELECT
+      COUNT(*) AS total_rows,
+      COUNTIF(latitude IS NOT NULL AND longitude IS NOT NULL) AS with_coordinates,
+      COUNTIF(zip_code IS NOT NULL AND zip_code != '') AS with_zip,
+      COUNT(DISTINCT CONCAT(COALESCE(brand_name, ''), '|', COALESCE(zip_code, ''), '|', COALESCE(address, ''))) AS distinct_rows,
+      MAX(last_observed_at) AS last_observed_at
+    FROM {table_ref}
+    WHERE (ARRAY_LENGTH(@selected_brands) = 0 OR COALESCE(brand_name, business_id) IN UNNEST(@selected_brands))
+    """
+
     def zip_only_payload(warning: str) -> dict[str, Any]:
         zip_where = """
         WHERE (@state = '' OR UPPER(state_code) = @state)
@@ -1635,6 +1651,7 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         map_records = [dict(row) for row in client.query(map_query, job_config=job_config).result()]
         filter_options = dict(next(iter(client.query(filter_options_query).result())))
         sample_records = [dict(row) for row in client.query(sample_query, job_config=job_config).result()]
+        data_quality_row = dict(next(iter(client.query(data_quality_query, job_config=job_config).result())))
     except Exception as exc:
         if getattr(exc, "code", None) == 404:
             payload = zip_only_payload("Preparing business data.")
@@ -1656,8 +1673,10 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
     # Reference metrics for Similar Market Analysis & Opportunity Scoring
     subject_pops = [r["population"] for r in raw_whitespace if r.get("subject_stores", 0) > 0 and r.get("population", 0) > 0]
     subject_incomes = [r["median_household_income"] for r in raw_whitespace if r.get("subject_stores", 0) > 0 and r.get("median_household_income", 0) > 0]
-    subject_median_pop = int(_median(subject_pops) or 25000)
-    subject_median_income = int(_median(subject_incomes) or 65000)
+    subject_ages = [r["median_age"] for r in raw_whitespace if r.get("subject_stores", 0) > 0 and r.get("median_age", 0) > 0]
+    subject_median_pop = int(_median(subject_pops) or 0)
+    subject_median_income = int(_median(subject_incomes) or 0)
+    subject_median_age = _median(subject_ages)
 
     tolerance_pct = float(params.get("tolerance", ["20"])[0] or "20") / 100.0
 
@@ -1738,7 +1757,7 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
     gaps = [opp for opp in opportunities if opp.get("whitespace_type") in {"COMPETITOR_WHITESPACE", "OPEN_WHITESPACE"}][:100]
 
     # Calculate Tab 1 Head-to-Head brand comparison metrics
-    selected_brand_name = main_brands[0] if main_brands else "Domino's"
+    selected_brand_name = main_brands[0] if main_brands else ""
     subject_locations_count = sum(r.get("subject_stores", 0) for r in raw_whitespace)
     competitor_locations_count = sum(r.get("competitor_stores", 0) for r in raw_whitespace)
 
@@ -1760,7 +1779,7 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         st_comp_ws = len([r for r in st_zips if r.get("whitespace_type") == "COMPETITOR_WHITESPACE"])
         st_open_ws = len([r for r in st_zips if r.get("whitespace_type") == "OPEN_WHITESPACE"])
         st_incomes = [r.get("median_household_income", 0) for r in st_zips if r.get("median_household_income", 0) > 0]
-        st_med_income = int(_median(st_incomes) or 62000)
+        st_med_income = int(_median(st_incomes) or 0)
 
         enriched_states.append({
             **st,
@@ -1792,7 +1811,11 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
             "population_covered": pop_cov,
             "population_per_location": pop_per_loc,
             "average_household_income": subject_median_income,
-            "median_age": 38.5,
+            # Real median age across the subject brand's own ZIP markets - the
+            # same reference value for every row here, since we don't track a
+            # distinct per-competitor market age (would need each competitor's
+            # own ZIP footprint aggregated the same way subject_stores is).
+            "median_age": subject_median_age if subject_median_age is not None else 0,
             "overlap_zips": shared_zips if b_name != selected_brand_name else 0,
             "competitor_only_zips": competitor_only_zips if b_name != selected_brand_name else 0,
             "shared_zips": shared_zips,
@@ -1805,44 +1828,73 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
     # with competitors listed afterwards ordered by location count.
     enriched_brands.sort(key=lambda b: (not b["is_subject"], -b.get("locations", 0)))
 
-    # Tab 2 Quality Summary Metrics
-    total_raw_locations = totals.get("total_locations", 33120)
+    # Tab 2 Quality Summary Metrics - computed from data_quality_row (a real
+    # aggregate against the silver-enriched listings table), not fabricated.
+    total_raw_locations = totals.get("total_locations", 0)
+    dq_total = data_quality_row.get("total_rows", 0) or 0
+    dq_with_coords = data_quality_row.get("with_coordinates", 0) or 0
+    dq_with_zip = data_quality_row.get("with_zip", 0) or 0
+    dq_distinct = data_quality_row.get("distinct_rows", 0) or 0
+    dq_last_observed = data_quality_row.get("last_observed_at")
+
+    zip_completeness_pct = _share_pct(dq_with_zip, dq_total)
+    coordinate_completeness_pct = _share_pct(dq_with_coords, dq_total)
+    duplicate_count = max(dq_total - dq_distinct, 0)
+    duplicate_rate_pct = _share_pct(duplicate_count, dq_total)
+    valid_rate_pct = round((zip_completeness_pct + coordinate_completeness_pct) / 2, 1) if dq_total else 0.0
+    invalid_zip_count = max(dq_total - dq_with_zip, 0)
+    missing_coord_count = max(dq_total - dq_with_coords, 0)
+
+    if dq_last_observed:
+        observed_dt = dq_last_observed if hasattr(dq_last_observed, "isoformat") else None
+        freshness_days = (datetime.now(timezone.utc) - observed_dt).days if observed_dt else None
+    else:
+        freshness_days = None
+
+    if dq_total == 0:
+        overall_confidence = "NO_DATA"
+        confidence_reasons = [
+            "No ingested listing records found for the selected brand(s) - load a source via the Mappings tab first.",
+        ]
+    else:
+        overall_confidence = "HIGH" if valid_rate_pct >= 90 else ("MEDIUM" if valid_rate_pct >= 60 else "LOW")
+        confidence_reasons = [
+            f"{zip_completeness_pct}% of {dq_total} ingested records have a valid ZIP code.",
+            f"{coordinate_completeness_pct}% resolved to real coordinates (source listing, ZIP, or city/state centroid).",
+            f"{duplicate_rate_pct}% duplicate rate across brand/ZIP/address.",
+            f"Last observed ingestion timestamp is {freshness_days} day(s) ago." if freshness_days is not None else "No observed-at timestamp available on ingested records.",
+        ]
+
     data_quality_summary = {
-        "valid_rate_pct": 99.2,
-        "duplicate_rate_pct": 0.8,
-        "zip_completeness_pct": 99.8,
-        "coordinate_completeness_pct": 98.6,
-        "freshness_days": 2,
-        "overall_confidence": "HIGH",
-        "confidence_reasons": [
-            "99.8% valid ZIP code coverage across all canonical observations",
-            "98.6% coordinate resolution against authoritative US geography centroid baseline",
-            "0.8% duplicate rate deduplicated into canonical location records",
-            "Last observed ingestion timestamp is within 2 days (FRESH status)",
-        ],
+        "valid_rate_pct": valid_rate_pct,
+        "duplicate_rate_pct": duplicate_rate_pct,
+        "zip_completeness_pct": zip_completeness_pct,
+        "coordinate_completeness_pct": coordinate_completeness_pct,
+        "freshness_days": freshness_days,
+        "overall_confidence": overall_confidence,
+        "confidence_reasons": confidence_reasons,
         "error_buckets": [
-            {"type": "INVALID_ZIP", "count": 24, "severity": "MEDIUM", "resolved": True},
-            {"type": "MISSING_COORDINATES", "count": 48, "severity": "LOW", "resolved": True},
-            {"type": "DUPLICATE_STORE", "count": 31, "severity": "INFO", "resolved": True},
-            {"type": "SCHEMA_MISMATCH", "count": 0, "severity": "HIGH", "resolved": True},
+            {"type": "INVALID_ZIP", "count": invalid_zip_count, "severity": "MEDIUM", "resolved": False},
+            {"type": "MISSING_COORDINATES", "count": missing_coord_count, "severity": "LOW", "resolved": False},
+            {"type": "DUPLICATE_STORE", "count": duplicate_count, "severity": "INFO", "resolved": False},
         ],
     }
 
-    median_ws_income = int(_median(whitespace_incomes) or 62000)
+    median_ws_income = int(_median(whitespace_incomes) or 0)
 
     primary_kpis = {
-        "selected_brand_locations": subject_locations_count if subject_locations_count > 0 else totals.get("total_locations", 6800),
-        "competitor_locations": competitor_locations_count if competitor_locations_count > 0 else 5400,
-        "states_covered": totals.get("total_states", 51),
-        "cities_covered": totals.get("total_cities", 18485),
-        "zips_covered": totals.get("total_zips", 33120),
-        "population_covered": totals.get("total_zips", 33120) * 8500,
-        "similar_zip_candidates": similar_candidates_count or 1420,
-        "competitor_whitespace_zips": competitor_whitespace_count or 482,
-        "open_whitespace_zips": open_whitespace_count or 890,
-        "whitespace_population": total_whitespace_pop or (1372 * subject_median_pop),
-        "median_whitespace_income": median_ws_income,
-        "data_confidence": "HIGH",
+        "selected_brand_locations": subject_locations_count,
+        "competitor_locations": competitor_locations_count,
+        "states_covered": totals.get("total_states", 0),
+        "cities_covered": totals.get("total_cities", 0),
+        "zips_covered": totals.get("total_zips", 0),
+        "population_covered": sum(r.get("population", 0) for r in raw_whitespace if r.get("subject_stores", 0) > 0 or r.get("competitor_stores", 0) > 0),
+        "similar_zip_candidates": similar_candidates_count,
+        "competitor_whitespace_zips": competitor_whitespace_count,
+        "open_whitespace_zips": open_whitespace_count,
+        "whitespace_population": total_whitespace_pop,
+        "median_whitespace_income": median_ws_income if whitespace_incomes else 0,
+        "data_confidence": "HIGH" if total_raw_locations > 0 else "NO_DATA",
     }
 
     similar_analysis_meta = {
