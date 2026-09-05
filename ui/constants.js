@@ -85,3 +85,12 @@ window.APP_CONSTANTS = Object.freeze({
   script.async = true;
   document.head.appendChild(script);
 })();
+
+// Add exactly two internal tabs inside the existing Reporting screen:
+// Location Intelligence & Whitespace, and Data Quality & Improvements.
+(() => {
+  const script = document.createElement("script");
+  script.src = "/reporting-tabs.js";
+  script.async = true;
+  document.head.appendChild(script);
+})();
