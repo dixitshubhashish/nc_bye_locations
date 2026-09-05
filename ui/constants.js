@@ -76,3 +76,12 @@ window.APP_CONSTANTS = Object.freeze({
   script.async = true;
   document.head.appendChild(script);
 })();
+
+// Preserve the useful Leaflet/reporting map behavior from the reporting-enrichment
+// work without reintroducing the unwanted top-level UI architecture rewrite.
+(() => {
+  const script = document.createElement("script");
+  script.src = "/reporting-map-hotfix.js";
+  script.async = true;
+  document.head.appendChild(script);
+})();
