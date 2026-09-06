@@ -722,6 +722,15 @@
       font: inherit;
       padding: 9px 10px;
     }
+    /* Radios/checkboxes must never inherit the full-width text-input sizing
+       above, or the control renders centered with its label flung to the far
+       edge. Keep them intrinsic-width so they sit beside their label text. */
+    input[type="radio"], input[type="checkbox"] {
+      width: auto;
+      flex: none;
+      margin: 0;
+      padding: 0;
+    }
     option.create-new-option {
       color: #0b5f55;
       font-weight: 800;
