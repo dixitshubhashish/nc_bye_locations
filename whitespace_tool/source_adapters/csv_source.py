@@ -22,5 +22,12 @@ def preview(content: bytes, record_path: str | None = None, fields_only: bool = 
             "preview_rows": [],
         }
 
-    rows = [dict(row) for row in reader]
+    # For full parsing, load rows efficiently with a batch limit to avoid memory issues
+    # (though most real data will come via batched saves, not this endpoint)
+    MAX_ROWS_TO_LOAD = 100000  # Cap at 100k rows for a single preview call
+    rows = []
+    for idx, row in enumerate(reader):
+        if idx >= MAX_ROWS_TO_LOAD:
+            break
+        rows.append(dict(row))
     return preview_payload(rows, record_path)

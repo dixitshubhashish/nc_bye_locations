@@ -36,6 +36,11 @@ def preview(content: bytes, record_path: str | None = None, fields_only: bool = 
     rows, resolved_path = choose_json_records(payload, record_path)
     rows = _prepare_rows(rows)
 
+    # Cap memory usage: limit to 100k rows even on full preview
+    MAX_ROWS_TO_LOAD = 100000
+    if len(rows) > MAX_ROWS_TO_LOAD:
+        rows = rows[:MAX_ROWS_TO_LOAD]
+
     # For lightweight field discovery, sample just first 10 rows to extract fields
     if fields_only:
         sample_rows = rows[:min(10, len(rows))]

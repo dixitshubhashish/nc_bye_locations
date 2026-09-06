@@ -48,6 +48,11 @@ def preview(content: bytes, record_path: str | None = None, fields_only: bool = 
     root = ElementTree.fromstring(content.decode("utf-8-sig"))
     records, resolved_path = _find_repeating_records(root)
 
+    # Cap memory usage: limit to 100k records to avoid memory issues
+    MAX_RECORDS_TO_LOAD = 100000
+    if len(records) > MAX_RECORDS_TO_LOAD:
+        records = records[:MAX_RECORDS_TO_LOAD]
+
     # For lightweight field discovery, sample just first 10 records
     if fields_only:
         sample_records = records[:min(10, len(records))]

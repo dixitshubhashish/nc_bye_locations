@@ -68,6 +68,9 @@ let sourceParsed = false;
 let templateEditMode = false;
 let selectedBrand = null;
 let csvFunctionMode = "new";
+// Batch size limits to prevent memory/network issues with large files
+const BATCH_MAX_BYTES = 5 * 1024 * 1024;  // 5MB per batch
+const BATCH_MAX_ROWS = 10000;              // 10k rows per batch
 let excelFunctionMode = "new";
 let jsonFunctionMode = "new";
 let apiFunctionMode = "new";
@@ -1989,11 +1992,24 @@ async function saveMapper() {
           let errorListings = 0;
           let processedRows = 0;
           let eventId = "";
+          const startTime = Date.now();
           for (let index = 0; index < batches.length; index += 1) {
             const batch = batches[index];
-            const batchNumber = index + 1;
-            const progress = Math.min(90, 20 + Math.round(processedRows / Math.max(sourceRows.length, 1) * 65));
-            setProgress(progress, batches.length > 1 ? `Processing batch ${batchNumber} of ${batches.length}` : `Processing ${sourceRows.length} records`);
+            const totalToProcess = sourceRows.length;
+            const percentComplete = Math.round(processedRows / Math.max(totalToProcess, 1) * 100);
+            const percentPending = 100 - percentComplete;
+            const progress = Math.min(90, 20 + Math.round(processedRows / Math.max(totalToProcess, 1) * 65));
+
+            // Estimate remaining time based on pace so far
+            let etaSeconds = "...";
+            if (processedRows > 0 && index > 0) {
+              const elapsedMs = Date.now() - startTime;
+              const msPerRow = elapsedMs / processedRows;
+              const remainingRows = totalToProcess - processedRows;
+              etaSeconds = Math.max(0, Math.round(remainingRows * msPerRow / 1000));
+            }
+
+            setProgress(progress, `${percentComplete}% complete, ${percentPending}% pending${etaSeconds !== "..." ? `, ~${etaSeconds}s remaining` : ""}`);
             const response = await fetch("/api/save", {
               method: "POST",
               headers: { "content-type": "application/json" },
