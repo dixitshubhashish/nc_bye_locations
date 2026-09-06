@@ -2,7 +2,7 @@
 
 Python-only prototype for Birdeye's competitive whitespace assessment. It separates source-specific acquisition from a unified restaurant/location model, stages/pushes unified BigQuery tables, and produces ZIP-level whitespace candidates.
 
-Known assumptions and gaps are tracked in `docs/assumptions_and_gaps.md`.
+Working implementation notes are tracked in `codex.md`; assumptions and known gaps are tracked in `docs/assumptions_and_gaps.md`.
 
 ## Run
 
@@ -50,6 +50,10 @@ Supported mapper inputs:
 Each input type is handled by a separate Python adapter under `whitespace_tool/source_adapters/`. Excel files expose sheet names in the UI so the user can choose which source to use.
 
 The Workflow Templates screen also includes predefined templates for Domino's, Pizza Hut, and Little Caesars. These load known mapping templates into the mapper so each brand workflow can be solved and validated one at a time.
+
+Brands are independent from source formats. A brand can be mapped from CSV, Excel, JSON, XML, GET JSON API, or Python at different times; source format belongs to the mapping/template workflow. Initial parsing samples up to 50 records for field discovery, while saving reloads the full dataset. Completion is reported as `X records processed. Y need review.`
+
+The current source/demo contracts, navigation rules, Pyodide behavior, smoke-test checklist, and active branch notes are maintained in [`codex.md`](codex.md). Demo XML uses Samplelib's 5 MB XML file. Demo PE Brand Python is preserved in `config/demo_pe_brand_python.py` and can be loaded or copied from the Python editor.
 
 ## Key System Enhancements & Architecture Features
 

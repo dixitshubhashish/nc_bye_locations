@@ -106,3 +106,13 @@ This document tracks known assumptions, data gaps, and deliberate tradeoffs in t
 ## Current Positioning
 
 This is a reusable prototype, not a production data platform. The strongest parts are the source separation, mapper-driven normalization, BigQuery-native ZIP/demographic base, data quality visibility, and configurable analysis logic. The weakest parts are source completeness, dedupe sophistication, and lack of true incremental warehouse loading.
+
+## Current UI And Workflow Gaps
+
+- Demo XML is a parser/size demonstration source, not guaranteed to contain the common restaurant location fields required for a successful listing save.
+- Browser Pyodide cannot reliably fetch every third-party URL because of CORS, rate limits, and remote availability. Server-backed Public URL fetching is the reliable path for ordinary remote sources.
+- BigQuery remains the authoritative fallback when SQLite mirrors are cold or stale; cache warm-up and remote query latency can still be visible during first use.
+- Source Preview and Data Model depend on a successful Parse response. A parsed source with no compatible mandatory fields still needs manual mapping or will correctly produce review rows.
+- Brand/source independence is now the intended contract; older templates or database rows may contain legacy `source_type_id` metadata and should be treated as historical metadata, not a UI restriction.
+
+See `codex.md` for the active behavior contract and verification checklist.
