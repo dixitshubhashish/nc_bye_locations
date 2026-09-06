@@ -1705,7 +1705,8 @@ async function parseSource() {
         const recordPathVal = recordExtractionMode === "custom" ? el("recordPath").value.trim() : "";
         const payload = {
           source_type: sourceType,
-          record_path: recordPathVal
+          record_path: recordPathVal,
+          fields_only: true  // Fast initial preview: headers/keys only, no full row parsing
         };
         if (sourceType === "api_get_json") {
           if (!el("apiUrl").value.trim()) throw new Error("Enter a GET API URL.");
