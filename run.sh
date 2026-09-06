@@ -1,36 +1,17 @@
 #!/usr/bin/env bash
-# Force-restart the Whitespace Tool workflow UI on a fixed port.
-#
-# Kills whatever is currently holding the port, then starts the server
-# fresh from the repo root. Works on Linux and macOS.
+# Force-kill whatever is holding the port, then (re)start the workflow UI
+# in the current directory. Run this from the repo root.
 #
 # Usage:
-#   ./run.sh              # serve on 127.0.0.1:8765
-#   ./run.sh 9000         # serve on a different port
-#   PORT=9000 ./run.sh    # same, via env var
-#   PYTHON=.venv/bin/python ./run.sh   # use a specific interpreter
+#   ./run.sh            # port 8765
+#   ./run.sh 9000       # different port
 set -euo pipefail
 
-# Resolve to the repo root (the directory this script lives in) so it can be
-# run from anywhere.
-cd "$(dirname "$0")"
+PORT="${1:-8765}"
 
-HOST="${HOST:-127.0.0.1}"
-PORT="${1:-${PORT:-8765}}"
-PYTHON="${PYTHON:-python3}"
-
-echo "Freeing port ${PORT} (if in use)..."
-if command -v lsof >/dev/null 2>&1; then
-  # Kill any process listening on the port; ignore if none.
-  lsof -ti "tcp:${PORT}" | xargs kill -9 2>/dev/null || true
-elif command -v fuser >/dev/null 2>&1; then
-  fuser -k "${PORT}/tcp" 2>/dev/null || true
-else
-  echo "  (neither lsof nor fuser found; skipping port kill)"
-fi
-
-# Give the OS a moment to release the socket before rebinding.
+echo "Killing anything on port ${PORT}..."
+lsof -ti "tcp:${PORT}" | xargs kill -9 2>/dev/null || fuser -k "${PORT}/tcp" 2>/dev/null || true
 sleep 1
 
-echo "Starting workflow UI at http://${HOST}:${PORT}/ ..."
-exec "${PYTHON}" -m whitespace_tool workflow-ui --host "${HOST}" --port "${PORT}"
+echo "Starting workflow UI at http://127.0.0.1:${PORT}/ ..."
+exec python3 -m whitespace_tool workflow-ui --host 127.0.0.1 --port "${PORT}"
