@@ -103,6 +103,7 @@ async function login() {
     sessionStorage.setItem(LOGIN_SESSION_KEY, "true");
     sessionStorage.setItem(MAPPING_SESSION_KEY, newSessionId());
     sessionStorage.removeItem(DRAFT_KEY);
+    // Server sets session_id cookie automatically; client tracks login state in sessionStorage
     const urlParams = new URLSearchParams(window.location.search);
     const viewParam = urlParams.get("view");
     const validViews = ["mapperView", "reportingView", "reviewView", "templateLibraryView"];

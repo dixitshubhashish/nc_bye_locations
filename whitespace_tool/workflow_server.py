@@ -76,6 +76,53 @@ REPORTING_REFRESHING = False
 SERVER_LAUNCH_ID = uuid4().hex
 load_dotenv()
 
+# Session management (15-minute timeout)
+SESSIONS: dict[str, dict[str, Any]] = {}
+SESSION_TIMEOUT_SECONDS = 15 * 60  # 15 minutes
+
+
+def _cleanup_expired_sessions() -> None:
+    """Remove expired sessions."""
+    now = datetime.now(timezone.utc).timestamp()
+    expired = [sid for sid, data in SESSIONS.items() if data.get("expires_at", 0) < now]
+    for sid in expired:
+        del SESSIONS[sid]
+
+
+def _create_session() -> str:
+    """Create a new session and return session ID."""
+    _cleanup_expired_sessions()
+    session_id = uuid4().hex
+    now = datetime.now(timezone.utc).timestamp()
+    SESSIONS[session_id] = {
+        "created_at": now,
+        "expires_at": now + SESSION_TIMEOUT_SECONDS,
+    }
+    return session_id
+
+
+def _get_session_id(handler: http.server.BaseHTTPRequestHandler) -> str | None:
+    """Extract session ID from cookie."""
+    cookie_header = handler.headers.get("cookie", "")
+    for part in cookie_header.split(";"):
+        part = part.strip()
+        if part.startswith("session_id="):
+            return part[11:]
+    return None
+
+
+def _is_valid_session(session_id: str | None) -> bool:
+    """Check if session is valid and not expired."""
+    if not session_id:
+        return False
+    _cleanup_expired_sessions()
+    return session_id in SESSIONS
+
+
+def _set_session_cookie(handler: http.server.BaseHTTPRequestHandler, session_id: str) -> None:
+    """Set session cookie in response."""
+    handler.send_header("Set-Cookie", f"session_id={session_id}; Path=/; HttpOnly; SameSite=Strict")
+
 
 def _json_response(handler: http.server.BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
     body = json.dumps(payload).encode("utf-8")
@@ -91,16 +138,17 @@ def authenticate(data: dict[str, Any]) -> dict[str, bool]:
     password = str(data.get("password", ""))
     expected_user = os.environ.get("WORKFLOW_LOGIN_USER", "admin")
     expected_password = os.environ.get("WORKFLOW_LOGIN_PASSWORD", "")
-    
+
     # Honor environment override if provided, otherwise accept any non-empty password for admin in dev mode
     if expected_password:
         valid = (username == expected_user and password == expected_password)
     else:
         valid = (username == expected_user)
-        
+
     if not valid:
         raise ValueError("Invalid username or password.")
-    return {"authenticated": True}
+    session_id = _create_session()
+    return {"authenticated": True, "session_id": session_id}
 
 
 def preview_source(payload: dict[str, Any]) -> dict[str, Any]:
@@ -4054,12 +4102,42 @@ def make_handler(ui_dir: Path):
 
         def _route_clean_ui_path(self, *, head: bool = False) -> bool:
             path = urlsplit(self.path).path
+            session_id = _get_session_id(self)
+            has_valid_session = _is_valid_session(session_id)
+
+            # If accessing / or /login with an active session, kill the session and redirect to login
             if path in {"", "/", "/login"}:
-                self._serve_ui_file("login.html", head=head)
+                if has_valid_session and session_id:
+                    # Kill the session
+                    if session_id in SESSIONS:
+                        del SESSIONS[session_id]
+                # Serve login page
+                self.send_response(200)
+                self.send_header("Set-Cookie", "session_id=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0")
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                if not head:
+                    file_path = self.ui_dir / "login.html"
+                    content = file_path.read_bytes()
+                    self.send_header("Content-Length", str(len(content)))
+                    self.end_headers()
+                    self.wfile.write(content)
+                else:
+                    file_path = self.ui_dir / "login.html"
+                    content = file_path.read_bytes()
+                    self.send_header("Content-Length", str(len(content)))
+                    self.end_headers()
                 return True
+
+            # If accessing /app without a valid session, redirect to login
             if path == "/app":
+                if not has_valid_session:
+                    self.send_response(302)
+                    self.send_header("Location", "/login")
+                    self.end_headers()
+                    return True
                 self._serve_ui_file("integrations.html", head=head)
                 return True
+
             if path in {"/not-found", "/404"}:
                 self._serve_ui_file("not-found.html", head=head, status=404)
                 return True
@@ -4086,6 +4164,7 @@ def make_handler(ui_dir: Path):
                 _json_response(self, 200, {"server_launch_id": SERVER_LAUNCH_ID})
                 return
             if self.path == "/api/ping":
+                # /api/ping is accessible without authentication for health checks
                 try:
                     result = ping_storage_connection()
                     result["timestamp"] = utc_now_iso()
@@ -4093,6 +4172,13 @@ def make_handler(ui_dir: Path):
                 except Exception as exc:
                     _json_response(self, 400, {"ok": False, "status": "warming", "error": str(exc), "timestamp": utc_now_iso()})
                 return
+
+            # All other API endpoints require a valid session
+            session_id = _get_session_id(self)
+            if not _is_valid_session(session_id):
+                _json_response(self, 401, {"error": "Unauthorized. Please login first."})
+                return
+
             if self.path == "/api/schema":
                 result = mapper_targets_with_status()
                 _json_response(self, 200, {"targets": result["fields"], "source": result["source"], "warning": result.get("warning")})
@@ -4234,6 +4320,14 @@ def make_handler(ui_dir: Path):
             if self.path not in {"/api/login", "/api/preview", "/api/source-url", "/api/sheets", "/api/save", "/api/clear", "/api/master-delete", "/api/brands", "/api/brands/update", "/api/brands/merge", "/api/learning", "/api/reprocess", "/api/field-alias", "/api/custom-field", "/api/custom-field/delete", "/api/templates/save", "/api/silver/enrich", "/api/reporting/refresh", "/api/sample/load"}:
                 _json_response(self, 404, {"error": "Not found"})
                 return
+
+            # All endpoints except /api/login require a valid session
+            if self.path != "/api/login":
+                session_id = _get_session_id(self)
+                if not _is_valid_session(session_id):
+                    _json_response(self, 401, {"error": "Unauthorized. Please login first."})
+                    return
+
             request_id = uuid4().hex
             try:
                 length = int(self.headers.get("content-length", "0"))
@@ -4242,7 +4336,15 @@ def make_handler(ui_dir: Path):
                     payload["event_id"] = request_id
                 LOGGER.info("request_started request_id=%s endpoint=%s content_length=%d", request_id, self.path, length)
                 if self.path == "/api/login":
-                    _json_response(self, 200, authenticate(payload))
+                    result = authenticate(payload)
+                    body = json.dumps(result).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("content-type", "application/json")
+                    self.send_header("content-length", str(len(body)))
+                    if "session_id" in result:
+                        _set_session_cookie(self, result["session_id"])
+                    self.end_headers()
+                    self.wfile.write(body)
                 elif self.path == "/api/source-url":
                     _json_response(self, 200, fetch_public_source(payload))
                 elif self.path == "/api/sheets":
