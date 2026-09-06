@@ -1,9 +1,15 @@
+"""Field validation rules and validators for location datasets in the whitespace analysis tool.
+
+Maps schema fields to data type validators and provides validation logic for both raw source rows
+and normalized location objects against registry specifications and domain boundaries.
+"""
+
 from __future__ import annotations
 
 from typing import Any
 
-from whitespace_tool.normalization import get_nested, optional_date, optional_float, optional_int, optional_timestamp
-from whitespace_tool.field_registry import load_field_registry
+from whitespace_tool.common.normalization import get_nested, optional_date, optional_float, optional_int, optional_timestamp
+from whitespace_tool.common.field_registry import load_field_registry
 
 
 VALIDATORS_BY_FIELD = {
@@ -39,7 +45,15 @@ FIELD_VALIDATORS = {
 
 
 def validate_source_row(row: dict[str, Any], mapper: dict[str, Any]) -> list[dict[str, str]]:
-    """Validate a parsed row independently of whether it came from CSV, Excel, JSON, XML, or an API."""
+    """Validate a parsed row independently of whether it came from CSV, Excel, JSON, XML, or an API.
+
+    Args:
+        row: Raw source row dictionary.
+        mapper: Mapping configuration dictionary.
+
+    Returns:
+        List of error dictionaries containing field, source path, reason, and hint.
+    """
     errors: list[dict[str, str]] = []
     fields = mapper.get("fields", {})
     for field_name, validator in FIELD_VALIDATORS.items():
@@ -61,6 +75,15 @@ def validate_source_row(row: dict[str, Any], mapper: dict[str, Any]) -> list[dic
 
 
 def validate_normalized_location(location: Any, registry: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Validate a normalized Location record against registry schema and domain bounds.
+
+    Args:
+        location: Normalized Location object instance.
+        registry: Field registry list specifying required fields and types.
+
+    Returns:
+        List of validation error dictionaries detailing field name, reason, hint, and invalid value.
+    """
     errors: list[dict[str, str]] = []
     for field in registry:
         key = field["key"]

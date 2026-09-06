@@ -1,21 +1,25 @@
+"""Domino's official store locator API integration module.
+
+Queries Domino's order.dominos.com API endpoint by ZIP code with cookie session warming and caching.
+"""
+
 from __future__ import annotations
 
 import argparse
 import http.cookiejar
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import pickle
 import random
-from pathlib import Path
 import threading
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from time import monotonic, sleep
 from typing import Any
-from urllib.parse import urlencode
-import urllib.request
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 
-from whitespace_tool.models import utc_now_iso
-
+from whitespace_tool.common.models import utc_now_iso
 
 LOCATOR_URL = "https://order.dominos.com/power/store-locator"
 ORDER_URL = "https://order.dominos.com/"
@@ -24,10 +28,12 @@ CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
 
 
 def _cache_key(zip_code: str, order_type: str) -> str:
+    """Generate cache pickle filename for zip code and order type."""
     return f"{zip_code}_{order_type.lower()}.pickle"
 
 
 def _load_cached(cache_dir: Path, zip_code: str, order_type: str) -> dict[str, Any] | None:
+    """Load cached store locator API response payload if present."""
     path = cache_dir / _cache_key(zip_code, order_type)
     if not path.exists():
         return None
@@ -36,12 +42,15 @@ def _load_cached(cache_dir: Path, zip_code: str, order_type: str) -> dict[str, A
 
 
 def _write_cached(cache_dir: Path, zip_code: str, order_type: str, payload: dict[str, Any]) -> None:
+    """Save store locator API response payload to pickle cache file."""
     cache_dir.mkdir(parents=True, exist_ok=True)
     with (cache_dir / _cache_key(zip_code, order_type)).open("wb") as handle:
         pickle.dump(payload, handle)
 
 
 class DominosLocatorSession:
+    """HTTP session manager for Domino's Store Locator API with cookie jar and retry handling."""
+
     def __init__(self, min_interval_seconds: float = 0.05, retries: int = 2) -> None:
         self.cookie_jar = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cookie_jar))
@@ -51,6 +60,7 @@ class DominosLocatorSession:
         self._warmed = False
 
     def _headers(self, accept: str = "application/json, text/javascript, */*; q=0.01") -> dict[str, str]:
+        """Construct standard HTTP headers mimicking a web browser."""
         return {
             "Accept": accept,
             "Accept-Language": "en-US,en;q=0.9",
@@ -60,12 +70,14 @@ class DominosLocatorSession:
         }
 
     def _rate_limit(self) -> None:
+        """Enforce min_interval_seconds delay between requests."""
         elapsed = monotonic() - self._last_request_at
         if elapsed < self.min_interval_seconds:
             sleep(self.min_interval_seconds - elapsed)
         self._last_request_at = monotonic()
 
     def _open_with_retries(self, request: urllib.request.Request, timeout: int = 60) -> bytes:
+        """Execute request with rate limiting and exponential backoff on HTTP errors."""
         last_error: Exception | None = None
         for attempt in range(self.retries):
             self._rate_limit()
@@ -84,6 +96,7 @@ class DominosLocatorSession:
         raise RuntimeError(f"Domino's locator request failed: {last_error}")
 
     def warmup(self) -> None:
+        """Perform initial HTTP GET to populate session cookies."""
         if self._warmed:
             return
         request = urllib.request.Request(ORDER_URL, headers=self._headers("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"))
@@ -93,6 +106,7 @@ class DominosLocatorSession:
             self._warmed = True
 
     def fetch_zip(self, zip_code: str, order_type: str = "Carryout") -> dict[str, Any]:
+        """Fetch store locator API payload for a specific ZIP code and order type."""
         self.warmup()
         query = urlencode({"s": "", "c": str(zip_code).zfill(5)[:5], "type": order_type})
         request = urllib.request.Request(f"{LOCATOR_URL}?{query}", headers=self._headers())
@@ -106,6 +120,7 @@ def fetch_zip(
     use_cache: bool = True,
     session: DominosLocatorSession | None = None,
 ) -> dict[str, Any]:
+    """Fetch Domino's store locator payload for a single ZIP code using cache if enabled."""
     zip_code = str(zip_code).zfill(5)[:5]
     cache_path = Path(cache_dir or "outputs/cache/dominos_locator")
     if use_cache:
@@ -118,6 +133,7 @@ def fetch_zip(
 
 
 def _stores_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract list of store dictionaries from raw API response payload."""
     stores = payload.get("Stores") or payload.get("stores") or []
     if isinstance(stores, dict):
         stores = list(stores.values())
@@ -134,6 +150,7 @@ def fetch_for_zips(
     one_per_zip: bool = False,
     max_workers: int = 8,
 ) -> dict[str, Any]:
+    """Concurrently fetch Domino's stores across multiple ZIP codes."""
     observed_at = utc_now_iso()
     stores_by_id: dict[str, dict[str, Any]] = {}
     errors = []
@@ -188,6 +205,7 @@ def fetch_for_zips(
 
 
 def _read_zip_codes(path: str | Path) -> list[str]:
+    """Read and extract 5-digit ZIP codes from text file."""
     zip_codes = []
     with Path(path).open("r", encoding="utf-8") as handle:
         for line in handle:
@@ -198,6 +216,7 @@ def _read_zip_codes(path: str | Path) -> list[str]:
 
 
 def main() -> None:
+    """CLI entry point for running Domino's store locator fetch script."""
     parser = argparse.ArgumentParser(description="Fetch Domino's store-locator JSON by ZIP code.")
     parser.add_argument("--zip-file", required=True, help="Text file with one ZIP code per line.")
     parser.add_argument("--output", default="outputs/dominos_store_locator.json")

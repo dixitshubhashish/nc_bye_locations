@@ -1,0 +1,16 @@
+<!-- ========================================================================= -->
+<!-- System Administration UI Module Partial (ui/system/system.html)            -->
+<!--                                                                           -->
+<!-- Provides system administration confirmation modals, including the          -->
+<!-- destructive dataset soft-delete clear confirmation dialog.                -->
+<!-- ========================================================================= -->
+
+<!-- Destructive Clear Saved Data Confirmation Dialog -->
+<dialog id="dangerDialog" class="danger-dialog">
+  <h2>DANGER</h2>
+  <p>This will delete saved businesses, listings, and review records. Templates and reference data stay available.</p>
+  <div class="button-row">
+    <button id="confirmClearBtn" type="button">Delete Data</button>
+    <button class="secondary" id="cancelClearBtn" type="button">Cancel</button>
+  </div>
+</dialog>

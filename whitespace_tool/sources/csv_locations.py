@@ -5,7 +5,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any
 
-from whitespace_tool.models import LocationRecord, utc_now_iso
+from whitespace_tool.common.models import LocationRecord, utc_now_iso
 
 
 def _clean_zip(value: str) -> str:

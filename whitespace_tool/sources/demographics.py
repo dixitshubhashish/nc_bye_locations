@@ -1,14 +1,20 @@
+"""US Census demographic dataset fetcher and storage connection resolver.
+
+Queries demographic metrics (population, median income, median age) by ZIP code from BigQuery.
+"""
+
 from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from whitespace_tool.models import ZipDemographics
-from whitespace_tool.storage_config import load_storage_config
+from whitespace_tool.common.models import ZipDemographics
+from whitespace_tool.common.storage_config import load_storage_config
 
 
 def _number(value: str) -> float | None:
+    """Coerce string value to float, ignoring null representations and sentinel codes."""
     if value in (None, "", "-666666666", "-888888888", "-999999999"):
         return None
     try:
@@ -18,6 +24,7 @@ def _number(value: str) -> float | None:
 
 
 def _row_value(row: Any, field: str) -> Any:
+    """Extract dictionary or Row attribute value by field name."""
     if isinstance(row, dict):
         return row.get(field)
     return row[field]
@@ -25,6 +32,7 @@ def _row_value(row: Any, field: str) -> Any:
 
 @lru_cache(maxsize=8)
 def _bigquery_client(project_id: str, credentials_json: str | None):
+    """Build cached BigQuery client instance for project and credentials file path."""
     from google.cloud import bigquery
     from google.oauth2 import service_account
 
@@ -40,6 +48,7 @@ def fetch_bigquery_demographics(
     source_name: str,
     credentials_json: str | None = None,
 ) -> dict[str, ZipDemographics]:
+    """Execute BigQuery query fetching demographic records mapped by 5-digit ZIP code."""
     try:
         from google.cloud import bigquery
     except ImportError as exc:
@@ -73,6 +82,7 @@ def fetch_bigquery_demographics(
 
 
 def resolve_bigquery_connection(source: dict[str, Any], config: dict[str, Any]) -> tuple[str, str | None]:
+    """Resolve project_id and absolute credentials_json path from config and environment."""
     storage = load_storage_config()
     project_id = source.get("project_id") or storage.get("project_id")
     credentials_json = source.get("credentials_json") or storage.get("credentials_json")
@@ -84,6 +94,7 @@ def resolve_bigquery_connection(source: dict[str, Any], config: dict[str, Any]) 
 
 
 def load_demographics(config: dict[str, Any]) -> dict[str, ZipDemographics]:
+    """Load demographic records dictionary according to configuration source type."""
     source = config["demographics_source"]
     if source["type"] == "bigquery":
         project_id, credentials_json = resolve_bigquery_connection(source, config)

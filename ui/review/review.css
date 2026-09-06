@@ -1,0 +1,33 @@
+/**
+ * ============================================================================
+ * Review Records UI Subpackage Stylesheet (ui/review/review.css)
+ * 
+ * Provides layout rules for the rejected records review dashboard, event ID
+ * search toolbar, error record action buttons, and edit record modal dialog.
+ * ============================================================================
+ */
+
+/* ----------------------------------------------------------------------------
+ * 1. Review Dashboard Container & Toolbar
+ * ------------------------------------------------------------------------- */
+.review-view {
+  padding: 24px;
+}
+
+.review-toolbar {
+  display: flex;
+  gap: 8px;
+  max-width: 620px;
+  margin-bottom: 16px;
+}
+
+.review-toolbar input {
+  flex: 1;
+}
+
+/* ----------------------------------------------------------------------------
+ * 2. Review Record Row Actions & Badges
+ * ------------------------------------------------------------------------- */
+.review-row-actions {
+  white-space: nowrap;
+}

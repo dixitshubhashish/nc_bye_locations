@@ -1,17 +1,21 @@
+"""OpenStreetMap Overpass API fallback fetcher for Domino's locations.
+
+Executes query requests against OpenStreetMap Overpass API for location nodes by ZIP code.
+"""
+
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import random
-from time import monotonic, sleep
-from typing import Any
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from time import monotonic, sleep
+from typing import Any
 
-from whitespace_tool.models import utc_now_iso
-
+from whitespace_tool.common.models import utc_now_iso
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 OVERPASS_USER_AGENT = "competitive-whitespace-prototype/1.0"
@@ -19,6 +23,7 @@ RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 def _query(zip_code: str) -> str:
+    """Build Overpass QL query string searching for Domino's nodes/ways/relations by ZIP code."""
     return f"""
 [out:json][timeout:60];
 (
@@ -31,18 +36,22 @@ out center tags;
 
 
 class OverpassSession:
+    """Session manager executing Overpass API HTTP requests with rate limiting and exponential backoff retries."""
+
     def __init__(self, delay_seconds: float = 1.0, retries: int = 3) -> None:
         self.delay_seconds = delay_seconds
         self.retries = retries
         self._last_request_at = 0.0
 
     def _rate_limit(self) -> None:
+        """Enforce delay_seconds throttle between HTTP requests."""
         elapsed = monotonic() - self._last_request_at
         if elapsed < self.delay_seconds:
             sleep(self.delay_seconds - elapsed)
         self._last_request_at = monotonic()
 
     def fetch_zip(self, zip_code: str) -> list[dict[str, Any]]:
+        """Fetch raw OpenStreetMap elements matching Domino's pizza in the given ZIP code."""
         data = urllib.parse.urlencode({"data": _query(zip_code)}).encode("utf-8")
         request = urllib.request.Request(
             OVERPASS_URL,
@@ -71,6 +80,7 @@ class OverpassSession:
 
 
 def _to_store(element: dict[str, Any], zip_code: str, observed_at: str) -> dict[str, Any] | None:
+    """Format raw OpenStreetMap element dictionary into Domino's Store location schema."""
     tags = element.get("tags") if isinstance(element.get("tags"), dict) else {}
     if element.get("type") == "node":
         lat, lon = element.get("lat"), element.get("lon")
@@ -101,6 +111,7 @@ def fetch_for_zips(
     one_per_zip: bool = False,
     max_workers: int = 4,
 ) -> dict[str, Any]:
+    """Concurrently query OpenStreetMap Overpass for Domino's stores across a list of ZIP codes."""
     observed_at = utc_now_iso()
     stores_by_id: dict[str, dict[str, Any]] = {}
     errors = []

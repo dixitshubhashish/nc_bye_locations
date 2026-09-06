@@ -1,0 +1,31 @@
+<!-- Common UI Overlays Partial (ui/common/common.html) -->
+<!-- ========================================================================= -->
+<!-- Common UI Subpackage Overlays Partial (ui/common/common.html)              -->
+<!--                                                                           -->
+<!-- Provides shared application-wide overlay components, including the         -->
+<!-- full-screen loading spinner overlay and the full-screen Python connector -->
+<!-- Monaco editor dialog modal.                                                -->
+<!-- ========================================================================= -->
+
+<!-- Application-Wide Full-Screen Loading Overlay -->
+<div id="loadingOverlay" class="loading-overlay hidden" role="dialog" aria-modal="true" aria-live="assertive">
+  <div class="loading-spinner-circle"></div>
+  <div id="loadingOverlayMessage" class="loading-overlay-message">Working...</div>
+  <div id="loadingOverlaySub" class="loading-overlay-sub">Processing records.</div>
+  <button id="loadingCancelBtn" class="loading-cancel-btn" type="button" title="Cancel this operation">
+    ✕ Cancel
+  </button>
+</div>
+
+<!-- Full-Screen Python Monaco Editor Dialog Modal -->
+<dialog id="pythonConnectorDialog" class="connector-editor-dialog">
+  <div class="connector-editor-dialog-content">
+    <div class="connector-editor-dialog-header">
+      <h2 class="connector-editor-dialog-title">Python Editor</h2>
+      <button class="secondary" id="minimizePythonConnectorBtn" type="button">Minimize Editor</button>
+    </div>
+    <!-- Monaco Editor Mounting Point -->
+    <div id="pythonConnectorDialogHost"></div>
+  </div>
+</dialog>
+

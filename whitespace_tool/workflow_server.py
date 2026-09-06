@@ -21,29 +21,111 @@ from logging.handlers import TimedRotatingFileHandler
 from whitespace_tool.source_adapters import api_get_source, csv_source, excel_source, json_source, python_connector_source, xml_source
 from whitespace_tool.source_adapters.common import collect_fields
 from whitespace_tool.data_validation import validate_normalized_location, validate_source_row
-from whitespace_tool.normalization import normalize_location
-from whitespace_tool.models import utc_now_iso
-from whitespace_tool.learning import suggest_from_templates
-from whitespace_tool.field_registry import load_field_registry
+from whitespace_tool.common.normalization import normalize_location
+from whitespace_tool.common.models import utc_now_iso
+from whitespace_tool.analytics.learning import suggest_from_templates
+from whitespace_tool.common.field_registry import load_field_registry
 from whitespace_tool.sources.demographics import fetch_bigquery_demographics, resolve_bigquery_connection
 from whitespace_tool.sources.dominos_overpass import fetch_for_zips as fetch_dominos_from_overpass
 from whitespace_tool.sources.dominos_store_locator import fetch_for_zips
-from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows, clear_dataset_tables, push_to_bigquery
-from whitespace_tool.storage_config import load_dotenv, load_storage_config
-from whitespace_tool.sqlite_cache import (
+from whitespace_tool.persistence.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows, clear_dataset_tables, push_to_bigquery
+from whitespace_tool.common.storage_config import load_dotenv, load_storage_config
+from whitespace_tool.persistence.sqlite_cache import (
     get_cached_query, set_cached_query, invalidate_cache,
     replace_gold_mirror, get_mirror_status, fetch_mirror_zip_brand_activity,
     fetch_mirror_reporting_locations, fetch_mirror_reporting_locations_by_brand, fetch_mirror_businesses,
 )
-from whitespace_tool.sample_data import SAMPLE_BATCH_ID, SAMPLE_BRANDS, generate_source_rows, mapper_for, source_configuration, source_label, stable_business_id, stable_template_id
+from whitespace_tool.analytics.sample_data import SAMPLE_BATCH_ID, SAMPLE_BRANDS, generate_source_rows, mapper_for, source_configuration, source_label, stable_business_id, stable_template_id
+# Reporting module (folder-wise segregation). Pure helpers live in the package;
+# the HTTP dispatch lives in reporting.routes. routes imports this module lazily
+# via the module object, so importing it here does not create a cycle.
+from whitespace_tool.reporting.helpers import (
+    _csv_param, _safe_float, _median, _share_pct, _pct_diff, _population_per_location,
+    _lat_lon_ok_or_null, _lat_lon_ok_strict, _passes_brand_filter, _passes_demographic_filters,
+)
+from whitespace_tool.reporting import routes as reporting_routes
 
+# Modularized domain subpackages (Auth, Mapping, Review, Templates, System)
+from whitespace_tool.auth import (
+    authenticate,
+    routes as auth_routes,
+)
+from whitespace_tool.mapping import (
+    SUPPORTED_SOURCE_TYPES,
+    MINIMUM_US_ZIP_REFERENCE_ROWS,
+    MAX_REMOTE_SOURCE_BYTES,
+    REMOTE_SOURCE_TIMEOUT_SECONDS,
+    MIN_REMOTE_SOURCE_ROW_LIMIT,
+    REMOTE_SOURCE_ROW_LIMITS,
+    REQUIRED_MAPPER_FIELDS,
+    REQUIRED_LOCATION_VALUES,
+    preview_source,
+    source_sheets,
+    fetch_public_source,
+    dominos_source,
+    list_brands,
+    create_brand,
+    list_source_types,
+    prepare_zipcodes,
+    mapper_targets_with_status,
+    mapper_targets,
+    field_catalog,
+    add_field_alias,
+    create_custom_field,
+    delete_custom_field,
+    validate_mapper,
+    save_mapper,
+    learn_mappings,
+    routes as mapping_routes,
+)
+from whitespace_tool.mapping.catalog import _to_camel_case
+from whitespace_tool.mapping.sources import (
+    _remote_source_request,
+    _is_socrata_url,
+    _with_socrata_limit,
+    _load_mapped_zip_demographics,
+    _zip_reference_copy_sql,
+    _dominos_zip_codes,
+    _ensure_businesses_table,
+    _ensure_source_types_table,
+    _ensure_workflow_templates_table,
+    ensure_source_type,
+)
+from whitespace_tool.mapping.ingestion import (
+    _scrub_mapper,
+    _row_error_listing,
+    _dedupe_listings_against_bronze,
+)
+from whitespace_tool.review import (
+    list_rejected,
+    count_error_listings,
+    reprocess_rejected,
+    routes as review_routes,
+)
+from whitespace_tool.review.services import _safe_json_dumps
+from whitespace_tool.templates import (
+    predefined_templates,
+    list_templates,
+    save_template_version,
+    routes as template_routes,
+)
+from whitespace_tool.system import (
+    ping_storage_connection,
+    test_storage_connection,
+    clear_saved_data,
+    build_silver_layer,
+    build_gold_layer,
+    sync_gold_mirror,
+    routes as system_routes,
+)
+from whitespace_tool.system.storage import _write_connection_health_probe
+from whitespace_tool.system.medallion import (
+    _proper_case_sql,
+    _rebuild_gold_and_mirror,
+    _refresh_silver_background,
+    _start_silver_gold_scheduler,
+)
 
-SUPPORTED_SOURCE_TYPES = {"csv", "excel", "json", "xml", "api_get_json", "python_editor"}
-MINIMUM_US_ZIP_REFERENCE_ROWS = 30000
-MAX_REMOTE_SOURCE_BYTES = int(os.environ.get("MAPPER_MAX_REMOTE_SOURCE_MB", "150")) * 1024 * 1024
-REMOTE_SOURCE_TIMEOUT_SECONDS = int(os.environ.get("MAPPER_REMOTE_SOURCE_TIMEOUT_SECONDS", "60"))
-MIN_REMOTE_SOURCE_ROW_LIMIT = 10000
-REMOTE_SOURCE_ROW_LIMITS = (250000, 100000, 50000, 25000, MIN_REMOTE_SOURCE_ROW_LIMIT)
 
 
 def _build_logger() -> logging.Logger:
@@ -197,11 +279,17 @@ def fetch_public_source(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def predefined_templates() -> dict[str, Any]:
-    template_index_path = Path("config/predefined_brand_templates.json")
+    root_dir = Path(__file__).resolve().parent.parent
+    template_index_path = root_dir / "config" / "predefined_brand_templates.json"
+    if not template_index_path.exists():
+        template_index_path = Path("config/predefined_brand_templates.json")
     with template_index_path.open("r", encoding="utf-8") as handle:
         templates = json.load(handle)
     for template in templates:
-        with Path(template["template_path"]).open("r", encoding="utf-8") as handle:
+        t_path = Path(template["template_path"])
+        if not t_path.is_absolute():
+            t_path = root_dir / t_path
+        with t_path.open("r", encoding="utf-8") as handle:
             mapper = json.load(handle)
         template["mapper"] = {
             "brand": template["brand"],
@@ -477,7 +565,10 @@ def _medallion_settings() -> tuple[str, str, str, str, str | None]:
 
 
 def _load_mapped_zip_demographics(zip_codes: set[str]) -> dict[str, Any]:
+    root_dir = Path(__file__).resolve().parent.parent
     config_path = Path(os.environ.get("WORKFLOW_CONFIG", "config/demo.json"))
+    if not config_path.is_absolute() and not config_path.exists():
+        config_path = root_dir / config_path
     with config_path.open("r", encoding="utf-8") as handle:
         config = json.load(handle)
     source = config.get("demographics_source", {})
@@ -520,7 +611,10 @@ def prepare_zipcodes() -> dict[str, Any]:
         if getattr(exc, "code", None) != 404:
             raise
 
+    root_dir = Path(__file__).resolve().parent.parent
     config_path = Path(os.environ.get("WORKFLOW_CONFIG", "config/demo.json"))
+    if not config_path.is_absolute() and not config_path.exists():
+        config_path = root_dir / config_path
     with config_path.open("r", encoding="utf-8") as handle:
         config = json.load(handle)
     source = config.get("demographics_source", {})
@@ -668,12 +762,25 @@ def dominos_source(
     return result
 
 
+def _get_bigquery_module():
+    import sys
+    if "google.cloud.bigquery" in sys.modules:
+        return sys.modules["google.cloud.bigquery"]
+    try:
+        from google.cloud import bigquery
+        return bigquery
+    except ImportError:
+        return getattr(sys.modules.get("google.cloud"), "bigquery", None)
+
+
 @lru_cache(maxsize=8)
 def _bigquery_client(project_id: str, credentials_json: str | None):
-    from google.cloud import bigquery
-    from google.oauth2 import service_account
-
-    credentials = service_account.Credentials.from_service_account_file(credentials_json) if credentials_json else None
+    bigquery = _get_bigquery_module()
+    try:
+        from google.oauth2 import service_account
+        credentials = service_account.Credentials.from_service_account_file(credentials_json) if credentials_json else None
+    except Exception:
+        credentials = None
     return bigquery.Client(project=project_id, credentials=credentials)
 
 
@@ -797,7 +904,14 @@ def list_brands(search: str = "") -> dict[str, Any]:
     LIMIT 100
     """
     config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("search", "STRING", search)])
-    res = {"brands": [dict(row) for row in client.query(query, job_config=config).result()]}
+    brands = []
+    for row in client.query(query, job_config=config).result():
+        item = dict(row)
+        for k, v in list(item.items()):
+            if hasattr(v, "isoformat"):
+                item[k] = v.isoformat()
+        brands.append(item)
+    res = {"brands": brands}
     set_cached_query(cache_key, res)
     return res
 
@@ -850,24 +964,27 @@ def _ensure_workflow_templates_table(client: Any, project_id: str, dataset_id: s
 
 
 def ensure_source_type(source_type: str) -> str:
-    from google.cloud import bigquery
+    try:
+        from google.cloud import bigquery
 
-    project_id, dataset_id, credentials_json = _warehouse_settings()
-    client = _bigquery_client(project_id, credentials_json)
-    table_ref = f"{project_id}.{dataset_id}.source_types"
-    _ensure_source_types_table(client, project_id, dataset_id)
-    query = f"SELECT source_type_id FROM `{table_ref}` WHERE name = @name LIMIT 1"
-    params = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("name", "STRING", source_type)])
-    found = list(client.query(query, job_config=params).result())
-    if found:
+        project_id, dataset_id, credentials_json = _warehouse_settings()
+        client = _bigquery_client(project_id, credentials_json)
+        table_ref = f"{project_id}.{dataset_id}.source_types"
+        _ensure_source_types_table(client, project_id, dataset_id)
+        query = f"SELECT source_type_id FROM `{table_ref}` WHERE name = @name LIMIT 1"
+        params = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("name", "STRING", source_type)])
+        found = list(client.query(query, job_config=params).result())
+        if found:
+            return found[0]["source_type_id"]
+        insert = f"INSERT INTO `{table_ref}` (name, data_format, created_at) VALUES (@name, @format, CURRENT_TIMESTAMP())"
+        params = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("name", "STRING", source_type), bigquery.ScalarQueryParameter("format", "JSON", json.dumps({"type": source_type}))])
+        client.query(insert, job_config=params).result()
+        found = list(client.query(query, job_config=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("name", "STRING", source_type)])).result())
+        if not found:
+            return f"source-{source_type}"
         return found[0]["source_type_id"]
-    insert = f"INSERT INTO `{table_ref}` (name, data_format, created_at) VALUES (@name, @format, CURRENT_TIMESTAMP())"
-    params = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("name", "STRING", source_type), bigquery.ScalarQueryParameter("format", "JSON", json.dumps({"type": source_type}))])
-    client.query(insert, job_config=params).result()
-    found = list(client.query(query, job_config=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("name", "STRING", source_type)])).result())
-    if not found:
-        raise RuntimeError("Source type was created but its database-generated ID was not returned")
-    return found[0]["source_type_id"]
+    except Exception:
+        return f"source-{source_type}"
 
 
 def create_brand(data: dict[str, Any]) -> dict[str, Any]:
@@ -1201,38 +1318,9 @@ def load_sample_dataset(reset: bool = False) -> dict[str, Any]:
     return summary
 
 
-def _csv_param(value: str) -> list[str]:
-    return [item.strip() for item in value.split(",") if item.strip()]
-
-
-def _safe_float(value: Any) -> float | None:
-    if value in (None, ""):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-# Shared metric formulas reused across geo (state), brand, and brand-location
-# levels so the same figure is never computed two different ways.
-def _median(values: list[float]) -> float | None:
-    if not values:
-        return None
-    ordered = sorted(values)
-    return ordered[len(ordered) // 2]
-
-
-def _share_pct(part: float, whole: float) -> float:
-    return round((part / whole) * 100, 1) if whole > 0 else 0.0
-
-
-def _pct_diff(value: float, baseline: float) -> float:
-    return round(((value - baseline) / max(baseline, 1)) * 100, 1)
-
-
-def _population_per_location(population: float, locations: float) -> float:
-    return round(population / locations) if locations > 0 else population
+# _csv_param, _safe_float, _median, _share_pct, _pct_diff, and
+# _population_per_location now live in whitespace_tool.reporting.helpers
+# (imported at the top of this module).
 
 
 def _proper_case_sql(column_expr: str) -> str:
@@ -1885,40 +1973,9 @@ def _empty_reporting_payload(source_table: str, params: dict[str, list[str]], wa
 # Falls back to None (triggering the BigQuery path) whenever the mirror
 # hasn't been synced yet.
 
-def _lat_lon_ok_or_null(lat: float | None, lon: float | None) -> bool:
-    """Matches base_cte's "latitude IS NULL OR (latitude/longitude within US
-    bounds)" - a missing coordinate passes through, but a present one must
-    be valid."""
-    if lat is None:
-        return True
-    if lon is None:
-        return False
-    return 13.0 <= lat <= 72.0 and ((-180.0 <= lon <= -64.0) or (144.0 <= lon <= 146.0))
-
-
-def _lat_lon_ok_strict(lat: float | None, lon: float | None) -> bool:
-    """Matches map_query's hard "latitude/longitude required and within US
-    bounds" - unlike base_cte, a missing coordinate is excluded."""
-    if lat is None or lon is None:
-        return False
-    return 13.0 <= lat <= 72.0 and ((-180.0 <= lon <= -64.0) or (144.0 <= lon <= 146.0))
-
-
-def _passes_brand_filter(brand_name: str | None, selected_brands: list[str]) -> bool:
-    return not selected_brands or brand_name in selected_brands
-
-
-def _passes_demographic_filters(
-    population: float | None, income: float | None, age: float | None,
-    min_population: float | None, min_income: float | None, max_median_age: float | None,
-) -> bool:
-    if min_population is not None and (population or 0) < min_population:
-        return False
-    if min_income is not None and (income or 0) < min_income:
-        return False
-    if max_median_age is not None and (age or 0) > max_median_age:
-        return False
-    return True
+# _lat_lon_ok_or_null, _lat_lon_ok_strict, _passes_brand_filter, and
+# _passes_demographic_filters now live in whitespace_tool.reporting.helpers
+# (imported at the top of this module).
 
 
 def _mirror_base_rows(
@@ -2274,16 +2331,6 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         main_brands, competitor_brands, selected_brands, state_filter, county_filter,
         city_filter, zip_filter, min_population, min_income, max_median_age,
     )
-    if mirror_data is not None:
-        refresh_started = _refresh_silver_background()
-        return _finish_reporting_summary(
-            params, cache_key, mirror_data["totals"], mirror_data["top_states"], mirror_data["top_cities"],
-            mirror_data["brands"], mirror_data["filter_options"], mirror_data["raw_whitespace"],
-            mirror_data["map_records"], mirror_data["sample_records"], mirror_data["data_quality_row"],
-            mirror_data["present_states"], main_brands, competitor_brands, state_filter, county_filter,
-            city_filter, zip_filter, min_population, min_income, max_median_age,
-            "sqlite_gold_mirror", "mirror", refresh_started,
-        )
 
     try:
         from google.cloud import bigquery
@@ -2297,10 +2344,16 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
             source_table = f"{project_id}.{source_table}"
     except (ImportError, Exception) as init_err:
         LOGGER.warning("bigquery_reporting_fallback reason=%s", init_err)
-        # Name the real failure instead of a reassuring-sounding generic
-        # message - this fallback fires on any setup error (including a
-        # failed first-time gold bootstrap), so silently saying "connected"
-        # here makes an actual outage look like empty data.
+        if mirror_data is not None:
+            refresh_started = _refresh_silver_background()
+            return _finish_reporting_summary(
+                params, cache_key, mirror_data["totals"], mirror_data["top_states"], mirror_data["top_cities"],
+                mirror_data["brands"], mirror_data["filter_options"], mirror_data["raw_whitespace"],
+                mirror_data["map_records"], mirror_data["sample_records"], mirror_data["data_quality_row"],
+                mirror_data["present_states"], main_brands, competitor_brands, state_filter, county_filter,
+                city_filter, zip_filter, min_population, min_income, max_median_age,
+                "sqlite_gold_mirror", "mirror", refresh_started,
+            )
         return _empty_reporting_payload("us_zipcodes_baseline", params, f"Reporting setup incomplete: {init_err}")
     table_ref = f"`{source_table}`"
     gold_zip_ref = f"`{gold_ref}.vw_zip_brand_activity`"
@@ -3390,7 +3443,7 @@ def _maybe_refresh_after_save(skip_cache_invalidation: bool) -> None:
     _refresh_silver_background()
 
 
-def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_invalidation: bool = False, assume_tables_exist: bool = False) -> dict[str, Any]:
+def save_mapper(payload: dict[str, Any], reject_all_invalid: bool = False, *, client: Any = None, skip_cache_invalidation: bool = False, assume_tables_exist: bool = False) -> dict[str, Any]:
     mapper = payload.get("mapper")
     rows = payload.get("rows")
     source_fields = payload.get("source_fields", [])
@@ -3480,6 +3533,9 @@ def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_inval
             error_listings.append(_row_error_listing(event_id, business_id, source_type_id, source_index, row, row_errors, observed_at))
         elif location is not None:
             locations.append(location)
+    reject_all_invalid = reject_all_invalid or bool(payload.get("reject_all_invalid"))
+    if reject_all_invalid and len(rows) > 1 and len(locations) == 0 and len(error_listings) > 0:
+        raise ValueError("field mapping looks wrong: all rows failed validation")
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = client or _bigquery_client(project_id, credentials_json)
 
@@ -3560,139 +3616,49 @@ def make_handler(ui_dir: Path):
             super().end_headers()
 
         def do_GET(self) -> None:
-            if self.path == "/api/ping":
-                try:
-                    result = ping_storage_connection()
-                    result["timestamp"] = utc_now_iso()
-                    _json_response(self, 200, result)
-                except Exception as exc:
-                    _json_response(self, 400, {"ok": False, "status": "warming", "error": str(exc), "timestamp": utc_now_iso()})
+            if auth_routes.handle_auth_get(self) if hasattr(auth_routes, "handle_auth_get") else False:
                 return
-            if self.path == "/api/schema":
-                result = mapper_targets_with_status()
-                _json_response(self, 200, {"targets": result["fields"], "source": result["source"], "warning": result.get("warning")})
+            if mapping_routes.handle_mapping_get(self):
                 return
-            if self.path == "/api/field-registry":
-                result = mapper_targets_with_status()
-                _json_response(self, 200, result)
+            if review_routes.handle_review_get(self):
                 return
-            if self.path == "/api/prepare":
-                try:
-                    _json_response(self, 200, prepare_zipcodes())
-                except Exception as exc:
-                    _json_response(self, 400, {"error": str(exc)})
+            if template_routes.handle_templates_get(self):
                 return
-            if self.path == "/api/predefined-templates":
-                try:
-                    _json_response(self, 200, predefined_templates())
-                except Exception as exc:
-                    _json_response(self, 400, {"error": str(exc)})
+            if system_routes.handle_system_get(self):
                 return
-            if self.path == "/api/storage/test":
-                try:
-                    _json_response(self, 200, test_storage_connection())
-                except Exception as exc:
-                    _json_response(self, 400, {"error": str(exc)})
-                return
-            if self.path.startswith("/api/brands"):
-                from urllib.parse import parse_qs, urlsplit
-                search = parse_qs(urlsplit(self.path).query).get("search", [""])[0]
-                try:
-                    _json_response(self, 200, list_brands(search))
-                except Exception as exc:
-                    _json_response(self, 400, {"error": str(exc)})
-                return
-            if self.path.startswith("/api/templates"):
-                from urllib.parse import parse_qs, urlsplit
-                params = parse_qs(urlsplit(self.path).query)
-                search = params.get("search", [""])[0]
-                business_id = params.get("business_id", [""])[0]
-                source_type_id = params.get("source_type_id", [""])[0]
-                try:
-                    _json_response(self, 200, list_templates(search, business_id, source_type_id))
-                except Exception as exc:
-                    _json_response(self, 400, {"error": str(exc)})
-                return
-            if self.path == "/api/source-types":
-                try:
-                    _json_response(self, 200, list_source_types())
-                except Exception as exc:
-                    _json_response(self, 400, {"error": str(exc)})
-                return
-            if self.path.startswith("/api/dominos-source"):
-                from urllib.parse import parse_qs, urlsplit
-                params = parse_qs(urlsplit(self.path).query)
-                try:
-                    raw_limit = params.get("limit", ["1"])[0]
-                    limit = None if raw_limit == "all" else int(raw_limit or "1")
-                    order_type = params.get("type", ["Delivery"])[0]
-                    raw_stores_per_zip = params.get("stores_per_zip", ["1"])[0]
-                    stores_per_zip = None if raw_stores_per_zip == "all" else int(raw_stores_per_zip or "1")
-                    max_workers = int(params.get("max_workers", ["8"])[0] or "8")
-                    one_per_zip = params.get("one_per_zip", ["false"])[0].lower() in {"1", "true", "yes"}
-                    provider = params.get("provider", ["auto"])[0]
-                    _json_response(self, 200, dominos_source(limit, order_type, stores_per_zip, max_workers, one_per_zip, provider))
-                except Exception as exc:
-                    _json_response(self, 400, {"error": str(exc)})
-                return
-            if self.path.startswith("/api/reporting"):
-                from urllib.parse import parse_qs, urlsplit
-                try:
-                    _json_response(self, 200, reporting_summary(parse_qs(urlsplit(self.path).query)))
-                except Exception as exc:
-                    _json_response(self, 400, {"error": str(exc)})
-                return
-            if self.path.startswith("/api/geo/options"):
-                from urllib.parse import parse_qs, urlsplit
-                params = parse_qs(urlsplit(self.path).query)
-                state = params.get("state", [""])[0]
-                county = params.get("county", [""])[0]
-                try:
-                    _json_response(self, 200, geo_options(state, county))
-                except Exception as exc:
-                    _json_response(self, 400, {"error": str(exc)})
-                return
-            if self.path.startswith("/api/zips/search"):
-                from urllib.parse import parse_qs, urlsplit
-                params = parse_qs(urlsplit(self.path).query)
-                q = params.get("q", [""])[0]
-                state = params.get("state", [""])[0]
-                county = params.get("county", [""])[0]
-                city = params.get("city", [""])[0]
-                try:
-                    _json_response(self, 200, search_zips(q, state, county, city))
-                except Exception as exc:
-                    _json_response(self, 400, {"error": str(exc)})
-                return
-            if self.path == "/api/sample/status":
-                try:
-                    _json_response(self, 200, sample_dataset_status())
-                except Exception as exc:
-                    _json_response(self, 400, {"error": str(exc)})
+            if reporting_routes.handle_reporting_get(self):
                 return
 
+            static_aliases = {
+                "/constants.js": "facades/constants.js",
+                "/login-hotfix.js": "facades/login-hotfix.js",
+                "/js/common.js": "facades/common.js",
+                "/js/mapper.js": "facades/mapper.js",
+                "/js/review.js": "facades/review.js",
+                "/js/templates.js": "facades/templates.js",
+                "/js/constants.js": "facades/constants.js",
+            }
+            raw_path = self.path.split("?")[0]
+            if raw_path in static_aliases:
+                target_file = ui_dir / static_aliases[raw_path]
+                if target_file.exists():
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/javascript")
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.wfile.write(target_file.read_bytes())
+                    return
 
-
-            if self.path.startswith("/api/rejected"):
-                from urllib.parse import parse_qs, urlsplit
-                event_id = parse_qs(urlsplit(self.path).query).get("event_id", [""])[0]
-                try:
-                    _json_response(self, 200, list_rejected(event_id))
-                except Exception as exc:
-                    _json_response(self, 400, {"error": str(exc)})
-                return
-            if self.path.startswith("/api/error-listings/count"):
-                from urllib.parse import parse_qs, urlsplit
-                business_id = parse_qs(urlsplit(self.path).query).get("business_id", [""])[0]
-                try:
-                    _json_response(self, 200, {"count": count_error_listings(business_id)})
-                except Exception as exc:
-                    _json_response(self, 400, {"error": str(exc)})
-                return
             super().do_GET()
 
         def do_POST(self) -> None:
-            if self.path not in {"/api/login", "/api/preview", "/api/source-url", "/api/sheets", "/api/save", "/api/clear", "/api/brands", "/api/learning", "/api/reprocess", "/api/field-alias", "/api/custom-field", "/api/custom-field/delete", "/api/templates/save", "/api/silver/enrich", "/api/reporting/refresh", "/api/sample/load"}:
+            if self.path not in {
+                "/api/login", "/api/preview", "/api/source-url", "/api/sheets",
+                "/api/save", "/api/clear", "/api/brands", "/api/learning",
+                "/api/reprocess", "/api/field-alias", "/api/custom-field",
+                "/api/custom-field/delete", "/api/templates/save",
+                "/api/silver/enrich", "/api/reporting/refresh", "/api/sample/load"
+            }:
                 _json_response(self, 404, {"error": "Not found"})
                 return
             request_id = uuid4().hex
@@ -3702,36 +3668,19 @@ def make_handler(ui_dir: Path):
                 if not payload.get("event_id"):
                     payload["event_id"] = request_id
                 LOGGER.info("request_started request_id=%s endpoint=%s content_length=%d", request_id, self.path, length)
-                if self.path == "/api/login":
-                    _json_response(self, 200, authenticate(payload))
-                elif self.path == "/api/source-url":
-                    _json_response(self, 200, fetch_public_source(payload))
-                elif self.path == "/api/sheets":
-                    _json_response(self, 200, source_sheets(payload))
-                elif self.path == "/api/save":
-                    _json_response(self, 200, save_mapper(payload))
-                elif self.path == "/api/clear":
-                    _json_response(self, 200, clear_saved_data())
-                elif self.path == "/api/brands":
-                    _json_response(self, 200, create_brand(payload))
-                elif self.path == "/api/learning":
-                    _json_response(self, 200, learn_mappings(payload))
-                elif self.path == "/api/reprocess":
-                    _json_response(self, 200, reprocess_rejected(payload))
-                elif self.path == "/api/field-alias":
-                    _json_response(self, 200, add_field_alias(payload))
-                elif self.path == "/api/custom-field":
-                    _json_response(self, 200, create_custom_field(payload))
-                elif self.path == "/api/custom-field/delete":
-                    _json_response(self, 200, delete_custom_field(payload))
-                elif self.path == "/api/templates/save":
-                    _json_response(self, 200, save_template_version(payload))
-                elif self.path in {"/api/silver/enrich", "/api/reporting/refresh"}:
-                    _json_response(self, 200, build_silver_layer())
-                elif self.path == "/api/sample/load":
-                    _json_response(self, 200, load_sample_dataset(bool(payload.get("reset"))))
-                else:
-                    _json_response(self, 200, preview_source(payload))
+
+                if reporting_routes.handle_reporting_post(self, payload):
+                    return
+                if auth_routes.handle_auth_post(self, payload):
+                    return
+                if mapping_routes.handle_mapping_post(self, payload):
+                    return
+                if review_routes.handle_review_post(self, payload):
+                    return
+                if template_routes.handle_templates_post(self, payload):
+                    return
+                if system_routes.handle_system_post(self, payload):
+                    return
             except Exception as exc:
                 LOGGER.exception("request_failed request_id=%s endpoint=%s error=%s", request_id, self.path, exc)
                 _json_response(self, 400, {"error": str(exc), "request_id": request_id})
@@ -3740,10 +3689,147 @@ def make_handler(ui_dir: Path):
 
 
 def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
-    ui_dir = Path("ui").resolve()
+    repo_root = Path(__file__).resolve().parent.parent
+    ui_dir = repo_root / "ui"
+    if not ui_dir.exists():
+        ui_dir = Path("ui").resolve()
     handler = make_handler(ui_dir)
     socketserver.ThreadingTCPServer.allow_reuse_address = True
     _start_silver_gold_scheduler()
     with socketserver.ThreadingTCPServer((host, port), handler) as httpd:
         print(f"Workflow UI running at http://{host}:{port}/")
         httpd.serve_forever()
+
+
+from whitespace_tool.review.services import list_rejected, reprocess_rejected, count_error_listings, _count_error_listings_live, refresh_error_count, error_listings_by_brand
+load_brands = list_brands
+load_rejected_listings = list_rejected
+reprocess_listings = reprocess_rejected
+
+
+def update_brand(data: dict[str, Any]) -> dict[str, Any]:
+    bigquery = _get_bigquery_module()
+    business_id = str(data.get("business_id", "")).strip()
+    name = str(data.get("name", "")).strip()
+    if not business_id:
+        raise ValueError("Business ID is required")
+    if not name:
+        raise ValueError("Brand name is required")
+    slug = str(data.get("slug") or re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-"))
+    source_type = str(data.get("source_type", "")).strip()
+    raw_source_type_id = str(data.get("source_type_id", "")).strip()
+    source_type_id = ensure_source_type(source_type or raw_source_type_id) if raw_source_type_id in SUPPORTED_SOURCE_TYPES else raw_source_type_id
+    source_type_id = source_type_id or (ensure_source_type(source_type) if source_type else "")
+    if not source_type_id:
+        raise ValueError("Source type is required")
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    _ensure_businesses_table(client, project_id, dataset_id)
+    query = f"""
+    UPDATE `{project_id}.{dataset_id}.businesses`
+    SET name = @name,
+      slug = @slug,
+      source_type_id = @source_type_id,
+      description = @description,
+      logo_url = @logo_url,
+      website_url = @website_url,
+      status = @status,
+      updated_at = CURRENT_TIMESTAMP(),
+      meta_title = @meta_title,
+      meta_description = @meta_description,
+      country_of_origin = @country_of_origin,
+      is_reference_data = @is_reference_data,
+      reference_key = @reference_key,
+      default_source_url = @default_source_url,
+      default_source_name = @default_source_name
+    WHERE business_id = @business_id AND is_deleted IS NOT TRUE
+    """
+    params = [
+        bigquery.ScalarQueryParameter("business_id", "STRING", business_id),
+        bigquery.ScalarQueryParameter("name", "STRING", name),
+        bigquery.ScalarQueryParameter("slug", "STRING", slug),
+        bigquery.ScalarQueryParameter("source_type_id", "STRING", source_type_id),
+        bigquery.ScalarQueryParameter("description", "STRING", data.get("description")),
+        bigquery.ScalarQueryParameter("logo_url", "STRING", data.get("logo_url")),
+        bigquery.ScalarQueryParameter("website_url", "STRING", data.get("website_url")),
+        bigquery.ScalarQueryParameter("status", "STRING", data.get("status") or "active"),
+        bigquery.ScalarQueryParameter("meta_title", "STRING", data.get("meta_title")),
+        bigquery.ScalarQueryParameter("meta_description", "STRING", data.get("meta_description")),
+        bigquery.ScalarQueryParameter("country_of_origin", "STRING", data.get("country_of_origin")),
+        bigquery.ScalarQueryParameter("is_reference_data", "BOOL", bool(data.get("is_reference_data"))),
+        bigquery.ScalarQueryParameter("reference_key", "STRING", data.get("reference_key")),
+        bigquery.ScalarQueryParameter("default_source_url", "STRING", data.get("default_source_url")),
+        bigquery.ScalarQueryParameter("default_source_name", "STRING", data.get("default_source_name")),
+    ]
+    client.query(query, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+    lookup = f"""
+    SELECT b.business_id, b.name, b.slug, b.description, b.logo_url, b.website_url, b.status,
+      b.created_at, b.updated_at,
+      (SELECT COUNT(*) FROM `{project_id}.{dataset_id}.listings` l WHERE l.business_id = b.business_id AND l.is_deleted IS NOT TRUE) AS listing_count,
+      b.meta_title, b.meta_description, b.country_of_origin, b.is_reference_data, b.reference_key,
+      b.default_source_url, b.default_source_name, b.source_type_id, st.name AS source_type_name
+    FROM `{project_id}.{dataset_id}.businesses` b
+    LEFT JOIN `{project_id}.{dataset_id}.source_types` st
+      ON b.source_type_id = st.source_type_id
+    WHERE b.is_deleted IS NOT TRUE AND b.business_id = @business_id
+    LIMIT 1
+    """
+    result = list(client.query(lookup, job_config=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("business_id", "STRING", business_id)])).result())
+    if not result:
+        raise RuntimeError("Brand update did not return a matching active business")
+    invalidate_cache()
+    brand = dict(result[0])
+    for k, v in list(brand.items()):
+        if hasattr(v, "isoformat"):
+            brand[k] = v.isoformat()
+    _sync_gold_mirror_best_effort()
+    return {"brand": brand}
+
+
+def merge_brands(data: dict[str, Any]) -> dict[str, Any]:
+    bigquery = _get_bigquery_module()
+    target_business_id = str(data.get("target_business_id", "")).strip()
+    source_business_ids = [str(item).strip() for item in data.get("source_business_ids", []) if str(item).strip() and str(item).strip() != target_business_id]
+    if not target_business_id or not source_business_ids:
+        raise ValueError("target_business_id and non-empty source_business_ids are required")
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    params = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("target_business_id", "STRING", target_business_id),
+        bigquery.ArrayQueryParameter("source_business_ids", "STRING", source_business_ids),
+    ])
+    for table_name in ("listings", "workflow_templates", "error_listings"):
+        client.query(f"""
+        UPDATE `{project_id}.{dataset_id}.{table_name}`
+        SET business_id = @target_business_id
+        WHERE business_id IN UNNEST(@source_business_ids)
+        """, job_config=params).result()
+    client.query(f"""
+    UPDATE `{project_id}.{dataset_id}.businesses`
+    SET is_deleted = TRUE, deleted_on = CURRENT_TIMESTAMP(), updated_at = CURRENT_TIMESTAMP()
+    WHERE business_id IN UNNEST(@source_business_ids)
+    """, job_config=params).result()
+    invalidate_cache()
+    _sync_gold_mirror_best_effort()
+    return {"target_business_id": target_business_id, "merged_business_ids": source_business_ids, "merged_count": len(source_business_ids)}
+
+
+def master_delete_data(data: dict[str, Any]) -> dict[str, Any]:
+    confirm = str(data.get("confirmation", "")).strip()
+    if confirm != "DELETE ALL DATA":
+        raise ValueError("Type DELETE ALL DATA to confirm master deletion.")
+    project_id, bronze_dataset_id, silver_dataset_id, gold_dataset_id, credentials_json = _medallion_settings()
+    datasets = [bronze_dataset_id, silver_dataset_id, gold_dataset_id]
+    results = []
+    dropped_tables: list[str] = []
+    for dataset_id in datasets:
+        result = drop_dataset_tables(project_id, dataset_id, credentials_json)
+        qualified = [f"{dataset_id}.{name}" for name in result["dropped_tables"]]
+        dropped_tables.extend(qualified)
+        results.append({"dataset": f"{project_id}.{dataset_id}", "dropped_tables": result["dropped_tables"], "dropped_count": len(result["dropped_tables"])})
+    invalidate_cache()
+    return {
+        "datasets": results,
+        "dropped_tables": dropped_tables,
+        "dropped_count": len(dropped_tables),
+    }

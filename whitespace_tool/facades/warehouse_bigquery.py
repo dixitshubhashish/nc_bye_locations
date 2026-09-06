@@ -1,0 +1,66 @@
+"""
+Backend Facade Module for BigQuery Warehouse Integration.
+
+Re-exports BigQuery warehouse functions, schemas, and helpers from `whitespace_tool.persistence.warehouse_bigquery`.
+"""
+
+from whitespace_tool.persistence.warehouse_bigquery import (
+    CONTENT_HASH_FIELDS,
+    LOGGER,
+    TABLE_CLUSTER_SPECS,
+    TABLE_PARTITION_SPECS,
+    TABLE_SCHEMAS,
+    _canonical_hash_payload,
+    _canonical_hash_payload_from_values,
+    _clear_dataset_tables_with_client,
+    _is_nullish,
+    _listing_row,
+    _pandas,
+    _scrub_config,
+    add_content_hash_column,
+    build_table_rows,
+    clear_dataset_tables,
+    content_hash,
+    dataframe_to_records,
+    hash_rows_by_table,
+    push_to_bigquery,
+    rows_to_dataframe,
+    rows_to_hashed_dataframe,
+    table_columns,
+    table_content_hash,
+    table_has_json_fields,
+    table_hash_columns,
+    write_bigquery_jsonl,
+    write_bigquery_schema,
+)
+
+__all__ = [
+    "CONTENT_HASH_FIELDS",
+    "LOGGER",
+    "TABLE_CLUSTER_SPECS",
+    "TABLE_PARTITION_SPECS",
+    "TABLE_SCHEMAS",
+    "_canonical_hash_payload",
+    "_canonical_hash_payload_from_values",
+    "_clear_dataset_tables_with_client",
+    "_is_nullish",
+    "_listing_row",
+    "_pandas",
+    "_scrub_config",
+    "add_content_hash_column",
+    "build_table_rows",
+    "clear_dataset_tables",
+    "content_hash",
+    "dataframe_to_records",
+    "hash_rows_by_table",
+    "push_to_bigquery",
+    "rows_to_dataframe",
+    "rows_to_hashed_dataframe",
+    "table_columns",
+    "table_content_hash",
+    "table_has_json_fields",
+    "table_hash_columns",
+    "write_bigquery_jsonl",
+    "write_bigquery_schema",
+]
+

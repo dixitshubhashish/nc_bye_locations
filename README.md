@@ -4,7 +4,143 @@ Python-only prototype for Birdeye's competitive whitespace assessment. It separa
 
 Known assumptions and gaps are tracked in `docs/assumptions_and_gaps.md`.
 
-## Run
+## Quick start: run the app locally (Windows & macOS)
+
+Requires **Python 3.10+**. Run every command from the repository root.
+
+### 1. Create a virtual environment and install dependencies
+
+**macOS / Linux (bash/zsh):**
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+**Windows (PowerShell):**
+
+```powershell
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+> If PowerShell blocks the activation script, allow it for the current user once:
+> `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`, then re-run
+> `.venv\Scripts\Activate.ps1`. Alternatively use `.venv\Scripts\activate.bat` in cmd.exe.
+
+Once the venv is activated, `python` refers to the venv interpreter on both
+operating systems, so the remaining commands are identical.
+
+### 2. Configure credentials (`.env`)
+
+The app reads storage settings from a local, git-ignored `.env` file (see the
+full variable list under [Configuration And Render Deployment](#configuration-and-render-deployment)).
+Copy the template and fill in your values:
+
+```bash
+cp .env.example .env          # macOS / Linux
+```
+
+```powershell
+Copy-Item .env.example .env   # Windows PowerShell
+```
+
+Set `BIGQUERY_PROJECT_ID` and provide credentials one of two ways:
+
+- **Service-account file:** `GOOGLE_APPLICATION_CREDENTIALS=config/connections/your-key.json`, or
+- **Inline JSON:** paste the full service-account key (as a single line) into
+  `GOOGLE_APPLICATION_CREDENTIALS_JSON={...}`.
+
+The Reporting tab needs a reachable BigQuery project to show data. Without
+credentials the UI still starts and the Reporting tab renders its layout, but
+data requests return a configuration error until `.env` is set.
+
+### 3. Launch the workflow UI (includes the Reporting tab)
+
+```bash
+python -m whitespace_tool workflow-ui
+```
+
+Open <http://127.0.0.1:8765/>, click **Go to Login**, sign in (default user
+`admin`; in dev mode any non-empty password works unless `WORKFLOW_LOGIN_PASSWORD`
+is set), then open the **Reporting** tab. Change the address with
+`--host 0.0.0.0 --port 8791` or the `PORT` environment variable.
+
+To stop the server, press `Ctrl+C`. To leave the virtual environment, run
+`deactivate`.
+
+## Running Unit Tests
+
+Run the complete suite of 123 unit tests across all 8 domain subpackages:
+
+```bash
+python -m unittest discover -s unit_tests
+```
+
+Or run tests for a specific domain subpackage:
+
+```bash
+python -m unittest unit_tests.common.test_storage_config
+python -m unittest unit_tests.persistence.test_warehouse_schema
+python -m unittest unit_tests.analytics.test_sample_data
+```
+
+## System Architecture & Modular Subpackages
+
+### Backend (`whitespace_tool`) Subpackages
+The backend is structured into clean, domain-driven subpackages following **SOLID principles** and the **Repository Pattern**:
+
+- **`whitespace_tool/common/`**: Core models (`LocationRecord`, `ZipDemographics`), field normalization, file I/O, field registry, and storage config.
+- **`whitespace_tool/persistence/`**: Repository layer encapsulating BigQuery warehouse access (`warehouse_bigquery.py`) and SQLite local caching (`sqlite_cache.py`).
+- **`whitespace_tool/analytics/`**: Haversine distance, spatial deduplication, data quality assertions, and mapping auto-learning.
+- **`whitespace_tool/auth/`**: User authentication services and `/api/login` controller routes.
+- **`whitespace_tool/mapping/`**: Field catalog repository, source preview generation, ingestion pipelines, and mapping routes.
+- **`whitespace_tool/review/`**: Error listing query repository, rejection reporting, and record reprocessing.
+- **`whitespace_tool/templates/`**: Built-in brand templates and workflow template catalog repository.
+- **`whitespace_tool/system/`**: Storage health probes, dataset resets, medallion ETL pipeline (Silver/Gold), and background scheduler.
+- **`whitespace_tool/reporting/`**: Analytical reporting metrics, market share calculations, and geographic filters.
+- **`whitespace_tool/source_adapters/`**: Modular file format adapters (CSV, Excel `.xlsx`/`.xls`, JSON/GeoJSON, XML, REST GET API, Python Editor).
+- **`whitespace_tool/sources/`**: External brand and public geography connectors (Demographics, Domino's, US ZIPs).
+- **`whitespace_tool/data_validation/`**: Shared source row and normalized location validation rules.
+- **`whitespace_tool/server/`**: Modular HTTP server subpackage (`handler.py`, `runner.py`, `dispatcher.py`) encapsulating `MapperHandler`, static asset routing, and API endpoint dispatchers.
+- **`whitespace_tool/facades/`**: Centralized backward-compatibility facade package re-exporting all domain modules and server entry points (`workflow_server.py`).
+
+### Frontend UI (`ui/`) Subpackages
+The frontend user interface is organized into corresponding domain subpackages containing their own HTML partials, CSS stylesheets, and JS script logic:
+
+- **`ui/index.html`**: Default Single-Page Application (SPA) HTML shell loading subpackage partials asynchronously.
+- **`ui/integrations.html`**: Forwarding redirect script to `index.html` for backward URL compatibility.
+- **`ui/common/`**: `common.html`, `header.html`, `footer.html`, `common.css`, `common.js`, `constants.js`, `loader.js` (shared layout, navigation, overlays, DOM helpers).
+- **`ui/auth/`**: `auth.html`, `auth.css`, `auth.js` (login modal, credential handling, session storage, `/api/login`).
+- **`ui/mapping/`**: `mapping.html`, `mapping.css`, `mapping.js` (source parsing, field mapping, custom fields, draft save/restore, editor dialog, `/api/save`, `/api/preview`, `/api/brands`).
+- **`ui/review/`**: `review.html`, `review.css`, `review.js` (rejected listings table, edit & retry record modal, `/api/rejected`, `/api/reprocess`).
+- **`ui/templates/`**: `templates.html`, `templates.css`, `templates.js` (predefined templates, brand filters, template catalog, `/api/templates`, `/api/templates/save`).
+- **`ui/system/`**: `system.html`, `system.css`, `system.js` (readiness ping, header status, dataset reset, `/api/ping`, `/api/prepare`, `/api/clear`).
+- **`ui/reporting/`**: `reporting.html`, `reporting.css`, `reporting.core.js`, `reporting.tabs.js`, `reporting.wiring.js` (whitespace analytics, market share dashboard, geographic filters).
+- **`ui/facades/`**: `constants.js`, `login-hotfix.js`, `common.js`, `mapper.js`, `review.js`, `templates.js` (centralized UI compatibility facade scripts).
+
+### Backward-Compatibility Facades (`whitespace_tool/facades/` & `ui/facades/`)
+To maintain zero breaking changes while enforcing complete subpackage decoupling:
+- **Backend Facades (`whitespace_tool/facades/`)**: Centralized subpackage re-exporting all 13 backend modules (`analysis`, `cli`, `config`, `data_quality`, `field_registry`, `io`, `learning`, `models`, `normalization`, `sample_data`, `sqlite_cache`, `storage_config`, `warehouse_bigquery`). All internal backend files import directly from canonical subpackages (`whitespace_tool.common`, `whitespace_tool.persistence`, etc.).
+- **Frontend Facades (`ui/facades/`)**: Centralized directory holding legacy polyfill scripts (`constants.js`, `login-hotfix.js`, `common.js`, `mapper.js`, `review.js`, `templates.js`) that inject or re-export subpackage components (`ui/common/`, `ui/auth/`, `ui/mapping/`, etc.).
+
+### Reporting Data Connection & BigQuery Analytics Views Target
+- **Responsible Connection File**: `whitespace_tool/workflow_server.py` (`reporting_summary()`, lines 2286–2370).
+- **Active Data Target**: Direct connection to **BigQuery Analytics Views** (`gold.vw_zip_brand_activity`, `gold.vw_reporting_locations`, `gold.vw_reporting_gap_base`).
+- **Preserved Fallback**: The local SQLite Gold Mirror (`location_cache.db`) check in `workflow_server.py` is preserved as a commented fallback option.
+- **Detailed Data Architecture**: Complete flow diagrams, dataset schemas, and pipeline specifications are documented in [DATAFLOW.md](DATAFLOW.md).
+
+Full architectural details, design rationale, and file-by-file inventories are documented in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) and [WALKTHROUGH.md](WALKTHROUGH.md).
+
+## Run (advanced CLI)
+
+The virtual-environment setup above applies to these commands too; activate the
+venv first, then use `python` (shown below as `.venv/bin/python` for an
+unactivated macOS/Linux shell — on Windows use `.venv\Scripts\python`).
 
 ```bash
 .venv/bin/python -m whitespace_tool analyze --config config/demo.json --output-dir outputs/demo

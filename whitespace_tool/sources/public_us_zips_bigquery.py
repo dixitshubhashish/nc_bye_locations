@@ -5,9 +5,9 @@ from pathlib import Path
 from google.cloud import bigquery
 from google.oauth2 import service_account
 
-from whitespace_tool.models import ZipDemographics
+from whitespace_tool.common.models import ZipDemographics
 from whitespace_tool.sources.demographics import _number
-from whitespace_tool.storage_config import load_storage_config
+from whitespace_tool.common.storage_config import load_storage_config
 
 
 DEFAULT_QUERY = """

@@ -1,0 +1,35 @@
+<!-- Common UI Header Module Partial (ui/common/header.html)                   -->
+<!-- ========================================================================= -->
+<!-- Provides the top navigation bar, application logo lockup, main view tabs  -->
+<!-- (Mappings, Review, Templates, Reporting), global header actions,          -->
+<!-- warehouse health readiness status indicator, and user logout button.      -->
+<!-- ========================================================================= -->
+
+<header>
+  <!-- Application Title & Brand Identity Lockup -->
+  <div class="app-title">
+    <div class="brand-lockup" aria-label="Birdeye brand reference">
+      <span class="brand-icon-crop">
+        <img class="brand-logo-image" data-logo-src="birdeyeLogoLightUrl" alt="Birdeye">
+      </span>
+    </div>
+    <h1>Location Intelligence</h1>
+  </div>
+
+  <!-- Primary Tab Navigation Bar -->
+  <nav class="top-tabs" aria-label="Primary navigation">
+    <button class="top-tab active" data-view="mapperView" type="button">Mappings</button>
+    <button class="top-tab" data-view="reviewView" type="button">Review Error Listings (<span id="reviewCount">0</span>)</button>
+    <button class="top-tab" data-view="templateLibraryView" type="button">Template Library</button>
+    <button class="top-tab" data-view="reportingView" type="button">Reporting</button>
+  </nav>
+
+  <!-- Global Action Controls & Readiness Status -->
+  <div class="header-actions">
+    <button class="secondary" id="resetMappingBtn" type="button">Reset Fields Mapping</button>
+    <button class="secondary" id="restartMappingBtn" type="button">Restart Mapping</button>
+    <button class="secondary" id="clearDataBtn" type="button">Clear Saved Data</button>
+    <div id="headerReadinessStatus" class="header-readiness">ZIPs not checked</div>
+    <button class="secondary" id="logoutBtn" type="button">Log out</button>
+  </div>
+</header>

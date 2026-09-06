@@ -1,0 +1,46 @@
+<!-- ========================================================================= -->
+<!-- Auth UI Subpackage Partial Template (ui/auth/auth.html)                    -->
+<!--                                                                           -->
+<!-- Provides the user authentication modal interface, including login input   -->
+<!-- fields, password visibility toggles, credential session persistence,     -->
+<!-- brand identity logo lockup, and login readiness status indicators.       -->
+<!-- ========================================================================= -->
+
+<!-- Login Screen Modal View Container -->
+<div id="loginScreen" class="login-screen">
+  <div class="login-box">
+    
+    <!-- Brand Identity Logo Lockup -->
+    <div class="brand-lockup login-brand" aria-label="Birdeye brand reference">
+      <span class="brand-icon-crop">
+        <img class="brand-logo-image" data-logo-src="birdeyeLogoDarkUrl" alt="Birdeye">
+      </span>
+    </div>
+
+    <!-- Product Title Header -->
+    <h1 id="productTitle">Location Intelligence</h1>
+
+    <!-- User Credential Input Fields -->
+    <label for="loginUser">Username</label>
+    <input id="loginUser" autocomplete="username" value="admin">
+
+    <label for="loginPassword">Password</label>
+    <input id="loginPassword" type="password" autocomplete="current-password">
+
+    <!-- Login Persistence Option -->
+    <label class="checkbox-row" for="rememberLogin">
+      <input id="rememberLogin" type="checkbox">
+      Remember login
+    </label>
+
+    <!-- Authentication Submission Action -->
+    <div class="button-row">
+      <button id="loginBtn" class="reference-login-button" type="button">Login</button>
+    </div>
+
+    <!-- Feedback & System Readiness Badges -->
+    <div id="loginStatus" class="status hidden"></div>
+    <div id="loginReadinessStatus" class="status hidden"></div>
+
+  </div>
+</div>

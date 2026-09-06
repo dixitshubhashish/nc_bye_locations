@@ -1,0 +1,54 @@
+/**
+ * ============================================================================
+ * Templates UI Subpackage Stylesheet (ui/templates/templates.css)
+ * 
+ * Provides layout and component styling for the workflow template library,
+ * search controls, business/source filter dropdowns, template cards grid, and
+ * advanced template version editor.
+ * ============================================================================
+ */
+
+/* ----------------------------------------------------------------------------
+ * 1. Template Library Layout & Search Inputs
+ * ------------------------------------------------------------------------- */
+.template-library {
+  padding: 24px;
+}
+
+.template-search {
+  display: flex;
+  gap: 8px;
+  max-width: 900px;
+  margin-bottom: 16px;
+}
+
+.template-search input {
+  flex: 1;
+  min-width: 180px;
+}
+
+.template-search select {
+  flex: 0 1 220px;
+  min-width: 140px;
+}
+
+/* ----------------------------------------------------------------------------
+ * 2. Advanced Template Version Editor
+ * ------------------------------------------------------------------------- */
+.advanced-template {
+  margin-top: 22px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.advanced-template summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.advanced-template textarea {
+  font-size: 18px;
+}

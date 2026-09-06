@@ -1,0 +1,73 @@
+"""Workflow Server Backward-Compatibility Facade Re-export Module.
+
+Re-exports core workflow server capabilities, handlers, and endpoints from
+``whitespace_tool.workflow_server`` and ``whitespace_tool.server``.
+"""
+from __future__ import annotations
+
+from whitespace_tool.workflow_server import (
+    authenticate,
+    clear_saved_data,
+    dominos_source,
+    fetch_public_source,
+    field_catalog,
+    geo_options,
+    load_brands,
+    load_rejected_listings,
+    load_sample_dataset,
+    make_handler,
+    mapper_targets,
+    medallion_status,
+    ping_storage_connection,
+    predefined_templates,
+    preview_source,
+    reporting_summary,
+    reprocess_listings,
+    run_medallion_pipeline,
+    sample_dataset_status,
+    save_brand,
+    save_mapper,
+    save_template,
+    search_zips,
+    serve,
+    dominos_source,
+    update_brand,
+    merge_brands,
+    master_delete_data,
+    error_listings_by_brand,
+)
+
+__all__ = [
+    "serve",
+    "make_handler",
+    "authenticate",
+    "preview_source",
+    "source_sheets",
+    "fetch_public_source",
+    "predefined_templates",
+    "mapper_targets",
+    "field_catalog",
+    "validate_mapper",
+    "save_mapper",
+    "load_brands",
+    "save_brand",
+    "save_template",
+    "load_rejected_listings",
+    "reprocess_listings",
+    "clear_saved_data",
+    "ping_storage_connection",
+    "test_storage_connection",
+    "medallion_status",
+    "run_medallion_pipeline",
+    "reporting_summary",
+    "geo_options",
+    "search_zips",
+    "sample_dataset_status",
+    "load_sample_dataset",
+    "dominos_source",
+    "update_brand",
+    "merge_brands",
+    "master_delete_data",
+    "error_listings_by_brand",
+]
+

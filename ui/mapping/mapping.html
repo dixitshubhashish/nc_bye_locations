@@ -1,0 +1,328 @@
+<!-- ========================================================================= -->
+<!-- Source Mapping UI Module Partial (ui/mapping/mapping.html)                 -->
+<!--                                                                           -->
+<!-- Provides the interactive source onboarding panel, brand selector, format  -->
+<!-- options (CSV, Excel, JSON, XML, GET API, Python Editor), field target     -->
+<!-- mapping grid, optional field picker, and data model preview tabs.         -->
+<!-- ========================================================================= -->
+
+<!-- Source Mapping Main View Container -->
+<div id="mapperView">
+  <!-- Progress Bar Overlay for Batch Ingestion Pipeline -->
+  <div id="saveProgress" class="progress-wrap hidden" aria-live="polite" aria-busy="false">
+    <div class="progress-label">
+      <span id="progressMessage">Preparing your records</span>
+      <span id="progressValue">0%</span>
+    </div>
+    <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
+  </div>
+
+  <main>
+    <!-- Left Sidebar: Source Configuration & Connector Controls -->
+    <aside>
+      <div class="panel">
+        <h2>Source Controls</h2>
+
+        <!-- Brand Inspection Controls -->
+        <div class="button-row" style="flex-wrap: wrap; gap: 6px;">
+          <button class="secondary" id="showExistingBrandsBtn" type="button">🏢 Show Existing Brands</button>
+          <button class="secondary" id="clearDemoDataBtn" type="button" style="color: var(--error); border-color: var(--error);">🗑️ Clear Demo Data</button>
+        </div>
+        <div id="existingBrandsDialog" style="display: none; border: 1px solid var(--line); background: #f8fafc; border-radius: 6px; padding: 10px; margin-top: 8px; font-size: 12px;"></div>
+
+        <!-- Source Format Selector -->
+        <label for="sourceType">Source format</label>
+        <select id="sourceType">
+          <option value="csv">CSV</option>
+          <option value="excel">Excel (.xlsx)</option>
+          <option value="json">JSON</option>
+          <option value="xml">XML</option>
+          <option value="api_get_json">GET API JSON</option>
+          <option value="python_editor">Python Editor</option>
+        </select>
+
+        <!-- Preset Radio Pill Selectors for Demo Sources -->
+        <div class="field-group csv-function-field hidden">
+          <label>CSV source</label>
+          <div class="python-function-options" role="radiogroup" aria-label="CSV source">
+            <label><input type="radio" name="csvFunction" value="new" checked> New</label>
+            <label><input type="radio" name="csvFunction" value="pizza_hut"> Pizza Hut USA</label>
+            <label><input type="radio" name="csvFunction" value="global_hotels"> Global Hotels</label>
+          </div>
+        </div>
+
+        <div class="field-group json-function-field hidden">
+          <label>JSON source</label>
+          <div class="python-function-options" role="radiogroup" aria-label="JSON source">
+            <label><input type="radio" name="jsonFunction" value="new" checked> New</label>
+            <label><input type="radio" name="jsonFunction" value="la_city"> LA City demo</label>
+          </div>
+        </div>
+
+        <div class="field-group api-function-field hidden">
+          <label>API source</label>
+          <div class="python-function-options" role="radiogroup" aria-label="API source">
+            <label><input type="radio" name="apiFunction" value="new" checked> New</label>
+            <label><input type="radio" name="apiFunction" value="little_caesars"> Little Caesars GET API</label>
+          </div>
+        </div>
+
+        <!-- File Upload / Remote URL Switcher -->
+        <div class="field-group file-field">
+          <label for="sourceInputMode">Source input</label>
+          <select id="sourceInputMode">
+            <option value="file">Upload file</option>
+            <option value="url">Public URL</option>
+          </select>
+          <label for="fileInput" class="file-upload-control">Upload source file</label>
+          <input id="fileInput" class="file-upload-control" type="file" accept=".csv,.xlsx,.xls,.json,.geojson,.xml,application/json,application/geo+json,text/csv,application/xml,text/xml">
+          <label for="sourceUrl" class="source-url-control hidden">Public source URL</label>
+          <input id="sourceUrl" class="source-url-control hidden" type="url" placeholder="https://example.com/locations.json">
+        </div>
+
+        <!-- Business Entity Selector -->
+        <label for="brandSelect">Business</label>
+        <select id="brandSelect" aria-label="Select business">
+          <option value="">Select an existing business</option>
+          <option class="create-new-option" value="__create_new__">+ Create New Business</option>
+        </select>
+        <div id="newBrandFields" class="field-group hidden">
+          <label for="newBrandName">Name</label><input id="newBrandName">
+          <label for="newBrandSourceType">Source format</label><select id="newBrandSourceType"></select>
+          <label for="newBrandSlug">Slug</label><input id="newBrandSlug">
+          <label for="newBrandDescription">Description</label><textarea id="newBrandDescription"></textarea>
+          <label for="newBrandLogo">Logo URL</label><input id="newBrandLogo" type="url">
+          <label for="newBrandWebsite">Website URL</label><input id="newBrandWebsite" type="url">
+          <label for="newBrandStatus">Status</label><select id="newBrandStatus"><option value="active">Active</option><option value="inactive">Inactive</option></select>
+          <label for="newBrandMetaTitle">Meta Title</label><input id="newBrandMetaTitle">
+          <label for="newBrandMetaDescription">Meta Description</label><textarea id="newBrandMetaDescription"></textarea>
+          <label for="newBrandOrigin">Country of Origin</label><input id="newBrandOrigin">
+          <button id="createBrandBtn" type="button">Save Brand</button>
+        </div>
+
+        <!-- Source Dataset Label -->
+        <label for="sourceName">Source name</label>
+        <input id="sourceName" placeholder="Example: Domino's locations">
+
+        <!-- Record Path Selector -->
+        <div class="field-group record-field">
+          <div class="label-row">
+            <label for="recordPath">Record path</label>
+            <span class="info-icon" tabindex="0" data-tooltip="Use when records sit inside a nested file or sheet.">i</span>
+          </div>
+          <input id="recordPath" placeholder="JSON: stores or data.locations; Excel: sheet1">
+          <label for="jsonRecordPath" class="json-record-path-field hidden">JSON record layer</label>
+          <select id="jsonRecordPath" class="json-record-path-field hidden">
+            <option value="">Automatically select the best record layer</option>
+          </select>
+        </div>
+
+        <!-- Excel Sheet Navigator -->
+        <div class="field-group excel-field">
+          <label for="sheetName">Excel sheet</label>
+          <select id="sheetName" disabled>
+            <option value="">Upload Excel to load sheets</option>
+          </select>
+        </div>
+
+        <!-- GET API Connector Options -->
+        <div class="field-group api-field">
+          <label for="apiUrl">GET API URL</label>
+          <input id="apiUrl" placeholder="https://example.com/stores.json">
+
+          <label>Query parameters</label>
+          <div id="queryParams"></div>
+          <button class="secondary" id="addQueryParamBtn" type="button">Add Param</button>
+
+          <label for="authType">Authentication</label>
+          <select id="authType">
+            <option value="none">None</option>
+            <option value="bearer">Bearer token</option>
+            <option value="basic">Basic username/password</option>
+            <option value="api_key_header">API key header</option>
+          </select>
+
+          <div class="field-group auth-field auth-bearer">
+            <label for="bearerToken">Bearer token</label>
+            <input id="bearerToken" type="password" placeholder="Token">
+          </div>
+
+          <div class="field-group auth-field auth-basic">
+            <label for="basicUser">Basic username</label>
+            <input id="basicUser" autocomplete="off" placeholder="Username">
+            <label for="basicPassword">Basic password</label>
+            <input id="basicPassword" type="password" autocomplete="off" placeholder="Password">
+          </div>
+
+          <div class="field-group auth-field auth-api-key">
+            <label for="apiKeyName">API key header name</label>
+            <input id="apiKeyName" placeholder="x-api-key">
+            <label for="apiKeyValue">API key value</label>
+            <input id="apiKeyValue" type="password" placeholder="Key">
+          </div>
+
+          <label>Custom headers</label>
+          <div id="customHeaders"></div>
+          <button class="secondary" id="addHeaderBtn" type="button">Add Header</button>
+        </div>
+
+        <!-- Python Code Connector Editor Panel -->
+        <div class="field-group python-connector-field hidden">
+          <label for="pythonConnectorCode">Python editor</label>
+          <div class="python-function-options" role="radiogroup" aria-label="Python function">
+            <label><input type="radio" name="pythonFunction" value="new" checked> New</label>
+            <label><input type="radio" name="pythonFunction" value="dominos"> Domino's Pizza</label>
+          </div>
+          <textarea id="pythonConnectorCode" class="hidden" spellcheck="false"># Assign your final records to `result`.
+from pyodide.http import pyfetch
+import json
+
+url = "https://raw.githubusercontent.com/dixitshubhashish/nc_bye_locations/main/little_caesars_locations.json"
+response = await pyfetch(url)
+
+if response.status == 200:
+    data = json.loads(await response.string())
+    result = data.get("locations", data)
+else:
+    result = []</textarea>
+          <div id="pythonConnectorEditor" class="connector-editor" aria-label="Python editor"></div>
+          <label for="pythonPackages">Python packages</label>
+          <input id="pythonPackages" placeholder="e.g. pandas, numpy, beautifulsoup4, requests">
+          <div class="mapping-note">Add packages separated by commas. Assign final records to <code>result</code>.</div>
+          <div class="button-row">
+            <button class="secondary" id="runPythonConnectorBtn" type="button">Run &amp; Parse</button>
+            <button class="secondary" id="expandPythonConnectorBtn" type="button">Open Full Editor</button>
+          </div>
+          <textarea id="pythonConnectorOutput" class="connector-output" readonly spellcheck="false" placeholder="Output appears here."></textarea>
+          <div id="pythonConnectorFeedback" class="action-feedback" role="status" aria-live="polite"></div>
+        </div>
+
+        <!-- Source Parsing Execution Actions -->
+        <div class="button-row">
+          <button id="parseBtn">Parse</button>
+          <button class="secondary" id="resetBtn">Reset</button>
+        </div>
+      </div>
+
+      <!-- Mapping Progress & Save Pipeline Controls -->
+      <div class="panel">
+        <div class="template-progress">
+          <span>Mapping Coverage</span>
+          <strong id="mappingPercentage" class="mapping-percentage low">0%</strong>
+        </div>
+        <div id="mappingCoverageDetail" class="mapping-note">Parse a source to measure mapped columns.</div>
+        <div class="button-row">
+          <span id="saveActionWrap" class="save-action-wrap" data-tooltip="Map at least 50% before saving.">
+            <button id="saveBtn" type="button" disabled>Save Template and Listing Data</button>
+          </span>
+        </div>
+        <details class="advanced-template">
+          <summary>View Template</summary>
+          <textarea id="mapperOutput" spellcheck="false"></textarea>
+          <div class="button-row">
+            <button class="secondary" id="copyBtn">Copy Template Data</button>
+          </div>
+          <div id="copyFeedback" class="action-feedback" role="status" aria-live="polite"></div>
+        </details>
+      </div>
+
+      <!-- JSON Viewer Quick Action Panel -->
+      <div class="panel json-viewer-panel">
+        <h2>JSON Viewer</h2>
+        <div class="mapping-note">Open a clean JSON viewer.</div>
+        <div class="button-row">
+          <a class="json-viewer-link" data-json-viewer-link target="_blank" rel="noopener noreferrer">Copy JSON &amp; Open Viewer</a>
+        </div>
+      </div>
+
+      <!-- Reporting Cache Refresh Action Panel -->
+      <div class="panel">
+        <h2>Reporting Data</h2>
+        <div class="mapping-note">Refresh saved records for reporting.</div>
+        <div class="button-row">
+          <button class="secondary" id="reportingDataRefreshBtn" type="button">Refresh Data</button>
+        </div>
+        <div id="reportingDataRefreshStatus" class="action-feedback" role="status" aria-live="polite"></div>
+      </div>
+    </aside>
+
+    <!-- Right Workspace Section: Target Mapping Grid & Data Previews -->
+    <section>
+      <div id="status" class="status">Choose a source and parse it to start mapping.</div>
+
+      <!-- Target Field Mapping Dropdowns Grid -->
+      <div class="panel">
+        <h2>Template Components</h2>
+        <div class="mapping-grid" id="mappingGrid"></div>
+      </div>
+
+      <!-- Optional & Custom Target Field Pickers -->
+      <div class="panel">
+        <h2>Optional Fields</h2>
+        <div class="mapping-note">Add fields available in this source. New fields appear at the end of the mapping list.</div>
+        <div class="optional-fields-layout">
+          <div class="optional-fields-column">
+            <label for="optionalFieldSelect">Available optional fields</label>
+            <div class="optional-picker">
+              <select id="optionalFieldSelect" aria-label="Optional field to add">
+                <option value="">Choose a field</option>
+              </select>
+              <button class="secondary" id="addOptionalFieldBtn" type="button">Add</button>
+            </div>
+          </div>
+          <div class="optional-fields-column alias-picker">
+            <label for="customFieldLabel">New custom field label</label>
+            <input id="customFieldLabel" placeholder="For example: Delivery Zone">
+            <input id="customFieldSlug" placeholder="camelCase slug without space (e.g. deliveryZone)">
+            <select id="customFieldType"><option value="string">Text</option><option value="float">Number</option><option value="integer">Whole number</option><option value="date">Date</option></select>
+            <input id="aliasPassword" type="password" placeholder="Admin password (use '54321')">
+            <button class="secondary" id="addCustomFieldBtn" type="button">Add Custom Field</button>
+            <div id="customFieldFeedback" class="action-feedback" role="status" aria-live="polite"></div>
+          </div>
+          <div class="optional-fields-column alias-picker">
+            <label for="dropCustomFieldSelect">Remove an existing custom field</label>
+            <select id="dropCustomFieldSelect"><option value="">Choose a custom field</option></select>
+            <input id="dropCustomFieldPassword" type="password" placeholder="Admin password (use '54321')">
+            <button class="secondary" id="dropCustomFieldBtn" type="button">Drop Custom Field</button>
+            <div id="dropCustomFieldFeedback" class="action-feedback" role="status" aria-live="polite"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Source & Data Model Preview Tabs -->
+      <div class="tabs">
+        <button class="tab active" data-tab="sourcePreview">Source Preview</button>
+        <button class="tab" data-tab="entityPreview">Data Model</button>
+      </div>
+
+      <div id="sourcePreview"></div>
+      <div id="entityPreview" class="hidden"></div>
+    </section>
+  </main>
+</div>
+
+<!-- Master Delete Authorization Modal Dialog -->
+<dialog id="masterDeleteCredentialsDialog" class="danger-dialog">
+  <h2>MASTER DATA DELETION</h2>
+  <p>This will drop every table and view across bronze, silver, and gold. Partitioned tables are removed through their base tables. Enter your local login credentials to continue.</p>
+  <label for="masterDeleteUser">Username</label>
+  <input id="masterDeleteUser" autocomplete="username" value="admin">
+  <label for="masterDeletePassword">Password</label>
+  <input id="masterDeletePassword" type="password" autocomplete="current-password">
+  <div class="button-row">
+    <button id="masterDeleteCredentialNextBtn" type="button">Continue</button>
+    <button class="secondary" id="cancelMasterDeleteCredentialsBtn" type="button">Cancel</button>
+  </div>
+</dialog>
+
+<!-- Master Delete Confirmation Modal Dialog -->
+<dialog id="masterDeleteConfirmDialog" class="danger-dialog">
+  <h2>FINAL CONFIRMATION</h2>
+  <p>Type DELETE ALL DATA to drop every table and view across all warehouse layers. This cannot be undone from this app.</p>
+  <input id="masterDeleteConfirmation" autocomplete="off" placeholder="DELETE ALL DATA">
+  <div class="button-row">
+    <button id="confirmMasterDeleteBtn" type="button">Delete Everything</button>
+    <button class="secondary" id="cancelMasterDeleteBtn" type="button">Cancel</button>
+  </div>
+</dialog>
+

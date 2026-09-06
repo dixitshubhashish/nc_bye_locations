@@ -1,0 +1,180 @@
+<!-- ========================================================================= -->
+<!-- Reporting Analytics UI Module Partial (ui/reporting/reporting.html)        -->
+<!--                                                                           -->
+<!-- Provides the competitive whitespace reporting dashboard, including hero   -->
+<!-- status bar, multi-select brand filters (primary & competitor),            -->
+<!-- geographic filters (state, county, city, ZIP), demographic bounds,       -->
+<!-- key metrics cards, interactive Leaflet map, distribution tables, head-    -->
+<!-- to-head comparison matrix, and market gap analysis tables.                 -->
+<!-- ========================================================================= -->
+
+<!-- Reporting Analytics View Container -->
+<section id="reportingView" class="reporting-view hidden">
+  <div class="report-shell">
+
+    <!-- Report Hero Header & Actions -->
+    <div class="report-hero">
+      <div>
+        <h1>Reporting</h1>
+        <p>Locations, markets, and gaps.</p>
+      </div>
+      <div class="report-hero-actions">
+        <div style="display: flex; gap: 8px; align-items: flex-start;">
+          <div class="sample-load-actions">
+            <button class="secondary" id="loadSampleDatasetBtn" type="button">Load Sample Dataset</button>
+            <button class="sample-load-link hidden" id="reloadSampleDatasetLink" type="button">Clear sample data and reload</button>
+          </div>
+          <button id="refreshReportBtn" type="button">Refresh Report</button>
+        </div>
+        <div id="reportStatus" class="report-status">Ready</div>
+      </div>
+    </div>
+
+    <!-- Analytical Search Filter Panel -->
+    <div class="report-filters" style="display: grid; gap: 12px;">
+      
+      <!-- Primary & Competitor Brand Selectors -->
+      <div class="report-filter-row primary">
+        <div class="report-filter-group">
+          <h2>Primary Brand</h2>
+          <select id="reportMainBrandSelect" style="width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px; font-weight: 600; background: var(--panel);">
+            <option value="">Select Primary Brand</option>
+          </select>
+        </div>
+        <div class="report-filter-group">
+          <h2>Competitor Brands (Multi)</h2>
+          <div id="competitorDropdownContainer" style="position: relative;">
+            <button id="competitorDropdownBtn" type="button" style="width: 100%; text-align: left; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px; background: var(--panel); display: flex; justify-content: space-between; align-items: center; cursor: pointer;">
+              <span id="competitorDropdownBtnText">Select Competitor Brands</span>
+              <span style="font-size: 10px; margin-left: 4px;">▼</span>
+            </button>
+            <div id="competitorDropdownMenu" style="display: none; position: absolute; top: 100%; left: 0; right: 0; z-index: 1000; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 20px rgba(0,0,0,0.15); max-height: 220px; overflow-y: auto; padding: 8px; margin-top: 4px;">
+              <div id="competitorBrandChecks" class="report-checks"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Geographic Boundaries Filter Row -->
+      <div class="report-filter-row geo">
+        <div class="report-filter-group">
+          <h2>State</h2>
+          <select id="reportStateFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px;">
+            <option value="">All States</option>
+          </select>
+        </div>
+        <div class="report-filter-group">
+          <h2>County</h2>
+          <select id="reportCountyFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px;">
+            <option value="">All Counties</option>
+          </select>
+        </div>
+        <div class="report-filter-group">
+          <h2>City</h2>
+          <select id="reportCityFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px;">
+            <option value="">All Cities</option>
+          </select>
+        </div>
+        <div class="report-filter-group">
+          <h2>ZIP</h2>
+          <input id="reportZipFilter" list="zipSuggestions" placeholder="Search 30k+ ZIPs..." style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px;">
+          <datalist id="zipSuggestions"></datalist>
+        </div>
+      </div>
+
+      <!-- Demographic Numeric Bounds Filter Row -->
+      <div class="report-filter-row demographics">
+        <div class="report-filter-group demographics">
+          <h2>Market Demographics</h2>
+          <div class="demographic-inputs">
+            <input id="reportMinPopFilter" type="number" placeholder="Min Population" style="padding: 7px; font-size: 10px;">
+            <input id="reportMinIncomeFilter" type="number" placeholder="Min Income" style="padding: 7px; font-size: 10px;">
+            <input id="reportMaxAgeFilter" type="number" placeholder="Max Median Age" style="padding: 7px; font-size: 10px;">
+          </div>
+        </div>
+      </div>
+
+      <!-- Filter Submission & Reset Controls -->
+      <div class="report-filter-actions" aria-label="Report filter actions">
+        <button id="applyReportFiltersBtn" type="button">Apply All Filters</button>
+        <button id="resetReportFiltersBtn" type="button" class="secondary">Reset All</button>
+      </div>
+    </div>
+
+    <!-- Analytical Results Container -->
+    <div id="reportContent" class="hidden" style="margin-top: 20px;">
+      
+      <!-- Market Metrics Summary Cards Grid -->
+      <div class="report-grid" style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px;">
+        <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportStates" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Total State</span></div>
+        <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportZips" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">ZIP Locations</span></div>
+        <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportBrands" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Brands</span></div>
+        <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportStores" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Stores</span></div>
+        <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportLocations" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Market Locations</span></div>
+        <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportBrandStates" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Brand States</span></div>
+        <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportCities" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Brand Cities</span></div>
+        <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportWhitespaceGaps" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Gap ZIPs</span></div>
+      </div>
+
+      <!-- Interactive Spatial Leaflet Map Container -->
+      <section class="report-section" style="margin-top: 0;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+          <h2>Location Map</h2>
+          <div style="font-size: 12px; color: var(--muted);">
+            <span style="display: inline-block; width: 10px; height: 10px; background: #16a34a; border-radius: 50%; margin-right: 4px;"></span>Primary Brand
+            <span style="display: inline-block; width: 10px; height: 10px; background: #dc2626; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Competitor Brands
+            <span style="display: inline-block; width: 10px; height: 10px; background: #f59e0b; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Gap ZIPs
+          </div>
+        </div>
+        <div id="reportingMapContainer" style="border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #e5e7eb; position: relative;">
+          <div id="reportingMap" style="height: 480px; width: 100%; z-index: 1;"></div>
+        </div>
+      </section>
+
+      <!-- Top States Summary Cards Section -->
+      <section class="report-section" style="margin-top: 24px;">
+        <h2>Top States</h2>
+        <div id="reportTopStateCards" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 16px;"></div>
+      </section>
+
+      <!-- State & City Geographic Distribution Section -->
+      <div class="report-columns" style="margin-top: 20px;">
+        <section class="report-section" style="margin-top: 0;">
+          <h2>State Distribution</h2>
+          <div id="reportTopStates"></div>
+        </section>
+
+        <section class="report-section" style="margin-top: 0;">
+          <h2>Top Cities</h2>
+          <div id="reportTopCities"></div>
+        </section>
+      </div>
+
+      <!-- Brand Head-to-Head Comparison Matrix Section -->
+      <section class="report-section">
+        <h2>Brand Head-to-Head Comparison</h2>
+        <div id="reportBrandsTable"></div>
+      </section>
+
+      <!-- Competitive Whitespace Market Gaps Table Section -->
+      <section class="report-section">
+        <h2>Market Gaps</h2>
+        <p style="margin: -4px 0 12px; color: var(--muted); font-size: 13px;">ZIP codes where competitors are present and the selected brand is not.</p>
+        <div id="reportGapsTable"></div>
+      </section>
+
+      <!-- Unmapped States & Territories Section -->
+      <section class="report-section">
+        <h2>States &amp; Territories Without Tracked Locations</h2>
+        <div id="reportEmptyStates" class="report-empty-states"></div>
+      </section>
+
+      <!-- Location Records Raw Sample Table Section -->
+      <section class="report-section">
+        <h2>Location Records Sample</h2>
+        <div id="reportSampleRecords"></div>
+      </section>
+
+    </div>
+  </div>
+</section>

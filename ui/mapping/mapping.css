@@ -1,0 +1,306 @@
+/**
+ * ============================================================================
+ * Source Mapping UI Subpackage Stylesheet (ui/mapping/mapping.css)
+ * 
+ * Provides layout and component styling for source onboarding, radio options,
+ * mapping coverage progress bar, field mapping grid, optional field pickers,
+ * save button tooltips, JSON viewer panel, and Python/Monaco editor dialog.
+ * ============================================================================
+ */
+
+/* ----------------------------------------------------------------------------
+ * 1. Target Field Mapping Grid & Form Controls
+ * ------------------------------------------------------------------------- */
+.mapping-grid {
+  display: grid;
+  grid-template-columns: minmax(160px, 220px) minmax(220px, 1fr) minmax(180px, 260px) 36px;
+  gap: 8px;
+  align-items: center;
+}
+
+.mapping-head {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  padding-bottom: 4px;
+}
+
+.required {
+  color: var(--error);
+  font-weight: 800;
+}
+
+select.auto-mapped {
+  border-color: #fca5a5;
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.mapping-note {
+  color: var(--muted);
+  font-size: 12px;
+  margin: -4px 0 12px;
+}
+
+/* ----------------------------------------------------------------------------
+ * 2. Optional & Custom Field Pickers
+ * ------------------------------------------------------------------------- */
+.optional-picker {
+  display: flex;
+  gap: 8px;
+  align-items: end;
+}
+
+.optional-picker select { flex: 1; }
+
+.optional-fields-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(300px, 1.2fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.optional-fields-column { min-width: 0; }
+
+.mapping-remove {
+  min-width: 30px;
+  padding: 5px 6px;
+  color: var(--error);
+  border-color: #e8bbbb;
+  justify-self: end;
+}
+
+.alias-picker {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.source-column-standard { display: block; color: var(--navy); }
+.source-column-name { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; font-weight: 500; }
+
+/* ----------------------------------------------------------------------------
+ * 3. Mapping Coverage Meter & Tooltip Wrapper
+ * ------------------------------------------------------------------------- */
+.template-progress {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.template-progress strong { color: var(--accent); font-size: 18px; }
+
+.mapping-percentage.low { color: #c43b54; }
+.mapping-percentage.medium { color: #b97816; }
+.mapping-percentage.high { color: #147d63; }
+
+#saveBtn:disabled { background: #aeb8c9; border-color: #aeb8c9; color: #eef2f7; cursor: not-allowed; }
+
+.save-action-wrap { position: relative; display: inline-flex; }
+.save-action-wrap::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 6;
+  width: 250px;
+  padding: 8px 10px;
+  border: 1px solid #b8c7dc;
+  border-radius: 5px;
+  background: var(--navy);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px);
+  transition: opacity 150ms ease, transform 150ms ease;
+}
+.save-action-wrap:hover::after, .save-action-wrap:focus-within::after { opacity: 1; transform: translateY(0); }
+
+/* ----------------------------------------------------------------------------
+ * 4. Monaco & Python Editor Connector Dialog Modal
+ * ------------------------------------------------------------------------- */
+.connector-editor {
+  height: 280px;
+  border: 1px solid #b9c9e0;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.python-function-options { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
+.python-function-options label { display: inline-flex; align-items: center; gap: 6px; width: auto; margin: 0; font-weight: 700; }
+.python-function-options input { width: auto; }
+
+.connector-output { min-height: 150px; margin-top: 8px; }
+
+main.connector-active { grid-template-columns: minmax(420px, 520px) minmax(0, 1fr); }
+.connector-editor-dialog { width: min(1200px, calc(100vw - 48px)); height: min(800px, calc(100vh - 48px)); border: 0; border-radius: 8px; padding: 0; }
+.connector-editor-dialog::backdrop { background: rgba(31, 41, 51, 0.48); }
+.connector-editor-dialog-content { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100%; padding: 20px; background: var(--panel); }
+.connector-editor-dialog-header { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding-bottom: 16px; }
+.connector-editor-dialog-title { margin: 0; font-size: 18px; }
+.connector-editor-dialog .connector-editor { height: 100%; }
+
+/* ----------------------------------------------------------------------------
+ * 5. Batch Ingestion Progress Bar
+ * ------------------------------------------------------------------------- */
+.progress-wrap {
+  position: sticky;
+  top: 72px;
+  z-index: 4;
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.96);
+}
+
+.progress-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: #e0e8f3;
+}
+
+.progress-fill {
+  width: 0;
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--cyan));
+  transition: width 180ms ease;
+}
+
+.progress-label {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.info-icon {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  background: #ffffff;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: help;
+}
+
+.info-icon:focus {
+  outline: 2px solid #9ccdc5;
+  outline-offset: 2px;
+}
+
+.info-icon:hover::after,
+.info-icon:focus::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 24px;
+  top: -8px;
+  width: 260px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--ink);
+  box-shadow: 0 10px 24px rgba(31, 41, 51, 0.12);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  z-index: 5;
+}
+
+.source-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 8px;
+  align-items: end;
+  margin-top: 8px;
+}
+
+.source-row button {
+  min-width: 40px;
+  padding: 9px 10px;
+}
+
+.source-row label {
+  margin-top: 0;
+}
+
+.entity-map {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(320px, 1.6fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.entity-column {
+  display: grid;
+  gap: 12px;
+}
+
+.entity-box {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.entity-title {
+  padding: 10px 12px;
+  background: #eef4fc;
+  color: var(--ink);
+  font-weight: 750;
+}
+
+.entity-subtitle {
+  padding: 8px 12px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.entity-fields {
+  padding: 8px 12px 12px;
+  display: grid;
+  gap: 6px;
+}
+
+.entity-field {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(120px, 1fr);
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid #e1e7f0;
+  border-radius: 5px;
+  font-size: 12px;
+}
+
+.entity-field-name { font-weight: 700; }
+.entity-field-source { color: var(--muted); overflow-wrap: anywhere; }
+.entity-field-source.mapped { color: var(--ok); }
+.entity-field-source.unmapped { color: #8a9298; font-style: italic; }
+
+.json-viewer-panel { overflow: hidden; }
+.json-viewer-link { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 9px 12px; border: 1px solid var(--accent); border-radius: 5px; background: var(--accent); color: var(--accent-ink); font-weight: 700; text-decoration: none; }
+.json-viewer-link:hover { background: #0759e8; border-color: #0759e8; }
+#sourcePreview, #entityPreview { max-width: 100%; overflow-x: auto; }
+#sourcePreview table, #entityPreview table { width: max-content; min-width: 100%; }
+
+@media (max-width: 900px) {
+  .entity-map { grid-template-columns: 1fr; }
+  .mapping-grid { grid-template-columns: 1fr; }
+  .mapping-head { display: none; }
+  .source-row { grid-template-columns: 1fr; }
+  .optional-fields-layout { grid-template-columns: 1fr; gap: 12px; }
+}

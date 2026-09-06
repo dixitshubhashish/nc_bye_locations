@@ -1,0 +1,23 @@
+<!-- ========================================================================= -->
+<!-- Template Library UI Module Partial (ui/templates/templates.html)           -->
+<!--                                                                           -->
+<!-- Provides the workflow template catalog dashboard, including template      -->
+<!-- search filter controls (text query, business filter, source type filter)  -->
+<!-- and saved template card grid.                                             -->
+<!-- ========================================================================= -->
+
+<!-- Template Library View Container -->
+<section id="templateLibraryView" class="template-library hidden">
+  <h2>Template Library</h2>
+
+  <!-- Template Search & Filter Controls -->
+  <div class="template-search">
+    <input id="templateSearch" placeholder="Search templates">
+    <select id="templateBusinessFilter" aria-label="Filter by business"><option value="">All businesses</option></select>
+    <select id="templateSourceFilter" aria-label="Filter by source type"><option value="">All source types</option></select>
+    <button id="templateSearchBtn" type="button">Search</button>
+  </div>
+
+  <!-- Template Query Results Container -->
+  <div id="templateResults" class="status">Search templates.</div>
+</section>

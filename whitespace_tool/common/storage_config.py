@@ -1,0 +1,116 @@
+"""Storage connection config loader and environment variable resolver.
+
+Parses environment variables and configuration files to build storage connection
+parameters for BigQuery bronze, silver, and gold datasets.
+"""
+from __future__ import annotations
+
+import json
+import os
+from ast import literal_eval
+from pathlib import Path
+from typing import Any
+
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent
+DEFAULT_STORAGE_CONFIG = ROOT_DIR / "config" / "connections" / "storage.json"
+ENV_FILE = ROOT_DIR / ".env"
+
+
+def load_dotenv(path: str | Path = ENV_FILE) -> None:
+    """Parse key=value pairs from a .env file into os.environ if not already set.
+
+    Args:
+        path: File path to the target .env file.
+    """
+    env_path = Path(path)
+    if not env_path.exists():
+        return
+    with env_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+def _credentials_json_path_from_env() -> str | None:
+    """Resolve Google BigQuery service account key path from environment variables.
+
+    Supports inline JSON credentials (writing to temporary file if provided) or
+    direct file path references.
+
+    Returns:
+        Absolute or relative filesystem path string to the service account credentials JSON.
+    """
+    inline_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON") or os.environ.get("BIGQUERY_CREDENTIALS_JSON")
+    if inline_json:
+        inline_json = inline_json.strip().strip('"').strip("'")
+        try:
+            parsed_credentials = json.loads(inline_json)
+        except json.JSONDecodeError as exc:
+            try:
+                parsed_credentials = literal_eval(inline_json)
+            except (SyntaxError, ValueError) as literal_exc:
+                raise ValueError(
+                    "GOOGLE_APPLICATION_CREDENTIALS_JSON must be a valid service account object. "
+                    "Paste the full service account JSON from the key file; it should start with { and include type, project_id, private_key, and client_email."
+                ) from literal_exc
+            if not isinstance(parsed_credentials, dict):
+                raise ValueError("GOOGLE_APPLICATION_CREDENTIALS_JSON must be a JSON object.") from exc
+        if not isinstance(parsed_credentials, dict):
+            raise ValueError("GOOGLE_APPLICATION_CREDENTIALS_JSON must be a JSON object.")
+        credentials_path = Path(os.environ.get("BIGQUERY_CREDENTIALS_PATH", "/tmp/birdeye-bigquery-service-account.json"))
+        credentials_path.parent.mkdir(parents=True, exist_ok=True)
+        credentials_path.write_text(json.dumps(parsed_credentials, separators=(",", ":")), encoding="utf-8")
+        return str(credentials_path)
+    return os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or os.environ.get("BIGQUERY_CREDENTIALS_FILE")
+
+
+def _config_from_env() -> dict[str, Any]:
+    """Extract BigQuery project ID, credentials, and medallion dataset configuration from environment.
+
+    Returns:
+        Dictionary mapping config keys to environment variable overrides.
+    """
+    return {
+        "project_id": os.environ.get("BIGQUERY_PROJECT_ID") or os.environ.get("GOOGLE_CLOUD_PROJECT"),
+        "credentials_json": _credentials_json_path_from_env(),
+        "bronze_dataset_id": os.environ.get("BIGQUERY_BRONZE_DATASET_ID") or os.environ.get("BRONZE_DATASET_ID"),
+        "silver_dataset_id": os.environ.get("BIGQUERY_SILVER_DATASET_ID") or os.environ.get("SILVER_DATASET_ID"),
+        "gold_dataset_id": os.environ.get("BIGQUERY_GOLD_DATASET_ID") or os.environ.get("GOLD_DATASET_ID"),
+    }
+
+
+def load_storage_config(path: str | Path = DEFAULT_STORAGE_CONFIG) -> dict[str, Any]:
+    """Load storage configuration by combining JSON file settings with environment variable overrides.
+
+    Args:
+        path: Path to the storage JSON configuration file.
+
+    Returns:
+        Merged configuration dictionary containing project_id, dataset IDs, and credentials path.
+    """
+    load_dotenv()
+    config_path = Path(path).resolve()
+    if config_path.exists():
+        with config_path.open("r", encoding="utf-8") as handle:
+            config = json.load(handle)
+    else:
+        config = {}
+    env_config = {key: value for key, value in _config_from_env().items() if value}
+    config = {**config, **env_config}
+    credentials_json = config.get("credentials_json")
+    if credentials_json and not Path(credentials_json).is_absolute():
+        rel_to_config = (config_path.parent / credentials_json).resolve()
+        rel_to_cwd = Path(credentials_json).resolve()
+        if rel_to_config.exists():
+            config["credentials_json"] = str(rel_to_config)
+        elif rel_to_cwd.exists():
+            config["credentials_json"] = str(rel_to_cwd)
+        else:
+            config["credentials_json"] = str(rel_to_config)
+    return config

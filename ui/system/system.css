@@ -1,0 +1,32 @@
+/**
+ * ============================================================================
+ * System UI Subpackage Stylesheet (ui/system/system.css)
+ * 
+ * Provides styling for system health probes, readiness indicators, storage
+ * connection test dialogs, and dataset reset confirmation alert banners.
+ * ============================================================================
+ */
+
+/* ----------------------------------------------------------------------------
+ * 1. System Administration View Layout
+ * ------------------------------------------------------------------------- */
+.system-view {
+  padding: 24px;
+}
+
+/* ----------------------------------------------------------------------------
+ * 2. Storage Health Probe Status Cards Grid
+ * ------------------------------------------------------------------------- */
+.system-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.system-status-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 14px;
+}
