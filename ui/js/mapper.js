@@ -954,7 +954,7 @@ async function loadFieldRegistry() {
           updateOptionalFieldPicker();
           updateDropCustomFieldPicker();
         }
-        if (result.warning) setStatus(result.warning, "warn");
+        if (result.warning && result.warning !== "Default field definitions were loaded.") setStatus(result.warning, "warn");
       } catch (error) {
         setStatus(productSafeError(error.message, "Could not load field definitions."), "error");
       }
@@ -1227,13 +1227,31 @@ function updateOptionalFieldPicker() {
 function updateDropCustomFieldPicker() {
       const picker = el("dropCustomFieldSelect");
       if (!picker) return;
-      const businessId = selectedBrand?.business_id || "";
+      const businessId = customFieldBusinessId("drop");
       const removable = mappingTargets.filter((target) => target.is_custom && target.business_id === businessId);
       picker.innerHTML = '<option value="">Choose a custom field</option>' + removable
         .map((target) => `<option value="${escapeHtml(target.key)}">${escapeHtml(target.label)}</option>`)
         .join("");
       const button = el("dropCustomFieldBtn");
       if (button) button.disabled = removable.length === 0;
+    }
+function customFieldBusinessId(mode = "add") {
+      const pickerId = mode === "drop" ? "dropCustomFieldBusinessSelect" : "customFieldBusinessSelect";
+      return el(pickerId)?.value || selectedBrand?.business_id || "";
+    }
+function syncCustomFieldBusinessPickers() {
+      const brands = JSON.parse(el("brandSelect")?.dataset.brands || "[]");
+      const options = '<option value="">Select business</option>' + brands
+        .map((brand) => `<option value="${escapeHtml(brand.business_id)}">${escapeHtml(brand.name)}</option>`)
+        .join("");
+      ["customFieldBusinessSelect", "dropCustomFieldBusinessSelect"].forEach((id) => {
+        const picker = el(id);
+        if (!picker) return;
+        const previous = picker.value;
+        picker.innerHTML = options;
+        picker.value = previous || selectedBrand?.business_id || "";
+      });
+      updateDropCustomFieldPicker();
     }
 async function dropCustomField() {
       const fieldKey = el("dropCustomFieldSelect").value;
@@ -1248,7 +1266,7 @@ async function dropCustomField() {
           body: JSON.stringify({
             field_key: fieldKey,
             password: el("dropCustomFieldPassword").value,
-            business_id: selectedBrand?.business_id || ""
+            business_id: customFieldBusinessId("drop")
           })
         });
         const result = await response.json();
@@ -1350,6 +1368,7 @@ async function loadBrands(search = "") {
         el("brandSelect").innerHTML = '<option value="">Select an existing business</option><option class="create-new-option" value="__create_new__">+ Create New Business</option>' + brands.map((brand) => `<option value="${escapeHtml(brand.business_id)}">${escapeHtml(brand.name)}</option>`).join("");
         el("brandSelect").dataset.brands = JSON.stringify(brands);
         if (selectedBrand) el("brandSelect").value = selectedBrand.business_id;
+        syncCustomFieldBusinessPickers();
       } catch (error) {
         setStatus(productSafeError(error.message, "Could not load businesses."), "error");
       }
@@ -2036,7 +2055,7 @@ async function addCustomField() {
       }
       try {
         const response = await fetch("/api/custom-field", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
-          label, slug: el("customFieldSlug").value.trim(), type: el("customFieldType").value, password: el("aliasPassword").value, business_id: selectedBrand?.business_id || ""
+          label, slug: el("customFieldSlug").value.trim(), type: el("customFieldType").value, password: el("aliasPassword").value, business_id: customFieldBusinessId("add")
         }) });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not save custom field.");

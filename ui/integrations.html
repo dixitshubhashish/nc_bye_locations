@@ -1628,6 +1628,7 @@ else:
           </div>
           <div class="optional-fields-column alias-picker">
             <label for="customFieldLabel">Create Custom Field</label>
+            <select id="customFieldBusinessSelect" aria-label="Business for custom field"><option value="">Select business</option></select>
             <input id="customFieldLabel" placeholder="For example: Delivery Zone">
             <input id="customFieldSlug" placeholder="camelCase slug without space (e.g. deliveryZone)">
             <select id="customFieldType"><option value="string">Text</option><option value="float">Number</option><option value="integer">Whole number</option><option value="date">Date</option></select>
@@ -1637,6 +1638,7 @@ else:
           </div>
           <div class="optional-fields-column alias-picker">
             <label for="dropCustomFieldSelect">Remove Custom Field</label>
+            <select id="dropCustomFieldBusinessSelect" aria-label="Business for custom field removal"><option value="">Select business</option></select>
             <select id="dropCustomFieldSelect"><option value="">Choose a custom field</option></select>
             <input id="dropCustomFieldPassword" type="password" placeholder="Admin password (use '54321')">
             <button class="secondary danger-action" id="dropCustomFieldBtn" type="button">Drop Custom Field</button>
@@ -1960,6 +1962,7 @@ else:
             el("templateBusinessFilter").value = "";
             el("templateSourceFilter").value = "";
             el("newBrandFields").classList.remove("hidden");
+            syncCustomFieldBusinessPickers();
             updateOutput();
             updateDropCustomFieldPicker();
             return;
@@ -1975,9 +1978,12 @@ else:
           }
           refreshReviewCount();
           refreshTemplatesForBusiness();
+          syncCustomFieldBusinessPickers();
           updateOutput();
           updateDropCustomFieldPicker();
         });
+    el("customFieldBusinessSelect").addEventListener("change", updateDropCustomFieldPicker);
+    el("dropCustomFieldBusinessSelect").addEventListener("change", updateDropCustomFieldPicker);
     el("createBrandBtn").addEventListener("click", () => createNewBrand());
     el("presetBrandCreateBtn").addEventListener("click", () => createOrUsePresetBrand());
     el("presetBrandEditBtn").addEventListener("click", () => {
