@@ -74,10 +74,29 @@ function renderBrandChecks(containerId, name, brands, checkedBrands, emptyMessag
       el(containerId).innerHTML = brands.length
         ? brands.map((brand) => `<label><input type="checkbox" name="${name}" value="${escapeHtml(brand)}" ${selected.has(brand) ? "checked" : ""}>${escapeHtml(brand)}</label>`).join("")
         : `<div class="report-status">${escapeHtml(emptyMessage)}</div>`;
-      el(containerId).querySelectorAll("input").forEach((input) => input.addEventListener("change", () => {
-        reportLoaded = false;
-        loadReporting();
-      }));
+    }
+function renderBrandChecksWithSelectAll(containerId, name, brands, checkedBrands, emptyMessage = "No brands available.") {
+      const selected = new Set(checkedBrands || []);
+      if (brands.length === 0) {
+        el(containerId).innerHTML = `<div class="report-status">${escapeHtml(emptyMessage)}</div>`;
+        return;
+      }
+      const allChecked = brands.length > 0 && brands.every(b => selected.has(b));
+      const someChecked = brands.some(b => selected.has(b));
+      let html = `<label style="font-weight: 600; margin-bottom: 8px; display: block; border-bottom: 1px solid var(--line); padding-bottom: 8px;">
+        <input type="checkbox" name="${name}_selectAll" ${allChecked ? "checked" : ""} ${someChecked && !allChecked ? "indeterminate" : ""}>
+        Select All / Deselect All
+      </label>`;
+      html += brands.map((brand) => `<label><input type="checkbox" name="${name}" value="${escapeHtml(brand)}" ${selected.has(brand) ? "checked" : ""}>${escapeHtml(brand)}</label>`).join("");
+      el(containerId).innerHTML = html;
+      const selectAllCheckbox = el(containerId).querySelector(`input[name="${name}_selectAll"]`);
+      if (selectAllCheckbox) {
+        selectAllCheckbox.addEventListener("change", (e) => {
+          el(containerId).querySelectorAll(`input[name="${name}"]`).forEach((input) => {
+            input.checked = e.target.checked;
+          });
+        });
+      }
     }
 let reportingMap = null;
 let mapMarkerLayerGroup = null;
@@ -378,7 +397,11 @@ function updateCompetitorOptions() {
       // genuinely has no other brands" - the old fixed "No brands available."
       // read like a data problem even when it just meant pick one first.
       const emptyMessage = selectedMain ? "No other brands available." : "Select a primary brand first.";
-      renderBrandChecks("competitorBrandChecks", "competitorBrand", competitorChoices, defaultCompetitors, emptyMessage);
+      renderBrandChecksWithSelectAll("competitorBrandChecks", "competitorBrand", competitorChoices, defaultCompetitors, emptyMessage);
+      const checkboxes = document.querySelectorAll("input[name='competitorBrand']");
+      checkboxes.forEach((checkbox) => {
+        checkbox.addEventListener("change", updateCompetitorDropdownText);
+      });
       updateCompetitorDropdownText();
     }
 function updateCompetitorDropdownText() {
@@ -400,8 +423,6 @@ function setupBrandDropdownListeners() {
       if (mainSel) {
         mainSel.addEventListener("change", () => {
           updateCompetitorOptions();
-          reportLoaded = false;
-          loadReporting();
         });
       }
       const dropdownBtn = el("competitorDropdownBtn");
