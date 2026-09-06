@@ -861,6 +861,14 @@ def list_brands(search: str = "") -> dict[str, Any]:
     config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("search", "STRING", search)])
     brands = [dict(row) for row in client.query(query, job_config=config).result()]
     for brand in brands:
+        # BigQuery TIMESTAMP columns (created_at, updated_at) come back as
+        # datetime objects, which json.dumps can't serialize - both the
+        # HTTP response and set_cached_query() below would raise
+        # "Object of type datetime is not JSON serializable". Normalize any
+        # datetime-like value to an ISO string, matching list_templates().
+        for key, value in list(brand.items()):
+            if hasattr(value, "isoformat"):
+                brand[key] = value.isoformat()
         brand["display_business_id"] = _display_business_id(brand)
     res = {"brands": brands}
     set_cached_query(cache_key, res)
