@@ -808,19 +808,13 @@ def list_brands(search: str = "") -> dict[str, Any]:
             brand.setdefault("display_business_id", _display_business_id(brand))
         return cached
 
-    mirror_status = get_mirror_status()
-    if mirror_status and mirror_status.get("business_rows", 0) > 0:
-        search_term = search.strip().lower()
-        brands = [
-            brand for brand in fetch_mirror_businesses()
-            if not search_term or search_term in str(brand.get("name", "")).lower()
-        ][:100]
-        for brand in brands:
-            brand["display_business_id"] = brand.get("display_business_id") or _display_business_id(brand)
-        res = {"brands": brands}
-        set_cached_query(cache_key, res)
-        return res
-
+    # NOTE: brand listing reads BigQuery businesses directly (the
+    # authoritative store), NOT the SQLite gold mirror. The mirror only
+    # refreshes on a gold rebuild, so serving brands from it made a
+    # freshly-created business invisible in the mapper's dropdown until the
+    # next rebuild - breaking the create-business-then-map flow. The
+    # query_cache above still gives the fast repeat-read; a brand mutation
+    # invalidates it, so the next list is fresh from BigQuery.
     from google.cloud import bigquery
 
     project_id, dataset_id, credentials_json = _warehouse_settings()
@@ -1123,10 +1117,20 @@ def merge_brands(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _sync_gold_mirror_best_effort() -> None:
-    try:
-        sync_gold_mirror()
-    except Exception as exc:
-        LOGGER.warning("gold_mirror_business_sync_failed error=%s", exc)
+    """Refresh the reporting mirror after a brand mutation, OFF the request's
+    critical path. sync_gold_mirror() runs three heavy BigQuery view scans
+    (all zip-brand rows, all locations, all businesses); doing that inline on
+    every brand create/update/merge made those calls take seconds and could
+    hang the UI. The brand write itself has already landed in BigQuery and the
+    list_brands cache is invalidated, so the dropdown is correct immediately;
+    the mirror (used only by reporting) just catches up a moment later."""
+    def _run() -> None:
+        try:
+            sync_gold_mirror()
+        except Exception as exc:
+            LOGGER.warning("gold_mirror_business_sync_failed error=%s", exc)
+
+    threading.Thread(target=_run, name="brand-mirror-sync", daemon=True).start()
 
 
 def learn_mappings(data: dict[str, Any]) -> dict[str, Any]:
