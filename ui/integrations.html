@@ -1887,12 +1887,12 @@ else:
       </div>
       <div id="reviewBrandBreakdown" class="review-brand-breakdown" style="display: none; margin: 8px 0 18px; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; background: #fff;">
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px;">
-          <strong style="font-size: 13px; color: var(--ink);">Error listings by brand</strong>
+          <strong style="font-size: 13px; color: var(--ink);">Error Distribution by Brand</strong>
           <span id="reviewBrandBreakdownTotal" style="font-size: 12px; color: var(--muted);"></span>
         </div>
-        <div style="display: flex; flex-wrap: wrap; gap: 20px; align-items: center;">
-          <div id="reviewBrandChart" style="flex: 0 0 auto;"></div>
-          <div id="reviewBrandTable" style="flex: 1 1 260px; min-width: 240px; overflow-x: auto;"></div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; max-width: 900px;">
+          <div id="reviewBrandChart" style="display: flex; justify-content: center; min-height: 200px;"></div>
+          <div id="reviewBrandTable" style="overflow-x: auto; min-height: 200px;"></div>
         </div>
       </div>
       <div id="reviewResults" class="status">Search review records.</div>

@@ -202,7 +202,14 @@ async function openEditRecordModal(record) {
         }).join('');
 
       const formEl = el("editRecordForm");
-      formEl.innerHTML = requiredFieldHtml + Object.entries(rawObj).filter(([key]) => !renderedPaths.has(key)).map(([key, val]) => {
+      formEl.innerHTML = requiredFieldHtml + Object.entries(rawObj).filter(([key]) => {
+        if (renderedPaths.has(key)) return false;
+        const isLat = key.toLowerCase().includes("lat");
+        const isLon = key.toLowerCase().includes("lon") || key.toLowerCase().includes("lng");
+        const isZip = key.toLowerCase().includes("zip") || key.toLowerCase().includes("postal");
+        if ((isLat && renderedPaths.has("latitude")) || (isLon && renderedPaths.has("longitude")) || (isZip && renderedPaths.has("postal_code"))) return false;
+        return true;
+      }).map(([key, val]) => {
         const isLat = key.toLowerCase().includes("lat");
         const isLon = key.toLowerCase().includes("lon") || key.toLowerCase().includes("lng");
         const isZip = key.toLowerCase().includes("zip") || key.toLowerCase().includes("postal");
@@ -291,6 +298,7 @@ async function openEditRecordModal(record) {
         });
       });
 
+      el("editRecordForm").scrollTop = 0;
       el("editRecordDialog").showModal();
     }
 el("closeEditRecordBtn")?.addEventListener("click", () => el("editRecordDialog").close());
@@ -484,8 +492,8 @@ async function refreshReviewCount(refresh = false) {
 // slice-to-slice so the table swatch and the arc always agree.
 const ERROR_BRAND_COLORS = ["#2f6f6a", "#c26a3d", "#4c6ef5", "#b5559e", "#3c9a5f", "#c0392b", "#8a6d3b", "#6741d9", "#128fb0", "#9c6b1f"];
 
-function _donutSvg(slices, total, size = 132) {
-      // slices: [{value, color}]. Renders an SVG donut; a single 100% slice
+function _donutSvg(slices, total, size = 180) {
+      // slices: [{value, color, label}]. Renders an SVG donut; a single 100% slice
       // is drawn as a full ring (an arc path can't express a 360 deg sweep).
       const radius = size / 2;
       const inner = radius * 0.58;
@@ -494,8 +502,11 @@ function _donutSvg(slices, total, size = 132) {
       if (!total) return "";
       const nonZero = slices.filter((s) => s.value > 0);
       if (nonZero.length === 1) {
+        const pct = Math.round(nonZero[0].value / total * 100);
         return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" role="img" aria-label="One brand accounts for all error listings">
-          <circle cx="${cx}" cy="${cy}" r="${(radius + inner) / 2}" fill="none" stroke="${nonZero[0].color}" stroke-width="${radius - inner}"></circle>
+          <circle cx="${cx}" cy="${cy}" r="${(radius + inner) / 2}" fill="none" stroke="${nonZero[0].color}" stroke-width="${radius - inner}">
+            <title>${escapeHtml(nonZero[0].label || 'Brand')}\n${nonZero[0].value} records\n${pct}% of errors</title>
+          </circle>
           <text x="${cx}" y="${cy - 2}" text-anchor="middle" font-size="18" font-weight="700" fill="#1f2937">${total}</text>
           <text x="${cx}" y="${cy + 14}" text-anchor="middle" font-size="9" fill="#6b7280">total</text>
         </svg>`;
@@ -512,7 +523,8 @@ function _donutSvg(slices, total, size = 132) {
         const x1 = cx + radius * Math.cos(a1), y1 = cy + radius * Math.sin(a1);
         const xi1 = cx + inner * Math.cos(a1), yi1 = cy + inner * Math.sin(a1);
         const xi0 = cx + inner * Math.cos(a0), yi0 = cy + inner * Math.sin(a0);
-        return `<path d="M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${radius} ${radius} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)} L ${xi1.toFixed(2)} ${yi1.toFixed(2)} A ${inner} ${inner} 0 ${large} 0 ${xi0.toFixed(2)} ${yi0.toFixed(2)} Z" fill="${slice.color}"></path>`;
+        const pct = Math.round(slice.value / total * 100);
+        return `<path d="M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${radius} ${radius} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)} L ${xi1.toFixed(2)} ${yi1.toFixed(2)} A ${inner} ${inner} 0 ${large} 0 ${xi0.toFixed(2)} ${yi0.toFixed(2)} Z" fill="${slice.color}"><title>${escapeHtml(slice.label || 'Brand')}\n${slice.value} records\n${pct}% of errors</title></path>`;
       }).join("");
       return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" role="img" aria-label="Error listings by brand">
         ${arcs}
@@ -535,7 +547,7 @@ async function loadErrorBrandBreakdown() {
           return;
         }
         const withColor = brands.map((b, i) => ({ ...b, color: ERROR_BRAND_COLORS[i % ERROR_BRAND_COLORS.length] }));
-        el("reviewBrandChart").innerHTML = _donutSvg(withColor.map((b) => ({ value: b.count, color: b.color })), total);
+        el("reviewBrandChart").innerHTML = _donutSvg(withColor.map((b) => ({ value: b.count, color: b.color, label: b.brand || b.business_id })), total);
         el("reviewBrandBreakdownTotal").textContent = `${total} across ${brands.length} brand${brands.length === 1 ? "" : "s"}`;
         el("reviewBrandTable").innerHTML = `<table style="width:100%; border-collapse: collapse; font-size: 12px;"><thead><tr>
             <th style="text-align:left; padding:4px 8px; border-bottom:1px solid var(--line);">Brand</th>
