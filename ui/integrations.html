@@ -239,6 +239,54 @@
       border: 2px solid #ffffff;
       box-shadow: 0 2px 7px rgba(15, 23, 42, 0.28);
     }
+    .preset-brand-panel {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .preset-brand-panel.hidden { display: none; }
+    .preset-brand-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex: 1;
+    }
+    .preset-brand-summary strong { display: none; }
+    .preset-brand-summary button {
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      text-decoration: underline;
+      white-space: nowrap;
+    }
+    .preset-brand-summary button:hover { color: #005fd3; background: transparent; }
+    .preset-brand-details.hidden { display: none; }
+    .source-url-edit {
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      text-decoration: underline;
+      cursor: pointer;
+    }
+    input.demo-url[readonly] {
+      color: #64748b;
+      background: #f1f5f9;
+      cursor: default;
+    }
     .report-checks { display: grid; gap: 6px; max-height: 150px; overflow: auto; }
     .report-checks label { display: flex; gap: 7px; align-items: center; color: var(--ink); font-weight: 650; }
     .report-checks input { width: auto; }
@@ -1248,6 +1296,13 @@
             <label><input type="radio" name="csvFunction" value="global_hotels"> Global Hotels</label>
           </div>
         </div>
+        <div class="field-group excel-function-field hidden">
+          <label>Excel source</label>
+          <div class="python-function-options" role="radiogroup" aria-label="Excel source">
+            <label><input type="radio" name="excelFunction" value="new" checked> New</label>
+            <label><input type="radio" name="excelFunction" value="demo_restaurant"> Demo Restaurant</label>
+          </div>
+        </div>
         <div class="field-group json-function-field hidden">
           <label>JSON source</label>
           <div class="python-function-options" role="radiogroup" aria-label="JSON source">
@@ -1273,13 +1328,24 @@
         <input id="fileInput" class="file-upload-control" type="file" accept=".csv,.xlsx,.xls,.json,.geojson,.xml,application/json,application/geo+json,text/csv,application/xml,text/xml">
         <label for="sourceUrl" class="source-url-control hidden">Public source URL</label>
         <input id="sourceUrl" class="source-url-control hidden" type="url" placeholder="https://example.com/locations.json">
+        <button id="sourceUrlEditBtn" class="source-url-control source-url-edit hidden" type="button">Edit URL</button>
         </div>
 
-        <label for="brandSelect">Business</label>
+        <label id="brandSelectLabel" for="brandSelect">Business</label>
         <select id="brandSelect" aria-label="Select business">
           <option value="">Select an existing business</option>
           <option class="create-new-option" value="__create_new__">+ Create New Business</option>
         </select>
+        <div id="presetBrandPanel" class="preset-brand-panel hidden">
+          <div class="preset-brand-summary">
+            <strong id="presetBrandTitle">Preset brand</strong>
+            <span id="presetBrandStatus">Preset business selected.</span>
+            <div class="button-row" style="gap: 6px;">
+              <button id="presetBrandCreateBtn" type="button">Use Brand</button>
+              <button id="presetBrandEditBtn" class="secondary" type="button">Edit Brand Details</button>
+            </div>
+          </div>
+        </div>
         <div id="newBrandFields" class="field-group hidden">
           <label for="newBrandName">Name</label><input id="newBrandName">
           <label for="newBrandSourceType">Source format</label><select id="newBrandSourceType"></select>
@@ -1791,8 +1857,28 @@ else:
           updateDropCustomFieldPicker();
         });
     el("createBrandBtn").addEventListener("click", () => createNewBrand());
+    el("presetBrandCreateBtn").addEventListener("click", () => createOrUsePresetBrand());
+    el("presetBrandEditBtn").addEventListener("click", () => {
+          presetBrandEditMode = !presetBrandEditMode;
+          el("newBrandFields").classList.toggle("hidden", !presetBrandEditMode);
+          if (presetBrandEditMode) {
+            fillBrandFields(selectedBrand || {}, activeCsvPresetConfig?.brand || {});
+            setNewBusinessSourceType(el("sourceType").value);
+          }
+          updatePresetBrandPanel(activeCsvPresetConfig?.brand || selectedBrand, Boolean(selectedBrand));
+        });
+    el("sourceUrlEditBtn").addEventListener("click", () => {
+          setSourceUrlLocked(false);
+          el("sourceUrl").focus();
+          setStatus("Preset URL is editable for this run.", "warn");
+        });
     el("newBrandName").addEventListener("input", updateOutput);
     el("sourceName").addEventListener("input", updateOutput);
+    el("sourceUrl").addEventListener("input", () => {
+          sourceParsed = false;
+          loadExcelSheets();
+          updateOutput();
+        });
     el("fileInput").addEventListener("change", () => {
           sourceParsed = false;
           setStatus("Source changed. Ready to review fields.", "");
@@ -1811,6 +1897,15 @@ else:
             const newCsvOption = document.querySelector("input[name='csvFunction'][value='new']");
             if (newCsvOption) newCsvOption.checked = true;
             csvFunctionMode = "new";
+          }
+          if (el("sourceType").value !== "excel") {
+            const newExcelOption = document.querySelector("input[name='excelFunction'][value='new']");
+            if (newExcelOption) newExcelOption.checked = true;
+            excelFunctionMode = "new";
+          } else {
+            const newExcelOption = document.querySelector("input[name='excelFunction'][value='new']");
+            if (newExcelOption) newExcelOption.checked = true;
+            excelFunctionMode = "new";
           }
           if (el("sourceType").value !== "json") {
             const newJsonOption = document.querySelector("input[name='jsonFunction'][value='new']");
@@ -1862,10 +1957,15 @@ else:
             el("sourceUrl").value = "";
             el("sourceUrl").placeholder = sourceUrlPlaceholders[el("sourceType").value] || "https://example.com/locations.json";
           }
+          sourceParsed = false;
           updateSourceVisibility();
+          loadExcelSheets();
         });
     document.querySelectorAll("input[name='csvFunction']").forEach((input) => {
           input.addEventListener("change", () => updateCsvFunctionSelection(input.value));
+        });
+    document.querySelectorAll("input[name='excelFunction']").forEach((input) => {
+          input.addEventListener("change", () => updateExcelFunctionSelection(input.value));
         });
     document.querySelectorAll("input[name='jsonFunction']").forEach((input) => {
           input.addEventListener("change", () => updateJsonFunctionSelection(input.value));

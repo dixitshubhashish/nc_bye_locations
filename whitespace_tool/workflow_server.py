@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from datetime import datetime, timezone
 from functools import lru_cache
+import hashlib
 import json
 import http.server
 import logging
@@ -137,10 +138,21 @@ def source_sheets(payload: dict[str, Any]) -> dict[str, Any]:
     return {"sheets": excel_source.list_sheets(content, file_name)}
 
 
+def _remote_source_file_name(url: str) -> str:
+    parsed = urlsplit(url)
+    file_name = Path(parsed.path).name or "remote_source"
+    suffix = Path(file_name).suffix.lower()
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    output = str(query.get("output", "")).lower().lstrip(".")
+    if not suffix and output in {"csv", "xlsx", "xls", "json", "xml"}:
+        file_name = f"{file_name}.{output}"
+    return file_name
+
+
 def _remote_source_request(url: str) -> tuple[bytes, str]:
     request = urllib.request.Request(url, headers={"User-Agent": "CompetitiveWhitespaceTool/1.0"})
     with urllib.request.urlopen(request, timeout=REMOTE_SOURCE_TIMEOUT_SECONDS) as response:
-        return response.read(MAX_REMOTE_SOURCE_BYTES + 1), Path(urlsplit(url).path).name or "remote_source"
+        return response.read(MAX_REMOTE_SOURCE_BYTES + 1), _remote_source_file_name(url)
 
 
 def _is_socrata_url(parsed_url: Any) -> bool:
@@ -768,7 +780,22 @@ def list_brands(search: str = "") -> dict[str, Any]:
     cache_key = f"list_brands:{search.strip().lower()}"
     cached = get_cached_query(cache_key)
     if cached:
+        for brand in cached.get("brands", []):
+            brand.setdefault("display_business_id", _display_business_id(brand))
         return cached
+
+    mirror_status = get_mirror_status()
+    if mirror_status and mirror_status.get("business_rows", 0) > 0:
+        search_term = search.strip().lower()
+        brands = [
+            brand for brand in fetch_mirror_businesses()
+            if not search_term or search_term in str(brand.get("name", "")).lower()
+        ][:100]
+        for brand in brands:
+            brand["display_business_id"] = brand.get("display_business_id") or _display_business_id(brand)
+        res = {"brands": brands}
+        set_cached_query(cache_key, res)
+        return res
 
     from google.cloud import bigquery
 
@@ -782,8 +809,24 @@ def list_brands(search: str = "") -> dict[str, Any]:
       b.business_id,
       b.name,
       b.slug,
+      b.description,
+      b.logo_url,
       b.website_url,
       b.status,
+      b.created_at,
+      b.updated_at,
+      (
+        SELECT COUNT(*)
+        FROM `{project_id}.{dataset_id}.listings` l
+        WHERE l.business_id = b.business_id AND l.is_deleted IS NOT TRUE
+      ) AS listing_count,
+      b.meta_title,
+      b.meta_description,
+      b.country_of_origin,
+      b.is_reference_data,
+      b.reference_key,
+      b.default_source_url,
+      b.default_source_name,
       COALESCE(b.source_type_id, t.source_type_id, JSON_VALUE(t.components, '$.source_type_id'), JSON_VALUE(t.components, '$.mapper.source_type_id')) AS source_type_id,
       st.name AS source_type_name
     FROM `{project_id}.{dataset_id}.businesses` b
@@ -798,9 +841,22 @@ def list_brands(search: str = "") -> dict[str, Any]:
     LIMIT 100
     """
     config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("search", "STRING", search)])
-    res = {"brands": [dict(row) for row in client.query(query, job_config=config).result()]}
+    brands = [dict(row) for row in client.query(query, job_config=config).result()]
+    for brand in brands:
+        brand["display_business_id"] = _display_business_id(brand)
+    res = {"brands": brands}
     set_cached_query(cache_key, res)
     return res
+
+
+def _display_business_id(brand: dict[str, Any]) -> str:
+    hashable = {
+        key: (value.isoformat() if hasattr(value, "isoformat") else value)
+        for key, value in brand.items()
+        if key not in {"business_id", "created_at", "updated_at", "display_business_id", "listing_count", "source_type_name"}
+    }
+    payload = json.dumps(hashable, sort_keys=True, separators=(",", ":"), default=str)
+    return "BID " + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8].upper()
 
 
 def _ensure_source_types_table(client: Any, project_id: str, dataset_id: str) -> None:
@@ -889,8 +945,8 @@ def create_brand(data: dict[str, Any]) -> dict[str, Any]:
     _ensure_businesses_table(client, project_id, dataset_id)
     query = f"""
     INSERT INTO `{project_id}.{dataset_id}.businesses`
-      (name, slug, source_type_id, description, logo_url, website_url, status, created_at, updated_at, meta_title, meta_description, country_of_origin)
-    VALUES (@name, @slug, @source_type_id, @description, @logo_url, @website_url, @status, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), @meta_title, @meta_description, @country_of_origin)
+      (name, slug, source_type_id, description, logo_url, website_url, status, created_at, updated_at, meta_title, meta_description, country_of_origin, is_reference_data, reference_key, default_source_url, default_source_name)
+    VALUES (@name, @slug, @source_type_id, @description, @logo_url, @website_url, @status, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), @meta_title, @meta_description, @country_of_origin, @is_reference_data, @reference_key, @default_source_url, @default_source_name)
     """
     params = [
         bigquery.ScalarQueryParameter("name", "STRING", name), bigquery.ScalarQueryParameter("slug", "STRING", slug),
@@ -899,10 +955,18 @@ def create_brand(data: dict[str, Any]) -> dict[str, Any]:
         bigquery.ScalarQueryParameter("website_url", "STRING", data.get("website_url")), bigquery.ScalarQueryParameter("status", "STRING", data.get("status") or "active"),
         bigquery.ScalarQueryParameter("meta_title", "STRING", data.get("meta_title")), bigquery.ScalarQueryParameter("meta_description", "STRING", data.get("meta_description")),
         bigquery.ScalarQueryParameter("country_of_origin", "STRING", data.get("country_of_origin")),
+        bigquery.ScalarQueryParameter("is_reference_data", "BOOL", bool(data.get("is_reference_data"))),
+        bigquery.ScalarQueryParameter("reference_key", "STRING", data.get("reference_key")),
+        bigquery.ScalarQueryParameter("default_source_url", "STRING", data.get("default_source_url")),
+        bigquery.ScalarQueryParameter("default_source_name", "STRING", data.get("default_source_name")),
     ]
     client.query(query, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
     lookup = f"""
-    SELECT b.business_id, b.name, b.slug, b.website_url, b.status, b.source_type_id, st.name AS source_type_name
+    SELECT b.business_id, b.name, b.slug, b.description, b.logo_url, b.website_url, b.status,
+      b.created_at, b.updated_at,
+      (SELECT COUNT(*) FROM `{project_id}.{dataset_id}.listings` l WHERE l.business_id = b.business_id AND l.is_deleted IS NOT TRUE) AS listing_count,
+      b.meta_title, b.meta_description, b.country_of_origin, b.is_reference_data, b.reference_key,
+      b.default_source_url, b.default_source_name, b.source_type_id, st.name AS source_type_name
     FROM `{project_id}.{dataset_id}.businesses` b
     LEFT JOIN `{project_id}.{dataset_id}.source_types` st
       ON b.source_type_id = st.source_type_id
@@ -914,7 +978,131 @@ def create_brand(data: dict[str, Any]) -> dict[str, Any]:
     if not result:
         raise RuntimeError("Brand was created but its database-generated ID could not be read back")
     invalidate_cache()
-    return {"brand": dict(result[0])}
+    brand = dict(result[0])
+    brand["display_business_id"] = _display_business_id(brand)
+    _sync_gold_mirror_best_effort()
+    return {"brand": brand}
+
+
+def update_brand(data: dict[str, Any]) -> dict[str, Any]:
+    from google.cloud import bigquery
+
+    business_id = str(data.get("business_id", "")).strip()
+    name = str(data.get("name", "")).strip()
+    if not business_id:
+        raise ValueError("Business ID is required")
+    if not name:
+        raise ValueError("Brand name is required")
+    slug = str(data.get("slug") or re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-"))
+    source_type = str(data.get("source_type", "")).strip()
+    raw_source_type_id = str(data.get("source_type_id", "")).strip()
+    source_type_id = ensure_source_type(source_type or raw_source_type_id) if raw_source_type_id in SUPPORTED_SOURCE_TYPES else raw_source_type_id
+    source_type_id = source_type_id or (ensure_source_type(source_type) if source_type else "")
+    if not source_type_id:
+        raise ValueError("Source type is required")
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    _ensure_businesses_table(client, project_id, dataset_id)
+    query = f"""
+    UPDATE `{project_id}.{dataset_id}.businesses`
+    SET name = @name,
+      slug = @slug,
+      source_type_id = @source_type_id,
+      description = @description,
+      logo_url = @logo_url,
+      website_url = @website_url,
+      status = @status,
+      updated_at = CURRENT_TIMESTAMP(),
+      meta_title = @meta_title,
+      meta_description = @meta_description,
+      country_of_origin = @country_of_origin,
+      is_reference_data = @is_reference_data,
+      reference_key = @reference_key,
+      default_source_url = @default_source_url,
+      default_source_name = @default_source_name
+    WHERE business_id = @business_id AND is_deleted IS NOT TRUE
+    """
+    params = [
+        bigquery.ScalarQueryParameter("business_id", "STRING", business_id),
+        bigquery.ScalarQueryParameter("name", "STRING", name),
+        bigquery.ScalarQueryParameter("slug", "STRING", slug),
+        bigquery.ScalarQueryParameter("source_type_id", "STRING", source_type_id),
+        bigquery.ScalarQueryParameter("description", "STRING", data.get("description")),
+        bigquery.ScalarQueryParameter("logo_url", "STRING", data.get("logo_url")),
+        bigquery.ScalarQueryParameter("website_url", "STRING", data.get("website_url")),
+        bigquery.ScalarQueryParameter("status", "STRING", data.get("status") or "active"),
+        bigquery.ScalarQueryParameter("meta_title", "STRING", data.get("meta_title")),
+        bigquery.ScalarQueryParameter("meta_description", "STRING", data.get("meta_description")),
+        bigquery.ScalarQueryParameter("country_of_origin", "STRING", data.get("country_of_origin")),
+        bigquery.ScalarQueryParameter("is_reference_data", "BOOL", bool(data.get("is_reference_data"))),
+        bigquery.ScalarQueryParameter("reference_key", "STRING", data.get("reference_key")),
+        bigquery.ScalarQueryParameter("default_source_url", "STRING", data.get("default_source_url")),
+        bigquery.ScalarQueryParameter("default_source_name", "STRING", data.get("default_source_name")),
+    ]
+    client.query(query, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+    lookup = f"""
+    SELECT b.business_id, b.name, b.slug, b.description, b.logo_url, b.website_url, b.status,
+      b.created_at, b.updated_at,
+      (SELECT COUNT(*) FROM `{project_id}.{dataset_id}.listings` l WHERE l.business_id = b.business_id AND l.is_deleted IS NOT TRUE) AS listing_count,
+      b.meta_title, b.meta_description, b.country_of_origin, b.is_reference_data, b.reference_key,
+      b.default_source_url, b.default_source_name, b.source_type_id, st.name AS source_type_name
+    FROM `{project_id}.{dataset_id}.businesses` b
+    LEFT JOIN `{project_id}.{dataset_id}.source_types` st
+      ON b.source_type_id = st.source_type_id
+    WHERE b.is_deleted IS NOT TRUE AND b.business_id = @business_id
+    LIMIT 1
+    """
+    result = list(client.query(lookup, job_config=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("business_id", "STRING", business_id)])).result())
+    if not result:
+        raise RuntimeError("Brand update did not return a matching active business")
+    invalidate_cache()
+    brand = dict(result[0])
+    brand["display_business_id"] = _display_business_id(brand)
+    _sync_gold_mirror_best_effort()
+    return {"brand": brand}
+
+
+def merge_brands(data: dict[str, Any]) -> dict[str, Any]:
+    from google.cloud import bigquery
+
+    target_business_id = str(data.get("target_business_id", "")).strip()
+    source_business_ids = [
+        str(item).strip()
+        for item in data.get("source_business_ids", [])
+        if str(item).strip() and str(item).strip() != target_business_id
+    ]
+    if not target_business_id:
+        raise ValueError("Target business is required")
+    if not source_business_ids:
+        raise ValueError("Choose at least one business to merge")
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    _ensure_businesses_table(client, project_id, dataset_id)
+    params = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("target_business_id", "STRING", target_business_id),
+        bigquery.ArrayQueryParameter("source_business_ids", "STRING", source_business_ids),
+    ])
+    for table_name in ("listings", "workflow_templates", "error_listings"):
+        client.query(f"""
+        UPDATE `{project_id}.{dataset_id}.{table_name}`
+        SET business_id = @target_business_id
+        WHERE business_id IN UNNEST(@source_business_ids)
+        """, job_config=params).result()
+    client.query(f"""
+    UPDATE `{project_id}.{dataset_id}.businesses`
+    SET is_deleted = TRUE, deleted_on = CURRENT_TIMESTAMP(), updated_at = CURRENT_TIMESTAMP()
+    WHERE business_id IN UNNEST(@source_business_ids)
+    """, job_config=params).result()
+    invalidate_cache()
+    _sync_gold_mirror_best_effort()
+    return {"target_business_id": target_business_id, "merged_business_ids": source_business_ids, "merged_count": len(source_business_ids)}
+
+
+def _sync_gold_mirror_best_effort() -> None:
+    try:
+        sync_gold_mirror()
+    except Exception as exc:
+        LOGGER.warning("gold_mirror_business_sync_failed error=%s", exc)
 
 
 def learn_mappings(data: dict[str, Any]) -> dict[str, Any]:
@@ -1700,9 +1888,21 @@ def sync_gold_mirror() -> dict[str, Any]:
         FROM `{gold_ref}.vw_reporting_locations`
     """).result()]
     business_rows = [dict(row) for row in client.query(f"""
-        SELECT business_id, name FROM `{bronze_ref}.businesses`
-        WHERE is_deleted IS NOT TRUE AND COALESCE(status, 'active') = 'active'
+        SELECT b.business_id, b.name, b.slug, b.description, b.logo_url, b.website_url, b.status,
+          b.created_at, b.updated_at,
+          (
+            SELECT COUNT(*)
+            FROM `{bronze_ref}.listings` l
+            WHERE l.business_id = b.business_id AND l.is_deleted IS NOT TRUE
+          ) AS listing_count,
+          b.meta_title, b.meta_description, b.country_of_origin, b.is_reference_data, b.reference_key,
+          b.default_source_url, b.default_source_name, b.source_type_id, st.name AS source_type_name
+        FROM `{bronze_ref}.businesses` b
+        LEFT JOIN `{bronze_ref}.source_types` st ON b.source_type_id = st.source_type_id
+        WHERE b.is_deleted IS NOT TRUE AND COALESCE(b.status, 'active') = 'active'
     """).result()]
+    for business in business_rows:
+        business["display_business_id"] = _display_business_id(business)
 
     replace_gold_mirror(zip_brand_rows, location_rows, business_rows)
     result = {"zip_brand_rows": len(zip_brand_rows), "location_rows": len(location_rows), "business_rows": len(business_rows)}
@@ -3790,7 +3990,7 @@ def make_handler(ui_dir: Path):
             super().do_GET()
 
         def do_POST(self) -> None:
-            if self.path not in {"/api/login", "/api/preview", "/api/source-url", "/api/sheets", "/api/save", "/api/clear", "/api/brands", "/api/learning", "/api/reprocess", "/api/field-alias", "/api/custom-field", "/api/custom-field/delete", "/api/templates/save", "/api/silver/enrich", "/api/reporting/refresh", "/api/sample/load"}:
+            if self.path not in {"/api/login", "/api/preview", "/api/source-url", "/api/sheets", "/api/save", "/api/clear", "/api/brands", "/api/brands/update", "/api/brands/merge", "/api/learning", "/api/reprocess", "/api/field-alias", "/api/custom-field", "/api/custom-field/delete", "/api/templates/save", "/api/silver/enrich", "/api/reporting/refresh", "/api/sample/load"}:
                 _json_response(self, 404, {"error": "Not found"})
                 return
             request_id = uuid4().hex
@@ -3812,6 +4012,10 @@ def make_handler(ui_dir: Path):
                     _json_response(self, 200, clear_saved_data())
                 elif self.path == "/api/brands":
                     _json_response(self, 200, create_brand(payload))
+                elif self.path == "/api/brands/update":
+                    _json_response(self, 200, update_brand(payload))
+                elif self.path == "/api/brands/merge":
+                    _json_response(self, 200, merge_brands(payload))
                 elif self.path == "/api/learning":
                     _json_response(self, 200, learn_mappings(payload))
                 elif self.path == "/api/reprocess":

@@ -65,6 +65,7 @@ window.APP_CONSTANTS = Object.freeze({
     metaDescription: "Demo dataset for testing malformed ZIP codes, out-of-bounds coordinates, and non-US location filtering.",
     countryOfOrigin: "Global"
   },
+  demoRestaurantExcelUrl: "https://docs.google.com/spreadsheets/d/e/2PACX-1vSHa0iIxTVG7odLSlxL8PKDdAt0Xo2ciufPLMpGm9pQuOi44nlwgs3N-Dew4pyz7g/pub?output=xlsx",
   trademarkDisclaimer: "Birdeye is a trademark of Birdeye, Inc. All rights in the Birdeye name and logo are reserved by Birdeye, Inc. This prototype uses the provided brand asset for reference and is not affiliated with, sponsored by, or endorsed by Birdeye. This prototype is provided for assessment and evaluation purposes only; no other use is intended or authorized."
 });
 
