@@ -1524,10 +1524,6 @@
               <span class="info-icon" tabindex="0" data-tooltip="Use when records sit inside a nested file or sheet.">i</span>
             </div>
             <input id="recordPath" placeholder="stores or data.locations">
-            <label for="jsonRecordPath" class="json-record-path-field hidden">JSON record layer</label>
-            <select id="jsonRecordPath" class="json-record-path-field hidden">
-              <option value="">Automatically select the best record layer</option>
-            </select>
           </div>
         </div>
 
@@ -2190,17 +2186,6 @@ else:
             el("customRecordPathContainer")?.classList.toggle("hidden", !isCustom);
             if (isCustom) el("recordPath")?.focus();
           });
-        });
-    el("jsonRecordPath").addEventListener("change", () => {
-          el("recordPath").value = el("jsonRecordPath").value;
-          if (el("jsonRecordPath").value) {
-            const customRadio = el("recordModeCustom");
-            if (customRadio) {
-              customRadio.checked = true;
-              el("customRecordPathContainer")?.classList.remove("hidden");
-            }
-          }
-          parseSource();
         });
     document.querySelectorAll(".tab").forEach((button) => {
           button.addEventListener("click", () => {

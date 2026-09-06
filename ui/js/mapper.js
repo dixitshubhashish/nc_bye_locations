@@ -459,7 +459,6 @@ function resetSourceInputsForNewMode(sourceType = el("sourceType").value) {
       updateSourcePlaceholders(sourceType);
       el("sourceName").value = "";
       el("recordPath").value = "";
-      el("jsonRecordPath").innerHTML = '<option value="">Automatically select the best record layer</option>';
       el("sheetName").innerHTML = '<option value="">Upload Excel to load sheets</option>';
       el("sheetName").disabled = true;
       const editLink = el("sourceUrlEditLink");
@@ -990,13 +989,11 @@ function validateSelectedFileType(file) {
       }
     }
 function populateJsonRecordPaths(paths) {
+      // The standalone "JSON record layer" dropdown was removed as redundant -
+      // Automatic mode auto-detects the layer and Custom mode takes a typed
+      // record path. We still track the detected paths for draft persistence
+      // and auto-resolution, but no longer render a picker for them.
       jsonRecordPaths = Array.isArray(paths) ? paths : [];
-      const picker = el("jsonRecordPath");
-      picker.innerHTML = '<option value="">Automatically select the best record layer</option>' + jsonRecordPaths
-        .filter((path) => path)
-        .map((path) => `<option value="${escapeHtml(path)}">${escapeHtml(path)}</option>`)
-        .join("");
-      picker.value = el("recordPath").value || "";
     }
 function isExcelFile(file) {
       if (!file) return false;
