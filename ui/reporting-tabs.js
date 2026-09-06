@@ -129,6 +129,18 @@
     } catch (err) {
       status.className = 'report-status error';
       status.textContent = err.message || 'Unable to load data quality metrics.';
+    } finally {
+      const reportingView = $('reportingView');
+      if (reportingView) {
+        const shell = reportingView.querySelector('.report-shell');
+        if (shell) {
+          shell.querySelectorAll('.report-location-panel').forEach((n) => n.classList.add('hidden'));
+          const quality = $('reportQualityPanel');
+          if (quality) quality.classList.remove('hidden');
+          const tabs = $('reportingInnerTabs');
+          if (tabs) tabs.querySelectorAll('[data-report-tab]').forEach((b) => b.classList.toggle('active', b.dataset.reportTab === 'quality'));
+        }
+      }
     }
   }
 
