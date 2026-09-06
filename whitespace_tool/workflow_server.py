@@ -433,7 +433,9 @@ def delete_custom_field(data: dict[str, Any]) -> dict[str, Any]:
     business_id = str(data.get("business_id", "")).strip()
     if not business_id:
         raise ValueError("Select a business before removing a custom field")
-    field_key = str(data.get("field_key", "")).strip()
+    # Accept the current API name and the older browser payload name while
+    # clients are upgraded independently.
+    field_key = str(data.get("field_key") or data.get("field_name") or "").strip()
     if not field_key:
         raise ValueError("Choose a custom field to remove")
 

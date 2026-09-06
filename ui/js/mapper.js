@@ -1329,7 +1329,7 @@ async function dropCustomField() {
           body: JSON.stringify({
             password,
             business_id: businessId,
-            field_name: fieldKey
+            field_key: fieldKey
           })
         });
         const result = await response.json();
@@ -1338,7 +1338,7 @@ async function dropCustomField() {
         optionalMappingKeys.delete(fieldKey);
         delete mappingSelections[fieldKey];
         delete customAliases[fieldKey];
-        populateOptionalFields();
+        updateOptionalFieldPicker();
         updateDropCustomFieldPicker();
         renderMappings();
         updateOutput();
