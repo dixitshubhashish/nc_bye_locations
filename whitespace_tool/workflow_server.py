@@ -3727,7 +3727,7 @@ def _maybe_refresh_after_save(skip_cache_invalidation: bool) -> None:
     _refresh_silver_background()
 
 
-def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_invalidation: bool = False, assume_tables_exist: bool = False) -> dict[str, Any]:
+def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_invalidation: bool = False, assume_tables_exist: bool = False, reject_all_invalid: bool = False) -> dict[str, Any]:
     mapper = payload.get("mapper")
     rows = payload.get("rows")
     source_fields = payload.get("source_fields", [])
@@ -3817,6 +3817,34 @@ def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_inval
             error_listings.append(_row_error_listing(event_id, business_id, source_type_id, source_index, row, row_errors, observed_at))
         elif location is not None:
             locations.append(location)
+
+    # A save where EVERY row failed validation is a systemic mapping mistake
+    # (e.g. a text column mapped to a date field), not a set of individually
+    # bad records. Flooding the error-listings queue with the whole batch and
+    # letting the "save" appear to succeed hides the real problem and stops
+    # the user's flow. When the caller asks us to guard (the mapping-tab
+    # save), reject the batch with a clear message and write nothing, so the
+    # error queue stays reserved for the mixed case - some rows valid, a few
+    # broken. A tiny batch (1 row) is exempt so a genuine single bad record
+    # can still be reviewed, and reprocess/sample loads never pass the flag.
+    ALL_INVALID_MIN_ROWS = 2
+    if reject_all_invalid and not locations and len(error_listings) >= ALL_INVALID_MIN_ROWS and len(error_listings) == len(rows):
+        sample_reasons = []
+        for record in error_listings[:3]:
+            try:
+                parsed = json.loads(record["errors"]) if isinstance(record.get("errors"), str) else record.get("errors")
+                if parsed:
+                    sample_reasons.append(parsed[0].get("hint") or parsed[0].get("reason") or parsed[0].get("field"))
+            except Exception:
+                pass
+        detail = f" First issue: {sample_reasons[0]}" if sample_reasons else ""
+        raise ValueError(
+            f"All {len(rows)} rows failed validation, so the field mapping looks wrong - "
+            f"nothing was saved and no review records were created. Recheck which source "
+            f"columns are mapped to each field (a common cause is a text column mapped to a "
+            f"date/number field).{detail}"
+        )
+
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = client or _bigquery_client(project_id, credentials_json)
 
@@ -4145,7 +4173,11 @@ def make_handler(ui_dir: Path):
                 elif self.path == "/api/sheets":
                     _json_response(self, 200, source_sheets(payload))
                 elif self.path == "/api/save":
-                    _json_response(self, 200, save_mapper(payload))
+                    # The mapping-tab save is the one place we guard against an
+                    # all-invalid batch (a wrong field mapping): reject instead
+                    # of flooding error_listings. reprocess/sample-load call
+                    # save_mapper directly and never set this.
+                    _json_response(self, 200, save_mapper(payload, reject_all_invalid=True))
                 elif self.path == "/api/clear":
                     _json_response(self, 200, clear_saved_data())
                 elif self.path == "/api/master-delete":
