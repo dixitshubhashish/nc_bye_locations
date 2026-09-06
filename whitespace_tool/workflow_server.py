@@ -76,15 +76,15 @@ REPORTING_REFRESHING = False
 SERVER_LAUNCH_ID = uuid4().hex
 load_dotenv()
 
-# Session management (15-minute timeout)
+# Session management (15-minute idle timeout)
 SESSIONS: dict[str, dict[str, Any]] = {}
-SESSION_TIMEOUT_SECONDS = 15 * 60  # 15 minutes
+SESSION_IDLE_TIMEOUT_SECONDS = 15 * 60  # 15 minutes of inactivity
 
 
 def _cleanup_expired_sessions() -> None:
-    """Remove expired sessions."""
+    """Remove sessions that have been idle for 15+ minutes."""
     now = datetime.now(timezone.utc).timestamp()
-    expired = [sid for sid, data in SESSIONS.items() if data.get("expires_at", 0) < now]
+    expired = [sid for sid, data in SESSIONS.items() if data.get("last_activity", 0) + SESSION_IDLE_TIMEOUT_SECONDS < now]
     for sid in expired:
         del SESSIONS[sid]
 
@@ -96,7 +96,7 @@ def _create_session() -> str:
     now = datetime.now(timezone.utc).timestamp()
     SESSIONS[session_id] = {
         "created_at": now,
-        "expires_at": now + SESSION_TIMEOUT_SECONDS,
+        "last_activity": now,  # Track last activity for idle timeout
     }
     return session_id
 
@@ -112,11 +112,15 @@ def _get_session_id(handler: http.server.BaseHTTPRequestHandler) -> str | None:
 
 
 def _is_valid_session(session_id: str | None) -> bool:
-    """Check if session is valid and not expired."""
+    """Check if session is valid and not idle-expired. Updates last_activity on valid session."""
     if not session_id:
         return False
     _cleanup_expired_sessions()
-    return session_id in SESSIONS
+    if session_id not in SESSIONS:
+        return False
+    # Update last activity time to extend the session
+    SESSIONS[session_id]["last_activity"] = datetime.now(timezone.utc).timestamp()
+    return True
 
 
 def _set_session_cookie(handler: http.server.BaseHTTPRequestHandler, session_id: str) -> None:
