@@ -478,6 +478,50 @@
 
     .json-viewer-panel { overflow: hidden; }
     .json-viewer-link { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 9px 12px; border: 1px solid var(--accent); border-radius: 5px; background: var(--accent); color: var(--accent-ink); font-weight: 700; text-decoration: none; }
+    .data-danger-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      background: #fff8e6;
+      border-color: #f2d5a6;
+    }
+    .data-danger-panel h2 {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 0;
+      color: var(--warn);
+    }
+    .data-risk-note {
+      margin: 0 0 4px;
+      color: #8a5a13;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .data-danger-panel button {
+      width: 100%;
+      justify-content: center;
+    }
+    .data-danger-panel .danger-soft {
+      background: #ffffff;
+      color: var(--error);
+      border-color: #e4b3bf;
+    }
+    .data-danger-panel .danger-soft:hover {
+      background: #fff1f4;
+      color: #9f1f36;
+      border-color: var(--error);
+    }
+    .data-danger-panel .danger-hard {
+      background: var(--error);
+      color: #ffffff;
+      border-color: var(--error);
+    }
+    .data-danger-panel .danger-hard:hover {
+      background: #9f1f36;
+      color: #ffffff;
+      border-color: #9f1f36;
+    }
     .json-viewer-link:hover { background: #0759e8; border-color: #0759e8; }
     main > aside, main > section, .panel { min-width: 0; }
     #sourcePreview, #entityPreview { max-width: 100%; overflow-x: auto; }
@@ -533,6 +577,22 @@
     @keyframes spinCircle {
       0% { transform: rotate(0deg); }
       100% { transform: rotate(360deg); }
+    }
+    .inline-spinner {
+      display: inline-block;
+      width: 13px;
+      height: 13px;
+      border: 2px solid currentColor;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spinCircle 0.8s linear infinite;
+      vertical-align: -2px;
+    }
+    .busy-label {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
     }
     .loading-overlay-message {
       font-size: 16px;
@@ -731,18 +791,48 @@
 
     .optional-picker {
       display: flex;
+      flex-direction: column;
       gap: 8px;
-      align-items: end;
+      align-items: stretch;
     }
 
     .optional-picker select { flex: 1; }
     .optional-fields-layout {
       display: grid;
-      grid-template-columns: minmax(220px, 0.8fr) minmax(300px, 1.2fr);
-      gap: 24px;
+      grid-template-columns: minmax(220px, 0.9fr) minmax(280px, 1.1fr) minmax(240px, 0.9fr);
+      gap: 16px;
       align-items: start;
     }
-    .optional-fields-column { min-width: 0; }
+    .optional-fields-column {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .optional-fields-column > label {
+      min-height: 24px;
+      margin-bottom: 4px;
+      color: var(--accent);
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: 0;
+      line-height: 1.25;
+    }
+    .optional-fields-column button { width: 100%; }
+    .optional-fields-column .secondary.danger-action {
+      color: var(--error);
+      border-color: #e4b3bf;
+      background: #ffffff;
+    }
+    .optional-fields-column .secondary.danger-action:hover {
+      color: #ffffff;
+      border-color: var(--error);
+      background: var(--error);
+    }
+    .optional-fields-column .action-feedback {
+      min-height: 18px;
+      margin-top: 0;
+    }
 
     .mapping-remove {
       min-width: 30px;
@@ -1221,7 +1311,7 @@
       ✕ Cancel
     </button>
   </div>
-  <div id="loginScreen" class="login-screen">
+  <div id="loginScreen" class="login-screen hidden">
     <div class="login-box">
       <div class="brand-lockup login-brand" aria-label="Birdeye brand reference">
         <span class="brand-icon-crop"><img class="brand-logo-image" data-logo-src="birdeyeLogoDarkUrl" alt="Birdeye"></span>
@@ -1260,7 +1350,6 @@
       <div class="header-actions">
         <button class="secondary" id="resetMappingBtn" type="button">Reset Fields Mapping</button>
         <button class="secondary" id="restartMappingBtn" type="button">Restart Mapping</button>
-        <button class="secondary" id="clearDataBtn" type="button">Clear Saved Data</button>
         <div id="headerReadinessStatus" class="header-readiness">ZIPs not checked</div>
         <button class="secondary" id="logoutBtn" type="button">Log out</button>
       </div>
@@ -1276,17 +1365,16 @@
         <h2>Source Controls</h2>
         <div class="button-row" style="flex-wrap: wrap; gap: 6px;">
           <button class="secondary" id="showExistingBrandsBtn" type="button">🏢 Show Existing Brands</button>
-          <button class="secondary" id="clearDemoDataBtn" type="button" style="color: var(--error); border-color: var(--error);">🗑️ Clear Demo Data</button>
         </div>
         <div id="existingBrandsDialog" style="display: none; border: 1px solid var(--line); background: #f8fafc; border-radius: 6px; padding: 10px; margin-top: 8px; font-size: 12px;"></div>
         <label for="sourceType">Source format</label>
         <select id="sourceType">
           <option value="csv">CSV</option>
-          <option value="excel">Excel (.xlsx)</option>
-          <option value="json">JSON</option>
-          <option value="xml">XML</option>
           <option value="api_get_json">GET API JSON</option>
-          <option value="python_editor">Python Editor</option>
+          <option value="excel">EXCEL (.XLSX)</option>
+          <option value="json">JSON</option>
+          <option value="python_editor">PYTHON EDITOR</option>
+          <option value="xml">XML</option>
         </select>
         <div class="field-group csv-function-field hidden">
           <label>CSV source</label>
@@ -1327,7 +1415,7 @@
         <label for="fileInput" class="file-upload-control">Upload source file</label>
         <input id="fileInput" class="file-upload-control" type="file" accept=".csv,.xlsx,.xls,.json,.geojson,.xml,application/json,application/geo+json,text/csv,application/xml,text/xml">
         <label for="sourceUrl" class="source-url-control hidden">Public source URL</label>
-        <input id="sourceUrl" class="source-url-control hidden" type="url" placeholder="https://example.com/locations.json">
+        <input id="sourceUrl" class="source-url-control hidden" type="url" placeholder="https://example.com/restaurant_locations.csv">
         <button id="sourceUrlEditBtn" class="source-url-control source-url-edit hidden" type="button">Edit URL</button>
         </div>
 
@@ -1361,14 +1449,14 @@
         </div>
 
         <label for="sourceName">Source name</label>
-        <input id="sourceName" placeholder="Example: Domino's locations">
+        <input id="sourceName" placeholder="restaurant_locations_csv">
 
         <div class="field-group record-field">
         <div class="label-row">
           <label for="recordPath">Record path</label>
           <span class="info-icon" tabindex="0" data-tooltip="Use when records sit inside a nested file or sheet.">i</span>
         </div>
-        <input id="recordPath" placeholder="JSON: stores or data.locations; Excel: sheet1">
+        <input id="recordPath" placeholder="stores or data.locations">
         <label for="jsonRecordPath" class="json-record-path-field hidden">JSON record layer</label>
         <select id="jsonRecordPath" class="json-record-path-field hidden">
           <option value="">Automatically select the best record layer</option>
@@ -1506,6 +1594,15 @@ else:
         <div id="reportingDataRefreshStatus" class="action-feedback" role="status" aria-live="polite"></div>
       </div>
 
+      <div class="panel data-danger-panel">
+        <h2>⚠️ Data Controls</h2>
+        <div class="mapping-note">Clear loaded records or reset the warehouse completely.</div>
+        <p class="data-risk-note">Risk: deletion can remove saved listings, businesses, review rows, and with master deletion every warehouse table/view.</p>
+        <button class="secondary danger-soft" id="clearDataBtn" type="button" title="Soft delete saved businesses, listings, and review records. Reference ZIPs, fields, source types, and templates stay available.">Clear Saved Data</button>
+        <button class="secondary danger-hard" id="masterDeleteBtn" type="button" title="Drop every table and view across bronze, silver, and gold datasets. Partitioned tables are removed through their base tables.">Master Data Deletion</button>
+        <div id="masterDeleteStatus" class="action-feedback" role="status" aria-live="polite"></div>
+      </div>
+
     </aside>
 
     <section>
@@ -1521,28 +1618,28 @@ else:
         <div class="mapping-note">Add fields available in this source. New fields appear at the end of the mapping list.</div>
         <div class="optional-fields-layout">
           <div class="optional-fields-column">
-            <label for="optionalFieldSelect">Available optional fields</label>
+            <label for="optionalFieldSelect">Add Optional Field</label>
             <div class="optional-picker">
               <select id="optionalFieldSelect" aria-label="Optional field to add">
                 <option value="">Choose a field</option>
               </select>
-              <button class="secondary" id="addOptionalFieldBtn" type="button">Add</button>
+              <button id="addOptionalFieldBtn" type="button">Add</button>
             </div>
           </div>
           <div class="optional-fields-column alias-picker">
-            <label for="customFieldLabel">New custom field label</label>
+            <label for="customFieldLabel">Create Custom Field</label>
             <input id="customFieldLabel" placeholder="For example: Delivery Zone">
             <input id="customFieldSlug" placeholder="camelCase slug without space (e.g. deliveryZone)">
             <select id="customFieldType"><option value="string">Text</option><option value="float">Number</option><option value="integer">Whole number</option><option value="date">Date</option></select>
             <input id="aliasPassword" type="password" placeholder="Admin password (use '54321')">
-            <button class="secondary" id="addCustomFieldBtn" type="button">Add Custom Field</button>
+            <button id="addCustomFieldBtn" type="button">Add Custom Field</button>
             <div id="customFieldFeedback" class="action-feedback" role="status" aria-live="polite"></div>
           </div>
           <div class="optional-fields-column alias-picker">
-            <label for="dropCustomFieldSelect">Remove an existing custom field</label>
+            <label for="dropCustomFieldSelect">Remove Custom Field</label>
             <select id="dropCustomFieldSelect"><option value="">Choose a custom field</option></select>
             <input id="dropCustomFieldPassword" type="password" placeholder="Admin password (use '54321')">
-            <button class="secondary" id="dropCustomFieldBtn" type="button">Drop Custom Field</button>
+            <button class="secondary danger-action" id="dropCustomFieldBtn" type="button">Drop Custom Field</button>
             <div id="dropCustomFieldFeedback" class="action-feedback" role="status" aria-live="polite"></div>
           </div>
         </div>
@@ -1768,6 +1865,27 @@ else:
       <button class="secondary" id="cancelClearBtn" type="button">Cancel</button>
     </div>
   </dialog>
+  <dialog id="masterDeleteCredentialsDialog" class="danger-dialog">
+    <h2>MASTER DATA DELETION</h2>
+    <p>This will drop every table and view across bronze, silver, and gold. Partitioned tables are removed through their base tables. Enter your local login credentials to continue.</p>
+    <label for="masterDeleteUser">Username</label>
+    <input id="masterDeleteUser" autocomplete="username" value="admin">
+    <label for="masterDeletePassword">Password</label>
+    <input id="masterDeletePassword" type="password" autocomplete="current-password">
+    <div class="button-row">
+      <button id="masterDeleteCredentialNextBtn" type="button">Continue</button>
+      <button class="secondary" id="cancelMasterDeleteCredentialsBtn" type="button">Cancel</button>
+    </div>
+  </dialog>
+  <dialog id="masterDeleteConfirmDialog" class="danger-dialog">
+    <h2>FINAL CONFIRMATION</h2>
+    <p>Type DELETE ALL DATA to drop every table and view across all warehouse layers. This cannot be undone from this app.</p>
+    <input id="masterDeleteConfirmation" autocomplete="off" placeholder="DELETE ALL DATA">
+    <div class="button-row">
+      <button id="confirmMasterDeleteBtn" type="button">Delete Everything</button>
+      <button class="secondary" id="cancelMasterDeleteBtn" type="button">Cancel</button>
+    </div>
+  </dialog>
 
   <script src="js/common.js"></script>
   <script src="js/reporting.js"></script>
@@ -1778,7 +1896,6 @@ else:
     el("parseBtn").addEventListener("click", parseSource);
     el("testReadinessBtn")?.addEventListener("click", testReadiness);
     el("showExistingBrandsBtn").addEventListener("click", toggleShowExistingBrands);
-    el("clearDemoDataBtn").addEventListener("click", clearSavedData);
     el("runPythonConnectorBtn").addEventListener("click", parseSource);
     el("expandPythonConnectorBtn").addEventListener("click", openConnectorEditor);
     el("minimizePythonConnectorBtn").addEventListener("click", minimizeConnectorEditor);
@@ -1793,6 +1910,7 @@ else:
     el("resetMappingBtn").addEventListener("click", resetMapping);
     el("restartMappingBtn").addEventListener("click", restartMapping);
     el("clearDataBtn").addEventListener("click", clearSavedData);
+    el("masterDeleteBtn").addEventListener("click", masterDeleteData);
     el("reportingDataRefreshBtn").addEventListener("click", refreshReportingData);
     el("logoutBtn").addEventListener("click", logout);
     el("confirmClearBtn").addEventListener("click", async () => {
@@ -1800,6 +1918,10 @@ else:
           await performClearSavedData();
         });
     el("cancelClearBtn").addEventListener("click", () => el("dangerDialog").close());
+    el("masterDeleteCredentialNextBtn").addEventListener("click", proceedMasterDeleteConfirmation);
+    el("cancelMasterDeleteCredentialsBtn").addEventListener("click", () => el("masterDeleteCredentialsDialog").close());
+    el("confirmMasterDeleteBtn").addEventListener("click", performMasterDeleteData);
+    el("cancelMasterDeleteBtn").addEventListener("click", () => el("masterDeleteConfirmDialog").close());
     el("reviewSearchBtn").addEventListener("click", loadRejectedRecords);
     el("templateSearchBtn").addEventListener("click", loadTemplateLibrary);
     el("templateSearch").addEventListener("keydown", (event) => {
@@ -1859,6 +1981,7 @@ else:
     el("createBrandBtn").addEventListener("click", () => createNewBrand());
     el("presetBrandCreateBtn").addEventListener("click", () => createOrUsePresetBrand());
     el("presetBrandEditBtn").addEventListener("click", () => {
+          if (!activeCsvPresetConfig) return;
           presetBrandEditMode = !presetBrandEditMode;
           el("newBrandFields").classList.toggle("hidden", !presetBrandEditMode);
           if (presetBrandEditMode) {
@@ -1955,7 +2078,7 @@ else:
           if (el("sourceInputMode").value === "url" && isNewSourceMode()) {
             setSourceUrlLocked(false);
             el("sourceUrl").value = "";
-            el("sourceUrl").placeholder = sourceUrlPlaceholders[el("sourceType").value] || "https://example.com/locations.json";
+            updateSourcePlaceholders(el("sourceType").value);
           }
           sourceParsed = false;
           updateSourceVisibility();
@@ -2066,25 +2189,29 @@ else:
           }
         });
     document.querySelector("#brandDisclaimer").textContent = window.APP_CONSTANTS.trademarkDisclaimer;
-    updateSourceVisibility();
-    resetLoginSessionFromLaunch();
-    restoreRememberedLogin();
-    setTimeout(() => prepareReferenceData(), 10);
-    setupZipTypeahead();
-    setupBrandDropdownListeners();
-    refreshSampleDatasetStatus();
-    loadGeoOptions();
-    if (sessionStorage.getItem(loginSessionStorageKey) === "true") {
+    (async () => {
+      updateSourceVisibility();
+      await resetLoginSessionFromLaunch();
+      restoreRememberedLogin();
+      if (sessionStorage.getItem(loginSessionStorageKey) !== "true") {
+        window.location.replace("/login");
+        return;
+      }
+      setTimeout(() => refreshHeaderReadiness(), 10);
+      setupZipTypeahead();
+      setupBrandDropdownListeners();
+      refreshSampleDatasetStatus();
+      loadGeoOptions();
       loadAppData();
       // Paint the Review Error Listings tab badge immediately from the
       // last-known SQLite count (no live BigQuery wait), regardless of which
       // tab opens first. A live re-count happens whenever data actually
       // moves (reprocess/save), keeping the cached number honest.
       refreshReviewCount();
-    }
-    const urlParams = new URLSearchParams(window.location.search);
-    const activeTab = urlParams.get("view") || sessionStorage.getItem("activeTab") || "mapperView";
-    switchView(activeTab || "mapperView");
+      const urlParams = new URLSearchParams(window.location.search);
+      const activeTab = urlParams.get("view") || sessionStorage.getItem("activeTab") || "mapperView";
+      switchView(activeTab || "mapperView");
+    })();
 
   </script>
 </body>

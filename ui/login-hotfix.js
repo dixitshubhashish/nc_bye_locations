@@ -169,11 +169,6 @@
       }, true);
     });
 
-    // If the current tab already has a valid in-browser session, keep the UI
-    // consistent with the existing application behavior.
-    if (sessionStorage.getItem(LOGIN_SESSION_KEY) === "true") {
-      showAuthenticatedApp(true);
-    }
   }
 
   if (document.readyState === "loading") {

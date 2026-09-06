@@ -29,7 +29,7 @@ from whitespace_tool.field_registry import load_field_registry
 from whitespace_tool.sources.demographics import fetch_bigquery_demographics, resolve_bigquery_connection
 from whitespace_tool.sources.dominos_overpass import fetch_for_zips as fetch_dominos_from_overpass
 from whitespace_tool.sources.dominos_store_locator import fetch_for_zips
-from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows, clear_dataset_tables, push_to_bigquery
+from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows, clear_dataset_tables, drop_dataset_tables, push_to_bigquery
 from whitespace_tool.storage_config import load_dotenv, load_storage_config
 from whitespace_tool.sqlite_cache import (
     get_cached_query, set_cached_query, invalidate_cache,
@@ -73,6 +73,7 @@ LOGGER = _build_logger()
 ZIP_REFERENCE_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 REPORTING_REFRESH_LOCK = threading.Lock()
 REPORTING_REFRESHING = False
+SERVER_LAUNCH_ID = uuid4().hex
 load_dotenv()
 
 
@@ -3840,6 +3841,29 @@ def clear_saved_data() -> dict[str, Any]:
     }
 
 
+def master_delete_data(data: dict[str, Any]) -> dict[str, Any]:
+    authenticate({"username": data.get("username", ""), "password": data.get("password", "")})
+    confirm = str(data.get("confirmation", "")).strip()
+    if confirm != "DELETE ALL DATA":
+        raise ValueError("Type DELETE ALL DATA to confirm master deletion.")
+    project_id, bronze_dataset_id, silver_dataset_id, gold_dataset_id, credentials_json = _medallion_settings()
+    datasets = [bronze_dataset_id, silver_dataset_id, gold_dataset_id]
+    results = []
+    dropped_tables: list[str] = []
+    for dataset_id in datasets:
+        result = drop_dataset_tables(project_id, dataset_id, credentials_json)
+        qualified = [f"{dataset_id}.{name}" for name in result["dropped_tables"]]
+        dropped_tables.extend(qualified)
+        results.append({"dataset": f"{project_id}.{dataset_id}", "dropped_tables": result["dropped_tables"], "dropped_count": len(result["dropped_tables"])})
+        ZIP_REFERENCE_CACHE.pop((project_id, dataset_id), None)
+    invalidate_cache()
+    return {
+        "datasets": results,
+        "dropped_tables": dropped_tables,
+        "dropped_count": len(dropped_tables),
+    }
+
+
 def make_handler(ui_dir: Path):
     class MapperHandler(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
@@ -3849,7 +3873,47 @@ def make_handler(ui_dir: Path):
             self.send_header("Cache-Control", "no-store")
             super().end_headers()
 
+        def _serve_ui_file(self, file_name: str, *, head: bool = False) -> None:
+            original_path = self.path
+            self.path = f"/{file_name}"
+            try:
+                if head:
+                    super().do_HEAD()
+                else:
+                    super().do_GET()
+            finally:
+                self.path = original_path
+
+        def _route_clean_ui_path(self, *, head: bool = False) -> bool:
+            path = urlsplit(self.path).path
+            if path in {"", "/", "/login"}:
+                self._serve_ui_file("login.html", head=head)
+                return True
+            if path == "/app":
+                self._serve_ui_file("integrations.html", head=head)
+                return True
+            if path in {"/login.html", "/integrations.html"}:
+                target = "/login" if path == "/login.html" else "/app"
+                query = urlsplit(self.path).query
+                if query:
+                    target = f"{target}?{query}"
+                self.send_response(302)
+                self.send_header("Location", target)
+                self.end_headers()
+                return True
+            return False
+
+        def do_HEAD(self) -> None:
+            if self._route_clean_ui_path(head=True):
+                return
+            super().do_HEAD()
+
         def do_GET(self) -> None:
+            if self._route_clean_ui_path():
+                return
+            if self.path == "/api/session":
+                _json_response(self, 200, {"server_launch_id": SERVER_LAUNCH_ID})
+                return
             if self.path == "/api/ping":
                 try:
                     result = ping_storage_connection()
@@ -3990,7 +4054,7 @@ def make_handler(ui_dir: Path):
             super().do_GET()
 
         def do_POST(self) -> None:
-            if self.path not in {"/api/login", "/api/preview", "/api/source-url", "/api/sheets", "/api/save", "/api/clear", "/api/brands", "/api/brands/update", "/api/brands/merge", "/api/learning", "/api/reprocess", "/api/field-alias", "/api/custom-field", "/api/custom-field/delete", "/api/templates/save", "/api/silver/enrich", "/api/reporting/refresh", "/api/sample/load"}:
+            if self.path not in {"/api/login", "/api/preview", "/api/source-url", "/api/sheets", "/api/save", "/api/clear", "/api/master-delete", "/api/brands", "/api/brands/update", "/api/brands/merge", "/api/learning", "/api/reprocess", "/api/field-alias", "/api/custom-field", "/api/custom-field/delete", "/api/templates/save", "/api/silver/enrich", "/api/reporting/refresh", "/api/sample/load"}:
                 _json_response(self, 404, {"error": "Not found"})
                 return
             request_id = uuid4().hex
@@ -4010,6 +4074,8 @@ def make_handler(ui_dir: Path):
                     _json_response(self, 200, save_mapper(payload))
                 elif self.path == "/api/clear":
                     _json_response(self, 200, clear_saved_data())
+                elif self.path == "/api/master-delete":
+                    _json_response(self, 200, master_delete_data(payload))
                 elif self.path == "/api/brands":
                     _json_response(self, 200, create_brand(payload))
                 elif self.path == "/api/brands/update":

@@ -190,16 +190,27 @@ function lockBrandFields(locked) {
       });
     }
 function populateSourceTypeSelects() {
-      const options = sourceTypes.length
-        ? sourceTypes.map((source) => `<option value="${escapeHtml(source.source_type_id)}" data-format="${escapeHtml(sourceTypeNameToFormat(source.name))}">${escapeHtml(source.name)}</option>`).join("")
-        : [
-            ["csv", "CSV"],
-            ["json", "JSON"],
-            ["excel", "XLS"],
-            ["api_get_json", "API"],
-            ["python_editor", "OpenStreetMap"]
-          ].map(([value, label]) => `<option value="${escapeHtml(value)}" data-format="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join("");
-      el("newBrandSourceType").innerHTML = `<option value="">Select source format</option>${options}`;
+      const fallbackSources = [
+        { source_type_id: "csv", name: "csv" },
+        { source_type_id: "api_get_json", name: "api_get_json" },
+        { source_type_id: "excel", name: "excel" },
+        { source_type_id: "json", name: "json" },
+        { source_type_id: "python_editor", name: "python_editor" },
+        { source_type_id: "xml", name: "xml" }
+      ];
+      const sources = sourceTypes.length ? [...sourceTypes] : fallbackSources;
+      const orderedSources = sources.sort((left, right) => {
+        const leftFormat = sourceTypeNameToFormat(left.name);
+        const rightFormat = sourceTypeNameToFormat(right.name);
+        if (leftFormat === "csv" && rightFormat !== "csv") return -1;
+        if (rightFormat === "csv" && leftFormat !== "csv") return 1;
+        return sourceTypeLabel(leftFormat || left.name).localeCompare(sourceTypeLabel(rightFormat || right.name));
+      });
+      const options = orderedSources.map((source) => {
+        const format = sourceTypeNameToFormat(source.name);
+        return `<option value="${escapeHtml(source.source_type_id)}" data-format="${escapeHtml(format)}">${escapeHtml(sourceTypeLabel(format || source.name))}</option>`;
+      }).join("");
+      el("newBrandSourceType").innerHTML = `<option value="">SELECT SOURCE FORMAT</option>${options}`;
     }
 function resetTemplateSelection() {
       activeTemplateId = "";
@@ -339,11 +350,42 @@ function setPresetLocked(locked, controlIds) {
       el("mappingGrid")?.classList.remove("locked-demo");
     }
 const sourceUrlPlaceholders = {
-      csv: "https://example.com/locations.csv",
-      json: "https://example.com/locations.json",
-      excel: "https://example.com/locations.xls",
-      xml: "https://example.com/locations.xml"
+      csv: "https://example.com/restaurant_locations.csv",
+      excel: "https://example.com/restaurant_locations.xlsx",
+      json: "https://example.com/restaurant_locations.json",
+      xml: "https://example.com/restaurant_locations.xml"
     };
+const sourceNamePlaceholders = {
+      csv: "restaurant_locations_csv",
+      excel: "restaurant_locations_excel",
+      json: "restaurant_locations_json",
+      xml: "restaurant_locations_xml",
+      api_get_json: "restaurant_locations_api",
+      python_editor: "restaurant_locations_python"
+    };
+const recordPathPlaceholders = {
+      csv: "",
+      excel: "Sheet1",
+      json: "stores or data.locations",
+      xml: "locations.location",
+      api_get_json: "stores or data.locations",
+      python_editor: "records"
+    };
+function updateSourcePlaceholders(sourceType = el("sourceType").value) {
+      el("sourceUrl").placeholder = sourceUrlPlaceholders[sourceType] || "https://example.com/restaurant_locations.json";
+      el("apiUrl").placeholder = sourceType === "api_get_json" ? "https://example.com/stores.json" : "https://example.com/restaurant_locations.json";
+      el("sourceName").placeholder = sourceNamePlaceholders[sourceType] || "restaurant_locations";
+      el("recordPath").placeholder = recordPathPlaceholders[sourceType] || "";
+      el("fileInput").title = sourceType === "excel"
+        ? "Upload an .xlsx or .xls workbook."
+        : sourceType === "csv"
+          ? "Upload a .csv file."
+          : sourceType === "json"
+            ? "Upload a .json or .geojson file."
+            : sourceType === "xml"
+              ? "Upload an .xml file."
+              : "";
+    }
 function remoteFileNameForSource(sourceResult, sourceUrl, fallbackName = "remote_source") {
       const rawName = sourceResult?.file_name || fallbackName;
       const hasExtension = /\.[a-z0-9]+$/i.test(rawName);
@@ -397,14 +439,24 @@ function hidePresetBrandPanel() {
       el("createBrandBtn")?.classList.remove("hidden");
       el("newBrandFields")?.classList.toggle("hidden", el("brandSelect")?.value !== "__create_new__");
     }
+function resetPresetBrandEditState() {
+      presetBrandEditMode = false;
+      el("newBrandFields")?.classList.add("hidden");
+      lockBrandFields(false);
+      el("presetBrandEditBtn")?.classList.remove("hidden");
+      el("presetBrandCreateBtn")?.classList.remove("hidden");
+      el("createBrandBtn")?.classList.remove("hidden");
+    }
 function resetSourceInputsForNewMode(sourceType = el("sourceType").value) {
       setPresetLocked(false, []);
       setSourceUrlLocked(false);
       hidePresetBrandPanel();
+      if (["csv", "excel", "json", "xml"].includes(sourceType)) {
+        el("sourceInputMode").value = "file";
+      }
       el("sourceUrl").value = "";
-      el("sourceUrl").placeholder = sourceUrlPlaceholders[sourceType] || "https://example.com/locations.json";
       el("apiUrl").value = "";
-      el("apiUrl").placeholder = sourceType === "api_get_json" ? "https://example.com/stores.json" : "https://example.com/locations.json";
+      updateSourcePlaceholders(sourceType);
       el("sourceName").value = "";
       el("recordPath").value = "";
       el("jsonRecordPath").innerHTML = '<option value="">Automatically select the best record layer</option>';
@@ -429,6 +481,7 @@ function fillBrandFromConfig(brand) {
       syncBrandSelection(brand);
     }
 function applyCsvPreset(config) {
+      resetPresetBrandEditState();
       activeCsvPresetConfig = config;
       csvFunctionMode = config.mode;
       el("sourceType").value = "csv";
@@ -510,10 +563,12 @@ function applyGlobalHotelsCsvDemo() {
       setPresetLocked(false, []);
     }
 function resetCsvDemoLock() {
+      resetPresetBrandEditState();
       csvFunctionMode = "new";
       resetSourceInputsForNewMode("csv");
     }
 function updateCsvFunctionSelection(value) {
+      resetPresetBrandEditState();
       if (value === "pizza_hut") applyPizzaHutCsvDemo();
       else if (value === "global_hotels") applyGlobalHotelsCsvDemo();
       else resetCsvDemoLock();
@@ -559,6 +614,7 @@ function setDemoRestaurantExcelMappings() {
       autoMappedKeys = new Set(Object.keys(mappingSelections));
     }
 function applyDemoRestaurantExcel() {
+      resetPresetBrandEditState();
       excelFunctionMode = "demo_restaurant";
       activeCsvPresetConfig = null;
       presetBrandEditMode = false;
@@ -581,10 +637,12 @@ function applyDemoRestaurantExcel() {
       setStatus(selectedBrand ? "Demo Restaurant Excel URL is ready with an existing business. Click Parse." : "Demo Restaurant Excel URL is ready. Choose or create a business, then click Parse.", selectedBrand ? "ok" : "warn");
     }
 function resetExcelDemoLock() {
+      resetPresetBrandEditState();
       excelFunctionMode = "new";
       resetSourceInputsForNewMode("excel");
     }
 function updateExcelFunctionSelection(value) {
+      resetPresetBrandEditState();
       if (value === "demo_restaurant") applyDemoRestaurantExcel();
       else resetExcelDemoLock();
     }
@@ -995,6 +1053,7 @@ function updateAuthVisibility() {
     }
 function updateSourceVisibility() {
       const sourceType = el("sourceType").value;
+      updateSourcePlaceholders(sourceType);
       const isApi = sourceType === "api_get_json";
       const isPythonConnector = sourceType === "python_editor";
       const isExcel = sourceType === "excel";
@@ -1863,6 +1922,8 @@ async function clearSavedData() {
       if (window.confirm("DANGER: delete user-entered saved data?")) await performClearSavedData();
     }
 async function performClearSavedData() {
+      const button = el("confirmClearBtn");
+      const previousButton = setButtonBusy(button, "Clearing...");
       setStatus("Clearing saved data...", "warn");
       try {
         const response = await fetch("/api/clear", {
@@ -1875,6 +1936,78 @@ async function performClearSavedData() {
         setStatus("Saved data cleared.", "ok");
       } catch (error) {
         setStatus(productSafeError(error.message, "Could not clear saved data."), "error");
+      } finally {
+        clearButtonBusy(button, previousButton);
+      }
+    }
+function masterDeleteData() {
+      const firstDialog = el("masterDeleteCredentialsDialog");
+      el("masterDeletePassword").value = "";
+      el("masterDeleteConfirmation").value = "";
+      if (typeof firstDialog.showModal === "function") {
+        firstDialog.showModal();
+        return;
+      }
+      if (window.confirm("MASTER DATA DELETION: continue to credential confirmation?")) {
+        el("masterDeleteCredentialNextBtn").click();
+      }
+    }
+function proceedMasterDeleteConfirmation() {
+      el("masterDeleteCredentialsDialog").close();
+      const confirmDialog = el("masterDeleteConfirmDialog");
+      if (typeof confirmDialog.showModal === "function") {
+        confirmDialog.showModal();
+        return;
+      }
+      if (window.confirm("Type confirmation is required in the app dialog.")) {
+        confirmDialog.showModal();
+      }
+    }
+async function performMasterDeleteData() {
+      const status = el("masterDeleteStatus");
+      const button = el("masterDeleteBtn");
+      const confirmButton = el("confirmMasterDeleteBtn");
+      const payload = {
+        username: el("masterDeleteUser").value.trim(),
+        password: el("masterDeletePassword").value,
+        confirmation: el("masterDeleteConfirmation").value.trim()
+      };
+      if (payload.confirmation !== "DELETE ALL DATA") {
+        status.className = "action-feedback error";
+        status.textContent = "Type DELETE ALL DATA to confirm.";
+        return;
+      }
+      button.disabled = true;
+      const previousConfirmButton = setButtonBusy(confirmButton, "Deleting...");
+      status.className = "action-feedback";
+      status.innerHTML = busyMarkup("Deleting...");
+      try {
+        const response = await fetch("/api/master-delete", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Master deletion failed.");
+        el("masterDeleteConfirmDialog").close();
+        status.className = "action-feedback ok";
+        status.textContent = `Master deletion complete. Dropped ${result.dropped_count || 0} tables.`;
+        setStatus("Master data deletion complete. Warehouse is back to no-tables state.", "ok");
+        window.alert(`Master data deletion complete. Dropped ${result.dropped_count || 0} warehouse objects across all layers. You will be logged out now.`);
+        sourceRows = [];
+        sourceFields = [];
+        sourceParsed = false;
+        mappingSelections = {};
+        selectedBrand = null;
+        appDataLoaded = false;
+        logout();
+        prepareReferenceData();
+      } catch (error) {
+        status.className = "action-feedback error";
+        status.textContent = productSafeError(error.message, "Master deletion failed.");
+      } finally {
+        button.disabled = false;
+        clearButtonBusy(confirmButton, previousConfirmButton);
       }
     }
 
@@ -1978,16 +2111,14 @@ async function toggleShowExistingBrands() {
             const targetId = box.querySelector(`[data-merge-target="${index}"]`)?.value || "";
             const sourceIds = group.map((brand) => brand.business_id).filter((id) => id && id !== targetId);
             if (!targetId || !sourceIds.length) return;
-            button.disabled = true;
-            button.textContent = "Merging...";
+            const previousButton = setButtonBusy(button, "Merging...");
             try {
               const result = await mergeDuplicateBusinesses(targetId, sourceIds);
               await loadBrands("");
               setStatus(`Merged ${result.merged_count} business record${result.merged_count === 1 ? "" : "s"}.`, "ok");
               box.style.display = "none";
             } catch (err) {
-              button.disabled = false;
-              button.textContent = "Merge Others Into Keep";
+              clearButtonBusy(button, previousButton);
               setStatus(productSafeError(err.message, "Could not merge businesses."), "error");
             }
           });

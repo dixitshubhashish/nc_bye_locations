@@ -37,10 +37,7 @@ async function _loadTemplateLibraryOnce() {
       const search = el("templateSearch").value.trim();
       const businessId = el("templateBusinessFilter").value;
       const sourceTypeId = el("templateSourceFilter").value;
-      if (searchBtn) {
-        searchBtn.disabled = true;
-        searchBtn.innerHTML = `<span style="display: inline-flex; align-items: center; gap: 6px;"><span class="inline-spinner" style="display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #ffffff; border-radius: 50%; animation: spinCircle 0.8s linear infinite;"></span> Searching...</span>`;
-      }
+      if (searchBtn) setButtonBusy(searchBtn, "Searching...");
       target.className = "status";
       target.innerHTML = `${_templateSpinner()}Loading templates...`;
       try {
@@ -93,8 +90,7 @@ async function _loadTemplateLibraryOnce() {
         target.textContent = productSafeError(error.message, "Could not load templates.");
       } finally {
         if (searchBtn) {
-          searchBtn.disabled = false;
-          searchBtn.innerHTML = originalBtnHtml;
+          clearButtonBusy(searchBtn, originalBtnHtml);
         }
       }
     }

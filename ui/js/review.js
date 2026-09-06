@@ -22,10 +22,7 @@ async function _loadRejectedRecordsOnce() {
       const searchBtn = el("reviewSearchBtn");
       const originalSearchBtnHtml = searchBtn ? searchBtn.innerHTML : "Search Records";
 
-      if (searchBtn) {
-        searchBtn.disabled = true;
-        searchBtn.innerHTML = `<span style="display: inline-flex; align-items: center; gap: 6px;"><span class="inline-spinner" style="display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #ffffff; border-radius: 50%; animation: spinCircle 0.8s linear infinite;"></span> Searching...</span>`;
-      }
+      if (searchBtn) setButtonBusy(searchBtn, "Searching...");
 
       target.className = "status";
       target.textContent = "Loading error listings...";
@@ -70,8 +67,7 @@ async function _loadRejectedRecordsOnce() {
         target.textContent = productSafeError(error.message, "Could not load review records.");
       } finally {
         if (searchBtn) {
-          searchBtn.disabled = false;
-          searchBtn.innerHTML = originalSearchBtnHtml;
+          clearButtonBusy(searchBtn, originalSearchBtnHtml);
         }
       }
     }
@@ -382,10 +378,7 @@ el("submitEditRecordBtn")?.addEventListener("click", async () => {
       const originalBtnHtml = submitBtn ? submitBtn.innerHTML : "Retry Record";
 
       try {
-        if (submitBtn) {
-          submitBtn.disabled = true;
-          submitBtn.innerHTML = `<span style="display: inline-flex; align-items: center; gap: 8px;"><span class="inline-spinner" style="display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #ffffff; border-radius: 50%; animation: spinCircle 0.8s linear infinite;"></span> Validating &amp; Retrying...</span>`;
-        }
+        if (submitBtn) setButtonBusy(submitBtn, "Retrying...");
         if (cancelBtn) cancelBtn.disabled = true;
 
         const response = await fetch("/api/reprocess", {
@@ -441,8 +434,7 @@ el("submitEditRecordBtn")?.addEventListener("click", async () => {
         showDialogError(productSafeError(error.message, "Could not reprocess this record."));
       } finally {
         if (submitBtn) {
-          submitBtn.disabled = false;
-          submitBtn.innerHTML = originalBtnHtml;
+          clearButtonBusy(submitBtn, originalBtnHtml);
         }
         if (cancelBtn) cancelBtn.disabled = false;
       }
@@ -534,4 +526,3 @@ async function loadErrorBrandBreakdown() {
         container.style.display = "none";
       }
     }
-

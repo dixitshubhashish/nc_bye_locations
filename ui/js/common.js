@@ -14,11 +14,11 @@ let sourceTypes = [];
 // instead of showing the raw code name.
 const SOURCE_TYPE_LABELS = {
   csv: "CSV",
-  excel: "Excel (.xlsx)",
-  json: "JSON",
-  xml: "XML",
+  excel: "EXCEL (.XLSX)",
   api_get_json: "GET API JSON",
-  python_editor: "Python Editor",
+  json: "JSON",
+  python_editor: "PYTHON EDITOR",
+  xml: "XML",
 };
 function sourceTypeLabel(sourceTypeKey) {
       return SOURCE_TYPE_LABELS[sourceTypeKey] || String(sourceTypeKey || "Unknown");
@@ -26,6 +26,7 @@ function sourceTypeLabel(sourceTypeKey) {
 
 const loginSessionStorageKey = "competitive_whitespace_login_session";
 const mappingSessionStorageKey = "competitive_whitespace_mapping_session";
+const serverLaunchStorageKey = "competitive_whitespace_server_launch";
 const el = (id) => document.getElementById(id);
 function newSessionId() {
       return window.crypto?.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -137,6 +138,21 @@ function hideProgress() {
       el("saveProgress").classList.add("hidden");
       el("saveProgress").setAttribute("aria-busy", "false");
       hideLoadingOverlay();
+    }
+function busyMarkup(label = "Loading...") {
+      return `<span class="busy-label"><span class="inline-spinner"></span>${escapeHtml(label)}</span>`;
+    }
+function setButtonBusy(button, label = "Loading...") {
+      if (!button) return "";
+      const previous = button.innerHTML;
+      button.disabled = true;
+      button.innerHTML = busyMarkup(label);
+      return previous;
+    }
+function clearButtonBusy(button, previousHtml) {
+      if (!button) return;
+      button.disabled = false;
+      if (previousHtml !== undefined) button.innerHTML = previousHtml;
     }
 
 function switchView(viewId) {
@@ -258,18 +274,7 @@ async function login() {
         sessionStorage.setItem(mappingSessionStorageKey, newSessionId());
         sessionStorage.removeItem(draftStorageKey);
         
-        // Instant screen toggle with mapper as the default view.
-        el("loginScreen").classList.add("hidden");
-        el("appShell").classList.remove("hidden");
-        switchView("mapperView");
-        refreshHeaderReadiness();
-
-        // Asynchronous non-blocking background data load
-        loadAppData();
-        // Fresh login: pull a live error-listings count once so the tab badge
-        // reflects the current warehouse state rather than a prior session's
-        // cached number (later reads stay cheap off SQLite).
-        if (typeof refreshReviewCount === "function") refreshReviewCount(true);
+        window.location.replace("/app");
       } catch (error) {
         status.className = "status error";
         status.textContent = productSafeError(error.message, "Invalid username or password.");
@@ -283,23 +288,62 @@ async function loadAppData() {
 function restoreRememberedLogin() {
       const remembered = localStorage.getItem("mapper_login_remembered") === "true";
       el("rememberLogin").checked = remembered;
-      if (remembered) {
-        sessionStorage.setItem(loginSessionStorageKey, "true");
+    }
+async function resetLoginSessionFromLaunch() {
+      try {
+        const response = await fetch("/api/session", { cache: "no-store" });
+        const result = await response.json();
+        if (!response.ok || !result.server_launch_id) throw new Error("Session check failed.");
+        const previousLaunchId = sessionStorage.getItem(serverLaunchStorageKey);
+        const currentLaunchId = String(result.server_launch_id);
+        if (previousLaunchId && previousLaunchId !== currentLaunchId) {
+          sessionStorage.removeItem(loginSessionStorageKey);
+          sessionStorage.removeItem(mappingSessionStorageKey);
+          sessionStorage.removeItem(draftStorageKey);
+        }
+        sessionStorage.setItem(serverLaunchStorageKey, currentLaunchId);
+      } catch (error) {
+        sessionStorage.removeItem(loginSessionStorageKey);
+        sessionStorage.removeItem(mappingSessionStorageKey);
+        sessionStorage.removeItem(draftStorageKey);
       }
       if (sessionStorage.getItem(loginSessionStorageKey) === "true") {
         el("loginScreen")?.classList.add("hidden");
         el("appShell")?.classList.remove("hidden");
+      } else {
+        el("appShell")?.classList.add("hidden");
+        el("loginScreen")?.classList.remove("hidden");
       }
-    }
-function resetLoginSessionFromLaunch() {
-      // Clean neat URLs: no query parameters required for login launch
     }
 async function prepareReferenceData() {
       const loginButton = el("loginBtn");
-      loginButton.className = "reference-login-button";
+      const status = el("loginReadinessStatus");
+      loginButton.className = "reference-login-button warn";
       loginButton.disabled = false;
-      loginButton.classList.add("ready");
-      appReady = true;
+      if (status) {
+        status.className = "status";
+        status.textContent = "Preparing ZIP reference data...";
+      }
+      try {
+        const response = await fetch("/api/prepare");
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "ZIP reference data could not be prepared.");
+        appReady = true;
+        updateLoginButtonReferenceState();
+        if (status) {
+          status.className = "status ok";
+          status.textContent = "ZIP reference data ready.";
+        }
+        return result;
+      } catch (error) {
+        appReady = false;
+        updateLoginButtonReferenceState();
+        if (status) {
+          status.className = "status error";
+          status.textContent = productSafeError(error.message, "ZIP reference data needs attention.");
+        }
+        return null;
+      }
     }
 
 function logout() {
@@ -307,8 +351,5 @@ function logout() {
       sessionStorage.removeItem(loginSessionStorageKey);
       sessionStorage.removeItem(mappingSessionStorageKey);
       sessionStorage.removeItem(draftStorageKey);
-      el("loginPassword").value = "";
-      el("loginStatus").className = "status hidden";
-      el("appShell").classList.add("hidden");
-      el("loginScreen").classList.remove("hidden");
+      window.location.replace("/login");
     }

@@ -678,8 +678,10 @@ async function loadReporting() {
 
 async function refreshReportingData() {
       const target = el("reportingDataRefreshStatus");
+      const button = el("reportingDataRefreshBtn");
+      const previousButton = setButtonBusy(button, "Refreshing...");
       target.className = "action-feedback";
-      target.textContent = "Refreshing...";
+      target.innerHTML = busyMarkup("Refreshing...");
       try {
         const response = await fetch("/api/reporting/refresh", {
           method: "POST",
@@ -693,5 +695,7 @@ async function refreshReportingData() {
       } catch (error) {
         target.className = "action-feedback error";
         target.textContent = productSafeError(error.message, "Could not refresh data.");
+      } finally {
+        clearButtonBusy(button, previousButton);
       }
     }

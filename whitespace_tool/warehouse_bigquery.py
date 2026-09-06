@@ -581,3 +581,35 @@ def clear_dataset_tables(
 
     dataset_ref = f"{project_id}.{dataset_id}"
     return _clear_dataset_tables_with_client(client, dataset_ref)
+
+
+def drop_dataset_tables(
+    project_id: str,
+    dataset_id: str,
+    credentials_json: str | None = None,
+) -> dict[str, list[str]]:
+    try:
+        from google.cloud import bigquery
+        from google.oauth2 import service_account
+    except ImportError as exc:
+        raise RuntimeError("Install the storage client dependencies before deleting master data.") from exc
+
+    if credentials_json:
+        credentials = service_account.Credentials.from_service_account_file(credentials_json)
+        client = bigquery.Client(project=project_id, credentials=credentials)
+    else:
+        client = bigquery.Client(project=project_id)
+
+    dataset_ref = f"{project_id}.{dataset_id}"
+    table_items = list(client.list_tables(dataset_ref))
+    LOGGER.warning("db_master_delete_started dataset=%s object_count=%d", dataset_ref, len(table_items))
+    dropped: list[str] = []
+    dropped_objects: list[dict[str, str]] = []
+    for table in table_items:
+        client.delete_table(table.reference, not_found_ok=True)
+        object_type = str(getattr(table, "table_type", "") or "TABLE")
+        dropped.append(table.table_id)
+        dropped_objects.append({"name": table.table_id, "type": object_type})
+        LOGGER.warning("db_master_object_dropped dataset=%s object=%s type=%s", dataset_ref, table.table_id, object_type)
+    LOGGER.warning("db_master_delete_succeeded dataset=%s dropped_count=%d", dataset_ref, len(dropped))
+    return {"dropped_tables": dropped, "dropped_objects": dropped_objects}
