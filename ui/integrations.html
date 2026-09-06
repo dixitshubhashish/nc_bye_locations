@@ -5,6 +5,19 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Location Intelligence</title>
   <script src="constants.js"></script>
+  <script>
+    (function() {
+      try {
+        var isAuth = sessionStorage.getItem("competitive_whitespace_login_session");
+        if (isAuth !== "true") {
+          var currentSearch = window.location.search || "";
+          window.location.replace("/login" + currentSearch);
+        }
+      } catch (e) {
+        window.location.replace("/login");
+      }
+    })();
+  </script>
   <link id="appFavicon" rel="icon" type="image/png">
   <script>document.getElementById("appFavicon").href = window.APP_CONSTANTS.birdeyeFaviconUrl;</script>
   <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.0/min/vs/loader.js"></script>
@@ -857,9 +870,24 @@
       color: var(--muted);
     }
 
-    .status.ok { color: var(--ok); border-color: #b9d6c3; background: #f2fbf5; }
-    .status.warn { color: var(--warn); border-color: #e5cfaa; background: #fff9ed; }
-    .status.error { color: var(--error); border-color: #e8bbbb; background: #fff5f5; }
+    #status {
+      font-size: 16px;
+      font-weight: 750;
+      padding: 14px 20px;
+      line-height: 1.5;
+      color: var(--navy);
+      background: #f0f7ff;
+      border: 1px solid #bfdbfe;
+      border-left: 5px solid #2563eb;
+      border-radius: 8px;
+      margin: 16px 20px 8px;
+      box-shadow: 0 2px 6px rgba(15, 23, 42, 0.05);
+      letter-spacing: -0.01em;
+    }
+
+    .status.ok, #status.ok { color: var(--ok); border-color: #b9d6c3; border-left-color: #10b981; background: #f2fbf5; }
+    .status.warn, #status.warn { color: var(--warn); border-color: #e5cfaa; border-left-color: #f59e0b; background: #fff9ed; }
+    .status.error, #status.error { color: var(--error); border-color: #e8bbbb; border-left-color: #ef4444; background: #fff5f5; }
 
     table {
       width: 100%;
@@ -1054,18 +1082,32 @@
 
     .entity-field {
       display: grid;
-      grid-template-columns: minmax(120px, 1fr) minmax(120px, 1fr);
+      grid-template-columns: minmax(130px, 1.1fr) minmax(110px, 0.9fr) minmax(140px, 1fr);
       gap: 8px;
-      padding: 7px 8px;
+      align-items: center;
+      padding: 7px 10px;
       border: 1px solid #e3e8e3;
-      border-radius: 5px;
+      border-radius: 6px;
       font-size: 12px;
+      background: #ffffff;
+    }
+
+    .entity-field.source-row-item {
+      grid-template-columns: minmax(130px, 1fr) minmax(100px, 1fr);
     }
 
     .entity-field-name { font-weight: 700; }
-    .entity-field-source { color: var(--muted); overflow-wrap: anywhere; }
-    .entity-field-source.mapped { color: var(--ok); }
+    .entity-field-source { color: var(--muted); overflow-wrap: anywhere; font-size: 11px; }
+    .entity-field-source.mapped { color: var(--ok); font-weight: 600; }
     .entity-field-source.unmapped { color: #8a9298; font-style: italic; }
+    .entity-map-select {
+      width: 100%;
+      padding: 4px 6px;
+      font-size: 11px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: #ffffff;
+    }
 
     /* Birdeye-inspired product styling: bright blue actions, white navigation, cool gray workspace. */
     :root {
@@ -1333,7 +1375,7 @@
     </div>
   </div>
 
-  <div id="appShell" class="hidden">
+  <div id="appShell">
     <header>
       <div class="app-title">
         <div class="brand-lockup" aria-label="Birdeye brand reference">
@@ -1355,7 +1397,8 @@
       </div>
     </header>
     <div id="mapperView">
-    <div id="saveProgress" class="progress-wrap hidden" aria-live="polite" aria-busy="false">
+      <div id="status" class="status">Choose a source and parse it to start mapping in left pane.</div>
+      <div id="saveProgress" class="progress-wrap hidden" aria-live="polite" aria-busy="false">
       <div class="progress-label"><span id="progressMessage">Preparing your records</span><span id="progressValue">0%</span></div>
       <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
     </div>
@@ -1419,15 +1462,15 @@
         <button id="sourceUrlEditBtn" class="source-url-control source-url-edit hidden" type="button">Edit URL</button>
         </div>
 
-        <label id="brandSelectLabel" for="brandSelect">Business</label>
-        <select id="brandSelect" aria-label="Select business">
-          <option value="">Select an existing business</option>
-          <option class="create-new-option" value="__create_new__">+ Create New Business</option>
+        <label id="brandSelectLabel" for="brandSelect">Brand</label>
+        <select id="brandSelect" aria-label="Select brand">
+          <option value="">Select an existing brand</option>
+          <option class="create-new-option" value="__create_new__">+ Create New Brand</option>
         </select>
         <div id="presetBrandPanel" class="preset-brand-panel hidden">
           <div class="preset-brand-summary">
             <strong id="presetBrandTitle">Preset brand</strong>
-            <span id="presetBrandStatus">Preset business selected.</span>
+            <span id="presetBrandStatus">Preset brand selected.</span>
             <div class="button-row" style="gap: 6px;">
               <button id="presetBrandCreateBtn" type="button">Use Brand</button>
               <button id="presetBrandEditBtn" class="secondary" type="button">Edit Brand Details</button>
@@ -1452,15 +1495,31 @@
         <input id="sourceName" placeholder="restaurant_locations_csv">
 
         <div class="field-group record-field">
-        <div class="label-row">
-          <label for="recordPath">Record path</label>
-          <span class="info-icon" tabindex="0" data-tooltip="Use when records sit inside a nested file or sheet.">i</span>
-        </div>
-        <input id="recordPath" placeholder="stores or data.locations">
-        <label for="jsonRecordPath" class="json-record-path-field hidden">JSON record layer</label>
-        <select id="jsonRecordPath" class="json-record-path-field hidden">
-          <option value="">Automatically select the best record layer</option>
-        </select>
+          <div class="label-row">
+            <label>Record Extraction Mode</label>
+            <span class="info-icon" tabindex="0" data-tooltip="Choose whether to automatically detect the best nested record layer across the source or use a specific custom record path.">i</span>
+          </div>
+          <div class="radio-choice-group" style="display: flex; flex-direction: column; gap: 8px; margin: 6px 0 10px;">
+            <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: normal; cursor: pointer;">
+              <input type="radio" name="recordExtractionMode" id="recordModeAuto" value="auto" checked>
+              <span>Automatic (detect best layer &amp; fields)</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: normal; cursor: pointer;">
+              <input type="radio" name="recordExtractionMode" id="recordModeCustom" value="custom">
+              <span>Custom record path (fetch from given path only)</span>
+            </label>
+          </div>
+          <div id="customRecordPathContainer" class="hidden">
+            <div class="label-row">
+              <label for="recordPath">Record path</label>
+              <span class="info-icon" tabindex="0" data-tooltip="Use when records sit inside a nested file or sheet.">i</span>
+            </div>
+            <input id="recordPath" placeholder="stores or data.locations">
+            <label for="jsonRecordPath" class="json-record-path-field hidden">JSON record layer</label>
+            <select id="jsonRecordPath" class="json-record-path-field hidden">
+              <option value="">Automatically select the best record layer</option>
+            </select>
+          </div>
         </div>
 
         <div class="field-group excel-field">
@@ -1597,8 +1656,8 @@ else:
       <div class="panel data-danger-panel">
         <h2>⚠️ Data Controls</h2>
         <div class="mapping-note">Clear loaded records or reset the warehouse completely.</div>
-        <p class="data-risk-note">Risk: deletion can remove saved listings, businesses, review rows, and with master deletion every warehouse table/view.</p>
-        <button class="secondary danger-soft" id="clearDataBtn" type="button" title="Soft delete saved businesses, listings, and review records. Reference ZIPs, fields, source types, and templates stay available.">Clear Saved Data</button>
+        <p class="data-risk-note">Risk: deletion can remove saved listings, brands, review rows, and with master deletion every warehouse table/view.</p>
+        <button class="secondary danger-soft" id="clearDataBtn" type="button" title="Soft delete saved brands, listings, and review records. Reference ZIPs, fields, source types, and templates stay available.">Clear Saved Data</button>
         <button class="secondary danger-hard" id="masterDeleteBtn" type="button" title="Drop every table and view across bronze, silver, and gold datasets. Partitioned tables are removed through their base tables.">Master Data Deletion</button>
         <div id="masterDeleteStatus" class="action-feedback" role="status" aria-live="polite"></div>
       </div>
@@ -1606,8 +1665,6 @@ else:
     </aside>
 
     <section>
-      <div id="status" class="status">Choose a source and parse it to start mapping.</div>
-
       <div class="panel">
         <h2>Template Components</h2>
         <div class="mapping-grid" id="mappingGrid"></div>
@@ -1628,7 +1685,7 @@ else:
           </div>
           <div class="optional-fields-column alias-picker">
             <label for="customFieldLabel">Create Custom Field</label>
-            <select id="customFieldBusinessSelect" aria-label="Business for custom field"><option value="">Select business</option></select>
+            <select id="customFieldBusinessSelect" aria-label="Brand for custom field"><option value="">Select brand</option></select>
             <input id="customFieldLabel" placeholder="For example: Delivery Zone">
             <input id="customFieldSlug" placeholder="camelCase slug without space (e.g. deliveryZone)">
             <select id="customFieldType"><option value="string">Text</option><option value="float">Number</option><option value="integer">Whole number</option><option value="date">Date</option></select>
@@ -1638,7 +1695,7 @@ else:
           </div>
           <div class="optional-fields-column alias-picker">
             <label for="dropCustomFieldSelect">Remove Custom Field</label>
-            <select id="dropCustomFieldBusinessSelect" aria-label="Business for custom field removal"><option value="">Select business</option></select>
+            <select id="dropCustomFieldBusinessSelect" aria-label="Brand for custom field removal"><option value="">Select brand</option></select>
             <select id="dropCustomFieldSelect"><option value="">Choose a custom field</option></select>
             <input id="dropCustomFieldPassword" type="password" placeholder="Admin password (use '54321')">
             <button class="secondary danger-action" id="dropCustomFieldBtn" type="button">Drop Custom Field</button>
@@ -1813,6 +1870,9 @@ else:
       <p style="color: var(--muted); font-size: 13px; margin-top: -8px; margin-bottom: 16px;">Review records that need attention. Edit and retry when ready.</p>
       <div class="review-toolbar">
         <input id="reviewEventId" placeholder="Search by event ID (leave empty for all records)">
+        <select id="reviewBrandFilter" aria-label="Filter by brand">
+          <option value="">All Brands</option>
+        </select>
         <button id="reviewSearchBtn" type="button">Search Records</button>
       </div>
       <div id="reviewBrandBreakdown" class="review-brand-breakdown" style="display: none; margin: 8px 0 18px; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; background: #fff;">
@@ -1846,7 +1906,7 @@ else:
       <h2>Template Library</h2>
       <div class="template-search">
         <input id="templateSearch" placeholder="Search templates">
-        <select id="templateBusinessFilter" aria-label="Filter by business"><option value="">All businesses</option></select>
+        <select id="templateBusinessFilter" aria-label="Filter by brand"><option value="">All brands</option></select>
         <select id="templateSourceFilter" aria-label="Filter by source type"><option value="">All source types</option></select>
         <button id="templateSearchBtn" type="button">Search</button>
       </div>
@@ -1861,7 +1921,7 @@ else:
   </div>
   <dialog id="dangerDialog" class="danger-dialog">
     <h2>DANGER</h2>
-    <p>This will delete saved businesses, listings, and review records. Templates and reference data stay available.</p>
+    <p>This will delete saved brands, listings, and review records. Templates and reference data stay available.</p>
     <div class="button-row">
       <button id="confirmClearBtn" type="button">Delete Data</button>
       <button class="secondary" id="cancelClearBtn" type="button">Cancel</button>
@@ -2114,8 +2174,23 @@ else:
           loadTemplateLibrary();
         });
     el("templateSourceFilter").addEventListener("change", loadTemplateLibrary);
+    el("reviewBrandFilter")?.addEventListener("change", loadRejectedRecords);
+    document.querySelectorAll("input[name='recordExtractionMode']").forEach((radio) => {
+          radio.addEventListener("change", () => {
+            const isCustom = radio.value === "custom" && radio.checked;
+            el("customRecordPathContainer")?.classList.toggle("hidden", !isCustom);
+            if (isCustom) el("recordPath")?.focus();
+          });
+        });
     el("jsonRecordPath").addEventListener("change", () => {
           el("recordPath").value = el("jsonRecordPath").value;
+          if (el("jsonRecordPath").value) {
+            const customRadio = el("recordModeCustom");
+            if (customRadio) {
+              customRadio.checked = true;
+              el("customRecordPathContainer")?.classList.remove("hidden");
+            }
+          }
           parseSource();
         });
     document.querySelectorAll(".tab").forEach((button) => {
@@ -2215,8 +2290,11 @@ else:
       // moves (reprocess/save), keeping the cached number honest.
       refreshReviewCount();
       const urlParams = new URLSearchParams(window.location.search);
-      const activeTab = urlParams.get("view") || sessionStorage.getItem("activeTab") || "mapperView";
-      switchView(activeTab || "mapperView");
+      let activeTab = urlParams.get("view") || sessionStorage.getItem("activeTab") || "mapperView";
+      if (!["mapperView", "reportingView", "reviewView", "templateLibraryView"].includes(activeTab)) {
+        activeTab = "mapperView";
+      }
+      switchView(activeTab);
     })();
 
   </script>

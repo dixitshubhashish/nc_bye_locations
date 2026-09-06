@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Page Not Found | Location Intelligence</title>
+  <script src="/constants.js"></script>
+  <link id="appFavicon" rel="icon" type="image/png">
+  <script>
+    if (window.APP_CONSTANTS && window.APP_CONSTANTS.birdeyeFaviconUrl) {
+      document.getElementById("appFavicon").href = window.APP_CONSTANTS.birdeyeFaviconUrl;
+    }
+  </script>
+  <style>
+    :root {
+      --bg: #f5f8ff;
+      --panel: #ffffff;
+      --ink: #1f2937;
+      --muted: #667085;
+      --line: #d9e2f1;
+      --accent: #0b70f0;
+      --accent-hover: #005fd3;
+      --error: #c43b54;
+      --ok: #147d63;
+      --warn: #a86412;
+    }
+    * { box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      padding: 16px;
+    }
+    .error-card {
+      width: min(460px, 100%);
+      padding: 36px 32px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--panel);
+      box-shadow: 0 16px 40px rgba(28, 51, 88, 0.08);
+      text-align: center;
+    }
+    .brand-logo-image {
+      display: block;
+      width: auto;
+      max-width: min(200px, 100%);
+      max-height: 52px;
+      object-fit: contain;
+      margin: 0 auto 24px;
+    }
+    .error-badge {
+      display: inline-block;
+      padding: 4px 12px;
+      background: #eef4ff;
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 700;
+      border-radius: 16px;
+      letter-spacing: 0.5px;
+      margin-bottom: 12px;
+    }
+    .error-code {
+      font-size: 64px;
+      font-weight: 900;
+      line-height: 1;
+      margin: 0 0 12px;
+      background: linear-gradient(135deg, #0b70f0 0%, #1d2b4f 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: 22px;
+      font-weight: 700;
+      color: var(--ink);
+    }
+    p {
+      margin: 0 0 20px;
+      font-size: 14px;
+      line-height: 1.5;
+      color: var(--muted);
+    }
+    .redirect-notice {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 8px 14px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: #f8fbff;
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 24px;
+    }
+    .countdown-num {
+      font-weight: 800;
+      color: var(--accent);
+      min-width: 12px;
+    }
+    .actions-row {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      padding: 11px 16px;
+      border-radius: 6px;
+      font: inherit;
+      font-size: 14px;
+      font-weight: 700;
+      text-decoration: none;
+      cursor: pointer;
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: #ffffff;
+      border: 1px solid var(--accent);
+    }
+    .btn-primary:hover {
+      background: var(--accent-hover);
+      border-color: var(--accent-hover);
+    }
+    .btn-secondary {
+      background: #f8fbff;
+      color: var(--ink);
+      border: 1px solid var(--line);
+    }
+    .btn-secondary:hover {
+      background: #edf3fc;
+      border-color: #cfd9e8;
+    }
+  </style>
+</head>
+<body>
+  <main class="error-card">
+    <img class="brand-logo-image" data-logo-src="birdeyeLogoDarkUrl" alt="Birdeye">
+    <div class="error-badge">PAGE NOT FOUND</div>
+    <div class="error-code">404</div>
+    <h1>Page Not Found</h1>
+    <p>The page or resource you are looking for doesn't exist, may have moved, or your session has expired.</p>
+    <div class="redirect-notice" id="redirectNotice">
+      <span>Redirecting to login in</span>
+      <span id="countdownSeconds" class="countdown-num">7</span>
+      <span>seconds...</span>
+    </div>
+    <div class="actions-row">
+      <a href="/login" class="btn btn-primary" id="loginNowBtn">Login Now</a>
+      <a href="/app" class="btn btn-secondary">Go to Dashboard</a>
+    </div>
+  </main>
+
+  <script>
+    const fallbackBirdeyeDarkSvg = "data:image/svg+xml;utf8," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 60" width="240" height="60"><rect width="240" height="60" fill="none"/><g transform="translate(10, 10)"><path d="M 6 22 C 6 8 18 3 24 3 C 30 3 42 8 42 22 C 42 36 30 41 24 41 C 18 41 6 36 6 22 Z" fill="#0b70f0"/><ellipse cx="24" cy="22" rx="10" ry="10" fill="#ffffff"/><circle cx="24" cy="22" r="5" fill="#1d2b4f"/><path d="M 2 22 C 14 36 34 36 46 22 C 34 8 14 8 2 22 Z" fill="none" stroke="#0b70f0" stroke-width="3" stroke-linecap="round"/><text x="56" y="31" font-family="system-ui, -apple-system, sans-serif" font-weight="800" font-size="28" fill="#1d2b4f">Birdeye</text></g></svg>');
+    document.querySelectorAll("[data-logo-src]").forEach((image) => {
+      const srcUrl = (window.APP_CONSTANTS && window.APP_CONSTANTS[image.dataset.logoSrc]) || (window.APP_CONSTANTS && window.APP_CONSTANTS.birdeyeLogoUrl);
+      image.onerror = () => {
+        image.onerror = null;
+        image.src = fallbackBirdeyeDarkSvg;
+      };
+      image.src = srcUrl || fallbackBirdeyeDarkSvg;
+    });
+
+    let secondsLeft = 7;
+    const countdownEl = document.getElementById("countdownSeconds");
+    const intervalId = setInterval(() => {
+      secondsLeft -= 1;
+      if (countdownEl) {
+        countdownEl.textContent = Math.max(0, secondsLeft);
+      }
+      if (secondsLeft <= 0) {
+        clearInterval(intervalId);
+        window.location.replace("/login");
+      }
+    }, 1000);
+  </script>
+</body>
+</html>

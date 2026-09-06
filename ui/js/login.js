@@ -17,6 +17,14 @@ function setStatus(targetId, message, type = "") {
   target.textContent = message;
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 function productSafeError(message, fallback = "Something went wrong. Please try again.") {
   const text = String(message || "");
   const sensitiveTerms = ["big" + "query", "data" + "set", "project" + "_id", "data" + "set_id", "credentials", "service" + " account", "google", "s" + "ql", "ware" + "house", "bron" + "ze", "sil" + "ver", "table", "module named"];
@@ -24,11 +32,12 @@ function productSafeError(message, fallback = "Something went wrong. Please try 
   return text || fallback;
 }
 
-function busyMarkup(label = "Loading...") {
-  return `<span class="busy-label"><span class="inline-spinner"></span>${label}</span>`;
+function busyMarkup(label = "Loading") {
+  const cleanLabel = String(label).replace(/\.\.\.+$/, "").trim();
+  return `<span class="busy-label">${escapeHtml(cleanLabel)} <span class="inline-spinner"></span></span>`;
 }
 
-function setButtonBusy(button, label = "Loading...") {
+function setButtonBusy(button, label = "Loading") {
   if (!button) return "";
   const previous = button.innerHTML;
   button.disabled = true;
@@ -78,7 +87,7 @@ async function prepareReferenceData() {
 
 async function login() {
   const button = el("loginBtn");
-  const previousButton = setButtonBusy(button, "Signing in...");
+  const previousButton = setButtonBusy(button, "Signing in");
   setStatus("loginStatus", "", "hidden");
   try {
     const response = await fetch("/api/login", {
@@ -90,10 +99,15 @@ async function login() {
     if (!response.ok || !result.authenticated) throw new Error(result.error || "Invalid username or password.");
     if (el("rememberLogin").checked) localStorage.setItem(REMEMBER_KEY, "true");
     else localStorage.removeItem(REMEMBER_KEY);
+    await syncServerLaunch();
     sessionStorage.setItem(LOGIN_SESSION_KEY, "true");
     sessionStorage.setItem(MAPPING_SESSION_KEY, newSessionId());
     sessionStorage.removeItem(DRAFT_KEY);
-    window.location.replace("/app");
+    const urlParams = new URLSearchParams(window.location.search);
+    const viewParam = urlParams.get("view");
+    const validViews = ["mapperView", "reportingView", "reviewView", "templateLibraryView"];
+    const target = (viewParam && validViews.includes(viewParam)) ? `/app?view=${encodeURIComponent(viewParam)}` : "/app";
+    window.location.replace(target);
   } catch (error) {
     setStatus("loginStatus", productSafeError(error.message, "Invalid username or password."), "error");
   } finally {
@@ -108,7 +122,11 @@ async function init() {
   el("rememberLogin").checked = localStorage.getItem(REMEMBER_KEY) === "true";
   await syncServerLaunch();
   if (sessionStorage.getItem(LOGIN_SESSION_KEY) === "true") {
-    window.location.replace("/app");
+    const urlParams = new URLSearchParams(window.location.search);
+    const viewParam = urlParams.get("view");
+    const validViews = ["mapperView", "reportingView", "reviewView", "templateLibraryView"];
+    const target = (viewParam && validViews.includes(viewParam)) ? `/app?view=${encodeURIComponent(viewParam)}` : "/app";
+    window.location.replace(target);
     return;
   }
   prepareReferenceData();

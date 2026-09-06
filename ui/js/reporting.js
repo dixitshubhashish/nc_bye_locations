@@ -501,6 +501,10 @@ function reportingQueryString() {
 
 async function loadReporting() {
       const status = el("reportStatus");
+      const refreshBtn = el("refreshReportBtn");
+      const applyBtn = el("applyReportFiltersBtn");
+      const previousRefreshBtn = setButtonBusy(refreshBtn, "Refreshing Report");
+      const previousApplyBtn = applyBtn ? setButtonBusy(applyBtn, "Applying Filters") : "";
       status.className = "report-status loading";
       status.innerHTML = '<span class="spinner"></span> Loading...';
       renderEmptyReportingStructure();
@@ -673,15 +677,18 @@ async function loadReporting() {
         renderEmptyReportingStructure();
         status.className = "report-status";
         status.textContent = productSafeError(error.message, "Could not load reporting data.");
+      } finally {
+        clearButtonBusy(refreshBtn, previousRefreshBtn);
+        if (applyBtn) clearButtonBusy(applyBtn, previousApplyBtn);
       }
     }
 
 async function refreshReportingData() {
       const target = el("reportingDataRefreshStatus");
       const button = el("reportingDataRefreshBtn");
-      const previousButton = setButtonBusy(button, "Refreshing...");
+      const previousButton = setButtonBusy(button, "Refreshing");
       target.className = "action-feedback";
-      target.innerHTML = busyMarkup("Refreshing...");
+      target.innerHTML = busyMarkup("Refreshing");
       try {
         const response = await fetch("/api/reporting/refresh", {
           method: "POST",

@@ -139,10 +139,11 @@ function hideProgress() {
       el("saveProgress").setAttribute("aria-busy", "false");
       hideLoadingOverlay();
     }
-function busyMarkup(label = "Loading...") {
-      return `<span class="busy-label"><span class="inline-spinner"></span>${escapeHtml(label)}</span>`;
+function busyMarkup(label = "Loading") {
+      const cleanLabel = String(label).replace(/\.\.\.+$/, "").trim();
+      return `<span class="busy-label">${escapeHtml(cleanLabel)} <span class="inline-spinner"></span></span>`;
     }
-function setButtonBusy(button, label = "Loading...") {
+function setButtonBusy(button, label = "Loading") {
       if (!button) return "";
       const previous = button.innerHTML;
       button.disabled = true;
@@ -179,7 +180,13 @@ function switchView(viewId) {
     }
 
 async function testReadiness() {
-      await refreshHeaderReadiness(true);
+      const button = el("testReadinessBtn");
+      const previousButton = setButtonBusy(button, "Testing Readiness");
+      try {
+        await refreshHeaderReadiness(true);
+      } finally {
+        clearButtonBusy(button, previousButton);
+      }
     }
 async function fetchReadinessPing() {
       const controller = new AbortController();
@@ -300,20 +307,27 @@ async function resetLoginSessionFromLaunch() {
           sessionStorage.removeItem(loginSessionStorageKey);
           sessionStorage.removeItem(mappingSessionStorageKey);
           sessionStorage.removeItem(draftStorageKey);
+          sessionStorage.setItem(serverLaunchStorageKey, currentLaunchId);
+          const currentSearch = window.location.search || "";
+          window.location.replace("/login" + currentSearch);
+          return;
         }
         sessionStorage.setItem(serverLaunchStorageKey, currentLaunchId);
       } catch (error) {
         sessionStorage.removeItem(loginSessionStorageKey);
         sessionStorage.removeItem(mappingSessionStorageKey);
         sessionStorage.removeItem(draftStorageKey);
+        const currentSearch = window.location.search || "";
+        window.location.replace("/login" + currentSearch);
+        return;
       }
-      if (sessionStorage.getItem(loginSessionStorageKey) === "true") {
-        el("loginScreen")?.classList.add("hidden");
-        el("appShell")?.classList.remove("hidden");
-      } else {
-        el("appShell")?.classList.add("hidden");
-        el("loginScreen")?.classList.remove("hidden");
+      if (sessionStorage.getItem(loginSessionStorageKey) !== "true") {
+        const currentSearch = window.location.search || "";
+        window.location.replace("/login" + currentSearch);
+        return;
       }
+      el("loginScreen")?.classList.add("hidden");
+      el("appShell")?.classList.remove("hidden");
     }
 async function prepareReferenceData() {
       const loginButton = el("loginBtn");

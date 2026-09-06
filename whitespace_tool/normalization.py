@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -96,7 +96,16 @@ def optional_timestamp(value: Any) -> str | None:
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
-        return None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f", "%m/%d/%Y %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%m-%d-%Y %H:%M:%S"):
+            try:
+                parsed = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                pass
+        else:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.isoformat()
 
 
@@ -111,6 +120,9 @@ def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name:
     if not location_id:
         location_id = f"{brand.lower().replace(' ', '_')}:{postal_code}:{index}"
 
+    raw_observed = _text(get_nested(row, fields.get("observed_at", ""), ""))
+    normalized_observed = optional_timestamp(raw_observed) if raw_observed else None
+
     return LocationRecord(
         brand=brand,
         business_id=str(mapper.get("business_id") or "") or None,
@@ -124,7 +136,7 @@ def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name:
         latitude=optional_float(get_nested(row, fields.get("latitude", ""), "")),
         longitude=optional_float(get_nested(row, fields.get("longitude", ""), "")),
         source=source_name,
-        observed_at=_text(get_nested(row, fields.get("observed_at", ""), "")) or utc_now_iso(),
+        observed_at=normalized_observed or raw_observed or utc_now_iso(),
         raw=dict(row),
         franchise_name=_text(get_nested(row, fields.get("franchise_name", ""), "")) or None,
         concept_type=_text(get_nested(row, fields.get("concept_type", ""), "")) or None,

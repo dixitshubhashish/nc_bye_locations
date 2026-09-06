@@ -1,6 +1,6 @@
 // Template Library tab: browse, load, and save saved mapping templates.
 
-let templateBusinessNames = {};
+let templateBrandNames = {};
 let loadTemplateLibraryPromise = null;
 // login-hotfix.js and integrations.html's own bootstrap script can each
 // independently call switchView("templateLibraryView") on the same page
@@ -17,8 +17,8 @@ function loadTemplateLibrary() {
       });
       return loadTemplateLibraryPromise;
     }
-const TEMPLATE_FIRST_BATCH = 15;
-const TEMPLATE_APPEND_CHUNK = 25;
+const TEMPLATE_FIRST_BATCH = 100;
+const TEMPLATE_APPEND_CHUNK = 50;
 // Self-contained spinner (the .spinner CSS class is scoped to .report-status,
 // so it wouldn't render inside the template results panel). Reuses the
 // spinCircle keyframe that the Review search button already relies on.
@@ -27,7 +27,7 @@ function _templateSpinner() {
     }
 
 function _templateRowHtml(template, sourceTypeIdToLabel) {
-      return `<tr><td>${escapeHtml(template.name)}</td><td>${escapeHtml(templateBusinessNames[template.business_id] || template.business_id)}</td><td>${escapeHtml(sourceTypeIdToLabel[template.source_type_id] || sourceTypeLabel(template.source_type_id))}</td><td>${escapeHtml(template.created_at)}</td><td>${escapeHtml(template.updated_at)}</td><td><button type="button" data-load-template="${escapeHtml(template.workflow_template_id)}">Load</button></td></tr>`;
+      return `<tr><td>${escapeHtml(template.name)}</td><td>${escapeHtml(templateBrandNames[template.business_id] || template.business_id)}</td><td>${escapeHtml(sourceTypeIdToLabel[template.source_type_id] || sourceTypeLabel(template.source_type_id))}</td><td>${escapeHtml(template.created_at)}</td><td>${escapeHtml(template.updated_at)}</td><td><button type="button" data-load-template="${escapeHtml(template.workflow_template_id)}">Load</button></td></tr>`;
     }
 
 async function _loadTemplateLibraryOnce() {
@@ -37,11 +37,11 @@ async function _loadTemplateLibraryOnce() {
       const search = el("templateSearch").value.trim();
       const businessId = el("templateBusinessFilter").value;
       const sourceTypeId = el("templateSourceFilter").value;
-      if (searchBtn) setButtonBusy(searchBtn, "Searching...");
+      if (searchBtn) setButtonBusy(searchBtn, "Searching");
       target.className = "status";
       target.innerHTML = `${_templateSpinner()}Loading templates...`;
       try {
-        const response = await fetch(`/api/templates?search=${encodeURIComponent(search)}&business_id=${encodeURIComponent(businessId)}&source_type_id=${encodeURIComponent(sourceTypeId)}`);
+        const response = await fetch(`/api/templates?search=${encodeURIComponent(search)}&business_id=${encodeURIComponent(businessId)}&source_type_id=${encodeURIComponent(sourceTypeId)}&limit=1000`);
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not load templates.");
         const templates = result.templates || [];
@@ -53,15 +53,17 @@ async function _loadTemplateLibraryOnce() {
         const sourceTypeIdToLabel = Object.fromEntries(sourceTypes.map((source) => [source.source_type_id, sourceTypeLabel(source.name)]));
         const byId = Object.fromEntries(templates.map((t) => [t.workflow_template_id, t]));
         target.className = "";
-        // Render the first batch immediately so the list appears without
-        // waiting on the whole set, then append the rest in chunks (with a
-        // small "loading more" note) so a large library doesn't block the UI.
+        // Render at least initial 100 templates immediately, then lazy append
+        // the remaining templates in chunks with smooth pagination/progress indicator.
         const firstBatch = templates.slice(0, TEMPLATE_FIRST_BATCH);
-        target.innerHTML = `<table><thead><tr><th>Template</th><th>Business</th><th>Source Type</th><th>Created</th><th>Updated</th><th>Action</th></tr></thead><tbody id="templateResultsBody">${firstBatch.map((t) => _templateRowHtml(t, sourceTypeIdToLabel)).join("")}</tbody></table>${templates.length > TEMPLATE_FIRST_BATCH ? `<div id="templateResultsMore" class="status" style="padding:8px 0;">${_templateSpinner()}Loading ${templates.length - TEMPLATE_FIRST_BATCH} more...</div>` : ""}`;
+        target.innerHTML = `<table><thead><tr><th>Template</th><th>Brand</th><th>Source Type</th><th>Created</th><th>Updated</th><th>Action</th></tr></thead><tbody id="templateResultsBody">${firstBatch.map((t) => _templateRowHtml(t, sourceTypeIdToLabel)).join("")}</tbody></table>${templates.length > TEMPLATE_FIRST_BATCH ? `<div id="templateResultsMore" class="status" style="padding:8px 0;">${_templateSpinner()}Loading ${templates.length - TEMPLATE_FIRST_BATCH} more...</div>` : ""}`;
 
         const bindLoad = (root) => root.querySelectorAll("button[data-load-template]:not([data-bound])").forEach((button) => {
           button.setAttribute("data-bound", "1");
-          button.addEventListener("click", () => loadTemplateIntoEditor(byId[button.dataset.loadTemplate]));
+          button.addEventListener("click", () => {
+            setButtonBusy(button, "Loading");
+            loadTemplateIntoEditor(byId[button.dataset.loadTemplate]);
+          });
         });
         bindLoad(target);
 
@@ -107,13 +109,13 @@ async function _loadTemplateFiltersOnce() {
       try {
         const businessResponse = await fetch("/api/brands?search=");
         const businessResult = await businessResponse.json();
-        if (!businessResponse.ok) throw new Error(businessResult.error || "Could not load businesses.");
+        if (!businessResponse.ok) throw new Error(businessResult.error || "Could not load brands.");
         businesses = businessResult.brands || [];
       } catch (error) {
         businesses = [];
       }
-      templateBusinessNames = Object.fromEntries(businesses.map((business) => [business.business_id, business.name]));
-      el("templateBusinessFilter").innerHTML = '<option value="">All businesses</option><option class="create-new-option" value="__create_new__">+ Create New Business</option>' + businesses.map((business) => `<option value="${escapeHtml(business.business_id)}">${escapeHtml(business.name)}</option>`).join("");
+      templateBrandNames = Object.fromEntries(businesses.map((business) => [business.business_id, business.name]));
+      el("templateBusinessFilter").innerHTML = '<option value="">All brands</option><option class="create-new-option" value="__create_new__">+ Create New Brand</option>' + businesses.map((business) => `<option value="${escapeHtml(business.business_id)}">${escapeHtml(business.name)}</option>`).join("");
       try {
         const sourceResponse = await fetch("/api/source-types");
         const sourceResult = await sourceResponse.json();
@@ -155,7 +157,7 @@ function loadTemplateIntoEditor(template) {
       renderMappings();
       renderTemplateEditSourcePreview();
       switchView("mapperView");
-      setStatus(`Loaded ${template.name}. Edit the field mapping, then Save to update the template.`, "ok");
+      setStatus(`Loaded ${template.name}. Edit the field mapping, then click Save Template to update.`, "ok");
     }
 // With no live rows to preview, show the stored source columns so the editor
 // isn't a blank panel (the "source mapper view shows nothing" case) and it's

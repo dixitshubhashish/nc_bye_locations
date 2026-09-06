@@ -523,10 +523,16 @@ def push_to_bigquery(
             if write_disposition:
                 load_config.write_disposition = write_disposition
             if hasattr(client, "load_table_from_dataframe") and not table_has_json_fields(table_name):
-                load_job = client.load_table_from_dataframe(frame, table_ref, job_config=load_config)
+                try:
+                    load_job = client.load_table_from_dataframe(frame, table_ref, job_config=load_config)
+                    load_job.result()
+                except Exception as exc:
+                    LOGGER.warning("dataframe_load_failed_falling_back_to_json table=%s error=%s", table_ref, exc)
+                    load_job = client.load_table_from_json(rows, table_ref, job_config=load_config)
+                    load_job.result()
             else:
                 load_job = client.load_table_from_json(rows, table_ref, job_config=load_config)
-            load_job.result()
+                load_job.result()
             if load_job.errors:
                 LOGGER.error("db_batch_load_failed table=%s rows=%d error_count=%d errors=%s", table_ref, len(rows), len(load_job.errors), load_job.errors)
                 raise RuntimeError(f"Batch load errors for {table_name}: {load_job.errors}")

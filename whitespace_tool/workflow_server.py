@@ -262,7 +262,9 @@ def field_catalog() -> list[dict[str, Any]]:
     else:
         existing_names = {field.name for field in existing_table.schema}
         if "business_id" not in existing_names:
-            client.query(f"ALTER TABLE `{table_ref}` ADD COLUMN business_id STRING").result()
+            client.query(f"ALTER TABLE `{table_ref}` ADD COLUMN IF NOT EXISTS business_id STRING").result()
+        if "content_hash" not in existing_names:
+            client.query(f"ALTER TABLE `{table_ref}` ADD COLUMN IF NOT EXISTS content_hash STRING").result()
     if created:
         legacy_ref = f"{project_id}.{dataset_id}.field_catalog"
         try:
@@ -281,10 +283,17 @@ def field_catalog() -> list[dict[str, Any]]:
         }
 
     rows = [dict(row) for row in client.query(f"SELECT * FROM `{table_ref}` ORDER BY is_custom, label").result()]
+    load_kwargs: dict[str, Any] = {"schema": schema}
+    if hasattr(bigquery, "SchemaUpdateOption") and hasattr(bigquery.SchemaUpdateOption, "ALLOW_FIELD_ADDITION"):
+        load_kwargs["schema_update_options"] = [bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION]
     if not rows:
         now = utc_now_iso()
         seed = [_registry_seed_row(field, now) for field in load_field_registry()]
-        load_job = client.load_table_from_json(seed, table_ref, job_config=bigquery.LoadJobConfig(schema=schema))
+        load_job = client.load_table_from_json(
+            seed,
+            table_ref,
+            job_config=bigquery.LoadJobConfig(**load_kwargs)
+        )
         load_job.result()
         rows = [dict(row) for row in client.query(f"SELECT * FROM `{table_ref}` ORDER BY is_custom, label").result()]
     else:
@@ -296,7 +305,11 @@ def field_catalog() -> list[dict[str, Any]]:
         if missing:
             now = utc_now_iso()
             seed = [_registry_seed_row(field, now) for field in missing]
-            load_job = client.load_table_from_json(seed, table_ref, job_config=bigquery.LoadJobConfig(schema=schema))
+            load_job = client.load_table_from_json(
+                seed,
+                table_ref,
+                job_config=bigquery.LoadJobConfig(**load_kwargs)
+            )
             load_job.result()
             rows = [dict(row) for row in client.query(f"SELECT * FROM `{table_ref}` ORDER BY is_custom, label").result()]
     for row in rows:
@@ -347,6 +360,8 @@ def _to_camel_case(text: str) -> str:
 
 
 def create_custom_field(data: dict[str, Any]) -> dict[str, Any]:
+    from google.cloud import bigquery
+
     label = str(data.get("label", "")).strip()
     if not label:
         raise ValueError("Field label is required")
@@ -394,9 +409,17 @@ def create_custom_field(data: dict[str, Any]) -> dict[str, Any]:
     table_ref = f"{project_id}.{dataset_id}.field_catalogs"
     now = utc_now_iso()
     field = {"field_id": str(uuid4()), "business_id": business_id, "slug": slug, "label": label, "table_name": "listings", "field_name": slug, "data_type": data.get("type", "string"), "required": False, "hints": json.dumps([slug]), "aliases": json.dumps([]), "is_custom": True, "created_at": now, "updated_at": now}
-    errors = client.insert_rows_json(table_ref, [field])
-    if errors:
-        raise RuntimeError(f"Custom field could not be saved: {errors}")
+    schema = [bigquery.SchemaField(f["name"], f["type"], mode=f["mode"], default_value_expression=f.get("default")) for f in TABLE_SCHEMAS["field_catalogs"]]
+    load_kwargs: dict[str, Any] = {"schema": schema}
+    if hasattr(bigquery, "SchemaUpdateOption") and hasattr(bigquery.SchemaUpdateOption, "ALLOW_FIELD_ADDITION"):
+        load_kwargs["schema_update_options"] = [bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION]
+    load_job = client.load_table_from_json(
+        [field],
+        table_ref,
+        job_config=bigquery.LoadJobConfig(**load_kwargs)
+    )
+    load_job.result()
+    invalidate_cache()
     return {"field": {"key": slug, "label": label, "table": "listings", "field": slug, "type": field["data_type"], "required": False, "hints": [slug], "is_custom": True}}
 
 
@@ -416,7 +439,7 @@ def delete_custom_field(data: dict[str, Any]) -> dict[str, Any]:
     client = _bigquery_client(project_id, credentials_json)
     table_ref = f"{project_id}.{dataset_id}.field_catalogs"
 
-    lookup_query = f"SELECT field_id, label, is_custom, business_id FROM `{table_ref}` WHERE slug = @slug AND business_id = @business_id LIMIT 1"
+    lookup_query = f"SELECT field_id, label, is_custom, business_id FROM `{table_ref}` WHERE LOWER(slug) = LOWER(@slug) AND business_id = @business_id LIMIT 1"
     lookup_config = bigquery.QueryJobConfig(query_parameters=[
         bigquery.ScalarQueryParameter("slug", "STRING", field_key),
         bigquery.ScalarQueryParameter("business_id", "STRING", business_id),
@@ -1123,12 +1146,14 @@ def learn_mappings(data: dict[str, Any]) -> dict[str, Any]:
     return {"suggestions": suggest_from_templates(templates, source_fields, source_type)}
 
 
-def list_templates(search: str = "", business_id: str = "", source_type_id: str = "") -> dict[str, Any]:
+def list_templates(search: str = "", business_id: str = "", source_type_id: str = "", limit: int = 500, offset: int = 0) -> dict[str, Any]:
     from google.cloud import bigquery
 
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
     _ensure_workflow_templates_table(client, project_id, dataset_id)
+    safe_limit = max(1, min(int(limit or 500), 5000))
+    safe_offset = max(0, int(offset or 0))
     query = f"""
     SELECT workflow_template_id, business_id, source_type_id, name, components, created_at, updated_at
     FROM `{project_id}.{dataset_id}.workflow_templates`
@@ -1142,7 +1167,7 @@ def list_templates(search: str = "", business_id: str = "", source_type_id: str 
         OR JSON_VALUE(components, '$.mapper.source_type_id') = @source_type_id
       )
     ORDER BY updated_at DESC
-    LIMIT 100
+    LIMIT {safe_limit} OFFSET {safe_offset}
     """
     config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("search", "STRING", search), bigquery.ScalarQueryParameter("business_id", "STRING", business_id), bigquery.ScalarQueryParameter("source_type_id", "STRING", source_type_id)])
     templates = []
@@ -1162,7 +1187,7 @@ def list_templates(search: str = "", business_id: str = "", source_type_id: str 
         item["source_type"] = mapper.get("source_type")
         item["status"] = item.get("status", "active")
         templates.append(item)
-    return {"templates": templates}
+    return {"templates": templates, "limit": safe_limit, "offset": safe_offset}
 
 
 def list_source_types() -> dict[str, Any]:
@@ -3361,13 +3386,22 @@ def save_template_version(data: dict[str, Any]) -> dict[str, Any]:
     return {"workflow_template_id": template_id, "updated": True}
 
 
-def list_rejected(event_id: str = "") -> dict[str, Any]:
+def list_rejected(event_id: str = "", business_id: str = "") -> dict[str, Any]:
     from google.cloud import bigquery
 
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
-    query = f"SELECT event_id, business_id, source_type_id, row_number, errors, raw_record FROM `{project_id}.{dataset_id}.error_listings` WHERE is_deleted IS NOT TRUE AND (@event_id = '' OR event_id = @event_id) ORDER BY event_id, row_number LIMIT 500"
-    config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("event_id", "STRING", event_id)])
+    query = f"""SELECT event_id, business_id, source_type_id, row_number, errors, raw_record
+    FROM `{project_id}.{dataset_id}.error_listings`
+    WHERE is_deleted IS NOT TRUE
+      AND (@event_id = '' OR event_id = @event_id)
+      AND (@business_id = '' OR business_id = @business_id)
+    ORDER BY event_id, row_number
+    LIMIT 500"""
+    config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("event_id", "STRING", event_id),
+        bigquery.ScalarQueryParameter("business_id", "STRING", business_id),
+    ])
     try:
         result_rows = client.query(query, job_config=config).result()
     except Exception as exc:
@@ -3873,16 +3907,35 @@ def make_handler(ui_dir: Path):
             self.send_header("Cache-Control", "no-store")
             super().end_headers()
 
-        def _serve_ui_file(self, file_name: str, *, head: bool = False) -> None:
-            original_path = self.path
-            self.path = f"/{file_name}"
-            try:
-                if head:
-                    super().do_HEAD()
-                else:
-                    super().do_GET()
-            finally:
-                self.path = original_path
+        def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
+            if code == 404:
+                path = urlsplit(self.path).path
+                if path.startswith("/api/"):
+                    _json_response(self, 404, {"error": "Not found"})
+                    return
+                not_found_file = ui_dir / "not-found.html"
+                if not_found_file.exists():
+                    content = not_found_file.read_bytes()
+                    self.send_response(404)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(content)))
+                    self.end_headers()
+                    self.wfile.write(content)
+                    return
+            super().send_error(code, message=message, explain=explain)
+
+        def _serve_ui_file(self, file_name: str, *, head: bool = False, status: int = 200) -> None:
+            file_path = ui_dir / file_name
+            if not file_path.exists():
+                self.send_error(404, "File not found")
+                return
+            content = file_path.read_bytes()
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            if not head:
+                self.wfile.write(content)
 
         def _route_clean_ui_path(self, *, head: bool = False) -> bool:
             path = urlsplit(self.path).path
@@ -3892,8 +3945,11 @@ def make_handler(ui_dir: Path):
             if path == "/app":
                 self._serve_ui_file("integrations.html", head=head)
                 return True
-            if path in {"/login.html", "/integrations.html"}:
-                target = "/login" if path == "/login.html" else "/app"
+            if path in {"/not-found", "/404"}:
+                self._serve_ui_file("not-found.html", head=head, status=404)
+                return True
+            if path in {"/login.html", "/integrations.html", "/not-found.html", "/404.html"}:
+                target = "/login" if path == "/login.html" else ("/app" if path == "/integrations.html" else "/not-found")
                 query = urlsplit(self.path).query
                 if query:
                     target = f"{target}?{query}"
@@ -3962,8 +4018,12 @@ def make_handler(ui_dir: Path):
                 search = params.get("search", [""])[0]
                 business_id = params.get("business_id", [""])[0]
                 source_type_id = params.get("source_type_id", [""])[0]
+                raw_limit = params.get("limit", ["500"])[0]
+                raw_offset = params.get("offset", ["0"])[0]
                 try:
-                    _json_response(self, 200, list_templates(search, business_id, source_type_id))
+                    limit = int(raw_limit or "500")
+                    offset = int(raw_offset or "0")
+                    _json_response(self, 200, list_templates(search, business_id, source_type_id, limit=limit, offset=offset))
                 except Exception as exc:
                     _json_response(self, 400, {"error": str(exc)})
                 return
@@ -4029,9 +4089,11 @@ def make_handler(ui_dir: Path):
 
             if self.path.startswith("/api/rejected"):
                 from urllib.parse import parse_qs, urlsplit
-                event_id = parse_qs(urlsplit(self.path).query).get("event_id", [""])[0]
+                params = parse_qs(urlsplit(self.path).query)
+                event_id = params.get("event_id", [""])[0]
+                business_id = params.get("business_id", [""])[0]
                 try:
-                    _json_response(self, 200, list_rejected(event_id))
+                    _json_response(self, 200, list_rejected(event_id, business_id))
                 except Exception as exc:
                     _json_response(self, 400, {"error": str(exc)})
                 return

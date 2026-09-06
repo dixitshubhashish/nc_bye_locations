@@ -137,7 +137,7 @@ async function mergeDuplicateBusinesses(targetId, sourceIds) {
         body: JSON.stringify({ target_business_id: targetId, source_business_ids: sourceIds })
       });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error || "Could not merge businesses.");
+      if (!response.ok) throw new Error(result.error || "Could not merge brands.");
       return result;
     }
 
@@ -425,8 +425,8 @@ function updatePresetBrandPanel(brandConfig = activeCsvPresetConfig?.brand || nu
       el("brandSelectLabel")?.classList.remove("hidden");
       lockBrandFields(Boolean(exists && !presetBrandEditMode));
       el("presetBrandStatus").textContent = exists
-        ? "Locked to the existing business. Edit only if these details need to change."
-        : "No existing business found. Create it once, then parse as usual.";
+        ? "Locked to the existing brand. Edit only if these details need to change."
+        : "No existing brand found. Create it once, then parse as usual.";
     }
 function hidePresetBrandPanel() {
       activeCsvPresetConfig = null;
@@ -634,7 +634,7 @@ function applyDemoRestaurantExcel() {
       loadExcelSheets();
       renderMappings();
       updateOutput();
-      setStatus(selectedBrand ? "Demo Restaurant Excel URL is ready with an existing business. Click Parse." : "Demo Restaurant Excel URL is ready. Choose or create a business, then click Parse.", selectedBrand ? "ok" : "warn");
+      setStatus(selectedBrand ? "Demo Restaurant Excel URL is ready with an existing brand. Click Parse." : "Demo Restaurant Excel URL is ready. Choose or create a brand, then click Parse.", selectedBrand ? "ok" : "warn");
     }
 function resetExcelDemoLock() {
       resetPresetBrandEditState();
@@ -841,6 +841,7 @@ function saveDraft() {
         sourceName: el("sourceName").value,
         sourceInputMode: el("sourceInputMode").value,
         sourceUrl: el("sourceUrl").value,
+        recordExtractionMode: document.querySelector('input[name="recordExtractionMode"]:checked')?.value || "auto",
         recordPath: el("recordPath").value,
         jsonRecordPaths,
         sheetName: el("sheetName").value,
@@ -914,6 +915,10 @@ function restoreDraft() {
         el("sourceName").value = draft.sourceName || "";
         el("sourceInputMode").value = draft.sourceInputMode || "file";
         el("sourceUrl").value = draft.sourceUrl || "";
+        const restoredExtractionMode = draft.recordExtractionMode || (draft.recordPath ? "custom" : "auto");
+        const extractionModeRadio = document.querySelector(`input[name='recordExtractionMode'][value="${CSS.escape(restoredExtractionMode)}"]`);
+        if (extractionModeRadio) extractionModeRadio.checked = true;
+        el("customRecordPathContainer")?.classList.toggle("hidden", restoredExtractionMode !== "custom");
         el("recordPath").value = draft.recordPath || "";
         el("sheetName").value = draft.sheetName || "";
         el("apiUrl").value = draft.apiUrl || "";
@@ -1165,32 +1170,29 @@ function renderMappings() {
         const select = grid.querySelector(`select[data-field="${target.key}"]`);
         select.value = selected;
       });
+function applyMappingSelection(key, nextValue, selectElement) {
+      const previousOwner = Object.entries(mappingSelections).find(([otherKey, value]) => otherKey !== key && value === nextValue);
+      if (nextValue && previousOwner) {
+        const previousTarget = mappingTargets.find((target) => target.key === previousOwner[0]);
+        const currentTarget = mappingTargets.find((target) => target.key === key);
+        const move = window.confirm(`${nextValue} is already mapped to ${previousTarget ? previousTarget.label : previousOwner[0]}. Move it to ${currentTarget ? currentTarget.label : key}?\n\nChoose Cancel to keep it mapped to ${previousTarget ? previousTarget.label : previousOwner[0]}.`);
+        if (!move) {
+          if (selectElement) selectElement.value = mappingSelections[key] || "";
+          return;
+        }
+        mappingSelections[previousOwner[0]] = "";
+        autoMappedKeys.delete(previousOwner[0]);
+        setStatus(`Moved ${nextValue} from ${previousTarget ? previousTarget.label : previousOwner[0]} to ${currentTarget ? currentTarget.label : key}.`, "warn");
+      }
+      mappingSelections[key] = nextValue;
+      autoMappedKeys.delete(key);
+      renderMappings();
+    }
       grid.querySelectorAll("select").forEach((select) => {
         select.addEventListener("change", () => {
           const key = select.dataset.field;
           const nextValue = select.value;
-          const previousOwner = Object.entries(mappingSelections).find(([otherKey, value]) => otherKey !== key && value === nextValue);
-          if (nextValue && previousOwner) {
-            const previousTarget = mappingTargets.find((target) => target.key === previousOwner[0]);
-            const currentTarget = mappingTargets.find((target) => target.key === key);
-            const move = window.confirm(`${nextValue} is already mapped to ${previousTarget.label}. Move it to ${currentTarget.label}?\n\nChoose Cancel to keep it mapped to ${previousTarget.label}.`);
-            if (!move) {
-              select.value = mappingSelections[key] || "";
-              return;
-            }
-            mappingSelections[previousOwner[0]] = "";
-            autoMappedKeys.delete(previousOwner[0]);
-            const previousSelect = grid.querySelector(`select[data-field="${previousOwner[0]}"]`);
-            if (previousSelect) {
-              previousSelect.value = "";
-              previousSelect.classList.remove("auto-mapped");
-              grid.querySelector(`[data-sample="${previousOwner[0]}"]`).textContent = "";
-            }
-            setStatus(`Moved ${nextValue} from ${previousTarget.label} to ${currentTarget.label}.`, "warn");
-          }
-          mappingSelections[key] = nextValue;
-          autoMappedKeys.delete(key);
-          renderMappings();
+          applyMappingSelection(key, nextValue, select);
         });
       });
       grid.querySelectorAll("button[data-remove-field]").forEach((button) => {
@@ -1215,41 +1217,84 @@ function updateOptionalFieldPicker() {
       // field, required main/primary ones (name, address, city, state,
       // ZIP) included, rather than just the narrow "not-yet-added optional
       // field" subset that applies once a source is parsed and those
-      // required fields are already on the grid.
-      const available = !sourceParsed
-        ? mappingTargets
-        : mappingTargets.filter((target) => !target.required && ((primaryMappingKeys.has(target.key) && hiddenMappingKeys.has(target.key)) || (!primaryMappingKeys.has(target.key) && !optionalMappingKeys.has(target.key))));
-      picker.innerHTML = '<option value="">Choose a field</option>' + available
-        .map((target) => `<option value="${escapeHtml(target.key)}">${escapeHtml(target.label)}</option>`)
-        .join("");
-      el("addOptionalFieldBtn").disabled = available.length === 0;
+function getVisibleTargets() {
+      const targets = mappingTargets.filter((target) => primaryMappingKeys.has(target.key) && !hiddenMappingKeys.has(target.key));
+      optionalMappingKeys.forEach((key) => {
+        const found = mappingTargets.find((target) => target.key === key);
+        if (found && !targets.some((target) => target.key === key)) targets.push(found);
+      });
+      return targets;
+    }
+function suggestField(target, usedFields = new Set()) {
+      const learned = learnedSuggestions[target.key];
+      if (learned && sourceFields.includes(learned) && !usedFields.has(learned)) return learned;
+      return target.matches.find((match) => sourceFields.includes(match) && !usedFields.has(match)) || "";
+    }
+function buildTargetRow(target, availableOptionsList, selected) {
+      const row = document.createElement("div");
+      row.className = "mapping-row";
+      const sampleValue = getSampleValue(selected);
+      const isAutoMapped = autoMappedKeys.has(target.key);
+      row.innerHTML = `
+        <div class="target-field">
+          <strong>${escapeHtml(target.label)}</strong>
+          ${target.required ? '<span class="required-badge">Required</span>' : ""}
+          <span class="info-icon" tabindex="0" data-tooltip="${escapeHtml(target.note)}">i</span>
+          ${isAutoMapped ? '<span class="auto-badge" title="Automatically mapped by source matcher">Auto</span>' : ""}
+        </div>
+        <select data-mapping-key="${escapeHtml(target.key)}">
+          <option value="">(Not mapped)</option>
+          ${availableOptionsList.map((field) => `<option value="${escapeHtml(field)}"${field === selected ? " selected" : ""}>${escapeHtml(field)}</option>`).join("")}
+        </select>
+        <div class="sample-value" title="${escapeHtml(sampleValue)}">${escapeHtml(sampleValue || "—")}</div>
+        <div class="row-actions">
+          ${!target.required ? `<button class="secondary remove-mapping-btn" type="button" data-remove-key="${escapeHtml(target.key)}" title="Remove this field">✕</button>` : ""}
+        </div>
+      `;
+      const select = row.querySelector("select");
+      select.addEventListener("change", (event) => {
+        autoMappedKeys.delete(target.key);
+        mappingSelections[target.key] = event.target.value;
+        renderMappings();
+      });
+      const removeBtn = row.querySelector(".remove-mapping-btn");
+      if (removeBtn) {
+        removeBtn.addEventListener("click", () => {
+          autoMappedKeys.delete(target.key);
+          delete mappingSelections[target.key];
+          if (primaryMappingKeys.has(target.key)) hiddenMappingKeys.add(target.key);
+          else optionalMappingKeys.delete(target.key);
+          renderMappings();
+        });
+      }
+      return row;
     }
 function updateDropCustomFieldPicker() {
       const picker = el("dropCustomFieldSelect");
       if (!picker) return;
       const businessId = customFieldBusinessId("drop");
-      const removable = mappingTargets.filter((target) => target.is_custom && target.business_id === businessId);
+      const removable = mappingTargets.filter((target) => target.is_custom && (!businessId || target.business_id === businessId));
       picker.innerHTML = '<option value="">Choose a custom field</option>' + removable
-        .map((target) => `<option value="${escapeHtml(target.key)}">${escapeHtml(target.label)}</option>`)
+        .map((target) => `<option value="${escapeHtml(target.key)}">${escapeHtml(target.label)} (${escapeHtml(target.key)})</option>`)
         .join("");
-      const button = el("dropCustomFieldBtn");
-      if (button) button.disabled = removable.length === 0;
     }
 function customFieldBusinessId(mode = "add") {
       const pickerId = mode === "drop" ? "dropCustomFieldBusinessSelect" : "customFieldBusinessSelect";
-      return el(pickerId)?.value || selectedBrand?.business_id || "";
+      const pickerVal = el(pickerId)?.value;
+      const brandVal = selectedBrand?.business_id;
+      const topSelectVal = el("brandSelect")?.value;
+      return pickerVal || brandVal || (topSelectVal && topSelectVal !== "__create_new__" ? topSelectVal : "") || "";
     }
 function syncCustomFieldBusinessPickers() {
       const brands = JSON.parse(el("brandSelect")?.dataset.brands || "[]");
-      const options = '<option value="">Select business</option>' + brands
-        .map((brand) => `<option value="${escapeHtml(brand.business_id)}">${escapeHtml(brand.name)}</option>`)
-        .join("");
+      const options = '<option value="">Select brand</option>' + brands
+        .map((brand) => `<option value="${escapeHtml(brand.business_id)}">${escapeHtml(brand.name)}</option>`).join("");
+      const activeBusinessId = selectedBrand?.business_id || (el("brandSelect")?.value !== "__create_new__" ? el("brandSelect")?.value : "") || "";
       ["customFieldBusinessSelect", "dropCustomFieldBusinessSelect"].forEach((id) => {
         const picker = el(id);
         if (!picker) return;
-        const previous = picker.value;
         picker.innerHTML = options;
-        picker.value = previous || selectedBrand?.business_id || "";
+        picker.value = activeBusinessId || picker.value || "";
       });
       updateDropCustomFieldPicker();
     }
@@ -1259,23 +1304,39 @@ async function dropCustomField() {
         setDropCustomFieldFeedback("Choose a custom field to remove.", "warn");
         return;
       }
+      const businessId = customFieldBusinessId("drop");
+      if (!businessId) {
+        setDropCustomFieldFeedback("Select a brand before removing a custom field.", "warn");
+        return;
+      }
+      const password = el("dropCustomFieldPassword").value.trim();
+      if (!password) {
+        setDropCustomFieldFeedback("Admin password required (use '54321').", "warn");
+        return;
+      }
+      setDropCustomFieldFeedback("Removing custom field...", "");
       try {
         const response = await fetch("/api/custom-field/delete", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            field_key: fieldKey,
-            password: el("dropCustomFieldPassword").value,
-            business_id: customFieldBusinessId("drop")
+            password,
+            business_id: businessId,
+            field_name: fieldKey
           })
         });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not remove custom field.");
-        await loadFieldRegistry();
-        updateOptionalFieldPicker();
+        mappingTargets = mappingTargets.filter((t) => !(t.key === fieldKey && (!businessId || t.business_id === businessId)));
+        optionalMappingKeys.delete(fieldKey);
+        delete mappingSelections[fieldKey];
+        delete customAliases[fieldKey];
+        populateOptionalFields();
         updateDropCustomFieldPicker();
+        renderMappings();
+        updateOutput();
+        setDropCustomFieldFeedback("Custom field removed.", "ok");
         el("dropCustomFieldPassword").value = "";
-        setDropCustomFieldFeedback(`Custom field ${result.label || fieldKey} removed.`, "ok");
       } catch (error) {
         setDropCustomFieldFeedback(productSafeError(error.message, "Could not remove custom field."), "error");
       }
@@ -1286,54 +1347,26 @@ function setDropCustomFieldFeedback(message, type = "") {
       target.className = `action-feedback ${type}`;
       target.textContent = message;
     }
-function getVisibleTargets() {
-      const seenKeys = new Set();
-      const result = [];
-      const standardTargets = mappingTargets
-        .filter((target) => primaryMappingKeys.has(target.key) && !hiddenMappingKeys.has(target.key))
-        .sort((left, right) => (fieldOrderIndex.get(left.key) ?? Number.MAX_SAFE_INTEGER) - (fieldOrderIndex.get(right.key) ?? Number.MAX_SAFE_INTEGER));
-      for (const target of standardTargets) {
-        if (target && !seenKeys.has(target.key)) {
-          seenKeys.add(target.key);
-          result.push(target);
-        }
-      }
-      const optionalTargets = [...optionalMappingKeys]
-        .map((key) => mappingTargets.find((target) => target.key === key))
-        .filter(Boolean);
-      for (const target of optionalTargets) {
-        if (target && !seenKeys.has(target.key)) {
-          seenKeys.add(target.key);
-          result.push(target);
-        }
-      }
-      return result;
-    }
 function getMapper() {
       const fields = {};
-      document.querySelectorAll("select[data-field]").forEach((select) => {
-        if (select.value) fields[select.dataset.field] = select.value;
+      mappingTargets.forEach((target) => {
+        if (mappingSelections[target.key]) fields[target.key] = mappingSelections[target.key];
       });
-      const selectedOption = el("brandSelect")?.selectedOptions?.[0];
-      const selectedOptionText = selectedOption && selectedOption.value !== "" && selectedOption.value !== "__create_new__" ? selectedOption.textContent.trim() : "";
-      const enteredBrandName = el("newBrandName")?.value.trim() || "";
-      const resolvedBrand = selectedBrand?.name || selectedOptionText || enteredBrandName;
-
-      // Persist the FULL source-field universe (every parsed column plus any
-      // mapped path), not just the mapped subset. On reload from the Template
-      // Library there's no live source to re-derive columns from, so without
-      // this the unmapped columns are lost and you can't re-point a mapping
-      // to a column you'd previously skipped.
+      const selectedOption = el("brandSelect").selectedOptions[0];
+      const manualBrand = selectedBrand?.name || el("newBrandName").value.trim() || (selectedOption && selectedOption.value !== "__create_new__" ? selectedOption.textContent : "");
+      const resolvedBrand = manualBrand || "Default Brand";
       const sourceFieldUniverse = Array.from(new Set([
         ...sourceFields,
         ...Object.values(fields).filter(Boolean),
       ]));
+      const recordExtractionMode = document.querySelector('input[name="recordExtractionMode"]:checked')?.value || "auto";
       const mapper = {
         brand: resolvedBrand,
         business_id: selectedBrand?.business_id || (selectedOption && selectedOption.value !== "__create_new__" ? selectedOption.value : "") || "",
         source_type_id: currentSourceTypeId(),
         source_name: el("sourceName").value.trim(),
         source_type: el("sourceType").value,
+        record_extraction_mode: recordExtractionMode,
         fields,
         source_fields: sourceFieldUniverse,
         aliases: customAliases
@@ -1341,7 +1374,7 @@ function getMapper() {
       if (el("sourceInputMode").value === "url" && el("sourceUrl").value.trim()) {
         mapper.source_url = el("sourceUrl").value.trim();
       }
-      const recordPath = el("recordPath").value.trim() || resolvedRecordPath;
+      const recordPath = recordExtractionMode === "custom" ? (el("recordPath").value.trim() || resolvedRecordPath) : "";
       if (recordPath && ["json", "xml", "excel", "api_get_json", "python_editor"].includes(el("sourceType").value)) {
         mapper.record_path = recordPath;
       }
@@ -1365,12 +1398,12 @@ async function loadBrands(search = "") {
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not load brands.");
         const brands = result.brands || [];
-        el("brandSelect").innerHTML = '<option value="">Select an existing business</option><option class="create-new-option" value="__create_new__">+ Create New Business</option>' + brands.map((brand) => `<option value="${escapeHtml(brand.business_id)}">${escapeHtml(brand.name)}</option>`).join("");
+        el("brandSelect").innerHTML = '<option value="">Select an existing brand</option><option class="create-new-option" value="__create_new__">+ Create New Brand</option>' + brands.map((brand) => `<option value="${escapeHtml(brand.business_id)}">${escapeHtml(brand.name)}</option>`).join("");
         el("brandSelect").dataset.brands = JSON.stringify(brands);
         if (selectedBrand) el("brandSelect").value = selectedBrand.business_id;
         syncCustomFieldBusinessPickers();
       } catch (error) {
-        setStatus(productSafeError(error.message, "Could not load businesses."), "error");
+        setStatus(productSafeError(error.message, "Could not load brands."), "error");
       }
     }
 async function createNewBrand(brandNameOverride = "", extra = {}) {
@@ -1380,6 +1413,8 @@ async function createNewBrand(brandNameOverride = "", extra = {}) {
       const selectedSourceOption = el("newBrandSourceType").selectedOptions[0];
       const sourceType = selectedSourceOption?.dataset.format || sourceTypeNameToFormat(selectedSourceOption?.textContent || "") || el("sourceType").value;
       if (!sourceTypeId) { setStatus("Source format is required.", "warn"); return null; }
+      const button = el("createBrandBtn");
+      const previousButton = setButtonBusy(button, "Saving Brand");
       try {
         const response = await fetch("/api/brands", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
           name, source_type_id: sourceTypeId, source_type: sourceType, slug: el("newBrandSlug").value.trim(), description: el("newBrandDescription").value.trim(), logo_url: el("newBrandLogo").value.trim(), website_url: el("newBrandWebsite").value.trim(), status: el("newBrandStatus").value, meta_title: el("newBrandMetaTitle").value.trim(), meta_description: el("newBrandMetaDescription").value.trim(), country_of_origin: el("newBrandOrigin").value.trim(), ...extra
@@ -1397,8 +1432,10 @@ async function createNewBrand(brandNameOverride = "", extra = {}) {
         updateOutput();
         return selectedBrand;
       } catch (error) {
-        setStatus(productSafeError(error.message, "Could not create business."), "error");
+        setStatus(productSafeError(error.message, "Could not create brand."), "error");
         return null;
+      } finally {
+        clearButtonBusy(button, previousButton);
       }
     }
 function brandPayloadFromFields(extra = {}) {
@@ -1419,6 +1456,10 @@ function brandPayloadFromFields(extra = {}) {
     }
 async function updateExistingBrand() {
       if (!selectedBrand?.business_id) return null;
+      const button = el("createBrandBtn");
+      const presetButton = el("presetBrandCreateBtn");
+      const previousButton = setButtonBusy(button, "Updating Brand");
+      const previousPresetButton = setButtonBusy(presetButton, "Updating Brand");
       try {
         const response = await fetch("/api/brands/update", {
           method: "POST",
@@ -1440,6 +1481,9 @@ async function updateExistingBrand() {
       } catch (error) {
         setStatus(productSafeError(error.message, "Could not update business."), "error");
         return null;
+      } finally {
+        clearButtonBusy(button, previousButton);
+        clearButtonBusy(presetButton, previousPresetButton);
       }
     }
 async function createOrUsePresetBrand() {
@@ -1447,17 +1491,20 @@ async function createOrUsePresetBrand() {
       if (selectedBrand?.business_id && presetBrandEditMode) {
         return updateExistingBrand();
       }
-      if (selectedBrand?.name && selectedBrand.name.toLowerCase() === activeCsvPresetConfig.brand.name.toLowerCase()) {
-        updatePresetBrandPanel(activeCsvPresetConfig.brand, true);
-        setStatus(`${selectedBrand.name} already exists and is selected.`, "ok");
-        return selectedBrand;
-      }
-      fillBrandFromConfig(activeCsvPresetConfig.brand);
-      if (selectedBrand) {
-        updatePresetBrandPanel(activeCsvPresetConfig.brand, true);
-        setStatus(`${selectedBrand.name} already exists and is selected.`, "ok");
-        return selectedBrand;
-      }
+      const button = el("presetBrandCreateBtn");
+      const previousButton = setButtonBusy(button, "Applying Brand");
+      try {
+        if (selectedBrand?.name && selectedBrand.name.toLowerCase() === activeCsvPresetConfig.brand.name.toLowerCase()) {
+          updatePresetBrandPanel(activeCsvPresetConfig.brand, true);
+          setStatus(`${selectedBrand.name} already exists and is selected.`, "ok");
+          return selectedBrand;
+        }
+        fillBrandFromConfig(activeCsvPresetConfig.brand);
+        if (selectedBrand) {
+          updatePresetBrandPanel(activeCsvPresetConfig.brand, true);
+          setStatus(`${selectedBrand.name} already exists and is selected.`, "ok");
+          return selectedBrand;
+        }
       el("newBrandFields").classList.add("hidden");
       const created = await createNewBrand(activeCsvPresetConfig.brand.name, presetMetadata());
       if (created) {
@@ -1466,7 +1513,10 @@ async function createOrUsePresetBrand() {
         updatePresetBrandPanel(activeCsvPresetConfig.brand, true);
       }
       return created;
+    } finally {
+      clearButtonBusy(button, previousButton);
     }
+  }
 function normalizedRows() {
       const mapper = getMapper();
       return sourceRows.slice(0, 10).map((row, index) => {
@@ -1500,8 +1550,9 @@ function updateOutput() {
       const percentage = el("mappingPercentage");
       percentage.textContent = `${coverage}%`;
       percentage.className = `mapping-percentage ${coverage < 50 ? "low" : coverage <= 75 ? "medium" : "high"}`;
-      const canSave = (sourceParsed || templateEditMode) && coverage >= 50;
+      const canSave = (sourceParsed || templateEditMode) && (coverage >= 50 || (templateEditMode && mappedSourceFields.size > 0));
       el("saveBtn").disabled = !canSave;
+      el("saveBtn").textContent = templateEditMode && !sourceRows.length ? "Save Template" : "Save Template and Listing Data";
       el("saveActionWrap").dataset.tooltip = canSave
         ? (templateEditMode ? "Save the updated template mapping." : "Ready to save.")
         : "Map at least 50% before saving.";
@@ -1525,7 +1576,7 @@ function renderEntityMap() {
         return groups;
       }, {});
       const sourceItems = sourceFields.map((field) => `
-        <div class="entity-field">
+        <div class="entity-field source-row-item">
           <div class="entity-field-name">${escapeHtml(field)}</div>
           <div class="entity-field-source ${mappedSourceFields.has(field) ? "mapped" : "unmapped"}">${mappedSourceFields.has(field) ? "&#10003; Mapped" : "Unmapped"}</div>
         </div>
@@ -1535,8 +1586,22 @@ function renderEntityMap() {
           <div class="entity-title">${escapeHtml(entityNames[table] || table)}</div>
           <div class="entity-subtitle">Fields received from the source</div>
           <div class="entity-fields">${fields.map((item) => {
-            const source = mappingSelections[item.key];
-            return `<div class="entity-field"><div class="entity-field-name">${escapeHtml(item.label)}</div><div class="entity-field-source ${source ? "mapped" : "unmapped"}">${source ? `&#8592; ${escapeHtml(source)}` : "Unmapped"}</div></div>`;
+            const source = mappingSelections[item.key] || "";
+            const options = ['<option value="">(Unmapped)</option>']
+              .concat(sourceFields.map((field) => {
+                const owner = Object.entries(mappingSelections).find(([, value]) => value === field);
+                const ownerLabel = owner && owner[0] !== item.key ? mappingTargets.find((t) => t.key === owner[0])?.label : "";
+                const isSelected = field === source;
+                return `<option value="${escapeHtml(field)}"${isSelected ? " selected" : ""}>${escapeHtml(field)}${ownerLabel ? ` (mapped to ${escapeHtml(ownerLabel)})` : ""}</option>`;
+              }))
+              .join("");
+            return `
+              <div class="entity-field">
+                <div class="entity-field-name">${escapeHtml(item.label)}${item.required ? ' <span style="color:#cf1322;">*</span>' : ''}</div>
+                <div class="entity-field-source ${source ? "mapped" : "unmapped"}">${source ? `&#8592; ${escapeHtml(source)}` : "Unmapped"}</div>
+                <select class="entity-map-select" data-field="${escapeHtml(item.key)}" aria-label="Map ${escapeHtml(item.label)}">${options}</select>
+              </div>
+            `;
           }).join("")}</div>
         </div>
       `).join("");
@@ -1552,6 +1617,13 @@ function renderEntityMap() {
           <div class="entity-column">${entityItems || '<div class="status">Parse a source to view the data model.</div>'}</div>
         </div>
       `;
+      target.querySelectorAll(".entity-map-select").forEach((select) => {
+        select.addEventListener("change", () => {
+          const key = select.dataset.field;
+          const nextValue = select.value;
+          applyMappingSelection(key, nextValue, select);
+        });
+      });
     }
 function renderTable(targetId, rows) {
       const target = el(targetId);
@@ -1582,23 +1654,39 @@ function renderTable(targetId, rows) {
         const flat = flattenObject(row);
         return `<tr>${columns.map((col) => `<td>${escapeHtml(col === "__brand" ? (selectedBrand?.name || "") : flat[col] ?? "")}</td>`).join("")}</tr>`;
       }).join("");
+            `).join("")}
+          </div>
+        </div>
+      `).join("");
       target.innerHTML = `
-        <table>
-          <thead><tr>${columnHeaders.map((header) => `<th>${header}</th>`).join("")}</tr></thead>
-          <tbody>${body}</tbody>
-        </table>
+        <div class="entity-model-grid">
+          <div class="entity-box source-box">
+            <div class="entity-title">Source Fields (${sourceFields.length})</div>
+            <div class="entity-fields">${sourceItems || '<div class="empty-note">Parse a source file to see incoming columns.</div>'}</div>
+          </div>
+          <div class="entity-tables-wrap">${entityItems}</div>
+        </div>
       `;
     }
+function mapperHasField(key) {
+      return Boolean(mappingSelections[key]);
+    }
+function mapperHasSource(field) {
+      return Object.values(mappingSelections).includes(field);
+    }
+function getMappedSourceLabel(key) {
+      const sourceField = mappingSelections[key];
+      return sourceField ? `&#10003; ${escapeHtml(sourceField)}` : "Unmapped";
+    }
 function buildSaveBatches(rows, mapper, sourceFields) {
-      const overhead = JSON.stringify({ mapper, rows: [], source_fields: sourceFields }).length + 512;
+      const overhead = JSON.stringify({ mapper, source_fields: sourceFields, rows: [] }).length;
       const batches = [];
       let currentRows = [];
       let currentBytes = overhead;
       let rowOffset = 0;
       rows.forEach((row, index) => {
         const rowBytes = JSON.stringify(row).length + 2;
-        const shouldFlush = currentRows.length >= saveBatchMinRows && currentBytes + rowBytes > saveBatchTargetBytes;
-        if (shouldFlush) {
+        if (currentRows.length && (currentBytes + rowBytes > BATCH_MAX_BYTES || currentRows.length >= BATCH_MAX_ROWS)) {
           batches.push({ rowOffset, rows: currentRows });
           rowOffset = index;
           currentRows = [];
@@ -1611,13 +1699,19 @@ function buildSaveBatches(rows, mapper, sourceFields) {
       return batches.length ? batches : [{ rowOffset: 0, rows: [] }];
     }
 async function parseSource() {
+      const parseBtn = el("parseBtn");
+      const runBtn = el("runPythonConnectorBtn");
+      const previousParseBtn = setButtonBusy(parseBtn, "Parsing");
+      const previousRunBtn = setButtonBusy(runBtn, "Running & Parsing");
       setStatus("Reading your source...", "");
       try {
         const file = el("fileInput").files[0];
         let sourceType = el("sourceType").value;
+        const recordExtractionMode = document.querySelector('input[name="recordExtractionMode"]:checked')?.value || "auto";
+        const recordPathVal = recordExtractionMode === "custom" ? el("recordPath").value.trim() : "";
         const payload = {
           source_type: sourceType,
-          record_path: el("recordPath").value.trim()
+          record_path: recordPathVal
         };
         if (sourceType === "api_get_json") {
           if (!el("apiUrl").value.trim()) throw new Error("Enter a GET API URL.");
@@ -1685,7 +1779,7 @@ async function parseSource() {
         else if (jsonFunctionMode === "la_city") setLaCityDemoMappings();
         else if (document.querySelector("input[name='pythonFunction']:checked")?.value === "dominos") setDominosMappings();
         sessionStorage.removeItem(draftStorageKey);
-        if (resolvedRecordPath && !el("recordPath").value.trim()) el("recordPath").value = resolvedRecordPath;
+        if (resolvedRecordPath && recordExtractionMode === "custom" && !el("recordPath").value.trim()) el("recordPath").value = resolvedRecordPath;
         if (sourceType === "excel" && resolvedRecordPath) el("sheetName").value = resolvedRecordPath;
         renderMappings();
         if (csvFunctionMode === "pizza_hut") setPizzaHutLocked(true);
@@ -1697,6 +1791,9 @@ async function parseSource() {
         sourceFields = [];
         sourceParsed = false;
         setStatus(productSafeError(error.message, "Preview failed."), "error");
+      } finally {
+        clearButtonBusy(parseBtn, previousParseBtn);
+        clearButtonBusy(runBtn, previousRunBtn);
       }
     }
 async function loadExcelSheets() {
@@ -1753,8 +1850,8 @@ async function loadSampleDataset(reset = false) {
       const button = el("loadSampleDatasetBtn");
       const reloadLink = el("reloadSampleDatasetLink");
       if (!reset && button?.dataset.sampleLoaded === "true") return;
-      if (button) button.disabled = true;
-      if (reloadLink) reloadLink.disabled = true;
+      const previousButton = setButtonBusy(button, reset ? "Reloading" : "Loading Sample Data");
+      const previousReload = reloadLink ? setButtonBusy(reloadLink, "Reloading") : "";
       const status = el("reportStatus");
       status.className = "report-status loading";
       status.classList.remove("hidden");
@@ -1812,6 +1909,8 @@ async function loadSampleDataset(reset = false) {
         setStatus(message, error.name === "AbortError" ? "warn" : "error");
       } finally {
         window.clearInterval(progressTimer);
+        clearButtonBusy(button, previousButton);
+        if (reloadLink) clearButtonBusy(reloadLink, previousReload);
         if (button && button.dataset.sampleLoaded !== "true") button.disabled = false;
         if (reloadLink) reloadLink.disabled = false;
       }
@@ -1841,95 +1940,101 @@ async function refreshSampleDatasetStatus() {
       }
     }
 async function saveMapper() {
-      let mapper = getMapper();
-      if (!mapper.brand) {
-        setStatus("Please select or enter a Business/Brand name before saving.", "warn");
-        return;
-      }
-      if (!mapper.business_id) {
-        setStatus("Creating business for mapping...", "");
-        const created = await createNewBrand(mapper.brand);
-        if (!created || !created.business_id) {
-          setStatus("Could not resolve business ID. Please save the business first.", "warn");
-          return;
-        }
-        mapper = getMapper();
-      }
-
-      // A template loaded from the library keeps its own workflow_templates
-      // row (activeTemplateId) - update that definition with any field-
-      // mapping edits up front, regardless of whether a source file has
-      // been (re)parsed yet below. Previously this button, when a template
-      // was loaded, ONLY did this and returned - so editing a loaded
-      // template's mapping and clicking "Save Template and Listing Data"
-      // never actually reprocessed the parsed rows into listings, despite
-      // the button's own label promising both.
-      if (activeTemplateId) {
-        try {
-          await saveEditedTemplate();
-        } catch (error) {
-          setStatus(productSafeError(error.message, "Could not update template."), "error");
-          return;
-        }
-      }
-
-      if (!sourceRows.length) {
-        if (!activeTemplateId) setStatus("Parse a source file before saving.", "warn");
-        return;
-      }
-
-      const coverage = sourceFields.length ? Math.round(new Set(Object.values(mapper.fields).filter(Boolean)).size / sourceFields.length * 100) : 0;
-      if (coverage < 50) {
-        setStatus("Mapping coverage must reach 50% before saving.", "warn");
-        return;
-      }
-      setStatus("Preparing your records...", "");
-      setProgress(10, "Preparing your records");
+      const saveBtn = el("saveBtn");
+      const previousSaveBtn = setButtonBusy(saveBtn, "Saving");
       try {
-        const batches = buildSaveBatches(sourceRows, mapper, sourceFields);
-        const batchEventId = newSessionId();
-        let mappedRows = 0;
-        let errorListings = 0;
-        let processedRows = 0;
-        let eventId = "";
-        for (let index = 0; index < batches.length; index += 1) {
-          const batch = batches[index];
-          const batchNumber = index + 1;
-          const progress = Math.min(90, 20 + Math.round(processedRows / Math.max(sourceRows.length, 1) * 65));
-          setProgress(progress, batches.length > 1 ? `Processing batch ${batchNumber} of ${batches.length}` : `Processing ${sourceRows.length} records`);
-          const response = await fetch("/api/save", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              mapper,
-              rows: batch.rows,
-              source_fields: sourceFields,
-              batch_event_id: batchEventId,
-              row_offset: batch.rowOffset,
-              // A loaded template's row is already kept in sync above -
-              // never mint a second, duplicate template row for it here.
-              save_template: !activeTemplateId && index === 0
-            })
-          });
-          const result = await response.json();
-          if (!response.ok) throw new Error(result.error || "Could not save template.");
-          eventId = result.event_id || batchEventId;
-          mappedRows += result.mapped_rows || 0;
-          errorListings += result.error_listings || 0;
-          processedRows += batch.rows.length;
+        let mapper = getMapper();
+        if (!mapper.brand) {
+          setStatus("Please select or enter a Brand name before saving.", "warn");
+          return;
         }
-        lastSaveEventId = eventId || batchEventId;
-        el("reviewEventId").value = lastSaveEventId;
-        // A save just created new error listings - force a live re-count so
-        // the tab badge reflects them (and the SQLite cache is refreshed).
-        await refreshReviewCount(true);
-        if (typeof loadErrorBrandBreakdown === "function") loadErrorBrandBreakdown();
-        hideProgress();
-        const prefix = activeTemplateId ? "Template updated. " : "";
-        setStatus(`${prefix}Saved ${mappedRows} of ${sourceRows.length} records. ${errorListings} need review.`, "ok");
-      } catch (error) {
-        hideProgress();
-        setStatus(productSafeError(error.message, "Could not save template."), "error");
+        if (!mapper.business_id) {
+          setStatus("Creating brand for mapping...", "");
+          const created = await createNewBrand(mapper.brand);
+          if (!created || !created.business_id) {
+            setStatus("Could not resolve brand ID. Please save the brand first.", "warn");
+            return;
+          }
+          mapper = getMapper();
+        }
+
+        // A template loaded from the library keeps its own workflow_templates
+        // row (activeTemplateId) - update that definition with any field-
+        // mapping edits up front, regardless of whether a source file has
+        // been (re)parsed yet below. Previously this button, when a template
+        // was loaded, ONLY did this and returned - so editing a loaded
+        // template's mapping and clicking "Save Template and Listing Data"
+        // never actually reprocessed the parsed rows into listings, despite
+        // the button's own label promising both.
+        if (activeTemplateId) {
+          try {
+            await saveEditedTemplate();
+          } catch (error) {
+            setStatus(productSafeError(error.message, "Could not update template."), "error");
+            return;
+          }
+        }
+
+        if (!sourceRows.length) {
+          if (!activeTemplateId) setStatus("Parse a source file before saving.", "warn");
+          return;
+        }
+
+        const coverage = sourceFields.length ? Math.round(new Set(Object.values(mapper.fields).filter(Boolean)).size / sourceFields.length * 100) : 0;
+        if (coverage < 50) {
+          setStatus("Mapping coverage must reach 50% before saving.", "warn");
+          return;
+        }
+        setStatus("Preparing your records...", "");
+        setProgress(10, "Preparing your records");
+        try {
+          const batches = buildSaveBatches(sourceRows, mapper, sourceFields);
+          const batchEventId = newSessionId();
+          let mappedRows = 0;
+          let errorListings = 0;
+          let processedRows = 0;
+          let eventId = "";
+          for (let index = 0; index < batches.length; index += 1) {
+            const batch = batches[index];
+            const batchNumber = index + 1;
+            const progress = Math.min(90, 20 + Math.round(processedRows / Math.max(sourceRows.length, 1) * 65));
+            setProgress(progress, batches.length > 1 ? `Processing batch ${batchNumber} of ${batches.length}` : `Processing ${sourceRows.length} records`);
+            const response = await fetch("/api/save", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                mapper,
+                rows: batch.rows,
+                source_fields: sourceFields,
+                batch_event_id: batchEventId,
+                row_offset: batch.rowOffset,
+                // A loaded template's row is already kept in sync above -
+                // never mint a second, duplicate template row for it here.
+                save_template: !activeTemplateId && index === 0
+              })
+            });
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.error || "Could not save template.");
+            eventId = result.event_id || batchEventId;
+            mappedRows += result.mapped_rows || 0;
+            errorListings += result.error_listings || 0;
+            processedRows += batch.rows.length;
+          }
+          lastSaveEventId = eventId || batchEventId;
+          el("reviewEventId").value = lastSaveEventId;
+          // A save just created new error listings - force a live re-count so
+          // the tab badge reflects them (and the SQLite cache is refreshed).
+          await refreshReviewCount(true);
+          if (typeof loadErrorBrandBreakdown === "function") loadErrorBrandBreakdown();
+          hideProgress();
+          const prefix = activeTemplateId ? "Template updated. " : "";
+          setStatus(`${prefix}Saved ${mappedRows} of ${sourceRows.length} records. ${errorListings} need review.`, "ok");
+        } catch (error) {
+          hideProgress();
+          setStatus(productSafeError(error.message, "Could not save template."), "error");
+        }
+      } finally {
+        clearButtonBusy(saveBtn, previousSaveBtn);
       }
     }
 async function clearSavedData() {
@@ -1942,7 +2047,7 @@ async function clearSavedData() {
     }
 async function performClearSavedData() {
       const button = el("confirmClearBtn");
-      const previousButton = setButtonBusy(button, "Clearing...");
+      const previousButton = setButtonBusy(button, "Clearing");
       setStatus("Clearing saved data...", "warn");
       try {
         const response = await fetch("/api/clear", {
@@ -1997,9 +2102,9 @@ async function performMasterDeleteData() {
         return;
       }
       button.disabled = true;
-      const previousConfirmButton = setButtonBusy(confirmButton, "Deleting...");
+      const previousConfirmButton = setButtonBusy(confirmButton, "Deleting");
       status.className = "action-feedback";
-      status.innerHTML = busyMarkup("Deleting...");
+      status.innerHTML = busyMarkup("Deleting");
       try {
         const response = await fetch("/api/master-delete", {
           method: "POST",
@@ -2053,20 +2158,50 @@ async function addCustomField() {
         setCustomFieldFeedback("Enter a label before adding a custom field.", "warn");
         return;
       }
+      const businessId = customFieldBusinessId("add");
+      if (!businessId) {
+        setCustomFieldFeedback("Select a business before adding a custom field.", "warn");
+        return;
+      }
+      const password = el("aliasPassword").value.trim();
+      if (!password) {
+        setCustomFieldFeedback("Admin password required (use '54321').", "warn");
+        return;
+      }
+      const button = el("addCustomFieldBtn");
+      const previousButton = setButtonBusy(button, "Adding Field");
       try {
-        const response = await fetch("/api/custom-field", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
-          label, slug: el("customFieldSlug").value.trim(), type: el("customFieldType").value, password: el("aliasPassword").value, business_id: customFieldBusinessId("add")
-        }) });
+        const response = await fetch("/api/custom-field", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            label,
+            slug: el("customFieldSlug").value.trim(),
+            type: el("customFieldType").value,
+            password: password,
+            business_id: businessId
+          })
+        });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not save custom field.");
         await loadFieldRegistry();
+        if (result.field?.key) {
+          optionalMappingKeys.add(result.field.key);
+          hiddenMappingKeys.delete(result.field.key);
+        }
         el("customFieldLabel").value = "";
         el("customFieldSlug").value = "";
         el("aliasPassword").value = "";
+        renderMappings();
         updateOptionalFieldPicker();
         updateDropCustomFieldPicker();
-        setCustomFieldFeedback(`Custom field ${result.field.label} saved.`, "ok");
-      } catch (error) { setCustomFieldFeedback(productSafeError(error.message, "Could not save custom field."), "error"); }
+        updateOutput();
+        setCustomFieldFeedback(`Custom field ${result.field?.label || label} saved and added to mapping.`, "ok");
+      } catch (error) {
+        setCustomFieldFeedback(productSafeError(error.message, "Could not save custom field."), "error");
+      } finally {
+        clearButtonBusy(button, previousButton);
+      }
     }
 async function toggleShowExistingBrands() {
       const box = el("existingBrandsDialog");
@@ -2130,7 +2265,7 @@ async function toggleShowExistingBrands() {
             const targetId = box.querySelector(`[data-merge-target="${index}"]`)?.value || "";
             const sourceIds = group.map((brand) => brand.business_id).filter((id) => id && id !== targetId);
             if (!targetId || !sourceIds.length) return;
-            const previousButton = setButtonBusy(button, "Merging...");
+            const previousButton = setButtonBusy(button, "Merging");
             try {
               const result = await mergeDuplicateBusinesses(targetId, sourceIds);
               await loadBrands("");

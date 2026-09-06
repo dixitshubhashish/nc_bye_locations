@@ -2,6 +2,25 @@
 
 let currentEditingRecord = null;
 let loadRejectedRecordsPromise = null;
+let reviewBrandNames = {};
+
+async function loadReviewBrandFilter() {
+      const select = el("reviewBrandFilter");
+      if (!select || select.options.length > 1) return;
+      try {
+        const res = await fetch("/api/brands?search=");
+        const data = await res.json();
+        if (res.ok && Array.isArray(data.brands)) {
+          reviewBrandNames = Object.fromEntries(data.brands.map(b => [b.business_id, b.name]));
+          const currentVal = select.value;
+          select.innerHTML = '<option value="">All Brands</option>' + data.brands.map(b => `<option value="${escapeHtml(b.business_id)}">${escapeHtml(b.name)}</option>`).join("");
+          select.value = currentVal || "";
+        }
+      } catch (err) {
+        // Soft fail
+      }
+    }
+
 // login-hotfix.js and integrations.html's own bootstrap script can each
 // independently call switchView("reviewView") on the same page load (the
 // hotfix script loads async, so ordering isn't guaranteed) - without this
@@ -17,25 +36,27 @@ function loadRejectedRecords() {
       return loadRejectedRecordsPromise;
     }
 async function _loadRejectedRecordsOnce() {
+      await loadReviewBrandFilter();
       const eventId = el("reviewEventId").value.trim();
+      const brandFilter = el("reviewBrandFilter")?.value || "";
       const target = el("reviewResults");
       const searchBtn = el("reviewSearchBtn");
       const originalSearchBtnHtml = searchBtn ? searchBtn.innerHTML : "Search Records";
 
-      if (searchBtn) setButtonBusy(searchBtn, "Searching...");
+      if (searchBtn) setButtonBusy(searchBtn, "Searching");
 
       target.className = "status";
       target.textContent = "Loading error listings...";
       try {
-        const response = await fetch(`/api/rejected?event_id=${encodeURIComponent(eventId)}`);
+        const response = await fetch(`/api/rejected?event_id=${encodeURIComponent(eventId)}&business_id=${encodeURIComponent(brandFilter)}`);
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not load review records.");
         if (!result.records.length) {
-          target.textContent = "No error listings found for this event.";
+          target.textContent = "No error listings found.";
           return;
         }
         target.className = "";
-        target.innerHTML = `<table><thead><tr><th>Event</th><th>Row</th><th>Issues & Hints</th><th>Source Record</th><th>Action</th></tr></thead><tbody>${result.records.map((record) => {
+        target.innerHTML = `<table><thead><tr><th>Event</th><th>Brand</th><th>Row</th><th>Issues & Hints</th><th>Source Record</th><th>Action</th></tr></thead><tbody>${result.records.map((record) => {
           let errs = record.errors;
           if (typeof errs === 'string') {
             try { errs = JSON.parse(errs); } catch (e) { errs = []; }
@@ -46,8 +67,12 @@ async function _loadRejectedRecordsOnce() {
             </div>
           `).join('') : escapeHtml(JSON.stringify(record.errors));
 
+          const rawBrand = record.raw_record && typeof record.raw_record === "object" ? (record.raw_record.brand || record.raw_record.Brand || "") : "";
+          const brandDisplayName = reviewBrandNames[record.business_id] || rawBrand || record.business_id || "—";
+
           return `<tr>
             <td style="font-family: monospace; font-size: 11px;">${escapeHtml(record.event_id)}</td>
+            <td><strong>${escapeHtml(brandDisplayName)}</strong></td>
             <td><strong>#${escapeHtml(record.row_number)}</strong></td>
             <td style="max-width: 320px;">${hintsHtml}</td>
             <td style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: monospace; font-size: 11px;">${escapeHtml(JSON.stringify(record.raw_record))}</td>
@@ -96,7 +121,7 @@ async function openEditRecordModal(record) {
         (Array.isArray(errs) ? errs.map(e => `<li><strong>${escapeHtml(e.field)}</strong>: ${escapeHtml(e.hint || e.reason)}</li>`).join('') : '<li>Issue found.</li>') +
         `</ul>`;
 
-      // Fetch saved businesses directly from DB API if not already cached
+      // Fetch saved brands directly from DB API if not already cached
       let savedBrandsList = [];
       try {
         savedBrandsList = JSON.parse(el("brandSelect")?.dataset.brands || "[]");
@@ -119,7 +144,7 @@ async function openEditRecordModal(record) {
       const activeMapper = typeof getMapper === "function" ? getMapper() : { fields: {} };
       const mapperFields = activeMapper.fields || {};
 
-      // Match similar business from existing data:
+      // Match similar brand from existing data:
       // Check record.business_id, rawObj business_id/brand, active mapper brand, or name matching
       const rawBrandVal = String(getNestedRawValue(rawObj, mapperFields.brand || "brand") || record.brand || activeMapper.brand || "").trim();
       const rawNameVal = String(getNestedRawValue(rawObj, mapperFields.name || "name") || "").trim();
@@ -134,7 +159,7 @@ async function openEditRecordModal(record) {
       }
 
       const LOCATION_FIELD_SPECS = {
-        brand: { label: "Business / Brand Name", path: mapperFields.brand || "brand", note: "Select the business/brand to associate with this record.", required: true },
+        brand: { label: "Brand Name", path: mapperFields.brand || "brand", note: "Select the brand to associate with this record.", required: true },
         name: { label: "Location Name", path: mapperFields.name || "name", note: "Required.", required: true },
         address: { label: "Address", path: mapperFields.address || "address", note: "Required.", required: true },
         city: { label: "City", path: mapperFields.city || "city", note: "Required.", required: true },
@@ -150,7 +175,7 @@ async function openEditRecordModal(record) {
           const { label, path, note, required } = LOCATION_FIELD_SPECS[key];
           renderedPaths.add(path);
           if (key === "brand") {
-            const optionsHtml = ['<option value="">Select a saved business</option>']
+            const optionsHtml = ['<option value="">Select a saved brand</option>']
               .concat(savedBrandsList.map(b => {
                 const isSelected = matchedBrand ? b.business_id === matchedBrand.business_id : (b.name.toLowerCase() === rawBrandVal.toLowerCase());
                 return `<option value="${escapeHtml(b.name)}" data-business-id="${escapeHtml(b.business_id)}" ${isSelected ? 'selected' : ''}>${escapeHtml(b.name)}</option>`;
@@ -378,7 +403,7 @@ el("submitEditRecordBtn")?.addEventListener("click", async () => {
       const originalBtnHtml = submitBtn ? submitBtn.innerHTML : "Retry Record";
 
       try {
-        if (submitBtn) setButtonBusy(submitBtn, "Retrying...");
+        if (submitBtn) setButtonBusy(submitBtn, "Retrying");
         if (cancelBtn) cancelBtn.disabled = true;
 
         const response = await fetch("/api/reprocess", {
