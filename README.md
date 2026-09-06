@@ -1,179 +1,447 @@
 # Competitive Whitespace Prototype
 
-Python-only prototype for Birdeye's competitive whitespace assessment. It separates source-specific acquisition from a unified restaurant/location model, stages/pushes unified BigQuery tables, and produces ZIP-level whitespace candidates.
+A web-based data platform for competitive whitespace assessment, combining restaurant/location data ingestion, quality validation, enrichment, and geographic analysis. The system separates source-specific acquisition from a unified data model, stages data through a medallion architecture (Bronze → Silver → Gold), and provides real-time reporting with data quality insights.
 
-Known assumptions and gaps are tracked in `docs/assumptions_and_gaps.md`.
+## Quick Start
 
-## Run
+### Prerequisites
+- Python 3.9+
+- Google Cloud BigQuery access (with service account credentials)
+- Modern browser (Chrome/Firefox/Safari/Edge)
 
-```bash
-.venv/bin/python -m whitespace_tool analyze --config config/demo.json --output-dir outputs/demo
-.venv/bin/python -m whitespace_tool quality-check --config config/demo.json --output-dir outputs/demo
-.venv/bin/python -m whitespace_tool push-bigquery --config config/demo.json --stage-dir outputs/bigquery --dry-run
-```
-
-Fetch the first-module ZIP base table from BigQuery public data:
+### Local Setup
 
 ```bash
-.venv/bin/python -m whitespace_tool fetch-public-zips --config config/connections/storage.json --output data/source_files/us_zips_bigquery.csv
+# Clone and install dependencies
+git clone https://github.com/dixitshubhashish/nc_bye_locations.git
+cd nc_bye_locations
+pip install -r requirements.txt
+
+# Copy and configure environment variables
+cp .env.example .env
+# Edit .env with your BigQuery project ID, dataset names, and credentials
 ```
 
-Current tested fetch result: 33,791 ZIP geography rows. Known missing ACS fields from the public join are surfaced by quality checks: 868 rows missing population, 1,348 missing median age, and 2,948 missing median household income. The generated full CSV is optional export/debug output; analysis reads ZIP demographics from BigQuery.
+**Environment Variables:**
+- `WORKFLOW_LOGIN_USER` / `WORKFLOW_LOGIN_PASSWORD` - Web UI authentication
+- `BIGQUERY_PROJECT_ID` or `GOOGLE_CLOUD_PROJECT` - GCP project
+- `BIGQUERY_BRONZE_DATASET_ID` - Bronze (raw) dataset (default: `birdeye_bronze_listings`)
+- `BIGQUERY_SILVER_DATASET_ID` - Silver (enriched) dataset (default: `birdeye_silver_listings`)
+- `BIGQUERY_GOLD_DATASET_ID` - Gold (aggregated views) dataset (default: `birdeye_gold_listings`)
+- `GOOGLE_APPLICATION_CREDENTIALS` - Path to service account JSON (local)
+- `GOOGLE_APPLICATION_CREDENTIALS_JSON` - Full JSON (for Render/hosted deploys)
 
-Launch the local workflow-template UI for adding a new brand source:
+### Start the Application
 
 ```bash
-.venv/bin/python -m whitespace_tool workflow-ui
+python -m whitespace_tool workflow-ui --host 127.0.0.1 --port 8765
 ```
 
-Open `http://127.0.0.1:8765/`, then choose `Go to Whitespace Tool`. Upload a source, map source columns/paths to the generic target fields, then choose `Save`. The server validates required mappings, stores the workflow template, and writes bronze rows.
+Open `http://127.0.0.1:8765/` and log in with credentials from `.env`.
 
-Mapper requests and BigQuery failures are recorded in the daily rotating `logs/mapper.log` file. Save errors include a request ID in the UI response so the matching traceback can be found in that log. Set `MAPPER_LOG_DIR` to change the log directory.
+## Application Architecture
 
-The Workflow Templates view includes `Clear Saved Data`, a destructive action that requires confirmation. It soft-deletes user-entered business/listing/rejected data by setting `is_deleted` and `deleted_on`, while preserving `us_zipcodes`, `field_catalog`, `source_types`, and `workflow_templates`; it does not delete the dataset itself, and every action is logged.
+### Web UI: Four-Tab Workflow
 
-Every parsed source type (CSV, Excel, JSON, XML, and GET API JSON) uses the shared validators in `whitespace_tool/data_validation/`. Rows with invalid mapped types or missing mandatory location values are written to `error_listings`; valid rows are written to the bronze location tables.
+The application is organized as a four-step workflow for data ingestion, validation, and analysis:
 
-The medallion datasets are `birdeye_bronze_listings`, `birdeye_silver_listings`, and `birdeye_gold_listings`. The current mapper writes only to the bronze dataset.
+#### 1. **Mapper Tab** (Data Source Ingestion)
+- Upload location data from multiple sources:
+  - **CSV** - Comma-separated values
+  - **Excel** - `.xlsx` and `.xls` files with sheet selection
+  - **JSON** - Structured or array-based JSON
+  - **XML** - Hierarchical XML documents
+  - **GET API** - JSON responses from HTTP endpoints
+  - **Python Editor** - Custom transformation scripts (Pyodide runtime in browser)
+  
+- **Mapping Workflow:**
+  1. Select source type and upload file
+  2. Click "Parse Source" to auto-map columns
+  3. Review mappings and adjust if needed (auto-mapped fields highlighted in red)
+  4. Confirm required fields (name, address, zip_code, etc.)
+  5. Click "Save Template and Listing Data"
+  
+- **Template System:**
+  - Auto-save mappings as reusable templates for each source
+  - Predefined templates for sample brands (Starlight Pizza, Crimson Slice, Pinnacle Pizza)
+  - Edit templates in the Template Library tab
+  - Templates stored in BigQuery for persistence
 
-Supported mapper inputs:
+#### 2. **Review Error Listings Tab** (Quality Control)
+- View rejected rows that failed validation
+- Error breakdown by source type and issue category
+- Per-brand error statistics with pie chart visualization
+- Edit individual records:
+  - Fix missing required fields (name, address, zip_code, phone)
+  - Add optional fields (coordinates, ratings, hours, etc.)
+  - See enrichment status and data completeness
+  - Click "Reprocess" to revalidate and save
+- Soft-delete corrupted records without losing audit trail
 
+#### 3. **Template Library Tab** (Workflow Management)
+- Search and manage all saved mapping templates
+- View source field details and parsing rules
+- Edit field mappings for existing templates
+- Lazy-loaded pagination (100 templates initially, then 500/page on scroll)
+- Template preview showing actual source data structure
+- Copy/reuse templates across similar sources
 
-- CSV
-- Excel `.xlsx`
-- Excel `.xls`
-- JSON
-- XML
-- GET API with JSON response
-- Python Editor
+#### 4. **Reporting Tab** (Analytics & Insights)
+- **Multi-Brand Filter:**
+  - Select main brands to analyze
+  - Select competitor brands for comparison
+  - Apply geographic filters (state, county, city, ZIP code)
+  
+- **Key Metrics:**
+  - Location counts by brand
+  - Data enrichment percentages (fully enriched, geo-enriched, ZIP-enriched, city-enriched)
+  - Coordinate source distribution (listing coordinates vs. ZIP centroid vs. city centroid)
+  - Data quality summary (coordinate/ZIP completeness, duplicate rate)
+  - Gap analysis - ZIPs where competitors are present but main brands are absent
+  
+- **Interactive Map:**
+  - Green pins: locations with full coordinates
+  - Blue pins: ZIP-code only locations (using ZIP centroid)
+  - Red pins: ZIP code not found/invalid
+  - Click pins for location details
+  
+- **Sample Data Tables:**
+  - Top states and cities by location count
+  - Brands and their coverage statistics
+  - ZIP code whitespace opportunities (sorted by population/income)
 
-Each input type is handled by a separate Python adapter under `whitespace_tool/source_adapters/`. Excel files expose sheet names in the UI so the user can choose which source to use.
+## Data Platform: Medallion Architecture
 
-The Workflow Templates screen also includes predefined templates for Domino's, Pizza Hut, and Little Caesars. These load known mapping templates into the mapper so each brand workflow can be solved and validated one at a time.
+### Bronze Layer (Raw Data)
+**BigQuery Dataset:** `birdeye_bronze_listings`
 
-## Key System Enhancements & Architecture Features
+Raw, immutable data as ingested from sources:
+- `businesses` - Business metadata (name, source_id, source_type)
+- `listings` - Location records with user-entered data (address, coordinates, phone, hours, ratings)
+- `error_listings` - Validation failures with error details and raw_record for recovery
+- `workflow_templates` - Saved mapping configurations per source
+- `field_catalog` - Available fields (standard + custom) for the UI
+- `source_types` - Metadata about each source type (CSV, API, etc.)
+- `us_zipcodes` - ZIP code geography and demographics (from BigQuery public data)
 
-### 1. High-Performance SQLite Sidecar Cache (`sqlite_cache.py`)
-- Integrated a WAL-mode SQLite local cache (`.cache/whitespace_cache.db`) for high-frequency queries (ZIP geography, brand lists, reporting summaries).
-- Reduces repeat query latency from ~13.5 seconds to sub-millisecond execution (<1ms - 3.4ms).
-- Invalidates reporting caches automatically whenever new listings or workflows are saved.
+**Partitioning & Clustering:**
+- `listings` and `listings_enriched`: partitioned daily by `first_observed_at`
+- `error_listings`: partitioned daily by `observed_at`
+- Clustered by `(state_code, zip_code, business_id)` for geographic queries
 
-### 2. BigQuery Partitioning & Clustering
-- `listings` and `listings_enriched` are partitioned daily by `first_observed_at`; `error_listings` is partitioned daily by `observed_at`.
-- Clustered by `(state_code, zip_code, business_id)` to optimize geographic filtering and whitespace analytical queries.
-- Restored `source_types` BigQuery table schema and seed records to support seamless template saving and metadata tracking.
+### Silver Layer (Validated & Enriched)
+**BigQuery Table:** `birdeye_silver_listings`
 
-### 3. Lightweight Instant Login Status Ping (`/api/ping`)
-- Introduced a minimal `/api/ping` endpoint returning rapid JSON health status in `<1ms`.
-- Prevents UI delays during initial load, immediately transitioning authentication status to **GREEN (`ready`)**.
+Validated, deduplicated, and enriched location records:
+- Coordinates enriched from ZIP code centroids and city/state centroids if missing
+- Enrichment status tracked per record:
+  - **fully_enriched** - Has coordinates AND name/phone/address filled
+  - **geo_enriched** - Has coordinates (from listing or ZIP centroid)
+  - **zip_enriched** - Uses ZIP code centroid as fallback
+  - **city_enriched** - Uses city/state centroid as fallback
+  - **minimal** - Only address/ZIP, no coordinates
+- Coordinate source tracked (source_listing, zip_centroid, city_state_centroid)
+- Last observed timestamp for staleness detection
 
-### 4. Custom Field Validation & Duplicate Guard
-- Added normalized token-matching validation in custom field creation (`create_custom_field`).
-- Blocks duplicate standard or custom fields (e.g. attempting to re-add `address` as a custom field returns an informative HTTP 400 error).
+**Refresh Strategy:**
+- Built on-demand when stale cache is detected (manual click on "Refresh Reports")
+- Built automatically on hourly schedule (runs at HH:00 via background thread)
+- Uses `build_silver_layer()` which validates and enriches from bronze
 
-### 5. Explicit Source Mapping Lifecycle & Visual Feedback
-- Auto-mapping logic triggers cleanly upon clicking **Parse Source** rather than on initial file selection.
-- Auto-mapped dropdown fields are highlighted in light red (`select.auto-mapped`) for visual verification.
-- Re-mapping an already mapped source field prompts confirmation (`window.confirm`) to prevent accidental overwrites.
+### Gold Layer (Pre-Aggregated Views)
+**BigQuery Dataset:** `birdeye_gold_listings`
 
-### 6. UI Refinements & Desktop Optimization
-- Standardized action buttons (e.g., `Save Template and Listing Data`).
-- Enforced clean URL routing without parameter pollution (`?fresh=1`).
-- Added responsive styling tailored for laptop screens (`min-width: 1280px`).
+Pre-computed aggregation views for sub-second reporting queries. All views read from `silver.listings_enriched` and `bronze.us_zipcodes`:
 
-Domino's can be explored through the unofficial first-party store locator endpoint used by community wrappers. The fetcher scans a ZIP list, caches raw ZIP responses with pickle, deduplicates by store ID, and writes mapper-ready JSON under a `Stores` array:
+- **`vw_zip_brand_activity`** - Grain: (zip_code, brand_name)
+  - Location count per ZIP per brand
+  - City/state/county coordinates
+  - Max last_observed_at for staleness detection
+  
+- **`vw_state_summary`** - Grain: (state_code, state_name, brand_name)
+  - Location count, city count, ZIP count per state per brand
+  
+- **`vw_city_summary`** - Grain: (city_name, state_code, state_name, county, brand_name)
+  - ZIP count and location count per city per brand
+  
+- **`vw_brand_summary`** - Grain: (brand_name)
+  - Total locations, states, counties, cities, ZIPs per brand
+  
+- **`vw_listing_quality_summary`** - Overall data quality metrics
+  - Total rows, rows with coordinates, rows with ZIP codes
+  - Distinct (deduplicated) row counts
+  - Last observed timestamp
+  
+- **`vw_geo_reference`** - Deduped geography (state/county/city combinations)
+  - Supports filter dropdowns
 
-```bash
-.venv/bin/python -m whitespace_tool fetch-dominos --zip-file data/source_files/us_zips.txt --output outputs/dominos_store_locator.json
-```
+**Refresh Strategy:**
+- Built alongside silver on hourly schedule and on-demand refresh
+- Simple views (non-materialized) that are "as fresh as the last silver build"
+- Reports query gold views for aggregations; individual records use silver/bronze
 
-This is not an official Domino's public API, so failures or schema changes should be treated as source-quality signals rather than silently trusted.
+### SQLite Mirror Cache (Local Sidecar)
+**File:** `.cache/whitespace_cache.db`
 
-The Python Editor runs user-authored Python in a browser Pyodide runtime. Scripts may import standard-library modules and supported Pyodide packages, and can fetch or transform data as needed. Assign the final JSON-compatible object or list to `result`; that value is validated and passed into the same mapping workflow as every other source. The server receives only the resulting JSON and does not execute the script.
+High-performance local copy of gold layer pre-aggregations:
+- Reduces reporting latency from ~13.5s to <1ms
+- Stores denormalized copies of gold view results
+- Automatically synced when silver/gold rebuild
+- Falls back to BigQuery if cache is stale or missing
+- Invalidated when:
+  - New listings are saved
+  - Error listings are reprocessed
+  - Manual "Refresh Reports" clicked
+  - Hourly scheduler rebuilds silver/gold
 
-The demo config uses small sample files for brand locations only. ZIP geography and demographics are read from BigQuery public datasets.
+## Hourly Medallion Scheduler
 
-For a current/realtime-oriented run, start from `config/live_bigquery.json`. It keeps ZIP demographics in BigQuery, requires live location sources where available, and marks snapshot sources so quality checks surface staleness instead of silently treating old extracts as current.
+Background thread (daemon) that runs continuously:
+1. Every hour at HH:00:
+   - Calls `build_silver_layer()` - validates and enriches bronze → silver
+   - Calls `build_gold_layer()` - creates/updates pre-aggregated views
+   - Calls `sync_gold_mirror()` - syncs gold views → SQLite cache
+2. Logs refresh timestamp and any errors
+3. Errors are logged but don't stop the loop; next hour's refresh proceeds independently
 
-```bash
-python3 -m whitespace_tool quality-check --config config/live_bigquery.json --output-dir outputs/live
-python3 -m whitespace_tool analyze --config config/live_bigquery.json --output-dir outputs/live
-```
+Reuses `REPORTING_REFRESH_LOCK` so hourly refresh and manual on-demand refresh never collide.
 
-To push directly to BigQuery, install `google-cloud-bigquery`, authenticate with Google Application Default Credentials, then run the same `push-bigquery` command without `--dry-run`.
+## Data Validation & Enrichment
 
-To test the Birdeye BigQuery connection with a service account JSON:
+### Validation Rules
+Every row is validated through `whitespace_tool/data_validation/`:
+- **Required:** name, address, zip_code, state_code, county
+- **Type Checks:** Coordinates are numeric; phone matches patterns; dates parse
+- **ZIP Validation:** ZIP code exists in `us_zipcodes` table
+- **Deduplication:** Duplicate source IDs within same brand are flagged
 
-```bash
-cp config/connections/storage.example.json config/connections/storage.json
-python3 -m pip install google-cloud-bigquery google-auth
-python3 scripts/test_storage_connection.py
-```
+Invalid rows → `error_listings` table with error details  
+Valid rows → Bronze `listings` table → Silver enrichment
 
-Put the downloaded service account file at `config/connections/keen-device-610-2af9b27dfda3.json`, or edit `credentials_json` in `config/connections/storage.json`. That local config and credential file are ignored by git.
+### Enrichment Pipeline
+1. **Coordinate enrichment** (if coordinates missing):
+   - Join `us_zipcodes` on zip_code to get ZIP centroid
+   - Join city/state lookup to get city centroid as final fallback
+   - Track which source was used (source_listing, zip_centroid, city_state_centroid)
 
-`config/live_bigquery.json` uses a `demographics_source` of type `bigquery` and the configured bronze dataset. If you are not using Application Default Credentials, set `credentials_json` in `config/connections/storage.json` or pass `--credentials-json` when pushing warehouse tables.
+2. **Data completeness tracking:**
+   - Count rows by enrichment status (fully/geo/zip/city/minimal)
+   - Calculate percentages (e.g., "82% fully enriched")
+   - Track coordinate source distribution
 
-## Configuration And Render Deployment
+3. **Deduplication:**
+   - Group by normalized (brand, address, zip_code)
+   - Keep latest observed record, archive older duplicates
 
-Local secrets are not committed. The app can read storage settings from either ignored `config/connections/storage.json`, a local ignored `.env`, or host environment variables. Start from:
+## Sample Data & Testing
+
+### Load Sample Dataset
+Click "Load Sample Dataset" button in Mapper tab to populate with 3 demo brands:
+- **Starlight Pizza Co.** - API-sourced data
+- **Crimson Slice** - CSV-sourced data
+- **Pinnacle Pizza** - JSON-sourced data
+
+~500 synthetic locations across all 50 states, with realistic geographic distribution and demographic diversity. Sample data is completely fictional and used only for testing platform functionality.
+
+### Fast Sample Loading
+Optimized to run in ~5 seconds (was ~20s before):
+- Single shared BigQuery client across all 15 per-brand saves
+- Unified cache invalidation (1 call instead of 15)
+- Skips table schema probes for empty business/source_types lists
+
+## Configuration & Deployment
+
+### Local Development with `.env`
 
 ```bash
 cp .env.example .env
+# Edit with your values:
+WORKFLOW_LOGIN_USER=your_user
+WORKFLOW_LOGIN_PASSWORD=your_password
+BIGQUERY_PROJECT_ID=your-gcp-project
+BIGQUERY_BRONZE_DATASET_ID=birdeye_bronze_listings
+BIGQUERY_SILVER_DATASET_ID=birdeye_silver_listings
+BIGQUERY_GOLD_DATASET_ID=birdeye_gold_listings
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
 ```
 
-Environment variables supported by the app:
+### Claude Code on the Web (Remote Environments)
+Automatic environment setup via SessionStart hook (`.claude/hooks/session-start.sh`):
+- Installs Python dependencies from `requirements.txt`
+- Sets `PYTHONPATH` for module imports
+- Validates dependencies are available
+- Runs test suite to ensure pytest works
 
-- `WORKFLOW_LOGIN_USER`
-- `WORKFLOW_LOGIN_PASSWORD`
-- `WORKFLOW_CONFIG`
-- `BIGQUERY_PROJECT_ID` or `GOOGLE_CLOUD_PROJECT`
-- `BIGQUERY_BRONZE_DATASET_ID`
-- `BIGQUERY_SILVER_DATASET_ID`
-- `BIGQUERY_GOLD_DATASET_ID`
-- `GOOGLE_APPLICATION_CREDENTIALS` for a local service-account file path
-- `GOOGLE_APPLICATION_CREDENTIALS_JSON` for hosted deploys where the full service-account JSON is stored as a secret
-- `REPORTING_LISTINGS_TABLE` to point the Reporting tab at a BigQuery table or view. If omitted, it reads raw bronze `listings`.
+This prevents recurring environment issues and server startup failures.
 
-The Reporting tab is built in the app, not embedded from an external dashboard. It summarizes location counts by brand, state, county, city, and ZIP, supports multi-select main/competitor brand filters, and maps gaps where competitor brands are present but selected main brands are absent. Keep `REPORTING_LISTINGS_TABLE` on the bronze `listings` table for raw reporting, or point it to a BigQuery silver/gold view once you add transformation views.
+### Render Deployment
 
-For Render, create a Web Service from GitHub and use the workflow UI:
+Create a Web Service from GitHub:
+
+**Build Command:**
+```bash
+pip install -r requirements.txt
+```
+
+**Start Command:**
+```bash
+python -m whitespace_tool workflow-ui --host 0.0.0.0
+```
+
+**Environment Variables:**
+Add these in Render dashboard:
+- All `BIGQUERY_*` and `WORKFLOW_*` variables from `.env`
+- Paste full service account JSON into `GOOGLE_APPLICATION_CREDENTIALS_JSON`
+- `PORT` is automatically set by Render
+
+Repository includes `render.yaml` for pre-filled config.
+
+### Local Service Account Testing
 
 ```bash
-Build Command: pip install -r requirements.txt
-Start Command: python -m whitespace_tool workflow-ui --host 0.0.0.0
+cp config/connections/storage.example.json config/connections/storage.json
+# Edit credentials_json path or set GOOGLE_APPLICATION_CREDENTIALS
+python scripts/test_storage_connection.py
 ```
 
-The workflow UI includes source mapping, rejected-record review, template library, and the native Reporting tab. The server automatically uses Render's `PORT` environment variable. Add the environment variables above in Render's dashboard; paste the full BigQuery service account JSON into `GOOGLE_APPLICATION_CREDENTIALS_JSON` instead of committing a credential file. Do not upload or commit `.env`; Render stores these values as encrypted service environment variables.
+Credentials and config are `.gitignore`'d; never commit secrets.
 
-This repo also includes `render.yaml`, so Render can pre-fill the build/start commands and prompt for secret environment variables.
+## Logging
 
-## Approach
+Request logs, errors, and BigQuery failures are recorded in `logs/mapper.log` (rotated daily):
+- File upload and parsing errors
+- Validation failures
+- BigQuery operation timeouts
+- Save/enrichment errors include a request ID for correlation
 
-1. Fetch ZIP/ZCTA geography and demographics from BigQuery public data into the unified `us_zipcodes` shape. The current join uses `bigquery-public-data.geo_us_boundaries.zip_codes` for city/county/state/lat/lon and `bigquery-public-data.census_bureau_acs.zip_codes_2018_5yr` for population, income, age, poverty, labor, and housing fields.
-2. Keep one source file per brand shape, with source freshness declared in config:
-   - `whitespace_tool/sources/dominos_api.py` for a Domino's API JSON response.
-   - `whitespace_tool/sources/pizza_hut_kaggle.py` for a Kaggle-style Pizza Hut CSV.
-   - `whitespace_tool/sources/little_caesars_json.py` for Little Caesars JSON objects.
-3. Use workflow template JSON files in `config/workflow_templates/` to translate each source into the internal schema. Adding a field or changing a source column should be a template edit, not analysis rewrites.
-4. Run all data quality checks through `whitespace_tool/data_quality.py`: brand coverage, duplicate source keys, required fields, ZIP validity, ZIP-to-demographic joins, missing demographic metrics, coordinate sanity, source tier, sample-file usage, and stale `observed_at` timestamps.
-5. Push unified tables to BigQuery using `whitespace_tool/warehouse_bigquery.py`. Bronze DDL is in `database/bronze_schema.sql`; load-ready JSONL and schema files are written to `outputs/bigquery/` during dry runs.
-6. Run whitespace analysis from config. The current demo defines similar population profile as z-score distance over `population` and `median_age`; this lives in `config/demo.json`.
+Change log directory with `MAPPER_LOG_DIR` environment variable.
 
-## Outputs
+## Application State & Sessions
 
-`outputs/demo/brand_locations.csv` contains Domino's, Pizza Hut, and Little Caesars records with ZIP demographics attached.
+- **Idle timeout:** Sessions expire after 30 minutes of inactivity
+- **Login:** Required per session (credentials in `.env`)
+- **Caching:** Reporting results cached in SQLite; refreshes hourly or on-demand
+- **Soft deletes:** Error records marked `is_deleted` with timestamp; never hard-deleted for audit trail
+- **Workflow persistence:** All mappings, templates, and decisions stored in BigQuery
 
-`outputs/demo/whitespace_zips.csv` contains ZIPs similar to Domino's ZIPs where Domino's is absent. It separates `competitor_present` from `no_tracked_brand_present` and includes median household income plus median age as the extra data point. Median age helps distinguish family/college/retiree trade areas that may have similar population totals but different demand patterns.
+## Performance Characteristics
 
-`outputs/demo/run_manifest.json` records config, sources, limitations, and summary counts.
+| Operation | Latency |
+|-----------|---------|
+| /api/ping | <1ms |
+| Mapper page load | ~200ms |
+| Parse CSV (1000 rows) | ~800ms |
+| Save validated rows | 2-5s (depends on BigQuery) |
+| Refresh Reports (BigQuery) | 10-15s (first run) |
+| Refresh Reports (SQLite cache) | <1ms (cached) |
+| Hourly medallion rebuild (100K rows) | 20-30s |
 
-`outputs/demo/data_quality_report.json` records the pass/fail result, source counts, brand counts, and issue details.
+## Testing
 
-`outputs/bigquery/` contains one JSONL file per unified BigQuery table plus matching schema JSON files.
+Unit test suite covers:
+- Data validation logic (field types, required fields, ZIP validity)
+- Enrichment pipeline (coordinate assignment, deduplication)
+- Silver layer build
+- Gold layer views
+- SQLite mirror sync
+- Reporting queries
+- Sample data loading
 
-## Data Quality Notes
+Run tests:
+```bash
+pytest unit_tests/ -q
+```
 
-The sample data is not authoritative; it exists to demonstrate architecture. For submission quality, I would pull Domino's from the store API, Pizza Hut from the freshest available public extract or locator-derived source, and Little Caesars from current JSON source objects, then compare counts by state/ZIP against each brand's public locator or another reference. Raw payloads are preserved in `source_observations` so every normalized restaurant can be traced back to its source and observed timestamp.
+All 135 tests should pass. Tests use mocked BigQuery clients; no live access required.
 
-Known gaps: no address geocoding, no fuzzy duplicate resolution across conflicting source IDs, no incremental diff report yet, and no real review ingestion. The schema reserves `reviews`, `analysis_runs`, and `whitespace_candidates` for those next steps.
+## Architecture Decisions
+
+### Why Medallion?
+- **Bronze:** Immutable audit trail of raw ingested data
+- **Silver:** Single source of truth for validated, enriched records (used for individual row lookups, map pins)
+- **Gold:** Pre-computed aggregations for reporting (used for metrics, top lists, charts)
+- **Separation of concerns:** Each layer has a distinct purpose and refresh cadence
+
+### Why SQLite Cache?
+- Reporting queries are almost all aggregation-only (can be pre-computed)
+- Pre-aggregations never need to change between hourly refreshes
+- Local SQLite is sub-millisecond; eliminates network latency
+- BigQuery fallback ensures correctness if cache is missing
+
+### Why Separate Bronze Tables?
+- Preserves raw payloads (`raw_record`) for recovery/reprocessing
+- Maintains audit trail of all decisions (soft-deletes, error flags)
+- Allows incremental analysis and quality reporting
+- Source-agnostic schema supports any input format
+
+## Known Limitations & Future Work
+
+- No address-level geocoding (coordinates only; ZIP/city centroids used as fallback)
+- No fuzzy duplicate resolution across conflicting source IDs
+- No incremental diff reports (full rebuild each refresh)
+- No review/feedback ingestion loop (schema reserved for future)
+
+Schema reserves tables `reviews`, `analysis_runs`, and `whitespace_candidates` for future phases.
+
+## Files & Organization
+
+```
+.
+├── ui/                           # Web UI (HTML/CSS/JavaScript)
+│   ├── index.html               # Mapper tab + main layout
+│   ├── login.html               # Login page
+│   ├── integrations.html        # Reporting tab
+│   └── js/mapper.js             # Tab logic and API calls
+├── whitespace_tool/             # Python backend
+│   ├── workflow_server.py       # HTTP handlers, medallion building
+│   ├── warehouse_bigquery.py    # BigQuery client and operations
+│   ├── sqlite_cache.py          # SQLite mirror cache
+│   ├── data_validation/         # Row validation rules
+│   ├── source_adapters/         # CSV/JSON/XML/API parsers
+│   └── ...
+├── unit_tests/                  # Test suite (135 tests)
+├── config/
+│   ├── connections/storage.json # BigQuery credentials (local, .gitignore'd)
+│   └── workflow_templates/      # Saved mapping templates
+├── .cache/
+│   └── whitespace_cache.db      # SQLite reporting cache
+├── logs/                        # Daily rotating mapper logs
+├── .env                         # Environment variables (local, .gitignore'd)
+├── .env.example                 # Template
+├── requirements.txt             # Python dependencies
+└── .claude/
+    ├── hooks/session-start.sh   # Cloud IDE environment setup
+    └── settings.json            # Hook configuration
+```
+
+## Troubleshooting
+
+**Server won't start with "ModuleNotFoundError"**
+- Check `PYTHONPATH=.` is set
+- Run SessionStart hook: `.claude/hooks/session-start.sh`
+
+**BigQuery dataset not found**
+- Verify `BIGQUERY_PROJECT_ID` and dataset names are correct
+- Check credentials have BigQuery dataset permissions
+- Datasets are auto-created on first API call; check GCP quota
+
+**Reporting queries slow (>10s)**
+- SQLite cache may be stale; click "Refresh Reports"
+- Hourly scheduler runs at HH:00; check `logs/mapper.log` for refresh status
+- Large datasets (>1M rows) may need indexed BigQuery queries; see schema
+
+**Logo/login fails in cloud IDE**
+- Run SessionStart hook to set up environment
+- Check network proxy allows CDN access to `cdn2.birdeye.com`
+
+## Contributing
+
+1. Create a feature branch from `develop`
+2. Make changes and test locally (`pytest unit_tests/`)
+3. Commit with clear messages including Co-Author footer
+4. Push to feature branch and open a pull request
+5. Ensure all 135 tests pass in CI before merge
+
+## License
+
+Assessment prototype. See LICENSE file for terms.
