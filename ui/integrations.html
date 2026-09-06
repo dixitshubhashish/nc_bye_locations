@@ -1838,6 +1838,51 @@ else:
             <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportCities" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Brand Cities</span></div>
             <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportWhitespaceGaps" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Gap ZIPs</span></div>
           </div>
+
+          <section class="report-section" style="margin-top: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin-bottom: 20px;">
+            <h2 style="margin-top: 0;">Data Enrichment & Quality</h2>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 12px;">
+              <div style="padding: 12px; background: #f3f4f6; border-radius: 6px;">
+                <div style="font-size: 12px; color: var(--muted); margin-bottom: 4px;">Overall Enrichment</div>
+                <div style="font-size: 18px; font-weight: 700; color: var(--ink);"><span id="reportEnrichmentPct">0</span>%</div>
+              </div>
+              <div style="padding: 12px; background: #f3f4f6; border-radius: 6px;">
+                <div style="font-size: 12px; color: var(--muted); margin-bottom: 4px;">Fully Enriched</div>
+                <div style="font-size: 14px; font-weight: 600; color: var(--ink);"><span id="reportFullyEnrichedPct">0</span>% (<span id="reportFullyEnrichedCount">0</span>)</div>
+              </div>
+              <div style="padding: 12px; background: #f3f4f6; border-radius: 6px;">
+                <div style="font-size: 12px; color: var(--muted); margin-bottom: 4px;">Geo Enriched</div>
+                <div style="font-size: 14px; font-weight: 600; color: var(--ink);"><span id="reportGeoEnrichedPct">0</span>% (<span id="reportGeoEnrichedCount">0</span>)</div>
+              </div>
+              <div style="padding: 12px; background: #f3f4f6; border-radius: 6px;">
+                <div style="font-size: 12px; color: var(--muted); margin-bottom: 4px;">ZIP Enriched</div>
+                <div style="font-size: 14px; font-weight: 600; color: var(--ink);"><span id="reportZipEnrichedPct">0</span>% (<span id="reportZipEnrichedCount">0</span>)</div>
+              </div>
+              <div style="padding: 12px; background: #f3f4f6; border-radius: 6px;">
+                <div style="font-size: 12px; color: var(--muted); margin-bottom: 4px;">City Enriched</div>
+                <div style="font-size: 14px; font-weight: 600; color: var(--ink);"><span id="reportCityEnrichedPct">0</span>% (<span id="reportCityEnrichedCount">0</span>)</div>
+              </div>
+              <div style="padding: 12px; background: #f3f4f6; border-radius: 6px;">
+                <div style="font-size: 12px; color: var(--muted); margin-bottom: 4px;">Total Ingested Records</div>
+                <div style="font-size: 14px; font-weight: 600; color: var(--ink);"><span id="reportTotalIngested">0</span></div>
+              </div>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line);">
+              <div>
+                <div style="font-size: 11px; color: var(--muted); margin-bottom: 8px; font-weight: 600;">Coordinate Source</div>
+                <div style="font-size: 13px; color: var(--ink);"><span id="reportSourceListingPct">0</span>% Source Listing</div>
+                <div style="font-size: 13px; color: var(--ink);"><span id="reportZipCentroidPct">0</span>% ZIP Centroid</div>
+                <div style="font-size: 13px; color: var(--ink);"><span id="reportCityCentroidPct">0</span>% City/State</div>
+              </div>
+              <div>
+                <div style="font-size: 11px; color: var(--muted); margin-bottom: 8px; font-weight: 600;">Data Quality</div>
+                <div style="font-size: 13px; color: var(--ink);">ZIP: <span id="reportZipCompleteness">0</span>%</div>
+                <div style="font-size: 13px; color: var(--ink);">Coordinates: <span id="reportCoordCompleteness">0</span>%</div>
+                <div style="font-size: 13px; color: var(--ink);">Duplicates: <span id="reportDuplicateRate">0</span>%</div>
+              </div>
+            </div>
+          </section>
+
           <section class="report-section" style="margin-top: 0;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
               <h2>Location Map</h2>
@@ -2296,6 +2341,38 @@ else:
           }
         });
     document.querySelector("#brandDisclaimer").textContent = window.APP_CONSTANTS.trademarkDisclaimer;
+
+    // Reporting data enrichment metrics - populate from API response
+    window.populateEnrichmentMetrics = function(data) {
+      if (!data || !data.data_quality_summary) return;
+      const dq = data.data_quality_summary;
+      const em = dq.enrichment_metrics || {};
+
+      const pct = (val) => typeof val === "number" ? Math.round(val * 10) / 10 : "0";
+
+      if (em.overall_enrichment_pct !== undefined) el("reportEnrichmentPct").textContent = pct(em.overall_enrichment_pct);
+      if (em.fully_enriched_pct !== undefined) el("reportFullyEnrichedPct").textContent = pct(em.fully_enriched_pct);
+      if (em.fully_enriched_count !== undefined) el("reportFullyEnrichedCount").textContent = em.fully_enriched_count;
+      if (em.geo_enriched_pct !== undefined) el("reportGeoEnrichedPct").textContent = pct(em.geo_enriched_pct);
+      if (em.geo_enriched_count !== undefined) el("reportGeoEnrichedCount").textContent = em.geo_enriched_count;
+      if (em.zip_enriched_pct !== undefined) el("reportZipEnrichedPct").textContent = pct(em.zip_enriched_pct);
+      if (em.zip_enriched_count !== undefined) el("reportZipEnrichedCount").textContent = em.zip_enriched_count;
+      if (em.city_enriched_pct !== undefined) el("reportCityEnrichedPct").textContent = pct(em.city_enriched_pct);
+      if (em.city_enriched_count !== undefined) el("reportCityEnrichedCount").textContent = em.city_enriched_count;
+
+      const cs = em.coordinate_sources || {};
+      if (cs.source_listing_pct !== undefined) el("reportSourceListingPct").textContent = pct(cs.source_listing_pct);
+      if (cs.zip_centroid_pct !== undefined) el("reportZipCentroidPct").textContent = pct(cs.zip_centroid_pct);
+      if (cs.city_state_centroid_pct !== undefined) el("reportCityCentroidPct").textContent = pct(cs.city_state_centroid_pct);
+
+      if (dq.zip_completeness_pct !== undefined) el("reportZipCompleteness").textContent = pct(dq.zip_completeness_pct);
+      if (dq.coordinate_completeness_pct !== undefined) el("reportCoordCompleteness").textContent = pct(dq.coordinate_completeness_pct);
+      if (dq.duplicate_rate_pct !== undefined) el("reportDuplicateRate").textContent = pct(dq.duplicate_rate_pct);
+
+      if (data.primary_kpis) {
+        if (data.primary_kpis.ingested_records !== undefined) el("reportTotalIngested").textContent = data.primary_kpis.ingested_records;
+      }
+    };
     (async () => {
       updateSourceVisibility();
       await resetLoginSessionFromLaunch();

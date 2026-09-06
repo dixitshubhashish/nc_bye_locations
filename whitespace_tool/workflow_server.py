@@ -1681,6 +1681,14 @@ def build_silver_layer() -> dict[str, Any]:
         WHEN cg.latitude IS NOT NULL AND cg.longitude IS NOT NULL THEN 0.55
         ELSE 0.0
       END AS coordinate_confidence,
+      CASE
+        WHEN l.latitude IS NOT NULL AND l.longitude IS NOT NULL AND
+             l.phone_number IS NOT NULL AND l.name IS NOT NULL THEN 'fully_enriched'
+        WHEN l.latitude IS NOT NULL AND l.longitude IS NOT NULL THEN 'geo_enriched'
+        WHEN z.latitude IS NOT NULL AND z.longitude IS NOT NULL THEN 'zip_enriched'
+        WHEN cg.latitude IS NOT NULL AND cg.longitude IS NOT NULL THEN 'city_enriched'
+        ELSE 'minimal'
+      END AS enrichment_status,
       ARRAY_TO_STRING(
         ARRAY(
           SELECT part
@@ -2934,7 +2942,15 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
       COUNTIF(latitude IS NOT NULL AND longitude IS NOT NULL) AS with_coordinates,
       COUNTIF(zip_code IS NOT NULL AND zip_code != '') AS with_zip,
       COUNT(DISTINCT CONCAT(COALESCE(brand_name, ''), '|', COALESCE(zip_code, ''), '|', COALESCE(address, ''))) AS distinct_rows,
-      MAX(last_observed_at) AS last_observed_at
+      MAX(last_observed_at) AS last_observed_at,
+      COUNTIF(enrichment_status = 'fully_enriched') AS fully_enriched_count,
+      COUNTIF(enrichment_status = 'geo_enriched') AS geo_enriched_count,
+      COUNTIF(enrichment_status = 'zip_enriched') AS zip_enriched_count,
+      COUNTIF(enrichment_status = 'city_enriched') AS city_enriched_count,
+      COUNTIF(enrichment_status = 'minimal') AS minimal_enrichment_count,
+      COUNTIF(coordinate_source = 'source_listing') AS source_listing_count,
+      COUNTIF(coordinate_source = 'zip_centroid') AS zip_centroid_count,
+      COUNTIF(coordinate_source = 'city_state_centroid') AS city_state_centroid_count
     FROM `{project_id}.{silver_dataset_id}.listings_enriched`
     WHERE (ARRAY_LENGTH(@selected_brands) = 0 OR COALESCE(brand_name, business_id) IN UNNEST(@selected_brands))
     """
@@ -3269,6 +3285,16 @@ def _finish_reporting_summary(
     dq_distinct = data_quality_row.get("distinct_rows", 0) or 0
     dq_last_observed = data_quality_row.get("last_observed_at")
 
+    # Enrichment metrics - track data enrichment levels
+    dq_fully_enriched = data_quality_row.get("fully_enriched_count", 0) or 0
+    dq_geo_enriched = data_quality_row.get("geo_enriched_count", 0) or 0
+    dq_zip_enriched = data_quality_row.get("zip_enriched_count", 0) or 0
+    dq_city_enriched = data_quality_row.get("city_enriched_count", 0) or 0
+    dq_minimal_enrichment = data_quality_row.get("minimal_enrichment_count", 0) or 0
+    dq_source_listing = data_quality_row.get("source_listing_count", 0) or 0
+    dq_zip_centroid = data_quality_row.get("zip_centroid_count", 0) or 0
+    dq_city_centroid = data_quality_row.get("city_state_centroid_count", 0) or 0
+
     zip_completeness_pct = _share_pct(dq_with_zip, dq_total)
     coordinate_completeness_pct = _share_pct(dq_with_coords, dq_total)
     duplicate_count = max(dq_total - dq_distinct, 0)
@@ -3276,6 +3302,16 @@ def _finish_reporting_summary(
     valid_rate_pct = round((zip_completeness_pct + coordinate_completeness_pct) / 2, 1) if dq_total else 0.0
     invalid_zip_count = max(dq_total - dq_with_zip, 0)
     missing_coord_count = max(dq_total - dq_with_coords, 0)
+
+    # Enrichment percentages
+    fully_enriched_pct = _share_pct(dq_fully_enriched, dq_total)
+    geo_enriched_pct = _share_pct(dq_geo_enriched, dq_total)
+    zip_enriched_pct = _share_pct(dq_zip_enriched, dq_total)
+    city_enriched_pct = _share_pct(dq_city_enriched, dq_total)
+    overall_enrichment_pct = _share_pct(dq_fully_enriched + dq_geo_enriched + dq_zip_enriched + dq_city_enriched, dq_total)
+    source_listing_pct = _share_pct(dq_source_listing, dq_total)
+    zip_centroid_pct = _share_pct(dq_zip_centroid, dq_total)
+    city_centroid_pct = _share_pct(dq_city_centroid, dq_total)
 
     if dq_last_observed:
         observed_dt = dq_last_observed if hasattr(dq_last_observed, "isoformat") else None
@@ -3293,6 +3329,8 @@ def _finish_reporting_summary(
         confidence_reasons = [
             f"{zip_completeness_pct}% of {dq_total} ingested records have a valid ZIP code.",
             f"{coordinate_completeness_pct}% resolved to real coordinates (source listing, ZIP, or city/state centroid).",
+            f"{overall_enrichment_pct}% data enrichment: {fully_enriched_pct}% fully enriched, {geo_enriched_pct}% with geocoding, {zip_enriched_pct}% with ZIP centroid.",
+            f"Coordinate sources: {source_listing_pct}% from source listing, {zip_centroid_pct}% from ZIP centroid, {city_centroid_pct}% from city/state centroid.",
             f"{duplicate_rate_pct}% duplicate rate across brand/ZIP/address.",
             f"Last observed ingestion timestamp is {freshness_days} day(s) ago." if freshness_days is not None else "No observed-at timestamp available on ingested records.",
         ]
@@ -3305,6 +3343,27 @@ def _finish_reporting_summary(
         "freshness_days": freshness_days,
         "overall_confidence": overall_confidence,
         "confidence_reasons": confidence_reasons,
+        "enrichment_metrics": {
+            "overall_enrichment_pct": overall_enrichment_pct,
+            "fully_enriched_pct": fully_enriched_pct,
+            "fully_enriched_count": dq_fully_enriched,
+            "geo_enriched_pct": geo_enriched_pct,
+            "geo_enriched_count": dq_geo_enriched,
+            "zip_enriched_pct": zip_enriched_pct,
+            "zip_enriched_count": dq_zip_enriched,
+            "city_enriched_pct": city_enriched_pct,
+            "city_enriched_count": dq_city_enriched,
+            "minimal_enrichment_pct": _share_pct(dq_minimal_enrichment, dq_total),
+            "minimal_enrichment_count": dq_minimal_enrichment,
+            "coordinate_sources": {
+                "source_listing_pct": source_listing_pct,
+                "source_listing_count": dq_source_listing,
+                "zip_centroid_pct": zip_centroid_pct,
+                "zip_centroid_count": dq_zip_centroid,
+                "city_state_centroid_pct": city_centroid_pct,
+                "city_state_centroid_count": dq_city_centroid,
+            },
+        },
         "error_buckets": [
             {"type": "INVALID_ZIP", "count": invalid_zip_count, "severity": "MEDIUM", "resolved": False},
             {"type": "MISSING_COORDINATES", "count": missing_coord_count, "severity": "LOW", "resolved": False},
@@ -3328,6 +3387,8 @@ def _finish_reporting_summary(
         "whitespace_population": total_whitespace_pop,
         "median_whitespace_income": median_ws_income if whitespace_incomes else 0,
         "data_confidence": "HIGH" if total_raw_locations > 0 else "NO_DATA",
+        "data_enrichment_pct": overall_enrichment_pct,
+        "ingested_records": dq_total,
     }
 
     similar_analysis_meta = {

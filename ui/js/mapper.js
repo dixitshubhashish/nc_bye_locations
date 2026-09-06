@@ -1525,6 +1525,70 @@ async function createOrUsePresetBrand() {
     }
   }
 
+// Reporting view state
+let reportLoaded = false;
+async function loadReporting() {
+  try {
+    const mainBrand = el("reportMainBrandSelect")?.value || "";
+    const competitors = Array.from(document.querySelectorAll("input[name='competitorBrand']:checked"))
+      .map((input) => input.value);
+    const state = el("reportStateFilter")?.value || "";
+    const county = el("reportCountyFilter")?.value || "";
+    const city = el("reportCityFilter")?.value || "";
+    const zip = el("reportZipFilter")?.value || "";
+    const minPop = el("reportMinPopFilter")?.value || "";
+    const minIncome = el("reportMinIncomeFilter")?.value || "";
+    const maxAge = el("reportMaxAgeFilter")?.value || "";
+
+    if (reportLoaded) {
+      if (window.populateEnrichmentMetrics && window.lastReportingData) {
+        window.populateEnrichmentMetrics(window.lastReportingData);
+      }
+      return;
+    }
+
+    el("reportStatus").textContent = "Loading...";
+    const queryParams = new URLSearchParams();
+    if (mainBrand) queryParams.append("main_brands", mainBrand);
+    if (competitors.length) queryParams.append("competitor_brands", competitors.join(","));
+    if (state) queryParams.append("state", state);
+    if (county) queryParams.append("county", county);
+    if (city) queryParams.append("city", city);
+    if (zip) queryParams.append("zip", zip);
+    if (minPop) queryParams.append("min_population", minPop);
+    if (minIncome) queryParams.append("min_income", minIncome);
+    if (maxAge) queryParams.append("max_median_age", maxAge);
+
+    const response = await fetch(`/api/reporting?${queryParams.toString()}`);
+    if (!response.ok) throw new Error(response.statusText);
+
+    const data = await response.json();
+    window.lastReportingData = data;
+
+    if (data.primary_kpis) {
+      el("reportStates").textContent = data.primary_kpis.states_covered || "0";
+      el("reportZips").textContent = data.primary_kpis.zips_covered || "0";
+      el("reportBrands").textContent = (data.brands || []).length || "0";
+      el("reportStores").textContent = data.primary_kpis.selected_brand_locations || "0";
+      el("reportLocations").textContent = data.primary_kpis.selected_brand_locations || "0";
+      el("reportBrandStates").textContent = data.primary_kpis.states_covered || "0";
+      el("reportCities").textContent = data.primary_kpis.cities_covered || "0";
+      el("reportWhitespaceGaps").textContent = data.primary_kpis.gap_zips || "0";
+    }
+
+    if (window.populateEnrichmentMetrics) {
+      window.populateEnrichmentMetrics(data);
+    }
+
+    el("reportContent").classList.remove("hidden");
+    el("reportStatus").textContent = "Ready";
+    reportLoaded = true;
+  } catch (error) {
+    el("reportStatus").textContent = `Error: ${error.message}`;
+    el("reportContent").classList.add("hidden");
+  }
+}
+
 // Brand Management Modal
 let brandEditMode = false;
 function openBrandModal(forEdit = false) {
