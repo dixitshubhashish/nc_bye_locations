@@ -630,48 +630,63 @@ async function loadReporting() {
         const effectivePrimaryName = primaryBrandName || (brandRows[0] ? brandRows[0].brand : "");
         const primaryRow = brandRows.find((b) => b.brand === effectivePrimaryName) || brandRows[0];
 
-        if (el("reportBrandComparisonCards") && primaryRow && brandRows.length > 1) {
-          const competitorBrands = brandRows.filter((b) => b.brand !== primaryRow.brand);
-          const cards = [];
-          cards.push(`
-            <div style="border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 14px; border-left: 4px solid var(--accent);">
-              <div style="font-size: 12px; color: var(--muted); margin-bottom: 4px; font-weight: 600; text-transform: uppercase;">Primary Brand</div>
-              <div style="font-size: 20px; font-weight: 700; color: var(--ink); margin-bottom: 8px;">${escapeHtml(primaryRow.brand)}</div>
-              <div style="font-size: 12px; color: var(--muted);">
-                <div>${formatNumber(primaryRow.locations)} locations</div>
-                <div>${formatNumber(primaryRow.states)} states</div>
-              </div>
-            </div>
-          `);
-          competitorBrands.slice(0, 2).forEach((brand) => {
-            const locDiff = brand.locations - primaryRow.locations;
-            const stateDiff = brand.states - primaryRow.states;
-            const locColor = locDiff > 0 ? "var(--ok)" : locDiff < 0 ? "var(--error)" : "var(--muted)";
-            const locSign = locDiff > 0 ? "+" : "";
-            const stateColor = stateDiff > 0 ? "var(--ok)" : stateDiff < 0 ? "var(--error)" : "var(--muted)";
-            const stateSign = stateDiff > 0 ? "+" : "";
+        if (el("reportBrandComparisonCards")) {
+          if (primaryRow && brandRows.length > 1) {
+            const competitorBrands = brandRows.filter((b) => b.brand !== primaryRow.brand);
+            if (el("reportBrandComparisonTitle")) {
+              el("reportBrandComparisonTitle").textContent = `${escapeHtml(primaryRow.brand)} vs Competitors`;
+            }
+            const cards = [];
             cards.push(`
-              <div style="border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 14px;">
-                <div style="font-size: 12px; color: var(--muted); margin-bottom: 4px; font-weight: 600; text-transform: uppercase;">Competitor</div>
-                <div style="font-size: 20px; font-weight: 700; color: var(--ink); margin-bottom: 8px;">${escapeHtml(brand.brand)}</div>
+              <div style="border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 14px; border-left: 4px solid var(--accent);">
+                <div style="font-size: 12px; color: var(--muted); margin-bottom: 4px; font-weight: 600; text-transform: uppercase;">Primary Brand</div>
+                <div style="font-size: 20px; font-weight: 700; color: var(--ink); margin-bottom: 8px;">${escapeHtml(primaryRow.brand)}</div>
                 <div style="font-size: 12px; color: var(--muted);">
-                  <div>${formatNumber(brand.locations)} locations <span style="color: ${locColor}; font-weight: 600;">(${locSign}${formatNumber(locDiff)})</span></div>
-                  <div>${formatNumber(brand.states)} states <span style="color: ${stateColor}; font-weight: 600;">(${stateSign}${formatNumber(stateDiff)})</span></div>
+                  <div>${formatNumber(primaryRow.locations)} locations</div>
+                  <div>${formatNumber(primaryRow.states)} states</div>
                 </div>
               </div>
             `);
-          });
-          if (competitorBrands.length > 2) {
-            cards.push(`
-              <div style="border: 1px solid var(--line); background: #f9fafb; border-radius: 8px; padding: 14px; display: flex; align-items: center; justify-content: center;">
-                <div style="text-align: center; color: var(--muted); font-size: 12px;">
-                  <div style="font-weight: 600; margin-bottom: 4px;">+${competitorBrands.length - 2} more</div>
-                  <div style="font-size: 11px;">competitors</div>
+            competitorBrands.slice(0, 2).forEach((brand) => {
+              const locDiff = brand.locations - primaryRow.locations;
+              const stateDiff = brand.states - primaryRow.states;
+              const locColor = locDiff > 0 ? "var(--ok)" : locDiff < 0 ? "var(--error)" : "var(--muted)";
+              const locSign = locDiff > 0 ? "+" : "";
+              const stateColor = stateDiff > 0 ? "var(--ok)" : stateDiff < 0 ? "var(--error)" : "var(--muted)";
+              const stateSign = stateDiff > 0 ? "+" : "";
+              cards.push(`
+                <div style="border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 14px;">
+                  <div style="font-size: 12px; color: var(--muted); margin-bottom: 4px; font-weight: 600; text-transform: uppercase;">Competitor</div>
+                  <div style="font-size: 20px; font-weight: 700; color: var(--ink); margin-bottom: 8px;">${escapeHtml(brand.brand)}</div>
+                  <div style="font-size: 12px; color: var(--muted);">
+                    <div>${formatNumber(brand.locations)} locations <span style="color: ${locColor}; font-weight: 600;">(${locSign}${formatNumber(locDiff)})</span></div>
+                    <div>${formatNumber(brand.states)} states <span style="color: ${stateColor}; font-weight: 600;">(${stateSign}${formatNumber(stateDiff)})</span></div>
+                  </div>
                 </div>
-              </div>
-            `);
+              `);
+            });
+            if (competitorBrands.length > 2) {
+              cards.push(`
+                <div style="border: 1px solid var(--line); background: #f9fafb; border-radius: 8px; padding: 14px; display: flex; align-items: center; justify-content: center;">
+                  <div style="text-align: center; color: var(--muted); font-size: 12px;">
+                    <div style="font-weight: 600; margin-bottom: 4px;">+${competitorBrands.length - 2} more</div>
+                    <div style="font-size: 11px;">competitors</div>
+                  </div>
+                </div>
+              `);
+            }
+            el("reportBrandComparisonCards").innerHTML = cards.join("");
+          } else if (primaryRow && brandRows.length === 1) {
+            if (el("reportBrandComparisonTitle")) {
+              el("reportBrandComparisonTitle").textContent = "Brand Comparison";
+            }
+            el("reportBrandComparisonCards").innerHTML = `<div style="color: var(--muted); font-size: 13px; padding: 16px; text-align: center; background: #f9fafb; border: 1px solid var(--line); border-radius: 8px;">Only one brand in current dataset. Select multiple brands to compare.</div>`;
+          } else {
+            if (el("reportBrandComparisonTitle")) {
+              el("reportBrandComparisonTitle").textContent = "Brand Comparison";
+            }
+            el("reportBrandComparisonCards").innerHTML = `<div style="color: var(--muted); font-size: 13px; padding: 16px; text-align: center; background: #f9fafb; border: 1px solid var(--line); border-radius: 8px;">No brand data available. Apply filters to see brands.</div>`;
           }
-          el("reportBrandComparisonCards").innerHTML = cards.join("");
         }
 
         renderSimpleTable("reportBrandsTable", [
