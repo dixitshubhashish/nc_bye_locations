@@ -171,7 +171,7 @@ function switchView(viewId) {
       if (el("restartMappingBtn")) el("restartMappingBtn").classList.toggle("hidden", viewId !== "mapperView");
       if (el("resetMappingBtn")) el("resetMappingBtn").classList.toggle("hidden", viewId !== "mapperView");
       if (viewId === "reportingView" && !reportLoaded) loadReporting();
-      if (viewId === "templateLibraryView") loadTemplateFilters().then(loadTemplateLibrary);
+      if (viewId === "templateLibraryView" && !templateLibraryLoaded) loadTemplateFilters().then(loadTemplateLibrary);
       if (viewId === "reviewView") {
         loadRejectedRecords();
         refreshReviewCount();
@@ -293,7 +293,10 @@ async function loadAppData() {
       if (appDataLoaded) return;
       appDataLoaded = true;
       await Promise.allSettled([loadFieldRegistry(), loadBrands(), loadTemplateFilters()]);
-    }
+      // Template records are intentionally fetched only after authentication
+      // and app initialization, so the library tab opens instantly later.
+      if (typeof loadTemplateLibrary === "function") await loadTemplateLibrary();
+}
 function restoreRememberedLogin() {
       const remembered = localStorage.getItem("mapper_login_remembered") === "true";
       el("rememberLogin").checked = remembered;

@@ -11,6 +11,7 @@ window.APP_CONSTANTS = Object.freeze({
   dominosMaxWorkers: 8,
   dominosProvider: "auto",
   dominosOrderType: "Delivery",
+  dominosJsonDemoUrl: "https://data-m8.com/downloads/list-of-all-dominos-pizza-locations-in-the-usa-csv-and-json.json",
   dominosBrand: {
     name: "Domino's Pizza",
     slug: "dominos-pizza",
@@ -66,6 +67,17 @@ window.APP_CONSTANTS = Object.freeze({
     countryOfOrigin: "Global"
   },
   demoRestaurantExcelUrl: "https://docs.google.com/spreadsheets/d/e/2PACX-1vSHa0iIxTVG7odLSlxL8PKDdAt0Xo2ciufPLMpGm9pQuOi44nlwgs3N-Dew4pyz7g/pub?output=xlsx",
+  demoXmlUrl: "https://samplelib.com/xml/sample-5mb.xml",
+  demoXmlBrand: {
+    name: "Demo XML",
+    slug: "demo-xml",
+    description: "Public XML structure and nested-record parsing demo.",
+    websiteUrl: "https://github.com/MichielCM/xsd2html2xml",
+    status: "active",
+    metaTitle: "Demo XML",
+    metaDescription: "Demo XML source for parser and nested field mapping validation.",
+    countryOfOrigin: "United States"
+  },
   trademarkDisclaimer: "Birdeye is a trademark of Birdeye, Inc. All rights in the Birdeye name and logo are reserved by Birdeye, Inc. This prototype uses the provided brand asset for reference and is not affiliated with, sponsored by, or endorsed by Birdeye. This prototype is provided for assessment and evaluation purposes only; no other use is intended or authorized."
 });
 

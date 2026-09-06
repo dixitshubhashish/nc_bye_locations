@@ -425,13 +425,39 @@
     }
 
     .review-view { padding: 24px; }
-    .review-toolbar { display: flex; gap: 8px; max-width: 620px; margin-bottom: 16px; }
-    .review-toolbar input { flex: 1; }
+    .review-toolbar { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(220px, .7fr) auto; gap: 8px; width: 100%; max-width: 980px; margin-bottom: 16px; align-items: stretch; }
+    .review-toolbar input, .review-toolbar select { width: 100%; min-width: 0; box-sizing: border-box; }
+    .review-brand-breakdown-layout { display: grid; grid-template-columns: minmax(300px, .85fr) minmax(360px, 1.15fr); gap: 28px; align-items: center; width: 100%; }
+    #reviewBrandChart { min-height: 340px; display: flex; justify-content: center; align-items: center; position: relative; }
+    #reviewBrandChart svg { width: min(340px, 100%); height: auto; overflow: visible; }
+    .review-chart-tooltip { position: absolute; z-index: 4; pointer-events: none; display: none; max-width: 220px; padding: 8px 10px; border-radius: 6px; background: #1f2937; color: #fff; font-size: 12px; line-height: 1.35; box-shadow: 0 4px 12px rgba(15, 23, 42, .22); white-space: nowrap; }
+    #reviewBrandTable { min-width: 0; width: 100%; }
+    @media (max-width: 760px) {
+      .review-toolbar { grid-template-columns: 1fr; max-width: none; }
+      .review-brand-breakdown-layout { grid-template-columns: 1fr; gap: 12px; }
+      #reviewBrandChart { min-height: 280px; }
+    }
     .review-row-actions { white-space: nowrap; }
+    .text-link { border: 0; padding: 2px 0; color: var(--accent); background: transparent; font-size: 12px; text-align: left; text-decoration: underline; cursor: pointer; transition: color 140ms ease, background 140ms ease; }
+    .text-link:hover { color: #005fd3; background: #edf4ff; }
+    .text-link:focus-visible { outline: 2px solid #8bb8ff; outline-offset: 2px; }
+    .text-link:active { color: #ffffff; background: var(--accent); }
+    .demo-code-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 7px; background: #f8fafc; }
+    .demo-code-actions button { padding: 7px 10px; font-size: 12px; }
+    .demo-code-feedback { flex: 1 1 180px; color: var(--muted); font-size: 12px; }
+    .demo-code-feedback.ok { color: #147d63; }
+    .demo-code-feedback.error { color: #c43b54; }
+    #newBrandFields.brand-edit-modal.is-open { position: fixed; inset: 50% auto auto 50%; z-index: 1200; width: min(520px, calc(100vw - 32px)); max-height: min(720px, calc(100vh - 32px)); overflow-y: auto; transform: translate(-50%, -50%); margin: 0; padding: 22px; background: #ffffff; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 24px 70px rgba(15, 23, 42, 0.28); }
+    #newBrandFields.brand-edit-modal.is-open::before { content: ""; position: fixed; inset: 50% auto auto 50%; width: 100vw; height: 100vh; transform: translate(-50%, -50%); z-index: -1; background: rgba(15, 23, 42, 0.38); }
+    .brand-edit-heading { display: none; margin: 0 0 14px; font-size: 18px; }
+    #newBrandFields.brand-edit-modal.is-open .brand-edit-heading { display: block; }
+    .brand-source-format-field { display: none; }
     .template-library { padding: 24px; }
     .template-search { display: flex; gap: 8px; max-width: 900px; margin-bottom: 16px; }
     .template-search input { flex: 1; min-width: 180px; }
     .template-search select { flex: 0 1 220px; min-width: 140px; }
+    .template-pagination { display: flex; align-items: center; justify-content: center; gap: 16px; padding: 14px 0; }
+    .template-pagination span { color: var(--muted); font-size: 13px; min-width: 150px; text-align: center; }
 
     .advanced-template summary {
       cursor: pointer;
@@ -1420,10 +1446,12 @@
     <aside>
       <div class="panel">
         <h2>Source Controls</h2>
-        <div class="button-row" style="flex-wrap: wrap; gap: 6px;">
-          <button class="secondary" id="showExistingBrandsBtn" type="button">🏢 Show Existing Brands</button>
-        </div>
-        <div id="existingBrandsDialog" style="display: none; border: 1px solid var(--line); background: #f8fafc; border-radius: 6px; padding: 10px; margin-top: 8px; font-size: 12px;"></div>
+        <label id="brandSelectLabel" for="brandSelect">Brand</label>
+        <select id="brandSelect" aria-label="Select brand">
+          <option value="">Select an existing brand</option>
+          <option class="create-new-option" value="__create_new__">+ Create New Brand</option>
+        </select>
+        <button id="editExistingBrandLink" class="text-link hidden" type="button">Edit brand details</button>
         <label for="sourceType">Source format</label>
         <select id="sourceType">
           <option value="csv">CSV</option>
@@ -1452,7 +1480,14 @@
           <label>JSON source</label>
           <div class="python-function-options" role="radiogroup" aria-label="JSON source">
             <label><input type="radio" name="jsonFunction" value="new" checked> New</label>
-            <label><input type="radio" name="jsonFunction" value="la_city"> LA City demo</label>
+            <label><input type="radio" name="jsonFunction" value="dominos"> Domino's Pizza</label>
+          </div>
+        </div>
+        <div class="field-group xml-function-field hidden">
+          <label>XML source</label>
+          <div class="python-function-options" role="radiogroup" aria-label="XML source">
+            <label><input type="radio" name="xmlFunction" value="new" checked> New</label>
+            <label><input type="radio" name="xmlFunction" value="demo_xml"> Demo XML</label>
           </div>
         </div>
         <div class="field-group api-function-field hidden">
@@ -1466,8 +1501,8 @@
         <div class="field-group file-field">
         <label for="sourceInputMode">Source input</label>
         <select id="sourceInputMode">
+          <option value="url" selected>Public URL</option>
           <option value="file">Upload file</option>
-          <option value="url">Public URL</option>
         </select>
         <label for="fileInput" class="file-upload-control">Upload source file</label>
         <input id="fileInput" class="file-upload-control" type="file" accept=".csv,.xlsx,.xls,.json,.geojson,.xml,application/json,application/geo+json,text/csv,application/xml,text/xml">
@@ -1476,11 +1511,6 @@
         <button id="sourceUrlEditBtn" class="source-url-control source-url-edit hidden" type="button">Edit URL</button>
         </div>
 
-        <label id="brandSelectLabel" for="brandSelect">Brand</label>
-        <select id="brandSelect" aria-label="Select brand">
-          <option value="">Select an existing brand</option>
-          <option class="create-new-option" value="__create_new__">+ Create New Brand</option>
-        </select>
         <div id="presetBrandPanel" class="preset-brand-panel hidden">
           <div class="preset-brand-summary">
             <strong id="presetBrandTitle">Preset brand</strong>
@@ -1491,9 +1521,12 @@
             </div>
           </div>
         </div>
-        <div id="newBrandFields" class="field-group hidden">
+        <div id="newBrandFields" class="field-group hidden brand-edit-modal">
+          <h3 id="brandFormHeading" class="brand-edit-heading">Brand details</h3>
           <label for="newBrandName">Name</label><input id="newBrandName">
-          <label for="newBrandSourceType">Source format</label><select id="newBrandSourceType"></select>
+          <div class="brand-source-format-field">
+            <label for="newBrandSourceType">Source format</label><select id="newBrandSourceType"></select>
+          </div>
           <label for="newBrandSlug">Slug</label><input id="newBrandSlug">
           <label for="newBrandDescription">Description</label><textarea id="newBrandDescription"></textarea>
           <label for="newBrandLogo">Logo URL</label><input id="newBrandLogo" type="url">
@@ -1502,7 +1535,10 @@
           <label for="newBrandMetaTitle">Meta Title</label><input id="newBrandMetaTitle">
           <label for="newBrandMetaDescription">Meta Description</label><textarea id="newBrandMetaDescription"></textarea>
           <label for="newBrandOrigin">Country of Origin</label><input id="newBrandOrigin">
-          <button id="createBrandBtn" type="button">Save Brand</button>
+          <div class="button-row">
+            <button id="createBrandBtn" type="button">Save Brand</button>
+            <button id="cancelBrandEditBtn" class="secondary" type="button">Cancel</button>
+          </div>
         </div>
 
         <label for="sourceName">Source name</label>
@@ -1583,36 +1619,26 @@
           <label for="pythonConnectorCode">Python editor</label>
           <div class="python-function-options" role="radiogroup" aria-label="Python function">
             <label><input type="radio" name="pythonFunction" value="new" checked> New</label>
-            <label><input type="radio" name="pythonFunction" value="dominos"> Domino's Pizza</label>
+            <label><input type="radio" name="pythonFunction" value="demo_pe_brand"> Demo PE Brand</label>
           </div>
-          <textarea id="pythonConnectorCode" class="hidden" spellcheck="false"># Assign your final records to `result`.
-# [
-#   {
-#     "store_number": "101",
-#     "restaurant_name": "Sample Bistro",
-#     "address": "100 Main St",
-#     "city": "Raleigh",
-#     "state": "North Carolina",
-#     "zip_code": "27601",
-#     "lat": 35.7796,
-#     "lng": -78.6382
-#   }
-# ]
-
-from pyodide.http import pyfetch
-import json
-
-url = "https://raw.githubusercontent.com/dixitshubhashish/nc_bye_locations/main/little_caesars_locations.json"
-response = await pyfetch(url)
-
-if response.status == 200:
-    data = json.loads(await response.string())
-    result = data.get("locations", data)
-else:
-    result = []</textarea>
+          <textarea id="pythonConnectorCode" class="hidden" spellcheck="false"># Return a JSON-compatible list of records in `result`.
+result = [
+    {
+        "name": "Sample Bistro",
+        "address": "100 Main St",
+        "city": "Raleigh",
+        "state": "NC",
+        "postal_code": "27601"
+    }
+]</textarea>
           <div id="pythonConnectorEditor" class="connector-editor" aria-label="Python editor"></div>
           <label for="pythonPackages">Python packages</label>
           <input id="pythonPackages" placeholder="e.g. pandas, numpy, beautifulsoup4, requests">
+          <div id="demoPeBrandActions" class="demo-code-actions hidden">
+            <button id="loadDemoPeBrandBtn" type="button">Load sample</button>
+            <button class="secondary" id="copyDemoPeBrandBtn" type="button">Copy code</button>
+            <span id="demoPeBrandFeedback" class="demo-code-feedback" role="status" aria-live="polite"></span>
+          </div>
           <div class="mapping-note">Add packages separated by commas. Assign final records to <code>result</code>.</div>
           <div class="button-row">
             <button class="secondary" id="runPythonConnectorBtn" type="button">Run &amp; Parse</button>
@@ -1885,7 +1911,7 @@ else:
       <h2>Review Records</h2>
       <p style="color: var(--muted); font-size: 13px; margin-top: -8px; margin-bottom: 16px;">Review records that need attention. Edit and retry when ready.</p>
       <div class="review-toolbar">
-        <input id="reviewEventId" placeholder="Search by event ID (leave empty for all records)">
+        <input id="reviewEventId" type="search" aria-label="Entity or event ID" placeholder="Search by entity/event ID (leave empty for all records)">
         <select id="reviewBrandFilter" aria-label="Filter by brand">
           <option value="">All Brands</option>
         </select>
@@ -1896,8 +1922,8 @@ else:
           <strong style="font-size: 13px; color: var(--ink);">Error Distribution by Brand</strong>
           <span id="reviewBrandBreakdownTotal" style="font-size: 12px; color: var(--muted);"></span>
         </div>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; max-width: 900px;">
-          <div id="reviewBrandChart" style="display: flex; justify-content: center; min-height: 200px;"></div>
+        <div class="review-brand-breakdown-layout">
+          <div id="reviewBrandChart"></div>
           <div id="reviewBrandTable" style="overflow-x: auto; min-height: 200px;"></div>
         </div>
       </div>
@@ -1973,7 +1999,6 @@ else:
   <script>
     el("parseBtn").addEventListener("click", parseSource);
     el("testReadinessBtn")?.addEventListener("click", testReadiness);
-    el("showExistingBrandsBtn").addEventListener("click", toggleShowExistingBrands);
     el("runPythonConnectorBtn").addEventListener("click", parseSource);
     el("expandPythonConnectorBtn").addEventListener("click", openConnectorEditor);
     el("minimizePythonConnectorBtn").addEventListener("click", minimizeConnectorEditor);
@@ -2005,9 +2030,9 @@ else:
     el("confirmMasterDeleteBtn").addEventListener("click", performMasterDeleteData);
     el("cancelMasterDeleteBtn").addEventListener("click", () => el("masterDeleteConfirmDialog").close());
     el("reviewSearchBtn").addEventListener("click", loadRejectedRecords);
-    el("templateSearchBtn").addEventListener("click", loadTemplateLibrary);
+    el("templateSearchBtn").addEventListener("click", () => { templateLibraryLoaded = false; loadTemplateLibrary(); });
     el("templateSearch").addEventListener("keydown", (event) => {
-          if (event.key === "Enter") loadTemplateLibrary();
+          if (event.key === "Enter") { templateLibraryLoaded = false; loadTemplateLibrary(); }
         });
     el("addCustomFieldBtn").addEventListener("click", addCustomField);
     el("dropCustomFieldBtn")?.addEventListener("click", dropCustomField);
@@ -2036,12 +2061,18 @@ else:
           resetTemplateSelection();
           if (event.target.value === "__create_new__") {
             selectedBrand = null;
+            brandEditMode = false;
+            el("editExistingBrandLink").classList.add("hidden");
+            el("createBrandBtn").textContent = "Save Brand";
             el("sourceType").disabled = false;
             resetSourceInputsForNewMode(el("sourceType").value);
             setNewBusinessSourceType(el("sourceType").value);
             el("templateBusinessFilter").value = "";
             el("templateSourceFilter").value = "";
             el("newBrandFields").classList.remove("hidden");
+            el("newBrandFields").classList.add("is-open");
+            el("newBrandFields").classList.remove("editing-brand");
+            el("brandFormHeading").textContent = "Create new brand";
             syncCustomFieldBusinessPickers();
             updateOutput();
             updateDropCustomFieldPicker();
@@ -2049,7 +2080,11 @@ else:
           }
           const brands = JSON.parse(event.target.dataset.brands || "[]");
           selectedBrand = brands.find((brand) => brand.business_id === event.target.value) || null;
+          brandEditMode = false;
+          el("editExistingBrandLink").classList.toggle("hidden", !selectedBrand);
+          el("createBrandBtn").textContent = "Save Brand";
           el("newBrandFields").classList.add("hidden");
+          el("newBrandFields").classList.remove("is-open");
           if (selectedBrand) applyBusinessSourceType(selectedBrand);
           else {
             el("sourceType").disabled = false;
@@ -2064,7 +2099,47 @@ else:
         });
     el("customFieldBusinessSelect").addEventListener("change", updateDropCustomFieldPicker);
     el("dropCustomFieldBusinessSelect").addEventListener("change", updateDropCustomFieldPicker);
-    el("createBrandBtn").addEventListener("click", () => createNewBrand());
+    el("createBrandBtn").addEventListener("click", () => brandEditMode ? updateExistingBrand() : createNewBrand());
+    el("loadDemoPeBrandBtn")?.addEventListener("click", () => applyDemoPeBrandFunction());
+    el("copyDemoPeBrandBtn")?.addEventListener("click", async () => {
+          try {
+            const code = await loadDemoPeBrandCode(true);
+            await navigator.clipboard.writeText(code);
+            setStatus("Demo PE Brand code copied.", "ok");
+            setDemoPeBrandFeedback("Code copied to clipboard.", "ok");
+          } catch (error) {
+            setStatus(productSafeError(error.message, "Could not copy Demo PE Brand code."), "error");
+            setDemoPeBrandFeedback("Copy failed. Select the editor text manually.", "error");
+          }
+        });
+    el("editExistingBrandLink").addEventListener("click", () => {
+          if (!selectedBrand) {
+            const brands = JSON.parse(el("brandSelect").dataset.brands || "[]");
+            selectedBrand = brands.find((brand) => brand.business_id === el("brandSelect").value) || null;
+          }
+          if (!selectedBrand) {
+            setStatus("Select an existing brand before editing.", "warn");
+            return;
+          }
+          brandEditMode = true;
+          fillBrandFields(selectedBrand, {});
+          setNewBusinessSourceType(el("sourceType").value);
+          el("newBrandFields").classList.remove("hidden");
+          el("newBrandFields").classList.add("is-open");
+          el("newBrandFields").classList.add("editing-brand");
+          el("brandFormHeading").textContent = "Edit brand details";
+          el("createBrandBtn").textContent = "Update Brand";
+          el("editExistingBrandLink").classList.add("hidden");
+        });
+    el("cancelBrandEditBtn").addEventListener("click", () => {
+          brandEditMode = false;
+          el("newBrandFields").classList.add("hidden");
+          el("newBrandFields").classList.remove("is-open");
+          el("newBrandFields").classList.remove("editing-brand");
+          el("createBrandBtn").textContent = "Save Brand";
+          el("brandFormHeading").textContent = "Brand details";
+          el("editExistingBrandLink").classList.toggle("hidden", !selectedBrand);
+        });
     el("presetBrandCreateBtn").addEventListener("click", () => createOrUsePresetBrand());
     el("presetBrandEditBtn").addEventListener("click", () => {
           if (!activeCsvPresetConfig) return;
@@ -2134,6 +2209,8 @@ else:
             if (newApiOption) newApiOption.checked = true;
             apiFunctionMode = "new";
           }
+          const newXmlOption = document.querySelector("input[name='xmlFunction'][value='new']");
+          if (newXmlOption) newXmlOption.checked = true;
           if (el("sourceType").value !== "python_editor") {
             const newPythonOption = document.querySelector("input[name='pythonFunction'][value='new']");
             if (newPythonOption) newPythonOption.checked = true;
@@ -2162,10 +2239,20 @@ else:
           }
         });
     el("sourceInputMode").addEventListener("change", () => {
-          if (el("sourceInputMode").value === "url" && isNewSourceMode()) {
-            setSourceUrlLocked(false);
-            el("sourceUrl").value = "";
+          const mode = el("sourceInputMode").value;
+          const demoUrlLocked = el("sourceUrl").classList.contains("demo-url") || Boolean(activeCsvPresetConfig) || jsonFunctionMode === "dominos";
+          if (mode === "url") {
+            el("fileInput").value = "";
+            if (!demoUrlLocked) {
+              setSourceUrlLocked(false);
+              if (isNewSourceMode()) el("sourceUrl").value = "";
+            }
             updateSourcePlaceholders(el("sourceType").value);
+          } else {
+            if (!demoUrlLocked) {
+              el("sourceUrl").value = "";
+              setSourceUrlLocked(false);
+            }
           }
           sourceParsed = false;
           updateSourceVisibility();
@@ -2180,6 +2267,9 @@ else:
     document.querySelectorAll("input[name='jsonFunction']").forEach((input) => {
           input.addEventListener("change", () => updateJsonFunctionSelection(input.value));
         });
+    document.querySelectorAll("input[name='xmlFunction']").forEach((input) => {
+          input.addEventListener("change", () => updateXmlFunctionSelection(input.value));
+        });
     document.querySelectorAll("input[name='pythonFunction']").forEach((input) => {
           input.addEventListener("change", () => updatePythonFunctionSelection(input.value));
         });
@@ -2192,9 +2282,10 @@ else:
             el("brandSelect").dispatchEvent(new Event("change"));
             return;
           }
+          templateLibraryLoaded = false;
           loadTemplateLibrary();
         });
-    el("templateSourceFilter").addEventListener("change", loadTemplateLibrary);
+    el("templateSourceFilter").addEventListener("change", () => { templateLibraryLoaded = false; loadTemplateLibrary(); });
     el("reviewBrandFilter")?.addEventListener("change", loadRejectedRecords);
     document.querySelectorAll("input[name='recordExtractionMode']").forEach((radio) => {
           radio.addEventListener("change", () => {
@@ -2295,7 +2386,7 @@ else:
       setupBrandDropdownListeners();
       refreshSampleDatasetStatus();
       loadGeoOptions();
-      loadAppData();
+      await loadAppData();
       // Paint the Review Error Listings tab badge immediately from the
       // last-known SQLite count (no live BigQuery wait), regardless of which
       // tab opens first. A live re-count happens whenever data actually

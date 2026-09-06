@@ -3,6 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 
+MAPPER_SAMPLE_ROWS = 50
+
+
 def flatten_object(value: Any, prefix: str = "", output: dict[str, Any] | None = None) -> dict[str, Any]:
     if output is None:
         output = {}
@@ -28,7 +31,7 @@ def preview_payload(rows: list[dict[str, Any]], record_path: str | None = None, 
     # For initial field discovery (mapping UI), extract fields from just the first
     # few rows. Full row validation happens at save time (no need to process all rows twice).
     if fields_only and len(rows) > 0:
-        sample_rows = rows[:min(10, len(rows))]  # Sample first 10 rows for field extraction + preview
+        sample_rows = rows[:MAPPER_SAMPLE_ROWS]
         fields = collect_fields(sample_rows)
         return {
             "record_path": record_path or "",

@@ -6,9 +6,11 @@ from ast import literal_eval
 from pathlib import Path
 from typing import Any
 
+from whitespace_tool.paths import project_path
 
-DEFAULT_STORAGE_CONFIG = Path("config/connections/storage.json")
-ENV_FILE = Path(".env")
+
+DEFAULT_STORAGE_CONFIG = project_path("config/connections/storage.json")
+ENV_FILE = project_path(".env")
 
 
 def load_dotenv(path: str | Path = ENV_FILE) -> None:
@@ -64,7 +66,7 @@ def _config_from_env() -> dict[str, Any]:
 
 def load_storage_config(path: str | Path = DEFAULT_STORAGE_CONFIG) -> dict[str, Any]:
     load_dotenv()
-    config_path = Path(path).resolve()
+    config_path = project_path(path).resolve()
     if config_path.exists():
         with config_path.open("r", encoding="utf-8") as handle:
             config = json.load(handle)
@@ -83,4 +85,3 @@ def load_storage_config(path: str | Path = DEFAULT_STORAGE_CONFIG) -> dict[str, 
         else:
             config["credentials_json"] = str(rel_to_config)
     return config
-
