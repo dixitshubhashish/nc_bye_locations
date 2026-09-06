@@ -8,9 +8,11 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Generator
 
+from whitespace_tool.paths import project_path
+
 LOGGER = logging.getLogger("whitespace_tool.sqlite_cache")
 
-DB_PATH = Path(__file__).resolve().parent.parent / ".cache" / "whitespace_cache.db"
+DB_PATH = project_path(".cache/whitespace_cache.db")
 
 # Columns mirrored locally from the gold layer's two master views, so
 # reporting can filter/aggregate against SQLite instead of a live BigQuery

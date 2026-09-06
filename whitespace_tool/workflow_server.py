@@ -26,6 +26,7 @@ from whitespace_tool.normalization import normalize_location
 from whitespace_tool.models import utc_now_iso
 from whitespace_tool.learning import suggest_from_templates
 from whitespace_tool.field_registry import load_field_registry
+from whitespace_tool.paths import project_path
 from whitespace_tool.sources.demographics import fetch_bigquery_demographics, resolve_bigquery_connection
 from whitespace_tool.sources.dominos_overpass import fetch_for_zips as fetch_dominos_from_overpass
 from whitespace_tool.sources.dominos_store_locator import fetch_for_zips
@@ -52,7 +53,7 @@ def _build_logger() -> logging.Logger:
     logger = logging.getLogger("whitespace_tool.workflow")
     if logger.handlers:
         return logger
-    log_dir = Path(os.environ.get("MAPPER_LOG_DIR", "logs"))
+    log_dir = project_path(os.environ.get("MAPPER_LOG_DIR", "logs"))
     log_dir.mkdir(parents=True, exist_ok=True)
     handler = TimedRotatingFileHandler(
         log_dir / "mapper.log",
@@ -213,11 +214,11 @@ def fetch_public_source(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def predefined_templates() -> dict[str, Any]:
-    template_index_path = Path("config/predefined_brand_templates.json")
+    template_index_path = project_path("config/predefined_brand_templates.json")
     with template_index_path.open("r", encoding="utf-8") as handle:
         templates = json.load(handle)
     for template in templates:
-        with Path(template["template_path"]).open("r", encoding="utf-8") as handle:
+        with project_path(template["template_path"]).open("r", encoding="utf-8") as handle:
             mapper = json.load(handle)
         template["mapper"] = {
             "brand": template["brand"],
@@ -4291,7 +4292,7 @@ def make_handler(ui_dir: Path):
 
 
 def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
-    ui_dir = Path("ui").resolve()
+    ui_dir = project_path("ui").resolve()
     handler = make_handler(ui_dir)
     socketserver.ThreadingTCPServer.allow_reuse_address = True
     _start_silver_gold_scheduler()

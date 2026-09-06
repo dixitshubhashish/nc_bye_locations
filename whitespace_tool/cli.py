@@ -18,6 +18,7 @@ from whitespace_tool.warehouse_bigquery import (
     write_bigquery_schema,
 )
 from whitespace_tool.storage_config import load_storage_config
+from whitespace_tool.paths import project_path
 
 
 def run_analysis(config_path: str, output_dir: str) -> None:
@@ -26,7 +27,7 @@ def run_analysis(config_path: str, output_dir: str) -> None:
     demographics = load_demographics(config)
     location_rows, whitespace_rows, summary = analyze_whitespace(locations, demographics, config)
 
-    out = Path(output_dir)
+    out = project_path(output_dir)
     write_csv(out / "brand_locations.csv", location_rows)
     write_csv(out / "whitespace_zips.csv", whitespace_rows)
     write_json(
@@ -53,7 +54,7 @@ def fetch_public_zips(config_path: str, output_path: str, limit: int | None) -> 
     from whitespace_tool.sources.public_us_zips_bigquery import fetch_from_bigquery
 
     demographics = fetch_from_bigquery(config_path, limit=limit)
-    write_demographics_csv(output_path, demographics)
+    write_demographics_csv(project_path(output_path), demographics)
     print(f"Wrote {len(demographics)} public BigQuery ZIP rows to {output_path}")
 
 
@@ -62,7 +63,7 @@ def quality_check(config_path: str, output_dir: str) -> None:
     locations = load_location_sources(config)
     demographics = load_demographics(config)
     report = run_quality_checks(locations, demographics, config)
-    out = Path(output_dir)
+    out = project_path(output_dir)
     write_json(out / "data_quality_report.json", report)
     write_csv(out / "data_quality_issues.csv", report["issues"])
     print(
@@ -100,6 +101,7 @@ def push_bigquery(
 
     _, whitespace_rows, summary = analyze_whitespace(locations, demographics, config)
     rows_by_table = build_table_rows(locations, demographics, config, whitespace_rows, summary)
+    stage_dir = project_path(stage_dir)
     write_bigquery_schema(stage_dir)
     write_bigquery_jsonl(stage_dir, rows_by_table)
     if dry_run:
@@ -118,9 +120,9 @@ def serve_workflow_ui(host: str, port: int) -> None:
 def fetch_dominos(zip_file: str, output: str, cache_dir: str, order_type: str) -> None:
     from whitespace_tool.sources.dominos_store_locator import fetch_for_zips, _read_zip_codes
 
-    zip_codes = _read_zip_codes(zip_file)
-    result = fetch_for_zips(zip_codes, order_type=order_type, cache_dir=cache_dir)
-    write_json(output, result)
+    zip_codes = _read_zip_codes(project_path(zip_file))
+    result = fetch_for_zips(zip_codes, order_type=order_type, cache_dir=project_path(cache_dir))
+    write_json(project_path(output), result)
     print(f"Wrote {len(result['Stores'])} Domino's stores from {len(zip_codes)} ZIPs to {output}")
 
 

@@ -425,8 +425,18 @@
     }
 
     .review-view { padding: 24px; }
-    .review-toolbar { display: flex; gap: 8px; max-width: 620px; margin-bottom: 16px; }
-    .review-toolbar input { flex: 1; }
+    .review-toolbar { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(220px, .7fr) auto; gap: 8px; width: 100%; max-width: 980px; margin-bottom: 16px; align-items: stretch; }
+    .review-toolbar input, .review-toolbar select { width: 100%; min-width: 0; box-sizing: border-box; }
+    .review-brand-breakdown-layout { display: grid; grid-template-columns: minmax(300px, .85fr) minmax(360px, 1.15fr); gap: 28px; align-items: center; width: 100%; }
+    #reviewBrandChart { min-height: 340px; display: flex; justify-content: center; align-items: center; position: relative; }
+    #reviewBrandChart svg { width: min(340px, 100%); height: auto; overflow: visible; }
+    .review-chart-tooltip { position: absolute; z-index: 4; pointer-events: none; display: none; max-width: 220px; padding: 8px 10px; border-radius: 6px; background: #1f2937; color: #fff; font-size: 12px; line-height: 1.35; box-shadow: 0 4px 12px rgba(15, 23, 42, .22); white-space: nowrap; }
+    #reviewBrandTable { min-width: 0; width: 100%; }
+    @media (max-width: 760px) {
+      .review-toolbar { grid-template-columns: 1fr; max-width: none; }
+      .review-brand-breakdown-layout { grid-template-columns: 1fr; gap: 12px; }
+      #reviewBrandChart { min-height: 280px; }
+    }
     .review-row-actions { white-space: nowrap; }
     .template-library { padding: 24px; }
     .template-search { display: flex; gap: 8px; max-width: 900px; margin-bottom: 16px; }
@@ -1885,7 +1895,7 @@ else:
       <h2>Review Records</h2>
       <p style="color: var(--muted); font-size: 13px; margin-top: -8px; margin-bottom: 16px;">Review records that need attention. Edit and retry when ready.</p>
       <div class="review-toolbar">
-        <input id="reviewEventId" placeholder="Search by event ID (leave empty for all records)">
+        <input id="reviewEventId" type="search" aria-label="Entity or event ID" placeholder="Search by entity/event ID (leave empty for all records)">
         <select id="reviewBrandFilter" aria-label="Filter by brand">
           <option value="">All Brands</option>
         </select>
@@ -1896,8 +1906,8 @@ else:
           <strong style="font-size: 13px; color: var(--ink);">Error Distribution by Brand</strong>
           <span id="reviewBrandBreakdownTotal" style="font-size: 12px; color: var(--muted);"></span>
         </div>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; max-width: 900px;">
-          <div id="reviewBrandChart" style="display: flex; justify-content: center; min-height: 200px;"></div>
+        <div class="review-brand-breakdown-layout">
+          <div id="reviewBrandChart"></div>
           <div id="reviewBrandTable" style="overflow-x: auto; min-height: 200px;"></div>
         </div>
       </div>

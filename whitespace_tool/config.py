@@ -4,9 +4,11 @@ import json
 from pathlib import Path
 from typing import Any
 
+from whitespace_tool.paths import project_path
+
 
 def load_config(path: str | Path) -> dict[str, Any]:
-    config_path = Path(path)
+    config_path = project_path(path)
     with config_path.open("r", encoding="utf-8") as fh:
         config = json.load(fh)
     config["_config_path"] = str(config_path)
