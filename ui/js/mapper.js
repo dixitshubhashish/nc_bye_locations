@@ -1217,6 +1217,15 @@ function updateOptionalFieldPicker() {
       // field, required main/primary ones (name, address, city, state,
       // ZIP) included, rather than just the narrow "not-yet-added optional
       // field" subset that applies once a source is parsed and those
+      // required fields are already on the grid.
+      const available = !sourceParsed
+        ? mappingTargets
+        : mappingTargets.filter((target) => !target.required && ((primaryMappingKeys.has(target.key) && hiddenMappingKeys.has(target.key)) || (!primaryMappingKeys.has(target.key) && !optionalMappingKeys.has(target.key))));
+      picker.innerHTML = '<option value="">Choose a field</option>' + available
+        .map((target) => `<option value="${escapeHtml(target.key)}">${escapeHtml(target.label)}</option>`)
+        .join("");
+      el("addOptionalFieldBtn").disabled = available.length === 0;
+    }
 function getVisibleTargets() {
       const targets = mappingTargets.filter((target) => primaryMappingKeys.has(target.key) && !hiddenMappingKeys.has(target.key));
       optionalMappingKeys.forEach((key) => {
@@ -1224,11 +1233,6 @@ function getVisibleTargets() {
         if (found && !targets.some((target) => target.key === key)) targets.push(found);
       });
       return targets;
-    }
-function suggestField(target, usedFields = new Set()) {
-      const learned = learnedSuggestions[target.key];
-      if (learned && sourceFields.includes(learned) && !usedFields.has(learned)) return learned;
-      return target.matches.find((match) => sourceFields.includes(match) && !usedFields.has(match)) || "";
     }
 function buildTargetRow(target, availableOptionsList, selected) {
       const row = document.createElement("div");
@@ -1654,18 +1658,11 @@ function renderTable(targetId, rows) {
         const flat = flattenObject(row);
         return `<tr>${columns.map((col) => `<td>${escapeHtml(col === "__brand" ? (selectedBrand?.name || "") : flat[col] ?? "")}</td>`).join("")}</tr>`;
       }).join("");
-            `).join("")}
-          </div>
-        </div>
-      `).join("");
       target.innerHTML = `
-        <div class="entity-model-grid">
-          <div class="entity-box source-box">
-            <div class="entity-title">Source Fields (${sourceFields.length})</div>
-            <div class="entity-fields">${sourceItems || '<div class="empty-note">Parse a source file to see incoming columns.</div>'}</div>
-          </div>
-          <div class="entity-tables-wrap">${entityItems}</div>
-        </div>
+        <table>
+          <thead><tr>${columnHeaders.map((header) => `<th>${header}</th>`).join("")}</tr></thead>
+          <tbody>${body}</tbody>
+        </table>
       `;
     }
 function mapperHasField(key) {

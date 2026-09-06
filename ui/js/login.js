@@ -115,9 +115,15 @@ async function login() {
   }
 }
 
+// Inline SVG wordmark shown if the external CDN logo can't be reached
+// (offline, blocked, or 404). Without this the login page - the first
+// screen users hit - renders a broken image. Mirrors the main app's fallback.
+const LOGIN_LOGO_FALLBACK = "data:image/svg+xml;utf8," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 60" width="240" height="60"><rect width="240" height="60" fill="none"/><g transform="translate(10, 10)"><path d="M 6 22 C 6 8 18 3 24 3 C 30 3 42 8 42 22 C 42 36 30 41 24 41 C 18 41 6 36 6 22 Z" fill="#0b70f0"/><ellipse cx="24" cy="22" rx="10" ry="10" fill="#ffffff"/><circle cx="24" cy="22" r="5" fill="#1d2b4f"/><path d="M 2 22 C 14 36 34 36 46 22 C 34 8 14 8 2 22 Z" fill="none" stroke="#0b70f0" stroke-width="3" stroke-linecap="round"/><text x="56" y="31" font-family="system-ui, -apple-system, sans-serif" font-weight="800" font-size="28" fill="#1d2b4f">Birdeye</text></g></svg>');
+
 async function init() {
   document.querySelectorAll("[data-logo-src]").forEach((image) => {
-    image.src = window.APP_CONSTANTS[image.dataset.logoSrc] || window.APP_CONSTANTS.birdeyeLogoUrl;
+    image.onerror = () => { image.onerror = null; image.src = LOGIN_LOGO_FALLBACK; };
+    image.src = window.APP_CONSTANTS[image.dataset.logoSrc] || window.APP_CONSTANTS.birdeyeLogoUrl || LOGIN_LOGO_FALLBACK;
   });
   el("rememberLogin").checked = localStorage.getItem(REMEMBER_KEY) === "true";
   await syncServerLaunch();
