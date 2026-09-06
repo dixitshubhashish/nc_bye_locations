@@ -133,6 +133,9 @@ function businessOptionLabel(brand = {}, newestCreatedAt = 0) {
       const newest = newestCreatedAt && businessCreatedTime(brand) === newestCreatedAt ? "Newest, " : "";
       return `${brand.name || "Unnamed"} (${brand.display_business_id || "BID --------"}, ${formatNumber(brand.listing_count || 0)} listings, ${newest}created ${brand.created_at ? new Date(brand.created_at).toLocaleDateString() : "unknown"})`;
     }
+function businessOptionLabelShort(brand = {}) {
+      return `${brand.name || "Unnamed"} (${brand.display_business_id || "BID --------"})`;
+    }
 async function mergeDuplicateBusinesses(targetId, sourceIds) {
       const response = await fetch("/api/brands/merge", {
         method: "POST",
@@ -1783,6 +1786,10 @@ async function parseSource() {
         if (csvFunctionMode === "pizza_hut") setPizzaHutLocked(true);
         if (jsonFunctionMode === "la_city") setLaCityDemoLocked(true);
         if (document.querySelector("input[name='pythonFunction']:checked")?.value === "dominos") setDominosLocked(true);
+        const recordCount = result.record_count;
+        if (recordCount !== undefined) {
+          setStatus(`Detected Records: ${recordCount}.`, "ok");
+        }
         renderTable("sourcePreview", sourceRows.slice(0, 10).map((row) => flattenObject(row)));
       } catch (error) {
         sourceRows = [];
@@ -2235,7 +2242,7 @@ async function toggleShowExistingBrands() {
           ...brand,
           display_business_id: brand.display_business_id || await fallbackDisplayBusinessId(brand)
         })));
-        const optionsHtml = '<option value="">Select an active business</option>' + brandsWithDisplayIds.map(b => `<option value="${escapeHtml(b.business_id)}">${escapeHtml(businessOptionLabel(b))}</option>`).join('');
+        const optionsHtml = '<option value="">Select an active business</option>' + brandsWithDisplayIds.map(b => `<option value="${escapeHtml(b.business_id)}">${escapeHtml(businessOptionLabelShort(b))}</option>`).join('');
         const duplicateGroups = duplicateBusinessGroups(brandsWithDisplayIds);
         const mergeHtml = duplicateGroups.length ? `
           <div style="border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px;">
@@ -2243,7 +2250,7 @@ async function toggleShowExistingBrands() {
             ${duplicateGroups.map((group, index) => {
               const newestCreatedAt = Math.max(...group.map(businessCreatedTime));
               return `
-              <div data-merge-group="${index}" style="border: 1px solid var(--line); border-radius: 6px; padding: 8px; margin-top: 8px; background: #ffffff;">
+              <div data-merge-group="${index}" style="border: 1px solid #e5cfaa; border-left: 4px solid #f59e0b; border-radius: 6px; padding: 8px; margin-top: 8px; background: #fff9ed;">
                 <div style="font-weight: 700; margin-bottom: 6px;">${escapeHtml(group[0].name || "Similar business")}</div>
                 <label style="font-size: 12px;">Keep</label>
                 <select data-merge-target="${index}" style="width: 100%; margin: 4px 0 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px;">

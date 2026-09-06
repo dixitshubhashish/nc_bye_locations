@@ -898,6 +898,11 @@
     .status.warn, #status.warn { color: var(--warn); border-color: #e5cfaa; border-left-color: #f59e0b; background: #fff9ed; }
     .status.error, #status.error { color: var(--error); border-color: #e8bbbb; border-left-color: #ef4444; background: #fff5f5; }
 
+    #status { position: relative; display: flex; justify-content: space-between; align-items: flex-start; }
+    .status-close { display: none; background: none; border: none; cursor: pointer; font-size: 20px; padding: 0; margin: -2px 0 0 12px; color: inherit; opacity: 0.7; }
+    .status-close:hover { opacity: 1; }
+    #status.error .status-close, #status.warn .status-close { display: block; }
+
     table {
       width: 100%;
       border-collapse: collapse;
@@ -1406,7 +1411,7 @@
       </div>
     </header>
     <div id="mapperView">
-      <div id="status" class="status">Choose a source and parse it to start mapping in left pane.</div>
+      <div id="status" class="status">Choose a source and parse it to start mapping in left pane.<button class="status-close" aria-label="Dismiss message" style="display: none;">×</button></div>
       <div id="saveProgress" class="progress-wrap hidden" aria-live="polite" aria-busy="false">
       <div class="progress-label"><span id="progressMessage">Preparing your records</span><span id="progressValue">0%</span></div>
       <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
@@ -1980,6 +1985,10 @@ else:
     el("masterDeleteBtn").addEventListener("click", masterDeleteData);
     el("reportingDataRefreshBtn").addEventListener("click", refreshReportingData);
     el("logoutBtn").addEventListener("click", logout);
+    document.querySelector(".status-close")?.addEventListener("click", () => {
+          el("status").className = "status";
+          el("status").textContent = "";
+        });
     el("confirmClearBtn").addEventListener("click", async () => {
           el("dangerDialog").close();
           await performClearSavedData();
@@ -2075,7 +2084,7 @@ else:
         });
     el("fileInput").addEventListener("change", () => {
           sourceParsed = false;
-          setStatus("Source changed. Ready to review fields.", "");
+          setStatus("Source ready. Ready to review fields.", "ok");
           loadExcelSheets();
         });
     el("sheetName").addEventListener("change", () => {
@@ -2124,8 +2133,9 @@ else:
             if (newPythonOption) newPythonOption.checked = true;
             setDominosLocked(false);
           }
+          el("newBrandFields").classList.add("hidden");
           resetSourceInputsForNewMode(nextSourceType);
-          setStatus("Source changed. Ready to review fields.", "");
+          setStatus("Source ready. Ready to review fields.", "ok");
           el("fileInput").value = "";
           updateSourceVisibility();
           if (!selectedBrand) {

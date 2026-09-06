@@ -193,6 +193,7 @@ function loadTemplateIntoEditor(template) {
       const storedSourceFields = Array.isArray(components.source_fields) ? components.source_fields : [];
       const mappedValues = Object.values(mappingSelections).filter(Boolean);
       sourceFields = Array.from(new Set([...storedSourceFields, ...mappedValues]));
+      sourceFields.sort((a, b) => (fieldOrderIndex.get(a) ?? 999) - (fieldOrderIndex.get(b) ?? 999));
       sourceRows = [];
       resolvedRecordPath = "";
       // Editing a stored template, not a freshly parsed file: enables the

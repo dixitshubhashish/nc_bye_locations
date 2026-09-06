@@ -955,6 +955,18 @@ def ensure_source_type(source_type: str) -> str:
     return found[0]["source_type_id"]
 
 
+def _serialize_for_json(obj: dict[str, Any]) -> dict[str, Any]:
+    """Convert datetime objects to ISO strings for JSON serialization."""
+    from datetime import datetime
+    result = {}
+    for key, value in obj.items():
+        if isinstance(value, datetime):
+            result[key] = value.isoformat()
+        else:
+            result[key] = value
+    return result
+
+
 def create_brand(data: dict[str, Any]) -> dict[str, Any]:
     from google.cloud import bigquery
 
@@ -1008,6 +1020,7 @@ def create_brand(data: dict[str, Any]) -> dict[str, Any]:
     invalidate_cache()
     brand = dict(result[0])
     brand["display_business_id"] = _display_business_id(brand)
+    brand = _serialize_for_json(brand)
     _sync_gold_mirror_best_effort()
     return {"brand": brand}
 
@@ -1086,6 +1099,7 @@ def update_brand(data: dict[str, Any]) -> dict[str, Any]:
     invalidate_cache()
     brand = dict(result[0])
     brand["display_business_id"] = _display_business_id(brand)
+    brand = _serialize_for_json(brand)
     _sync_gold_mirror_best_effort()
     return {"brand": brand}
 

@@ -280,8 +280,10 @@ async function login() {
         sessionStorage.setItem(loginSessionStorageKey, "true");
         sessionStorage.setItem(mappingSessionStorageKey, newSessionId());
         sessionStorage.removeItem(draftStorageKey);
-        
-        window.location.replace("/app");
+
+        const urlParams = new URLSearchParams(window.location.search);
+        const nextUrl = urlParams.size > 0 ? `/app?${urlParams.toString()}` : "/app";
+        window.location.replace(nextUrl);
       } catch (error) {
         status.className = "status error";
         status.textContent = productSafeError(error.message, "Invalid username or password.");
