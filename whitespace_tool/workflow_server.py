@@ -4176,7 +4176,10 @@ def make_handler(ui_dir: Path):
             # All other API endpoints require a valid session
             session_id = _get_session_id(self)
             if not _is_valid_session(session_id):
-                _json_response(self, 401, {"error": "Unauthorized. Please login first."})
+                # For API requests with expired session, redirect to login
+                self.send_response(302)
+                self.send_header("Location", "/login")
+                self.end_headers()
                 return
 
             if self.path == "/api/schema":
@@ -4325,7 +4328,10 @@ def make_handler(ui_dir: Path):
             if self.path != "/api/login":
                 session_id = _get_session_id(self)
                 if not _is_valid_session(session_id):
-                    _json_response(self, 401, {"error": "Unauthorized. Please login first."})
+                    # For API requests with expired session, redirect to login
+                    self.send_response(302)
+                    self.send_header("Location", "/login")
+                    self.end_headers()
                     return
 
             request_id = uuid4().hex
