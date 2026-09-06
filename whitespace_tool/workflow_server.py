@@ -977,12 +977,7 @@ def create_brand(data: dict[str, Any]) -> dict[str, Any]:
     if not name:
         raise ValueError("Brand name is required")
     slug = str(data.get("slug") or re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-"))
-    source_type = str(data.get("source_type", "")).strip()
-    raw_source_type_id = str(data.get("source_type_id", "")).strip()
-    source_type_id = ensure_source_type(source_type or raw_source_type_id) if raw_source_type_id in SUPPORTED_SOURCE_TYPES else raw_source_type_id
-    source_type_id = source_type_id or (ensure_source_type(source_type) if source_type else "")
-    if not source_type_id:
-        raise ValueError("Source type is required")
+    source_type_id = None
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
     _ensure_businesses_table(client, project_id, dataset_id)
@@ -1038,12 +1033,6 @@ def update_brand(data: dict[str, Any]) -> dict[str, Any]:
     if not name:
         raise ValueError("Brand name is required")
     slug = str(data.get("slug") or re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-"))
-    source_type = str(data.get("source_type", "")).strip()
-    raw_source_type_id = str(data.get("source_type_id", "")).strip()
-    source_type_id = ensure_source_type(source_type or raw_source_type_id) if raw_source_type_id in SUPPORTED_SOURCE_TYPES else raw_source_type_id
-    source_type_id = source_type_id or (ensure_source_type(source_type) if source_type else "")
-    if not source_type_id:
-        raise ValueError("Source type is required")
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
     _ensure_businesses_table(client, project_id, dataset_id)
@@ -1051,7 +1040,6 @@ def update_brand(data: dict[str, Any]) -> dict[str, Any]:
     UPDATE `{project_id}.{dataset_id}.businesses`
     SET name = @name,
       slug = @slug,
-      source_type_id = @source_type_id,
       description = @description,
       logo_url = @logo_url,
       website_url = @website_url,
@@ -1070,7 +1058,6 @@ def update_brand(data: dict[str, Any]) -> dict[str, Any]:
         bigquery.ScalarQueryParameter("business_id", "STRING", business_id),
         bigquery.ScalarQueryParameter("name", "STRING", name),
         bigquery.ScalarQueryParameter("slug", "STRING", slug),
-        bigquery.ScalarQueryParameter("source_type_id", "STRING", source_type_id),
         bigquery.ScalarQueryParameter("description", "STRING", data.get("description")),
         bigquery.ScalarQueryParameter("logo_url", "STRING", data.get("logo_url")),
         bigquery.ScalarQueryParameter("website_url", "STRING", data.get("website_url")),
@@ -3896,33 +3883,6 @@ def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_inval
         elif location is not None:
             locations.append(location)
 
-    # A save where EVERY row failed validation is a systemic mapping mistake
-    # (e.g. a text column mapped to a date field), not a set of individually
-    # bad records. Flooding the error-listings queue with the whole batch and
-    # letting the "save" appear to succeed hides the real problem and stops
-    # the user's flow. When the caller asks us to guard (the mapping-tab
-    # save), reject the batch with a clear message and write nothing, so the
-    # error queue stays reserved for the mixed case - some rows valid, a few
-    # broken. A tiny batch (1 row) is exempt so a genuine single bad record
-    # can still be reviewed, and reprocess/sample loads never pass the flag.
-    ALL_INVALID_MIN_ROWS = 2
-    if reject_all_invalid and not locations and len(error_listings) >= ALL_INVALID_MIN_ROWS and len(error_listings) == len(rows):
-        sample_reasons = []
-        for record in error_listings[:3]:
-            try:
-                parsed = json.loads(record["errors"]) if isinstance(record.get("errors"), str) else record.get("errors")
-                if parsed:
-                    sample_reasons.append(parsed[0].get("hint") or parsed[0].get("reason") or parsed[0].get("field"))
-            except Exception:
-                pass
-        detail = f" First issue: {sample_reasons[0]}" if sample_reasons else ""
-        raise ValueError(
-            f"All {len(rows)} rows failed validation, so the field mapping looks wrong - "
-            f"nothing was saved and no review records were created. Recheck which source "
-            f"columns are mapped to each field (a common cause is a text column mapped to a "
-            f"date/number field).{detail}"
-        )
-
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = client or _bigquery_client(project_id, credentials_json)
 
@@ -4251,11 +4211,9 @@ def make_handler(ui_dir: Path):
                 elif self.path == "/api/sheets":
                     _json_response(self, 200, source_sheets(payload))
                 elif self.path == "/api/save":
-                    # The mapping-tab save is the one place we guard against an
-                    # all-invalid batch (a wrong field mapping): reject instead
-                    # of flooding error_listings. reprocess/sample-load call
-                    # save_mapper directly and never set this.
-                    _json_response(self, 200, save_mapper(payload, reject_all_invalid=True))
+                    # Every invalid source row is retained in error_listings;
+                    # valid rows in the same batch continue to listings.
+                    _json_response(self, 200, save_mapper(payload))
                 elif self.path == "/api/clear":
                     _json_response(self, 200, clear_saved_data())
                 elif self.path == "/api/master-delete":

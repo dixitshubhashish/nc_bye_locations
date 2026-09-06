@@ -43,8 +43,7 @@ def preview(content: bytes, record_path: str | None = None, fields_only: bool = 
 
     # For lightweight field discovery, sample just first 10 rows to extract fields
     if fields_only:
-        sample_rows = rows[:min(10, len(rows))]
-        result = preview_payload(sample_rows, resolved_path, fields_only=True)
+        result = preview_payload(rows, resolved_path, fields_only=True)
     else:
         result = preview_payload(rows, resolved_path)
 

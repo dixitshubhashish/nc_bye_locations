@@ -30,11 +30,8 @@ def _valid_row():
 
 
 class SaveMapperAllInvalidGuardTests(unittest.TestCase):
-    """A save where every row fails validation is a wrong-mapping mistake, not
-    a set of individually bad records. With the guard on (the mapping-tab
-    save), save_mapper must reject and write NOTHING - not flood
-    error_listings. reprocess/sample-load leave the guard off and keep the
-    old per-row behavior."""
+    """Every invalid source row is retained for review, including when the
+    entire source batch fails validation."""
 
     def setUp(self) -> None:
         # Force field_catalog() down its offline fallback (load_field_registry),
@@ -45,19 +42,20 @@ class SaveMapperAllInvalidGuardTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._fc.stop()
 
-    def test_all_invalid_with_guard_raises_before_touching_bigquery(self) -> None:
-        with patch.object(ws, "_warehouse_settings") as settings, \
-             patch.object(ws, "push_to_bigquery") as push:
-            with self.assertRaises(ValueError) as ctx:
-                ws.save_mapper(
-                    {"mapper": _mapper(), "rows": _invalid_rows(4), "source_fields": SOURCE_FIELDS},
-                    reject_all_invalid=True,
-                )
-        self.assertIn("field mapping looks wrong", str(ctx.exception))
-        # The guard fires before the warehouse is ever contacted: nothing is
-        # written and no review records are created.
-        settings.assert_not_called()
-        push.assert_not_called()
+    def test_all_invalid_with_guard_still_writes_error_listings(self) -> None:
+        with patch.object(ws, "_warehouse_settings", return_value=("p", "d", None)), \
+             patch.object(ws, "_bigquery_client", return_value=object()), \
+             patch.object(ws, "_load_mapped_zip_demographics", return_value={}), \
+             patch.object(ws, "_dedupe_listings_against_bronze", side_effect=lambda c, p, d, rows: (rows, 0)), \
+             patch.object(ws, "push_to_bigquery") as push, \
+             patch.object(ws, "_maybe_refresh_after_save"):
+            result = ws.save_mapper(
+                {"mapper": _mapper(), "rows": _invalid_rows(4), "source_fields": SOURCE_FIELDS},
+                reject_all_invalid=True,
+            )
+        self.assertEqual(result["mapped_rows"], 0)
+        self.assertEqual(result["error_listings"], 4)
+        push.assert_called_once()
 
     def test_single_invalid_row_is_exempt_from_the_guard(self) -> None:
         # One bad row is a genuine record to review, not a mapping mistake, so

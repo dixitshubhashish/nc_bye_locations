@@ -70,15 +70,16 @@ def _table_from_rows(rows_as_lists: list[list[str]], record_path: str, fields_on
             seen[header] = 1
         headers.append(header)
 
-    # For lightweight field discovery, just return headers without processing data rows
+    # Return a small sample for the mapper preview while keeping the full file
+    # out of the fast parse response.
     if fields_only:
-        return preview_payload([], record_path, fields_only=True) if not headers else {
-            "record_path": record_path or "",
-            "record_count": len(rows_as_lists) - 1,  # Exclude header row
-            "fields": headers,
-            "rows": [],
-            "preview_rows": [],
-        }
+        sample_rows = [
+            {headers[index]: row[index] if index < len(row) else "" for index in range(width)}
+            for row in rows_as_lists[1:51]
+        ]
+        result = preview_payload(sample_rows, record_path, fields_only=True)
+        result["record_count"] = len(rows_as_lists) - 1
+        return result
 
     rows = []
     for row in rows_as_lists[1:]:

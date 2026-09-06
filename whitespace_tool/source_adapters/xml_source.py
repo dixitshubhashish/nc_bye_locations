@@ -55,7 +55,7 @@ def preview(content: bytes, record_path: str | None = None, fields_only: bool = 
 
     # For lightweight field discovery, sample just first 10 records
     if fields_only:
-        sample_records = records[:min(10, len(records))]
+        sample_records = records[:50]
         sample_rows = [_element_to_dict(record) for record in sample_records]
         return preview_payload(sample_rows, record_path or resolved_path, fields_only=True)
 
