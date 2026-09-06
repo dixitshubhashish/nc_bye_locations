@@ -438,10 +438,21 @@
       #reviewBrandChart { min-height: 280px; }
     }
     .review-row-actions { white-space: nowrap; }
+    .text-link { border: 0; padding: 2px 0; color: var(--accent); background: transparent; font-size: 12px; text-align: left; text-decoration: underline; cursor: pointer; transition: color 140ms ease, background 140ms ease; }
+    .text-link:hover { color: #005fd3; background: #edf4ff; }
+    .text-link:focus-visible { outline: 2px solid #8bb8ff; outline-offset: 2px; }
+    .text-link:active { color: #ffffff; background: var(--accent); }
+    #newBrandFields.brand-edit-modal.is-open { position: fixed; inset: 50% auto auto 50%; z-index: 1200; width: min(520px, calc(100vw - 32px)); max-height: min(720px, calc(100vh - 32px)); overflow-y: auto; transform: translate(-50%, -50%); margin: 0; padding: 22px; background: #ffffff; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 24px 70px rgba(15, 23, 42, 0.28); }
+    #newBrandFields.brand-edit-modal.is-open::before { content: ""; position: fixed; inset: 50% auto auto 50%; width: 100vw; height: 100vh; transform: translate(-50%, -50%); z-index: -1; background: rgba(15, 23, 42, 0.38); }
+    .brand-edit-heading { display: none; margin: 0 0 14px; font-size: 18px; }
+    #newBrandFields.brand-edit-modal.is-open .brand-edit-heading { display: block; }
+    .brand-source-format-field { display: none; }
     .template-library { padding: 24px; }
     .template-search { display: flex; gap: 8px; max-width: 900px; margin-bottom: 16px; }
     .template-search input { flex: 1; min-width: 180px; }
     .template-search select { flex: 0 1 220px; min-width: 140px; }
+    .template-pagination { display: flex; align-items: center; justify-content: center; gap: 16px; padding: 14px 0; }
+    .template-pagination span { color: var(--muted); font-size: 13px; min-width: 150px; text-align: center; }
 
     .advanced-template summary {
       cursor: pointer;
@@ -1430,10 +1441,12 @@
     <aside>
       <div class="panel">
         <h2>Source Controls</h2>
-        <div class="button-row" style="flex-wrap: wrap; gap: 6px;">
-          <button class="secondary" id="showExistingBrandsBtn" type="button">🏢 Show Existing Brands</button>
-        </div>
-        <div id="existingBrandsDialog" style="display: none; border: 1px solid var(--line); background: #f8fafc; border-radius: 6px; padding: 10px; margin-top: 8px; font-size: 12px;"></div>
+        <label id="brandSelectLabel" for="brandSelect">Brand</label>
+        <select id="brandSelect" aria-label="Select brand">
+          <option value="">Select an existing brand</option>
+          <option class="create-new-option" value="__create_new__">+ Create New Brand</option>
+        </select>
+        <button id="editExistingBrandLink" class="text-link hidden" type="button">Edit brand details</button>
         <label for="sourceType">Source format</label>
         <select id="sourceType">
           <option value="csv">CSV</option>
@@ -1462,7 +1475,7 @@
           <label>JSON source</label>
           <div class="python-function-options" role="radiogroup" aria-label="JSON source">
             <label><input type="radio" name="jsonFunction" value="new" checked> New</label>
-            <label><input type="radio" name="jsonFunction" value="la_city"> LA City demo</label>
+            <label><input type="radio" name="jsonFunction" value="dominos"> Domino's Pizza</label>
           </div>
         </div>
         <div class="field-group api-function-field hidden">
@@ -1476,8 +1489,8 @@
         <div class="field-group file-field">
         <label for="sourceInputMode">Source input</label>
         <select id="sourceInputMode">
+          <option value="url" selected>Public URL</option>
           <option value="file">Upload file</option>
-          <option value="url">Public URL</option>
         </select>
         <label for="fileInput" class="file-upload-control">Upload source file</label>
         <input id="fileInput" class="file-upload-control" type="file" accept=".csv,.xlsx,.xls,.json,.geojson,.xml,application/json,application/geo+json,text/csv,application/xml,text/xml">
@@ -1486,11 +1499,6 @@
         <button id="sourceUrlEditBtn" class="source-url-control source-url-edit hidden" type="button">Edit URL</button>
         </div>
 
-        <label id="brandSelectLabel" for="brandSelect">Brand</label>
-        <select id="brandSelect" aria-label="Select brand">
-          <option value="">Select an existing brand</option>
-          <option class="create-new-option" value="__create_new__">+ Create New Brand</option>
-        </select>
         <div id="presetBrandPanel" class="preset-brand-panel hidden">
           <div class="preset-brand-summary">
             <strong id="presetBrandTitle">Preset brand</strong>
@@ -1501,9 +1509,12 @@
             </div>
           </div>
         </div>
-        <div id="newBrandFields" class="field-group hidden">
+        <div id="newBrandFields" class="field-group hidden brand-edit-modal">
+          <h3 id="brandFormHeading" class="brand-edit-heading">Brand details</h3>
           <label for="newBrandName">Name</label><input id="newBrandName">
-          <label for="newBrandSourceType">Source format</label><select id="newBrandSourceType"></select>
+          <div class="brand-source-format-field">
+            <label for="newBrandSourceType">Source format</label><select id="newBrandSourceType"></select>
+          </div>
           <label for="newBrandSlug">Slug</label><input id="newBrandSlug">
           <label for="newBrandDescription">Description</label><textarea id="newBrandDescription"></textarea>
           <label for="newBrandLogo">Logo URL</label><input id="newBrandLogo" type="url">
@@ -1512,7 +1523,10 @@
           <label for="newBrandMetaTitle">Meta Title</label><input id="newBrandMetaTitle">
           <label for="newBrandMetaDescription">Meta Description</label><textarea id="newBrandMetaDescription"></textarea>
           <label for="newBrandOrigin">Country of Origin</label><input id="newBrandOrigin">
-          <button id="createBrandBtn" type="button">Save Brand</button>
+          <div class="button-row">
+            <button id="createBrandBtn" type="button">Save Brand</button>
+            <button id="cancelBrandEditBtn" class="secondary" type="button">Cancel</button>
+          </div>
         </div>
 
         <label for="sourceName">Source name</label>
@@ -1593,7 +1607,7 @@
           <label for="pythonConnectorCode">Python editor</label>
           <div class="python-function-options" role="radiogroup" aria-label="Python function">
             <label><input type="radio" name="pythonFunction" value="new" checked> New</label>
-            <label><input type="radio" name="pythonFunction" value="dominos"> Domino's Pizza</label>
+            <label><input type="radio" name="pythonFunction" value="la_city"> LA City</label>
           </div>
           <textarea id="pythonConnectorCode" class="hidden" spellcheck="false"># Assign your final records to `result`.
 # [
@@ -1983,7 +1997,6 @@ else:
   <script>
     el("parseBtn").addEventListener("click", parseSource);
     el("testReadinessBtn")?.addEventListener("click", testReadiness);
-    el("showExistingBrandsBtn").addEventListener("click", toggleShowExistingBrands);
     el("runPythonConnectorBtn").addEventListener("click", parseSource);
     el("expandPythonConnectorBtn").addEventListener("click", openConnectorEditor);
     el("minimizePythonConnectorBtn").addEventListener("click", minimizeConnectorEditor);
@@ -2015,9 +2028,9 @@ else:
     el("confirmMasterDeleteBtn").addEventListener("click", performMasterDeleteData);
     el("cancelMasterDeleteBtn").addEventListener("click", () => el("masterDeleteConfirmDialog").close());
     el("reviewSearchBtn").addEventListener("click", loadRejectedRecords);
-    el("templateSearchBtn").addEventListener("click", loadTemplateLibrary);
+    el("templateSearchBtn").addEventListener("click", () => { templateLibraryLoaded = false; loadTemplateLibrary(); });
     el("templateSearch").addEventListener("keydown", (event) => {
-          if (event.key === "Enter") loadTemplateLibrary();
+          if (event.key === "Enter") { templateLibraryLoaded = false; loadTemplateLibrary(); }
         });
     el("addCustomFieldBtn").addEventListener("click", addCustomField);
     el("dropCustomFieldBtn")?.addEventListener("click", dropCustomField);
@@ -2046,12 +2059,18 @@ else:
           resetTemplateSelection();
           if (event.target.value === "__create_new__") {
             selectedBrand = null;
+            brandEditMode = false;
+            el("editExistingBrandLink").classList.add("hidden");
+            el("createBrandBtn").textContent = "Save Brand";
             el("sourceType").disabled = false;
             resetSourceInputsForNewMode(el("sourceType").value);
             setNewBusinessSourceType(el("sourceType").value);
             el("templateBusinessFilter").value = "";
             el("templateSourceFilter").value = "";
             el("newBrandFields").classList.remove("hidden");
+            el("newBrandFields").classList.add("is-open");
+            el("newBrandFields").classList.remove("editing-brand");
+            el("brandFormHeading").textContent = "Create new brand";
             syncCustomFieldBusinessPickers();
             updateOutput();
             updateDropCustomFieldPicker();
@@ -2059,7 +2078,11 @@ else:
           }
           const brands = JSON.parse(event.target.dataset.brands || "[]");
           selectedBrand = brands.find((brand) => brand.business_id === event.target.value) || null;
+          brandEditMode = false;
+          el("editExistingBrandLink").classList.toggle("hidden", !selectedBrand);
+          el("createBrandBtn").textContent = "Save Brand";
           el("newBrandFields").classList.add("hidden");
+          el("newBrandFields").classList.remove("is-open");
           if (selectedBrand) applyBusinessSourceType(selectedBrand);
           else {
             el("sourceType").disabled = false;
@@ -2074,7 +2097,35 @@ else:
         });
     el("customFieldBusinessSelect").addEventListener("change", updateDropCustomFieldPicker);
     el("dropCustomFieldBusinessSelect").addEventListener("change", updateDropCustomFieldPicker);
-    el("createBrandBtn").addEventListener("click", () => createNewBrand());
+    el("createBrandBtn").addEventListener("click", () => brandEditMode ? updateExistingBrand() : createNewBrand());
+    el("editExistingBrandLink").addEventListener("click", () => {
+          if (!selectedBrand) {
+            const brands = JSON.parse(el("brandSelect").dataset.brands || "[]");
+            selectedBrand = brands.find((brand) => brand.business_id === el("brandSelect").value) || null;
+          }
+          if (!selectedBrand) {
+            setStatus("Select an existing brand before editing.", "warn");
+            return;
+          }
+          brandEditMode = true;
+          fillBrandFields(selectedBrand, {});
+          setNewBusinessSourceType(el("sourceType").value);
+          el("newBrandFields").classList.remove("hidden");
+          el("newBrandFields").classList.add("is-open");
+          el("newBrandFields").classList.add("editing-brand");
+          el("brandFormHeading").textContent = "Edit brand details";
+          el("createBrandBtn").textContent = "Update Brand";
+          el("editExistingBrandLink").classList.add("hidden");
+        });
+    el("cancelBrandEditBtn").addEventListener("click", () => {
+          brandEditMode = false;
+          el("newBrandFields").classList.add("hidden");
+          el("newBrandFields").classList.remove("is-open");
+          el("newBrandFields").classList.remove("editing-brand");
+          el("createBrandBtn").textContent = "Save Brand";
+          el("brandFormHeading").textContent = "Brand details";
+          el("editExistingBrandLink").classList.toggle("hidden", !selectedBrand);
+        });
     el("presetBrandCreateBtn").addEventListener("click", () => createOrUsePresetBrand());
     el("presetBrandEditBtn").addEventListener("click", () => {
           if (!activeCsvPresetConfig) return;
@@ -2172,10 +2223,20 @@ else:
           }
         });
     el("sourceInputMode").addEventListener("change", () => {
-          if (el("sourceInputMode").value === "url" && isNewSourceMode()) {
-            setSourceUrlLocked(false);
-            el("sourceUrl").value = "";
+          const mode = el("sourceInputMode").value;
+          const demoUrlLocked = el("sourceUrl").classList.contains("demo-url") || Boolean(activeCsvPresetConfig) || jsonFunctionMode === "dominos";
+          if (mode === "url") {
+            el("fileInput").value = "";
+            if (!demoUrlLocked) {
+              setSourceUrlLocked(false);
+              if (isNewSourceMode()) el("sourceUrl").value = "";
+            }
             updateSourcePlaceholders(el("sourceType").value);
+          } else {
+            if (!demoUrlLocked) {
+              el("sourceUrl").value = "";
+              setSourceUrlLocked(false);
+            }
           }
           sourceParsed = false;
           updateSourceVisibility();
@@ -2202,9 +2263,10 @@ else:
             el("brandSelect").dispatchEvent(new Event("change"));
             return;
           }
+          templateLibraryLoaded = false;
           loadTemplateLibrary();
         });
-    el("templateSourceFilter").addEventListener("change", loadTemplateLibrary);
+    el("templateSourceFilter").addEventListener("change", () => { templateLibraryLoaded = false; loadTemplateLibrary(); });
     el("reviewBrandFilter")?.addEventListener("change", loadRejectedRecords);
     document.querySelectorAll("input[name='recordExtractionMode']").forEach((radio) => {
           radio.addEventListener("change", () => {
@@ -2305,7 +2367,7 @@ else:
       setupBrandDropdownListeners();
       refreshSampleDatasetStatus();
       loadGeoOptions();
-      loadAppData();
+      await loadAppData();
       // Paint the Review Error Listings tab badge immediately from the
       // last-known SQLite count (no live BigQuery wait), regardless of which
       // tab opens first. A live re-count happens whenever data actually

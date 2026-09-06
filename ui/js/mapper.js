@@ -54,6 +54,8 @@ let optionalMappingKeys = new Set();
 let hiddenMappingKeys = new Set();
 let sourceRows = [];
 let sourceFields = [];
+let sourceRecordCount = 0;
+let lastSourcePreviewPayload = null;
 let resolvedRecordPath = "";
 let mappingSelections = {};
 let jsonRecordPaths = [];
@@ -82,6 +84,7 @@ let connectorEditor = null;
 let pyodideRuntimePromise = null;
 let activeCsvPresetConfig = null;
 let presetBrandEditMode = false;
+let brandEditMode = false;
 
 const draftStorageKey = "competitive_whitespace_mapping_draft";
 const draftPreviewRowLimit = 10;
@@ -167,7 +170,9 @@ function currentSourceTypeId() {
       return existing?.source_type_id || "";
     }
 function setNewBusinessSourceType(format) {
-      const match = Array.from(el("newBrandSourceType").options).find((option) => option.dataset.format === format || option.value === format);
+      const sourceTypeSelect = el("newBrandSourceType");
+      if (!sourceTypeSelect) return;
+      const match = Array.from(sourceTypeSelect.options).find((option) => option.dataset.format === format || option.value === format);
       if (match) el("newBrandSourceType").value = match.value;
     }
 function fillBrandFields(brand = {}, fallback = {}) {
@@ -286,6 +291,7 @@ function syncBrandSelection(brandConfig) {
       if (existing) {
         selectedBrand = existing;
         el("brandSelect").value = existing.business_id;
+        el("editExistingBrandLink")?.classList.remove("hidden");
         el("newBrandFields").classList.add("hidden");
         fillBrandFields(existing, brandConfig);
         lockBrandFields(Boolean(activeCsvPresetConfig));
@@ -339,7 +345,7 @@ function applyDominosPythonFunction() {
       setStatus("Domino's ready. Click Parse.", "ok");
     }
 function updatePythonFunctionSelection(value) {
-      if (value === "dominos") applyDominosPythonFunction();
+      if (value === "la_city") applyLaCityPythonFunction();
       else setDominosLocked(false);
     }
 function setLockedValue(id, value) {
@@ -458,7 +464,7 @@ function resetSourceInputsForNewMode(sourceType = el("sourceType").value) {
       setSourceUrlLocked(false);
       hidePresetBrandPanel();
       if (["csv", "excel", "json", "xml"].includes(sourceType)) {
-        el("sourceInputMode").value = "file";
+      el("sourceInputMode").value = "url";
       }
       el("sourceUrl").value = "";
       el("apiUrl").value = "";
@@ -673,30 +679,45 @@ function setLaCityDemoMappings() {
       hiddenMappingKeys = new Set();
       autoMappedKeys = new Set(Object.keys(mappingSelections));
     }
-function applyLaCityJsonDemo() {
-      jsonFunctionMode = "la_city";
+function applyDominosJsonFunction() {
+      jsonFunctionMode = "dominos";
       el("sourceType").value = "json";
       el("sourceInputMode").value = "url";
-      el("sourceUrl").value = window.APP_CONSTANTS.laCityJsonDemoUrl || "";
+      el("sourceUrl").value = window.APP_CONSTANTS.dominosJsonDemoUrl || "";
       setSourceUrlLocked(true);
-      el("sourceName").value = "la_city_restaurant_inspections_json";
-      el("recordPath").value = "";
-      fillLaCityDemoBrand();
+      el("sourceName").value = "dominos_store_locator_json";
+      el("recordPath").value = "Stores";
+      fillDominosBrand();
       mappingSelections = {};
       sourceFields = [];
       sourceParsed = false;
       updateSourceVisibility();
       renderMappings();
-      setLaCityDemoLocked(false);
+      setDominosLocked(false);
       updateOutput();
-      setStatus("LA City ready. Click Parse.", "ok");
+      setStatus("Domino's JSON ready. Click Parse.", "ok");
+    }
+function applyLaCityPythonFunction() {
+      el("sourceType").value = "python_editor";
+      el("sourceName").value = "la_city_restaurant_inspections_python";
+      el("recordPath").value = "";
+      setConnectorCode("");
+      fillLaCityDemoBrand();
+      mappingSelections = {};
+      sourceFields = [];
+      sourceRows = [];
+      sourceParsed = false;
+      renderMappings();
+      updateOutput();
+      setPresetLocked(false, []);
+      setStatus("LA City Python editor ready. Add connector code when ready.", "ok");
     }
 function resetJsonDemoLock() {
       jsonFunctionMode = "new";
       resetSourceInputsForNewMode("json");
     }
 function updateJsonFunctionSelection(value) {
-      if (value === "la_city") applyLaCityJsonDemo();
+      if (value === "dominos") applyDominosJsonFunction();
       else resetJsonDemoLock();
     }
 function setLittleCaesarsMappings() {
@@ -918,7 +939,7 @@ function restoreDraft() {
         const jsonFunctionOption = document.querySelector(`input[name='jsonFunction'][value="${CSS.escape(jsonFunctionMode)}"]`);
         if (jsonFunctionOption) jsonFunctionOption.checked = true;
         el("sourceName").value = draft.sourceName || "";
-        el("sourceInputMode").value = draft.sourceInputMode || "file";
+        el("sourceInputMode").value = draft.sourceInputMode || "url";
         el("sourceUrl").value = draft.sourceUrl || "";
         const restoredExtractionMode = draft.recordExtractionMode || (draft.recordPath ? "custom" : "auto");
         const extractionModeRadio = document.querySelector(`input[name='recordExtractionMode'][value="${CSS.escape(restoredExtractionMode)}"]`);
@@ -939,8 +960,8 @@ function restoreDraft() {
         selectedBrand = draft.selectedBrand || null;
         renderMappings();
         setPizzaHutLocked(csvFunctionMode === "pizza_hut");
-        setLaCityDemoLocked(jsonFunctionMode === "la_city");
-        setDominosLocked((draft.pythonFunction || "new") === "dominos");
+        setDominosLocked(jsonFunctionMode === "dominos");
+        setLaCityDemoLocked((draft.pythonFunction || "new") === "la_city");
         renderTable("sourcePreview", sourceRows.slice(0, 10).map((row) => flattenObject(row)));
         const restoredCount = draft.sourceRowCount ? ` ${formatNumber(draft.sourceRowCount)} parsed records were in the prior session; re-parse before saving if you need the full dataset in memory.` : "";
         setStatus(`Draft restored.${restoredCount}`, "ok");
@@ -1069,6 +1090,7 @@ function updateSourceVisibility() {
       const isCsv = sourceType === "csv";
       const hasRecordPath = ["json", "xml", "api_get_json", "python_editor"].includes(sourceType);
       const isFileSource = !isApi && !isPythonConnector;
+      if (!isFileSource) el("sourceInputMode").value = "url";
 
       document.querySelectorAll(".api-field").forEach((field) => field.classList.toggle("hidden", !isApi));
       document.querySelectorAll(".api-function-field").forEach((field) => field.classList.toggle("hidden", !isApi));
@@ -1077,7 +1099,7 @@ function updateSourceVisibility() {
       document.querySelectorAll(".json-function-field").forEach((field) => field.classList.toggle("hidden", !isJson));
       document.querySelectorAll(".python-connector-field").forEach((field) => field.classList.toggle("hidden", !isPythonConnector));
       document.querySelectorAll(".excel-field").forEach((field) => field.classList.toggle("hidden", !isExcel));
-      document.querySelectorAll(".file-field").forEach((field) => field.classList.toggle("hidden", isApi || isPythonConnector));
+      document.querySelectorAll(".file-field").forEach((field) => field.classList.toggle("hidden", !isFileSource));
       document.querySelectorAll(".file-upload-control").forEach((field) => field.classList.toggle("hidden", !isFileSource || el("sourceInputMode").value !== "file"));
       document.querySelectorAll(".source-url-control").forEach((field) => field.classList.toggle("hidden", !isFileSource || el("sourceInputMode").value !== "url"));
       const sourceUrlEditBtn = el("sourceUrlEditBtn");
@@ -1124,7 +1146,7 @@ function sampleValue(path) {
 function renderMappings() {
       const grid = el("mappingGrid");
       grid.innerHTML = `
-        <div class="mapping-head">Business Field</div>
+        <div class="mapping-head">Brand Field</div>
         <div class="mapping-head">Source field path</div>
         <div class="mapping-head">Sample value</div>
         <div class="mapping-head"> </div>
@@ -1235,7 +1257,25 @@ function getVisibleTargets() {
         const found = mappingTargets.find((target) => target.key === key);
         if (found && !targets.some((target) => target.key === key)) targets.push(found);
       });
-      return targets;
+      // Registry responses can contain repeated keys and do not always retain
+      // the local field order. Keep one row per target and put required fields
+      // first so the mapping contract is visible before optional fields.
+      const unique = [];
+      const seen = new Set();
+      targets.forEach((target) => {
+        if (!target?.key || seen.has(target.key)) return;
+        seen.add(target.key);
+        unique.push(target);
+      });
+      return unique
+        .map((target, index) => ({ target, index }))
+        .sort((a, b) => {
+          const requiredOrder = Number(Boolean(b.target.required)) - Number(Boolean(a.target.required));
+          if (requiredOrder) return requiredOrder;
+          const fieldOrder = (fieldOrderIndex.get(a.target.key) ?? 999) - (fieldOrderIndex.get(b.target.key) ?? 999);
+          return fieldOrder || a.index - b.index;
+        })
+        .map(({ target }) => target);
     }
 function buildTargetRow(target, availableOptionsList, selected) {
       const row = document.createElement("div");
@@ -1408,6 +1448,7 @@ async function loadBrands(search = "") {
         el("brandSelect").innerHTML = '<option value="">Select an existing brand</option><option class="create-new-option" value="__create_new__">+ Create New Brand</option>' + brands.map((brand) => `<option value="${escapeHtml(brand.business_id)}">${escapeHtml(brand.name)}</option>`).join("");
         el("brandSelect").dataset.brands = JSON.stringify(brands);
         if (selectedBrand) el("brandSelect").value = selectedBrand.business_id;
+        el("editExistingBrandLink")?.classList.toggle("hidden", !selectedBrand);
         syncCustomFieldBusinessPickers();
       } catch (error) {
         setStatus(productSafeError(error.message, "Could not load brands."), "error");
@@ -1416,23 +1457,22 @@ async function loadBrands(search = "") {
 async function createNewBrand(brandNameOverride = "", extra = {}) {
       const name = (brandNameOverride || el("newBrandName").value).trim();
       if (!name) { setStatus("Brand name is required.", "warn"); return null; }
-      const sourceTypeId = el("newBrandSourceType").value || currentSourceTypeId();
-      const selectedSourceOption = el("newBrandSourceType").selectedOptions[0];
-      const sourceType = selectedSourceOption?.dataset.format || sourceTypeNameToFormat(selectedSourceOption?.textContent || "") || el("sourceType").value;
-      if (!sourceTypeId) { setStatus("Source format is required.", "warn"); return null; }
       const button = el("createBrandBtn");
       const previousButton = setButtonBusy(button, "Saving Brand");
       try {
         const response = await fetch("/api/brands", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
-          name, source_type_id: sourceTypeId, source_type: sourceType, slug: el("newBrandSlug").value.trim(), description: el("newBrandDescription").value.trim(), logo_url: el("newBrandLogo").value.trim(), website_url: el("newBrandWebsite").value.trim(), status: el("newBrandStatus").value, meta_title: el("newBrandMetaTitle").value.trim(), meta_description: el("newBrandMetaDescription").value.trim(), country_of_origin: el("newBrandOrigin").value.trim(), ...extra
+          name, slug: el("newBrandSlug").value.trim(), description: el("newBrandDescription").value.trim(), logo_url: el("newBrandLogo").value.trim(), website_url: el("newBrandWebsite").value.trim(), status: el("newBrandStatus").value, meta_title: el("newBrandMetaTitle").value.trim(), meta_description: el("newBrandMetaDescription").value.trim(), country_of_origin: el("newBrandOrigin").value.trim(), ...extra
         }) });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not create brand.");
         selectedBrand = result.brand;
         el("brandSelect").value = selectedBrand.business_id;
+        el("editExistingBrandLink")?.classList.remove("hidden");
         await loadBrands(selectedBrand.name);
         el("brandSelect").value = selectedBrand.business_id;
         el("newBrandFields").classList.add("hidden");
+        el("newBrandFields").classList.remove("is-open");
+        el("newBrandFields").classList.remove("editing-brand");
         applyBusinessSourceType(selectedBrand);
         await refreshTemplatesForBusiness();
         setStatus(`Brand ${selectedBrand.name} is ready for mapping.`, "ok");
@@ -1449,8 +1489,6 @@ function brandPayloadFromFields(extra = {}) {
       return {
         ...extra,
         name: el("newBrandName").value.trim(),
-        source_type_id: el("newBrandSourceType").value || currentSourceTypeId(),
-        source_type: el("sourceType").value,
         slug: el("newBrandSlug").value.trim(),
         description: el("newBrandDescription").value.trim(),
         logo_url: el("newBrandLogo").value.trim(),
@@ -1480,10 +1518,14 @@ async function updateExistingBrand() {
         el("brandSelect").value = selectedBrand.business_id;
         fillBrandFields(selectedBrand, activeCsvPresetConfig?.brand || {});
         presetBrandEditMode = false;
+        brandEditMode = false;
         el("newBrandFields").classList.add("hidden");
+        el("newBrandFields").classList.remove("is-open");
+        el("newBrandFields").classList.remove("editing-brand");
+        el("createBrandBtn").textContent = "Save Brand";
         updatePresetBrandPanel(activeCsvPresetConfig?.brand || selectedBrand, true);
         updateOutput();
-        setStatus(`Business ${selectedBrand.name} updated.`, "ok");
+        setStatus(`Brand ${selectedBrand.name} updated.`, "ok");
         return selectedBrand;
       } catch (error) {
         setStatus(productSafeError(error.message, "Could not update business."), "error");
@@ -1753,7 +1795,9 @@ async function parseSource() {
         });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Preview failed.");
+        lastSourcePreviewPayload = { ...payload };
         sourceRows = result.rows || [];
+        sourceRecordCount = Number(result.record_count || sourceRows.length);
         sourceFields = [...new Set((result.fields || []).filter((field) => field !== null && field !== undefined && String(field).trim()))];
         jsonRecordPaths = result.record_paths || [];
         sourceParsed = true;
@@ -1777,15 +1821,15 @@ async function parseSource() {
         if (csvFunctionMode === "pizza_hut") setPizzaHutMappings();
         else if (csvFunctionMode === "global_hotels") setGlobalHotelsMappings();
         else if (excelFunctionMode === "demo_restaurant") setDemoRestaurantExcelMappings();
-        else if (jsonFunctionMode === "la_city") setLaCityDemoMappings();
-        else if (document.querySelector("input[name='pythonFunction']:checked")?.value === "dominos") setDominosMappings();
+        else if (jsonFunctionMode === "dominos") setDominosMappings();
+        else if (document.querySelector("input[name='pythonFunction']:checked")?.value === "la_city") setLaCityDemoMappings();
         sessionStorage.removeItem(draftStorageKey);
         if (resolvedRecordPath && recordExtractionMode === "custom" && !el("recordPath").value.trim()) el("recordPath").value = resolvedRecordPath;
         if (sourceType === "excel" && resolvedRecordPath) el("sheetName").value = resolvedRecordPath;
         renderMappings();
         if (csvFunctionMode === "pizza_hut") setPizzaHutLocked(true);
-        if (jsonFunctionMode === "la_city") setLaCityDemoLocked(true);
-        if (document.querySelector("input[name='pythonFunction']:checked")?.value === "dominos") setDominosLocked(true);
+        if (jsonFunctionMode === "dominos") setDominosLocked(true);
+        if (document.querySelector("input[name='pythonFunction']:checked")?.value === "la_city") setLaCityDemoLocked(true);
         const recordCount = result.record_count;
         if (recordCount !== undefined) {
           setStatus(`Detected Records: ${recordCount}.`, "ok");
@@ -1800,6 +1844,25 @@ async function parseSource() {
         clearButtonBusy(parseBtn, previousParseBtn);
         clearButtonBusy(runBtn, previousRunBtn);
       }
+    }
+async function loadFullSourceForSave() {
+      if (!lastSourcePreviewPayload || sourceRows.length >= sourceRecordCount) return;
+      setStatus(`Loading all ${sourceRecordCount} source records for saving...`, "");
+      const response = await fetch("/api/preview", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...lastSourcePreviewPayload, fields_only: false })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not load the full source for saving.");
+      sourceRows = result.rows || [];
+      sourceRecordCount = Number(result.record_count || sourceRows.length);
+      sourceFields = Array.from(new Set([
+        ...sourceFields,
+        ...(result.fields || []).filter((field) => field !== null && field !== undefined && String(field).trim())
+      ]));
+      renderTable("sourcePreview", sourceRows.slice(0, 10).map((row) => flattenObject(row)));
+      setStatus(`Loaded ${sourceRows.length} records. Ready to save all source data.`, "ok");
     }
 async function loadExcelSheets() {
       const file = el("fileInput").files[0];
@@ -1980,6 +2043,10 @@ async function saveMapper() {
           }
         }
 
+        if (!activeTemplateId) {
+          await loadFullSourceForSave();
+        }
+
         if (!sourceRows.length) {
           if (!activeTemplateId) setStatus("Parse a source file before saving.", "warn");
           return;
@@ -2003,8 +2070,6 @@ async function saveMapper() {
           for (let index = 0; index < batches.length; index += 1) {
             const batch = batches[index];
             const totalToProcess = sourceRows.length;
-            const percentComplete = Math.round(processedRows / Math.max(totalToProcess, 1) * 100);
-            const percentPending = 100 - percentComplete;
             const progress = Math.min(90, 20 + Math.round(processedRows / Math.max(totalToProcess, 1) * 65));
 
             // Estimate remaining time based on pace so far
@@ -2016,7 +2081,11 @@ async function saveMapper() {
               etaSeconds = Math.max(0, Math.round(remainingRows * msPerRow / 1000));
             }
 
-            setProgress(progress, `${percentComplete}% complete, ${percentPending}% pending${etaSeconds !== "..." ? `, ~${etaSeconds}s remaining` : ""}`);
+            const progressDetail = processedRows
+              ? `${processedRows} of ${totalToProcess} records processed`
+              : `Starting batch ${index + 1} of ${batches.length}`;
+            const etaDetail = etaSeconds !== "..." ? `, about ${etaSeconds}s remaining` : "";
+            setProgress(progress, `${progressDetail}${etaDetail}`);
             const response = await fetch("/api/save", {
               method: "POST",
               headers: { "content-type": "application/json" },
@@ -2178,7 +2247,7 @@ async function addCustomField() {
       }
       const businessId = customFieldBusinessId("add");
       if (!businessId) {
-        setCustomFieldFeedback("Select a business before adding a custom field.", "warn");
+        setCustomFieldFeedback("Select a brand before adding a custom field.", "warn");
         return;
       }
       const password = el("aliasPassword").value.trim();
@@ -2228,30 +2297,30 @@ async function toggleShowExistingBrands() {
         return;
       }
       box.style.display = "block";
-      box.innerHTML = `<em>Fetching active businesses...</em>`;
+      box.innerHTML = `<em>Fetching active brands...</em>`;
       try {
         const response = await fetch("/api/brands?search=");
         const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "Could not fetch active businesses.");
+        if (!response.ok) throw new Error(result.error || "Could not fetch active brands.");
         const brands = result.brands || [];
         if (!brands.length) {
-          box.innerHTML = `<div style="color: var(--muted);">No existing businesses found.</div>`;
+          box.innerHTML = `<div style="color: var(--muted);">No existing brands found.</div>`;
           return;
         }
         const brandsWithDisplayIds = await Promise.all(brands.map(async (brand) => ({
           ...brand,
           display_business_id: brand.display_business_id || await fallbackDisplayBusinessId(brand)
         })));
-        const optionsHtml = '<option value="">Select an active business</option>' + brandsWithDisplayIds.map(b => `<option value="${escapeHtml(b.business_id)}">${escapeHtml(businessOptionLabelShort(b))}</option>`).join('');
+        const optionsHtml = '<option value="">Select an active brand</option>' + brandsWithDisplayIds.map(b => `<option value="${escapeHtml(b.business_id)}">${escapeHtml(businessOptionLabelShort(b))}</option>`).join('');
         const duplicateGroups = duplicateBusinessGroups(brandsWithDisplayIds);
         const mergeHtml = duplicateGroups.length ? `
           <div style="border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px;">
-            <strong style="display: block; margin-bottom: 6px; color: var(--navy);">Similar Businesses</strong>
+            <strong style="display: block; margin-bottom: 6px; color: var(--navy);">Similar Brands</strong>
             ${duplicateGroups.map((group, index) => {
               const newestCreatedAt = Math.max(...group.map(businessCreatedTime));
               return `
               <div data-merge-group="${index}" style="border: 1px solid #e5cfaa; border-left: 4px solid #f59e0b; border-radius: 6px; padding: 8px; margin-top: 8px; background: #fff9ed;">
-                <div style="font-weight: 700; margin-bottom: 6px;">${escapeHtml(group[0].name || "Similar business")}</div>
+                <div style="font-weight: 700; margin-bottom: 6px;">${escapeHtml(group[0].name || "Similar brand")}</div>
                 <label style="font-size: 12px;">Keep</label>
                 <select data-merge-target="${index}" style="width: 100%; margin: 4px 0 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px;">
                   ${group.map((brand) => `<option value="${escapeHtml(brand.business_id)}">${escapeHtml(businessOptionLabel(brand, newestCreatedAt))}</option>`).join("")}
@@ -2263,7 +2332,7 @@ async function toggleShowExistingBrands() {
         ` : "";
         box.innerHTML = `
           <label style="display: block; font-weight: 700; margin-bottom: 4px; color: var(--navy);" for="activeBusinessesDropdown">
-            Active Businesses (${brands.length})
+            Active Brands (${brands.length})
           </label>
           <select id="activeBusinessesDropdown" style="width: 100%; padding: 6px 8px; border-radius: 4px; border: 1px solid var(--line); background: #ffffff;">
             ${optionsHtml}

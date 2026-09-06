@@ -11,6 +11,7 @@ window.APP_CONSTANTS = Object.freeze({
   dominosMaxWorkers: 8,
   dominosProvider: "auto",
   dominosOrderType: "Delivery",
+  dominosJsonDemoUrl: "https://data-m8.com/downloads/list-of-all-dominos-pizza-locations-in-the-usa-csv-and-json.json",
   dominosBrand: {
     name: "Domino's Pizza",
     slug: "dominos-pizza",
