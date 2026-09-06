@@ -411,11 +411,13 @@ function updateCompetitorDropdownText() {
       if (!el("reportMainBrandSelect")?.value) {
         btnText.textContent = "Select Primary Brand";
       } else if (checked.length === 0) {
-        btnText.textContent = "Select Competitor Brands (0 selected)";
+        btnText.textContent = "Select Competitor Brands";
       } else if (checked.length === (reportingBrands.length ? reportingBrands.length - 1 : 0)) {
-        btnText.textContent = "All Competitors Selected";
+        btnText.textContent = "All Competitors: " + checked.map(escapeHtml).join("; ");
+      } else if (checked.length <= 3) {
+        btnText.textContent = checked.map(escapeHtml).join("; ");
       } else {
-        btnText.textContent = `${checked.length} Competitor${checked.length > 1 ? "s" : ""} Selected`;
+        btnText.textContent = checked.slice(0, 3).map(escapeHtml).join("; ") + `; +${checked.length - 3} more`;
       }
     }
 function setupBrandDropdownListeners() {
