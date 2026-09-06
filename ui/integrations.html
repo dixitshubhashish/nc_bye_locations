@@ -1483,6 +1483,13 @@
             <label><input type="radio" name="jsonFunction" value="dominos"> Domino's Pizza</label>
           </div>
         </div>
+        <div class="field-group xml-function-field hidden">
+          <label>XML source</label>
+          <div class="python-function-options" role="radiogroup" aria-label="XML source">
+            <label><input type="radio" name="xmlFunction" value="new" checked> New</label>
+            <label><input type="radio" name="xmlFunction" value="demo_xml"> Demo XML</label>
+          </div>
+        </div>
         <div class="field-group api-function-field hidden">
           <label>API source</label>
           <div class="python-function-options" role="radiogroup" aria-label="API source">
@@ -2202,6 +2209,8 @@ result = [
             if (newApiOption) newApiOption.checked = true;
             apiFunctionMode = "new";
           }
+          const newXmlOption = document.querySelector("input[name='xmlFunction'][value='new']");
+          if (newXmlOption) newXmlOption.checked = true;
           if (el("sourceType").value !== "python_editor") {
             const newPythonOption = document.querySelector("input[name='pythonFunction'][value='new']");
             if (newPythonOption) newPythonOption.checked = true;
@@ -2257,6 +2266,9 @@ result = [
         });
     document.querySelectorAll("input[name='jsonFunction']").forEach((input) => {
           input.addEventListener("change", () => updateJsonFunctionSelection(input.value));
+        });
+    document.querySelectorAll("input[name='xmlFunction']").forEach((input) => {
+          input.addEventListener("change", () => updateXmlFunctionSelection(input.value));
         });
     document.querySelectorAll("input[name='pythonFunction']").forEach((input) => {
           input.addEventListener("change", () => updatePythonFunctionSelection(input.value));

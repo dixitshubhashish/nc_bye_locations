@@ -507,9 +507,15 @@ function resetPresetBrandEditState() {
       el("createBrandBtn")?.classList.remove("hidden");
     }
 function resetSourceInputsForNewMode(sourceType = el("sourceType").value) {
+      const preservedBrand = selectedBrand;
       setPresetLocked(false, []);
       setSourceUrlLocked(false);
       hidePresetBrandPanel();
+      selectedBrand = preservedBrand;
+      if (selectedBrand?.business_id) {
+        el("brandSelect").value = selectedBrand.business_id;
+        el("editExistingBrandLink")?.classList.remove("hidden");
+      }
       if (["csv", "excel", "json", "xml"].includes(sourceType)) {
       el("sourceInputMode").value = "url";
       }
@@ -762,6 +768,35 @@ function applyLaCityPythonFunction() {
 function resetJsonDemoLock() {
       jsonFunctionMode = "new";
       resetSourceInputsForNewMode("json");
+    }
+function resetXmlDemoLock() {
+      resetPresetBrandEditState();
+      resetSourceInputsForNewMode("xml");
+    }
+function applyDemoXml() {
+      resetPresetBrandEditState();
+      activeCsvPresetConfig = { mode: "demo_xml", brand: window.APP_CONSTANTS.demoXmlBrand || {}, url: window.APP_CONSTANTS.demoXmlUrl || "", sourceName: "demo_xml_complex_sample", status: "Demo XML URL is ready. Click Parse.", statusType: "ok" };
+      el("sourceType").value = "xml";
+      el("sourceInputMode").value = "url";
+      el("sourceUrl").value = window.APP_CONSTANTS.demoXmlUrl || "";
+      el("sourceUrl").placeholder = window.APP_CONSTANTS.demoXmlUrl || sourceUrlPlaceholders.xml;
+      setSourceUrlLocked(true);
+      el("sourceName").value = "demo_xml_complex_sample";
+      el("recordPath").value = "rootElement";
+      fillBrandFromConfig(activeCsvPresetConfig.brand);
+      updatePresetBrandPanel(activeCsvPresetConfig.brand, Boolean(selectedBrand));
+      sourceFields = [];
+      sourceRows = [];
+      sourceParsed = false;
+      mappingSelections = {};
+      updateSourceVisibility();
+      renderMappings();
+      updateOutput();
+      setStatus("Demo XML URL is ready. Click Parse.", "ok");
+    }
+function updateXmlFunctionSelection(value) {
+      if (value === "demo_xml") applyDemoXml();
+      else resetXmlDemoLock();
     }
 function updateJsonFunctionSelection(value) {
       if (value === "dominos") applyDominosJsonFunction();
@@ -1135,6 +1170,7 @@ function updateSourceVisibility() {
       const isExcel = sourceType === "excel";
       const isJson = sourceType === "json";
       const isCsv = sourceType === "csv";
+      const isXml = sourceType === "xml";
       const hasRecordPath = ["json", "xml", "api_get_json", "python_editor"].includes(sourceType);
       const isFileSource = !isApi && !isPythonConnector;
       if (!isFileSource) el("sourceInputMode").value = "url";
@@ -1144,6 +1180,7 @@ function updateSourceVisibility() {
       document.querySelectorAll(".csv-function-field").forEach((field) => field.classList.toggle("hidden", !isCsv));
       document.querySelectorAll(".excel-function-field").forEach((field) => field.classList.toggle("hidden", !isExcel));
       document.querySelectorAll(".json-function-field").forEach((field) => field.classList.toggle("hidden", !isJson));
+      document.querySelectorAll(".xml-function-field").forEach((field) => field.classList.toggle("hidden", !isXml));
       document.querySelectorAll(".python-connector-field").forEach((field) => field.classList.toggle("hidden", !isPythonConnector));
       document.querySelectorAll(".excel-field").forEach((field) => field.classList.toggle("hidden", !isExcel));
       document.querySelectorAll(".file-field").forEach((field) => field.classList.toggle("hidden", !isFileSource));
@@ -2162,7 +2199,7 @@ async function saveMapper() {
           if (typeof loadErrorBrandBreakdown === "function") loadErrorBrandBreakdown();
           hideProgress();
           const prefix = activeTemplateId ? "Template updated. " : "";
-          setStatus(`${prefix}Saved ${mappedRows} of ${sourceRows.length} records. ${errorListings} need review.`, "ok");
+          setStatus(`${prefix}${processedRows} records processed. ${errorListings} need review.`, "ok");
         } catch (error) {
           hideProgress();
           setStatus(productSafeError(error.message, "Could not save template."), "error");
