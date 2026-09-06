@@ -2487,6 +2487,44 @@ def _reporting_data_from_mirror(
     }
 
 
+def _execute_bq_queries_parallel(queries: dict[str, tuple[str, Any]], client: Any) -> dict[str, Any]:
+    """Execute multiple BigQuery queries in parallel threads.
+
+    Args:
+        queries: dict mapping result_key -> (query_sql, job_config)
+        client: BigQuery client
+
+    Returns:
+        dict mapping result_key -> query result
+    """
+    results = {}
+    errors = {}
+
+    def _run_query(key: str, query_sql: str, job_config: Any) -> None:
+        try:
+            result = client.query(query_sql, job_config=job_config).result()
+            # Convert to list of dicts
+            results[key] = [dict(row) for row in result] if key != "totals" else dict(next(iter(result)))
+        except Exception as exc:
+            errors[key] = exc
+
+    threads = []
+    for key, (query_sql, job_config) in queries.items():
+        thread = threading.Thread(target=_run_query, args=(key, query_sql, job_config), daemon=False)
+        thread.start()
+        threads.append(thread)
+
+    # Wait for all threads
+    for thread in threads:
+        thread.join(timeout=300)  # 5-minute timeout per query
+
+    if errors:
+        # Raise the first error
+        raise next(iter(errors.values()))
+
+    return results
+
+
 def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, Any]:
     params = params or {}
     cache_key = f"reporting_summary:v3:{json.dumps(params, sort_keys=True)}"
@@ -2905,23 +2943,44 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         FROM {zip_ref}
         """
         payload = _empty_reporting_payload(source_table, params, warning)
-        payload["totals"] = dict(next(iter(client.query(zip_totals_query, job_config=job_config).result())))
-        payload["top_states"] = [dict(row) for row in client.query(zip_states_query, job_config=job_config).result()]
-        payload["top_cities"] = [dict(row) for row in client.query(zip_cities_query, job_config=job_config).result()]
+        # Run zip queries in parallel
+        zip_queries = {
+            "totals": (zip_totals_query, job_config),
+            "top_states": (zip_states_query, job_config),
+            "top_cities": (zip_cities_query, job_config),
+        }
+        zip_results = _execute_bq_queries_parallel(zip_queries, client)
+        payload["totals"] = zip_results["totals"]
+        payload["top_states"] = zip_results["top_states"]
+        payload["top_cities"] = zip_results["top_cities"]
         payload["filter_options"] = dict(next(iter(client.query(zip_filter_query).result())))
         payload["reporting_cache"] = "zip_base"
         return payload
 
     try:
-        totals = dict(next(iter(client.query(totals_query, job_config=job_config).result())))
-        top_states = [dict(row) for row in client.query(top_states_query, job_config=job_config).result()]
-        top_cities = [dict(row) for row in client.query(top_cities_query, job_config=job_config).result()]
-        brands = [dict(row) for row in client.query(brand_query, job_config=job_config).result()]
-        raw_whitespace = [dict(row) for row in client.query(gap_query, job_config=job_config).result()]
-        map_records = [dict(row) for row in client.query(map_query, job_config=job_config).result()]
+        # Execute independent BigQuery queries in parallel for speed
+        parallel_queries = {
+            "totals": (totals_query, job_config),
+            "top_states": (top_states_query, job_config),
+            "top_cities": (top_cities_query, job_config),
+            "brands": (brand_query, job_config),
+            "raw_whitespace": (gap_query, job_config),
+            "map_records": (map_query, job_config),
+            "sample_records": (sample_query, job_config),
+            "data_quality": (data_quality_query, job_config),
+        }
+        query_results = _execute_bq_queries_parallel(parallel_queries, client)
+        totals = query_results["totals"]
+        top_states = query_results["top_states"]
+        top_cities = query_results["top_cities"]
+        brands = query_results["brands"]
+        raw_whitespace = query_results["raw_whitespace"]
+        map_records = query_results["map_records"]
+        sample_records = query_results["sample_records"]
+        data_quality_row = query_results["data_quality"]
+
+        # filter_options_query runs separately (no job_config, simpler query)
         filter_options = dict(next(iter(client.query(filter_options_query).result())))
-        sample_records = [dict(row) for row in client.query(sample_query, job_config=job_config).result()]
-        data_quality_row = dict(next(iter(client.query(data_quality_query, job_config=job_config).result())))
     except Exception as exc:
         if getattr(exc, "code", None) == 404:
             payload = zip_only_payload("Preparing business data.")
