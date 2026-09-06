@@ -2238,6 +2238,8 @@ else:
           if (el("reportCountyFilter")) el("reportCountyFilter").value = "";
           if (el("reportCityFilter")) el("reportCityFilter").value = "";
           if (el("reportZipFilter")) el("reportZipFilter").value = "";
+          if (el("reportMainBrandSelect")) el("reportMainBrandSelect").value = "";
+          document.querySelectorAll("input[name='competitorBrand']").forEach((input) => input.checked = false);
           reportLoaded = false;
           loadReporting();
         });
