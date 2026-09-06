@@ -1524,6 +1524,97 @@ async function createOrUsePresetBrand() {
       clearButtonBusy(button, previousButton);
     }
   }
+
+// Brand Management Modal
+let brandEditMode = false;
+function openBrandModal(forEdit = false) {
+  brandEditMode = forEdit;
+  const modal = el("brandManagementModal");
+  const title = el("brandModalTitle");
+  if (forEdit && selectedBrand) {
+    title.textContent = `Edit Brand: ${selectedBrand.name}`;
+    fillBrandFields(selectedBrand, {});
+  } else {
+    title.textContent = "Create New Brand";
+    fillBrandFields({}, {});
+  }
+  modal.classList.remove("hidden");
+  el("newBrandName").focus();
+}
+function closeBrandModal() {
+  const modal = el("brandManagementModal");
+  modal.classList.add("hidden");
+  brandEditMode = false;
+}
+async function handleBrandSave() {
+  if (brandEditMode && selectedBrand) {
+    const result = await updateExistingBrand();
+    if (result) closeBrandModal();
+    return result;
+  } else {
+    const result = await createNewBrand();
+    if (result) closeBrandModal();
+    return result;
+  }
+}
+function setupBrandManagementListeners() {
+  // Brand dropdown change
+  const brandSelect = el("brandSelect");
+  if (brandSelect) {
+    brandSelect.addEventListener("change", (e) => {
+      const value = e.target.value;
+      const editBtn = el("editBrandBtn");
+
+      if (value === "__create_new__") {
+        selectedBrand = null;
+        openBrandModal(false);
+        editBtn.classList.add("hidden");
+      } else if (value === "") {
+        selectedBrand = null;
+        editBtn.classList.add("hidden");
+      } else {
+        const brands = JSON.parse(brandSelect.dataset.brands || "[]");
+        selectedBrand = brands.find((b) => b.business_id === value);
+        editBtn.classList.toggle("hidden", !selectedBrand);
+      }
+    });
+  }
+
+  // Edit button
+  const editBtn = el("editBrandBtn");
+  if (editBtn) {
+    editBtn.addEventListener("click", () => {
+      if (selectedBrand) openBrandModal(true);
+    });
+  }
+
+  // Modal close button
+  const closeBtn = el("closeBrandModalBtn");
+  if (closeBtn) {
+    closeBtn.addEventListener("click", closeBrandModal);
+  }
+
+  // Cancel button
+  const cancelBtn = el("cancelBrandBtn");
+  if (cancelBtn) {
+    cancelBtn.addEventListener("click", closeBrandModal);
+  }
+
+  // Create/Save button
+  const createBtn = el("createBrandBtn");
+  if (createBtn) {
+    createBtn.addEventListener("click", handleBrandSave);
+  }
+
+  // Modal click outside to close
+  const modal = el("brandManagementModal");
+  if (modal) {
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal) closeBrandModal();
+    });
+  }
+}
+
 function normalizedRows() {
       const mapper = getMapper();
       return sourceRows.slice(0, 10).map((row, index) => {

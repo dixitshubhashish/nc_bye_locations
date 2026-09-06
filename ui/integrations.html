@@ -1476,11 +1476,16 @@
         <button id="sourceUrlEditBtn" class="source-url-control source-url-edit hidden" type="button">Edit URL</button>
         </div>
 
-        <label id="brandSelectLabel" for="brandSelect">Brand</label>
-        <select id="brandSelect" aria-label="Select brand">
-          <option value="">Select an existing brand</option>
-          <option class="create-new-option" value="__create_new__">+ Create New Brand</option>
-        </select>
+        <div style="display: flex; align-items: flex-end; gap: 8px;">
+          <div style="flex: 1;">
+            <label id="brandSelectLabel" for="brandSelect">Brand</label>
+            <select id="brandSelect" aria-label="Select brand">
+              <option value="">Select an existing brand</option>
+              <option class="create-new-option" value="__create_new__">+ Create New Brand</option>
+            </select>
+          </div>
+          <button id="editBrandBtn" class="secondary hidden" type="button" title="Edit selected brand">✎ Edit</button>
+        </div>
         <div id="presetBrandPanel" class="preset-brand-panel hidden">
           <div class="preset-brand-summary">
             <strong id="presetBrandTitle">Preset brand</strong>
@@ -1491,7 +1496,13 @@
             </div>
           </div>
         </div>
-        <div id="newBrandFields" class="field-group hidden">
+        <div id="brandManagementModal" class="modal hidden" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000;">
+          <div style="background: white; border-radius: 8px; padding: 24px; max-width: 600px; width: 90%; max-height: 90vh; overflow-y: auto;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+              <h3 id="brandModalTitle" style="margin: 0;">Create New Brand</h3>
+              <button id="closeBrandModalBtn" type="button" style="background: none; border: none; font-size: 24px; cursor: pointer; padding: 0;">×</button>
+            </div>
+            <div id="newBrandFields" class="field-group">
           <label for="newBrandName">Name</label><input id="newBrandName">
           <label for="newBrandSourceType">Source format</label><select id="newBrandSourceType"></select>
           <label for="newBrandSlug">Slug</label><input id="newBrandSlug">
@@ -1503,6 +1514,9 @@
           <label for="newBrandMetaDescription">Meta Description</label><textarea id="newBrandMetaDescription"></textarea>
           <label for="newBrandOrigin">Country of Origin</label><input id="newBrandOrigin">
           <button id="createBrandBtn" type="button">Save Brand</button>
+          <button id="cancelBrandBtn" type="button" class="secondary" style="margin-left: 8px;">Cancel</button>
+            </div>
+          </div>
         </div>
 
         <label for="sourceName">Source name</label>
@@ -2293,6 +2307,7 @@ else:
       setTimeout(() => refreshHeaderReadiness(), 10);
       setupZipTypeahead();
       setupBrandDropdownListeners();
+      setupBrandManagementListeners();
       refreshSampleDatasetStatus();
       loadGeoOptions();
       loadAppData();
