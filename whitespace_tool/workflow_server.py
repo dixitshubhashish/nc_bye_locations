@@ -489,6 +489,27 @@ def validate_mapper(mapper: dict[str, Any], source_fields: list[str], rows: list
     return errors
 
 
+def _source_field_match_key(value: Any) -> str:
+    """Compare source headers across CSV/Excel naming and casing differences."""
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _resolve_mapper_source_fields(mapper: dict[str, Any], source_fields: list[str]) -> dict[str, Any]:
+    """Replace equivalent mapped names with the exact parsed source headers."""
+    fields = mapper.get("fields")
+    if not isinstance(fields, dict):
+        return mapper
+    by_match_key = {_source_field_match_key(field): field for field in source_fields}
+    resolved_fields = {
+        target: by_match_key.get(_source_field_match_key(source), source)
+        if source else source
+        for target, source in fields.items()
+    }
+    resolved = dict(mapper)
+    resolved["fields"] = resolved_fields
+    return resolved
+
+
 def _scrub_mapper(mapper: dict[str, Any]) -> dict[str, Any]:
     secret_keys = {"token", "password", "key_value", "credentials_json"}
 
@@ -3806,6 +3827,7 @@ def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_inval
         len(rows),
         len(source_fields),
     )
+    mapper = _resolve_mapper_source_fields(mapper, source_fields)
     errors = validate_mapper(mapper, source_fields, rows)
     if errors:
         raise ValueError(f"Mapper validation failed: {', '.join(errors)}")
@@ -4047,6 +4069,13 @@ def make_handler(ui_dir: Path):
                 return
             if self.path == "/api/session":
                 _json_response(self, 200, {"server_launch_id": SERVER_LAUNCH_ID})
+                return
+            if self.path == "/api/demo-python/pe-brand":
+                demo_path = project_path("config/demo_pe_brand_python.py")
+                if not demo_path.exists():
+                    _json_response(self, 404, {"error": "Demo PE Brand sample is unavailable."})
+                    return
+                _json_response(self, 200, {"code": demo_path.read_text(encoding="utf-8")})
                 return
             if self.path == "/api/ping":
                 try:

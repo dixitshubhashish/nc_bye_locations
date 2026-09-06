@@ -85,6 +85,16 @@ let pyodideRuntimePromise = null;
 let activeCsvPresetConfig = null;
 let presetBrandEditMode = false;
 let brandEditMode = false;
+const pythonEditorStarterCode = `# Return a JSON-compatible list of records in \`result\`.
+result = [
+    {
+        "name": "Sample Bistro",
+        "address": "100 Main St",
+        "city": "Raleigh",
+        "state": "NC",
+        "postal_code": "27601"
+    }
+]`;
 
 const draftStorageKey = "competitive_whitespace_mapping_draft";
 const draftPreviewRowLimit = 10;
@@ -257,11 +267,13 @@ function setConnectorFeedback(message, type = "") {
       el("pythonConnectorFeedback").textContent = message;
     }
 function getConnectorCode() {
-      return connectorEditor ? connectorEditor.getValue() : el("pythonConnectorCode").value;
+      const code = connectorEditor ? connectorEditor.getValue() : el("pythonConnectorCode").value;
+      return String(code || "").trim() ? code : pythonEditorStarterCode;
     }
 function setConnectorCode(code) {
-      if (connectorEditor) connectorEditor.setValue(code);
-      else el("pythonConnectorCode").value = code;
+      const nextCode = String(code || "").trim() ? String(code) : pythonEditorStarterCode;
+      if (connectorEditor) connectorEditor.setValue(nextCode);
+      else el("pythonConnectorCode").value = nextCode;
     }
 function dominosPythonCode() {
       const limit = window.APP_CONSTANTS.dominosZipFetchLimit || 1;
@@ -345,8 +357,43 @@ function applyDominosPythonFunction() {
       setStatus("Domino's ready. Click Parse.", "ok");
     }
 function updatePythonFunctionSelection(value) {
+      el("demoPeBrandActions")?.classList.toggle("hidden", value !== "demo_pe_brand");
       if (value === "la_city") applyLaCityPythonFunction();
+      else if (value === "demo_pe_brand") applyDemoPeBrandFunction();
       else setDominosLocked(false);
+    }
+async function loadDemoPeBrandCode(copyOnly = false) {
+      const response = await fetch("/api/demo-python/pe-brand", { cache: "no-store" });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not load Demo PE Brand sample.");
+      if (!copyOnly) setConnectorCode(result.code);
+      return result.code;
+    }
+function setDemoPeBrandFeedback(message, type = "") {
+      const target = el("demoPeBrandFeedback");
+      if (!target) return;
+      target.className = `demo-code-feedback ${type}`.trim();
+      target.textContent = message;
+    }
+async function applyDemoPeBrandFunction() {
+      el("sourceType").value = "python_editor";
+      el("sourceName").value = "demo_pe_brand_osm_restaurants";
+      el("recordPath").value = "";
+      try {
+        await loadDemoPeBrandCode();
+        fillBrandFields({}, { name: "Demo PE Brand", slug: "demo-pe-brand", description: "Greater Los Angeles restaurant demo from Overpass.", websiteUrl: "https://www.openstreetmap.org/", status: "active", metaTitle: "Demo PE Brand", metaDescription: "Demo Python source for restaurant locations.", countryOfOrigin: "United States" });
+        setStatus("Demo PE Brand sample loaded. Click Parse.", "ok");
+        setDemoPeBrandFeedback("Sample loaded into the editor.", "ok");
+      } catch (error) {
+        setStatus(productSafeError(error.message, "Could not load Demo PE Brand sample."), "error");
+        setDemoPeBrandFeedback("Could not load the sample.", "error");
+      }
+      mappingSelections = {};
+      sourceFields = [];
+      sourceParsed = false;
+      updateSourceVisibility();
+      renderMappings();
+      updateOutput();
     }
 function setLockedValue(id, value) {
       if (el(id)) el(id).value = value || "";
