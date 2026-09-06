@@ -51,7 +51,7 @@ def _cell_value(cell: ElementTree.Element, shared: list[str]) -> str:
     return value
 
 
-def _table_from_rows(rows_as_lists: list[list[str]], record_path: str) -> dict:
+def _table_from_rows(rows_as_lists: list[list[str]], record_path: str, fields_only: bool = False) -> dict:
     rows_as_lists = [row for row in rows_as_lists if any(str(value).strip() for value in row)]
     if not rows_as_lists:
         return preview_payload([], record_path)
@@ -69,6 +69,16 @@ def _table_from_rows(rows_as_lists: list[list[str]], record_path: str) -> dict:
         else:
             seen[header] = 1
         headers.append(header)
+
+    # For lightweight field discovery, just return headers without processing data rows
+    if fields_only:
+        return preview_payload([], record_path, fields_only=True) if not headers else {
+            "record_path": record_path or "",
+            "record_count": len(rows_as_lists) - 1,  # Exclude header row
+            "fields": headers,
+            "rows": [],
+            "preview_rows": [],
+        }
 
     rows = []
     for row in rows_as_lists[1:]:
@@ -111,7 +121,7 @@ def list_sheets(content: bytes, file_name: str = "") -> list[str]:
         return list(_xlsx_sheet_map(zf).keys())
 
 
-def _preview_xls(content: bytes, sheet_name: str | None) -> dict:
+def _preview_xls(content: bytes, sheet_name: str | None, fields_only: bool = False) -> dict:
     try:
         import xlrd
     except ImportError as exc:
@@ -122,12 +132,12 @@ def _preview_xls(content: bytes, sheet_name: str | None) -> dict:
     if sheet.nrows == 0:
         return preview_payload([], sheet.name)
     rows_as_lists = [sheet.row_values(row_index) for row_index in range(sheet.nrows)]
-    return _table_from_rows(rows_as_lists, sheet.name)
+    return _table_from_rows(rows_as_lists, sheet.name, fields_only=fields_only)
 
 
-def preview(content: bytes, record_path: str | None = None, file_name: str = "") -> dict:
+def preview(content: bytes, record_path: str | None = None, file_name: str = "", fields_only: bool = False) -> dict:
     if file_name.lower().endswith(".xls") and not file_name.lower().endswith(".xlsx"):
-        return _preview_xls(content, record_path)
+        return _preview_xls(content, record_path, fields_only=fields_only)
 
     rows_as_lists: list[list[str]] = []
     with zipfile.ZipFile(io.BytesIO(content)) as zf:

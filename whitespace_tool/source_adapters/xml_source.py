@@ -44,8 +44,15 @@ def _find_repeating_records(root: ElementTree.Element) -> tuple[list[ElementTree
     return records, _strip_namespace(records[0].tag)
 
 
-def preview(content: bytes, record_path: str | None = None) -> dict:
+def preview(content: bytes, record_path: str | None = None, fields_only: bool = False) -> dict:
     root = ElementTree.fromstring(content.decode("utf-8-sig"))
     records, resolved_path = _find_repeating_records(root)
+
+    # For lightweight field discovery, sample just first 10 records
+    if fields_only:
+        sample_records = records[:min(10, len(records))]
+        sample_rows = [_element_to_dict(record) for record in sample_records]
+        return preview_payload(sample_rows, record_path or resolved_path, fields_only=True)
+
     rows = [_element_to_dict(record) for record in records]
     return preview_payload(rows, record_path or resolved_path)

@@ -31,11 +31,18 @@ def _prepare_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
-def preview(content: bytes, record_path: str | None = None) -> dict:
+def preview(content: bytes, record_path: str | None = None, fields_only: bool = False) -> dict:
     payload = json.loads(content.decode("utf-8-sig"))
     rows, resolved_path = choose_json_records(payload, record_path)
     rows = _prepare_rows(rows)
-    result = preview_payload(rows, resolved_path)
+
+    # For lightweight field discovery, sample just first 10 rows to extract fields
+    if fields_only:
+        sample_rows = rows[:min(10, len(rows))]
+        result = preview_payload(sample_rows, resolved_path, fields_only=True)
+    else:
+        result = preview_payload(rows, resolved_path)
+
     if isinstance(payload, list):
         record_paths = [""]
     else:

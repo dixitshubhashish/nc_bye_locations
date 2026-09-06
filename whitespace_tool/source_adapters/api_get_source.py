@@ -52,6 +52,7 @@ def preview_url(
     headers: dict[str, str] | None = None,
     query_params: list[dict[str, str]] | None = None,
     auth: dict | None = None,
+    fields_only: bool = False,
 ) -> dict:
     request_url = _url_with_query_params(url, query_params)
     request_headers = {"Accept": "application/json"}
@@ -62,4 +63,4 @@ def preview_url(
         content_type = response.headers.get("content-type", "")
         if "json" not in content_type.lower():
             raise ValueError(f"GET API response must be JSON. Received content-type: {content_type}")
-        return preview_json(response.read(), record_path)
+        return preview_json(response.read(), record_path, fields_only=fields_only)

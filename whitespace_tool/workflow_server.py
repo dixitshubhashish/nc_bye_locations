@@ -106,6 +106,7 @@ def authenticate(data: dict[str, Any]) -> dict[str, bool]:
 def preview_source(payload: dict[str, Any]) -> dict[str, Any]:
     source_type = payload["source_type"]
     record_path = payload.get("record_path") or None
+    fields_only = payload.get("fields_only", False)
     if source_type not in SUPPORTED_SOURCE_TYPES:
         raise ValueError(f"Unsupported source_type: {source_type}")
     if source_type == "api_get_json":
@@ -115,21 +116,22 @@ def preview_source(payload: dict[str, Any]) -> dict[str, Any]:
             payload.get("headers"),
             payload.get("query_params"),
             payload.get("auth"),
+            fields_only=fields_only,
         )
     if source_type == "python_editor":
         content = base64.b64decode(payload["content_base64"])
-        return python_connector_source.preview(content, record_path)
+        return python_connector_source.preview(content, record_path, fields_only=fields_only)
 
     file_name = payload.get("file_name", "")
     content = base64.b64decode(payload["content_base64"])
     if source_type == "csv":
-        return csv_source.preview(content, record_path)
+        return csv_source.preview(content, record_path, fields_only=fields_only)
     if source_type == "json":
-        return json_source.preview(content, record_path)
+        return json_source.preview(content, record_path, fields_only=fields_only)
     if source_type == "xml":
-        return xml_source.preview(content, record_path)
+        return xml_source.preview(content, record_path, fields_only=fields_only)
     if source_type == "excel":
-        return excel_source.preview(content, record_path, file_name)
+        return excel_source.preview(content, record_path, file_name, fields_only=fields_only)
     raise ValueError(f"Unsupported source_type: {source_type}")
 
 

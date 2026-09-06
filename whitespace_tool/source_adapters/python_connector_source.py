@@ -17,8 +17,8 @@ def validate_result(value: Any) -> Any:
     return value
 
 
-def preview(content: bytes, record_path: str | None = None) -> dict[str, Any]:
+def preview(content: bytes, record_path: str | None = None, fields_only: bool = False) -> dict[str, Any]:
     """Preview JSON emitted by the browser Python runtime."""
     payload = json.loads(content.decode("utf-8"))
     validate_result(payload)
-    return preview_json(content, record_path)
+    return preview_json(content, record_path, fields_only=fields_only)

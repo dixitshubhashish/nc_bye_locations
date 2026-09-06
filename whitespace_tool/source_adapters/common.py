@@ -24,7 +24,19 @@ def collect_fields(rows: list[dict[str, Any]]) -> list[str]:
     return sorted(fields)
 
 
-def preview_payload(rows: list[dict[str, Any]], record_path: str | None = None, limit: int = 25) -> dict[str, Any]:
+def preview_payload(rows: list[dict[str, Any]], record_path: str | None = None, limit: int = 25, fields_only: bool = False) -> dict[str, Any]:
+    # For initial field discovery (mapping UI), extract fields from just the first
+    # few rows and send back minimal data. Full row validation happens at save time.
+    if fields_only and len(rows) > 0:
+        sample_rows = rows[:min(10, len(rows))]  # Sample first 10 rows for field extraction
+        fields = collect_fields(sample_rows)
+        return {
+            "record_path": record_path or "",
+            "record_count": len(rows),
+            "fields": fields,
+            "rows": [],  # Don't send rows for field-discovery preview
+            "preview_rows": [],
+        }
     return {
         "record_path": record_path or "",
         "record_count": len(rows),
