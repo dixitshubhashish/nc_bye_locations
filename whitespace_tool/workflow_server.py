@@ -4180,17 +4180,12 @@ def make_handler(ui_dir: Path):
                 self.send_response(200)
                 self.send_header("Set-Cookie", "session_id=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0")
                 self.send_header("Content-Type", "text/html; charset=utf-8")
+                file_path = ui_dir / "login.html"
+                content = file_path.read_bytes()
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
                 if not head:
-                    file_path = self.ui_dir / "login.html"
-                    content = file_path.read_bytes()
-                    self.send_header("Content-Length", str(len(content)))
-                    self.end_headers()
                     self.wfile.write(content)
-                else:
-                    file_path = self.ui_dir / "login.html"
-                    content = file_path.read_bytes()
-                    self.send_header("Content-Length", str(len(content)))
-                    self.end_headers()
                 return True
 
             # If accessing /app without a valid session, redirect to login
@@ -4241,10 +4236,7 @@ def make_handler(ui_dir: Path):
             # All other API endpoints require a valid session
             session_id = _get_session_id(self)
             if not _is_valid_session(session_id):
-                # For API requests with expired session, redirect to login
-                self.send_response(302)
-                self.send_header("Location", "/login")
-                self.end_headers()
+                _json_response(self, 401, {"error": "Session expired. Please login again."})
                 return
 
             if self.path == "/api/schema":
@@ -4393,10 +4385,7 @@ def make_handler(ui_dir: Path):
             if self.path != "/api/login":
                 session_id = _get_session_id(self)
                 if not _is_valid_session(session_id):
-                    # For API requests with expired session, redirect to login
-                    self.send_response(302)
-                    self.send_header("Location", "/login")
-                    self.end_headers()
+                    _json_response(self, 401, {"error": "Session expired. Please login again."})
                     return
 
             request_id = uuid4().hex
