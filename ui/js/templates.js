@@ -17,8 +17,12 @@ function loadTemplateLibrary() {
       });
       return loadTemplateLibraryPromise;
     }
-const TEMPLATE_FIRST_BATCH = 100;
-const TEMPLATE_APPEND_CHUNK = 50;
+const TEMPLATE_FIRST_PAGE = 100;   // quick initial paint
+const TEMPLATE_PAGE_SIZE = 500;    // subsequent lazy pages, fetched from the backend by offset
+// Live paging state for the current search/filter. Rebuilt on every fresh
+// load; the IntersectionObserver reads it to fetch the next backend page.
+let templatePaging = null;
+let templateLazyObserver = null;
 // Self-contained spinner (the .spinner CSS class is scoped to .report-status,
 // so it wouldn't render inside the template results panel). Reuses the
 // spinCircle keyframe that the Review search button already relies on.
@@ -26,67 +30,111 @@ function _templateSpinner() {
       return `<span style="display:inline-block; width:12px; height:12px; border:2px solid var(--line); border-top-color: var(--accent); border-radius:50%; animation: spinCircle 0.8s linear infinite; vertical-align:middle; margin-right:6px;"></span>`;
     }
 
-function _templateRowHtml(template, sourceTypeIdToLabel) {
-      return `<tr><td>${escapeHtml(template.name)}</td><td>${escapeHtml(templateBrandNames[template.business_id] || template.business_id)}</td><td>${escapeHtml(sourceTypeIdToLabel[template.source_type_id] || sourceTypeLabel(template.source_type_id))}</td><td>${escapeHtml(template.created_at)}</td><td>${escapeHtml(template.updated_at)}</td><td><button type="button" data-load-template="${escapeHtml(template.workflow_template_id)}">Load</button></td></tr>`;
+function _templateRowHtml(template) {
+      const label = templatePaging?.sourceTypeIdToLabel?.[template.source_type_id] || sourceTypeLabel(template.source_type_id);
+      return `<tr><td>${escapeHtml(template.name)}</td><td>${escapeHtml(templateBrandNames[template.business_id] || template.business_id)}</td><td>${escapeHtml(label)}</td><td>${escapeHtml(template.created_at)}</td><td>${escapeHtml(template.updated_at)}</td><td><button type="button" data-load-template="${escapeHtml(template.workflow_template_id)}">Load</button></td></tr>`;
+    }
+
+async function _fetchTemplatesPage(offset, limit) {
+      const p = templatePaging;
+      const response = await fetch(`/api/templates?search=${encodeURIComponent(p.search)}&business_id=${encodeURIComponent(p.businessId)}&source_type_id=${encodeURIComponent(p.sourceTypeId)}&limit=${limit}&offset=${offset}`);
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not load templates.");
+      return result.templates || [];
+    }
+
+function _appendTemplateRows(templates) {
+      const body = el("templateResultsBody");
+      if (!body) return;
+      templates.forEach((t) => { templatePaging.byId[t.workflow_template_id] = t; });
+      body.insertAdjacentHTML("beforeend", templates.map((t) => _templateRowHtml(t)).join(""));
+      body.querySelectorAll("button[data-load-template]:not([data-bound])").forEach((button) => {
+        button.setAttribute("data-bound", "1");
+        button.addEventListener("click", () => {
+          setButtonBusy(button, "Loading");
+          loadTemplateIntoEditor(templatePaging.byId[button.dataset.loadTemplate]);
+        });
+      });
+    }
+
+// Fetch and append the next backend page (500 rows) when the sentinel scrolls
+// into view. Guards against overlapping fetches and stops once a short page
+// signals the end.
+async function _loadNextTemplatePage() {
+      const p = templatePaging;
+      if (!p || p.done || p.loading) return;
+      p.loading = true;
+      const more = el("templateResultsMore");
+      if (more) more.innerHTML = `${_templateSpinner()}Loading more...`;
+      try {
+        const page = await _fetchTemplatesPage(p.offset, TEMPLATE_PAGE_SIZE);
+        _appendTemplateRows(page);
+        p.offset += page.length;
+        if (page.length < TEMPLATE_PAGE_SIZE) {
+          p.done = true;
+          if (templateLazyObserver) templateLazyObserver.disconnect();
+          if (more) more.remove();
+        } else if (more) {
+          more.innerHTML = `${_templateSpinner()}Scroll for more (${p.offset} loaded)`;
+        }
+      } catch (error) {
+        if (more) more.textContent = productSafeError(error.message, "Could not load more templates.");
+      } finally {
+        p.loading = false;
+      }
+    }
+
+function _setupTemplateLazyObserver() {
+      if (templateLazyObserver) templateLazyObserver.disconnect();
+      const sentinel = el("templateResultsMore");
+      if (!sentinel || templatePaging.done) return;
+      templateLazyObserver = new IntersectionObserver((entries) => {
+        if (entries.some((e) => e.isIntersecting)) _loadNextTemplatePage();
+      }, { rootMargin: "200px" });
+      templateLazyObserver.observe(sentinel);
     }
 
 async function _loadTemplateLibraryOnce() {
       const target = el("templateResults");
       const searchBtn = el("templateSearchBtn");
       const originalBtnHtml = searchBtn ? searchBtn.innerHTML : "Search";
-      const search = el("templateSearch").value.trim();
-      const businessId = el("templateBusinessFilter").value;
-      const sourceTypeId = el("templateSourceFilter").value;
       if (searchBtn) setButtonBusy(searchBtn, "Searching");
       target.className = "status";
       target.innerHTML = `${_templateSpinner()}Loading templates...`;
+      // Fresh paging state for this search/filter.
+      templatePaging = {
+        search: el("templateSearch").value.trim(),
+        businessId: el("templateBusinessFilter").value,
+        sourceTypeId: el("templateSourceFilter").value,
+        offset: 0,
+        done: false,
+        loading: false,
+        byId: {},
+        sourceTypeIdToLabel: Object.fromEntries(sourceTypes.map((source) => [source.source_type_id, sourceTypeLabel(source.name)])),
+      };
+      if (templateLazyObserver) { templateLazyObserver.disconnect(); templateLazyObserver = null; }
       try {
-        const response = await fetch(`/api/templates?search=${encodeURIComponent(search)}&business_id=${encodeURIComponent(businessId)}&source_type_id=${encodeURIComponent(sourceTypeId)}&limit=1000`);
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "Could not load templates.");
-        const templates = result.templates || [];
-        if (!templates.length) {
+        // First page: 100 rows, rendered immediately for a fast table.
+        const firstPage = await _fetchTemplatesPage(0, TEMPLATE_FIRST_PAGE);
+        if (!firstPage.length) {
           target.className = "status";
           target.textContent = "No templates found.";
+          templatePaging.done = true;
           return;
         }
-        const sourceTypeIdToLabel = Object.fromEntries(sourceTypes.map((source) => [source.source_type_id, sourceTypeLabel(source.name)]));
-        const byId = Object.fromEntries(templates.map((t) => [t.workflow_template_id, t]));
         target.className = "";
-        // Render at least initial 100 templates immediately, then lazy append
-        // the remaining templates in chunks with smooth pagination/progress indicator.
-        const firstBatch = templates.slice(0, TEMPLATE_FIRST_BATCH);
-        target.innerHTML = `<table><thead><tr><th>Template</th><th>Brand</th><th>Source Type</th><th>Created</th><th>Updated</th><th>Action</th></tr></thead><tbody id="templateResultsBody">${firstBatch.map((t) => _templateRowHtml(t, sourceTypeIdToLabel)).join("")}</tbody></table>${templates.length > TEMPLATE_FIRST_BATCH ? `<div id="templateResultsMore" class="status" style="padding:8px 0;">${_templateSpinner()}Loading ${templates.length - TEMPLATE_FIRST_BATCH} more...</div>` : ""}`;
-
-        const bindLoad = (root) => root.querySelectorAll("button[data-load-template]:not([data-bound])").forEach((button) => {
-          button.setAttribute("data-bound", "1");
-          button.addEventListener("click", () => {
-            setButtonBusy(button, "Loading");
-            loadTemplateIntoEditor(byId[button.dataset.loadTemplate]);
-          });
-        });
-        bindLoad(target);
-
-        let index = firstBatch.length;
-        const body = el("templateResultsBody");
-        await new Promise((resolve) => {
-          const appendChunk = () => {
-            if (!body || index >= templates.length) {
-              const more = el("templateResultsMore");
-              if (more) more.remove();
-              resolve();
-              return;
-            }
-            const chunk = templates.slice(index, index + TEMPLATE_APPEND_CHUNK);
-            body.insertAdjacentHTML("beforeend", chunk.map((t) => _templateRowHtml(t, sourceTypeIdToLabel)).join(""));
-            index += chunk.length;
-            bindLoad(body.parentElement);
-            const more = el("templateResultsMore");
-            if (more) more.innerHTML = index < templates.length ? `${_templateSpinner()}Loading ${templates.length - index} more...` : "";
-            requestAnimationFrame(appendChunk);
-          };
-          requestAnimationFrame(appendChunk);
-        });
+        target.innerHTML = `<table><thead><tr><th>Template</th><th>Brand</th><th>Source Type</th><th>Created</th><th>Updated</th><th>Action</th></tr></thead><tbody id="templateResultsBody"></tbody></table><div id="templateResultsMore" class="status" style="padding:8px 0;"></div>`;
+        _appendTemplateRows(firstPage);
+        templatePaging.offset = firstPage.length;
+        // A short first page means there is nothing more to lazy-load.
+        templatePaging.done = firstPage.length < TEMPLATE_FIRST_PAGE;
+        const more = el("templateResultsMore");
+        if (templatePaging.done) {
+          if (more) more.remove();
+        } else {
+          if (more) more.innerHTML = `${_templateSpinner()}Scroll for more (${templatePaging.offset} loaded)`;
+          _setupTemplateLazyObserver();
+        }
       } catch (error) {
         target.className = "status error";
         target.textContent = productSafeError(error.message, "Could not load templates.");
