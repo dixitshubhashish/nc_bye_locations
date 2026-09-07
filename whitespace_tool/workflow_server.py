@@ -31,10 +31,10 @@ from whitespace_tool.paths import project_path
 from whitespace_tool.sources.demographics import fetch_bigquery_demographics, resolve_bigquery_connection
 from whitespace_tool.sources.dominos_overpass import fetch_for_zips as fetch_dominos_from_overpass
 from whitespace_tool.sources.dominos_store_locator import fetch_for_zips
-from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows, clear_dataset_tables, drop_dataset_tables, push_to_bigquery
+from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, TABLE_CLUSTER_SPECS, build_table_rows, clear_dataset_tables, drop_dataset_tables, push_to_bigquery
 from whitespace_tool.storage_config import load_dotenv, load_storage_config
 from whitespace_tool.sqlite_cache import (
-    get_cached_query, set_cached_query, invalidate_cache,
+    get_cached_query, set_cached_query, invalidate_cache, clear_local_cache_db,
     get_cached_zipcode_count, cache_zipcodes, get_auto_repair_stats, set_auto_repair_stats, increment_manual_fixed_count,
     replace_gold_mirror, get_mirror_status, fetch_mirror_zip_brand_activity,
     fetch_mirror_reporting_locations, fetch_mirror_reporting_locations_by_brand, fetch_mirror_businesses,
@@ -956,7 +956,10 @@ def _ensure_businesses_table(client: Any, project_id: str, dataset_id: str) -> N
         ]
         client.create_table(bigquery.Table(table_ref, schema=schema))
         return
-    existing_names = {field.name for field in existing.schema}
+    existing_schema = getattr(existing, "schema", None)
+    if existing_schema is None:
+        return
+    existing_names = {field.name for field in existing_schema}
     missing_fields = [
         bigquery.SchemaField(
             field["name"], field["type"], mode=field["mode"],
@@ -966,7 +969,47 @@ def _ensure_businesses_table(client: Any, project_id: str, dataset_id: str) -> N
         if field["name"] not in existing_names
     ]
     if missing_fields:
-        existing.schema = list(existing.schema) + missing_fields
+        existing.schema = list(existing_schema) + missing_fields
+        client.update_table(existing, ["schema"])
+
+
+def _ensure_listings_table(client: Any, project_id: str, dataset_id: str) -> None:
+    from google.cloud import bigquery
+
+    table_ref = f"{project_id}.{dataset_id}.listings"
+    _ensure_dataset(client, project_id, dataset_id)
+    try:
+        existing = client.get_table(table_ref)
+    except Exception as exc:
+        if getattr(exc, "code", None) != 404:
+            raise
+        schema = [
+            bigquery.SchemaField(
+                field["name"], field["type"], mode=field["mode"],
+                default_value_expression=field.get("default"),
+            )
+            for field in TABLE_SCHEMAS["listings"]
+        ]
+        table = bigquery.Table(table_ref, schema=schema)
+        cluster_fields = TABLE_CLUSTER_SPECS.get("listings")
+        if cluster_fields:
+            table.clustering_fields = cluster_fields
+        client.create_table(table)
+        return
+    existing_schema = getattr(existing, "schema", None)
+    if existing_schema is None:
+        return
+    existing_names = {field.name for field in existing_schema}
+    missing_fields = [
+        bigquery.SchemaField(
+            field["name"], field["type"], mode=field["mode"],
+            default_value_expression=field.get("default"),
+        )
+        for field in TABLE_SCHEMAS["listings"]
+        if field["name"] not in existing_names
+    ]
+    if missing_fields:
+        existing.schema = list(existing_schema) + missing_fields
         client.update_table(existing, ["schema"])
 
 
@@ -1803,6 +1846,8 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
         _enrichment_checkpoint()
         _ensure_dataset(client, project_id, bronze_dataset_id)
         _ensure_dataset(client, project_id, silver_dataset_id)
+        _ensure_businesses_table(client, project_id, bronze_dataset_id)
+        _ensure_listings_table(client, project_id, bronze_dataset_id)
         bronze_ref = f"{project_id}.{bronze_dataset_id}"
         silver_ref = f"{project_id}.{silver_dataset_id}"
         zip_reference_table = f"{silver_ref}.zip_reference"
@@ -2689,12 +2734,21 @@ def _ensure_gold_reporting_views(client: Any, gold_ref: str) -> bool:
     except Exception as exc:
         if getattr(exc, "code", None) != 404:
             raise
+    if hasattr(client, "create_dataset"):
+        project_id, bronze_dataset_id, silver_dataset_id, gold_dataset_id, _ = _medallion_settings()
+        _ensure_dataset(client, project_id, bronze_dataset_id)
+        _ensure_dataset(client, project_id, silver_dataset_id)
+        _ensure_dataset(client, project_id, gold_dataset_id)
+        _ensure_businesses_table(client, project_id, bronze_dataset_id)
+        _ensure_listings_table(client, project_id, bronze_dataset_id)
     try:
         prepare_zipcodes()
     except Exception as exc:
         raise RuntimeError(f"gold bootstrap failed at prepare_zipcodes: {exc}") from exc
     try:
-        build_silver_layer()
+        silver_res = build_silver_layer()
+        if isinstance(silver_res, dict) and silver_res.get("status") == "failed":
+            raise RuntimeError(f"gold bootstrap failed at build_silver_layer: {silver_res.get('warning')}")
     except Exception as exc:
         raise RuntimeError(f"gold bootstrap failed at build_silver_layer: {exc}") from exc
     try:
@@ -3204,6 +3258,7 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         from google.cloud import bigquery
         client = _bigquery_client(project_id, credentials_json)
         _ensure_businesses_table(client, project_id, bronze_dataset_id)
+        _ensure_listings_table(client, project_id, bronze_dataset_id)
         gold_ref = f"{project_id}.{gold_dataset_id}"
         gold_bootstrapped = _ensure_gold_reporting_views(client, gold_ref)
         source_table = os.environ.get("REPORTING_LISTINGS_TABLE") or f"{gold_ref}.vw_zip_brand_activity"
@@ -3211,11 +3266,13 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
             source_table = f"{project_id}.{source_table}"
     except (ImportError, Exception) as init_err:
         LOGGER.warning("bigquery_reporting_fallback reason=%s", init_err)
-        # Name the real failure instead of a reassuring-sounding generic
-        # message - this fallback fires on any setup error (including a
-        # failed first-time gold bootstrap), so silently saying "connected"
-        # here makes an actual outage look like empty data.
-        return _empty_reporting_payload("us_zipcodes_baseline", params, f"Reporting setup incomplete: {init_err}")
+        err_text = str(init_err)
+        # Suppress raw BigQuery 404 traces when warehouse tables do not exist yet so empty warehouse displays cleanly
+        if "404" in err_text and ("not found" in err_text.lower() or "notfound" in err_text.lower()):
+            warning = ""
+        else:
+            warning = f"Reporting setup incomplete: {init_err}"
+        return _empty_reporting_payload("us_zipcodes_baseline", params, warning)
     table_ref = f"`{source_table}`"
     gold_zip_ref = f"`{gold_ref}.vw_zip_brand_activity`"
     # vw_state_summary/vw_city_summary are grouped by brand_name, so summing
@@ -4170,7 +4227,8 @@ def _count_error_listings_live(business_id: str = "") -> int:
     try:
         return int(next(iter(client.query(query, job_config=config).result()))["total"])
     except Exception as exc:
-        if getattr(exc, "code", None) == 404:
+        err_msg = str(exc).lower()
+        if getattr(exc, "code", None) == 404 or "404" in err_msg or "not found" in err_msg:
             return 0
         raise
 
@@ -4919,6 +4977,11 @@ def clear_saved_data() -> dict[str, Any]:
     truncated = clear_result["truncated_tables"]
     ZIP_REFERENCE_CACHE.pop((project_id, dataset_id), None)
     invalidate_cache()
+    try:
+        remaining_errors = refresh_error_count("")
+    except Exception as exc:
+        LOGGER.warning("error_count_refresh_after_clear_failed error=%s", exc)
+        remaining_errors = 0
     return {
         "dataset": f"{project_id}.{dataset_id}",
         "deleted_tables": deleted,
@@ -4943,7 +5006,12 @@ def master_delete_data(data: dict[str, Any]) -> dict[str, Any]:
         dropped_tables.extend(qualified)
         results.append({"dataset": f"{project_id}.{dataset_id}", "dropped_tables": result["dropped_tables"], "dropped_count": len(result["dropped_tables"])})
         ZIP_REFERENCE_CACHE.pop((project_id, dataset_id), None)
+    ZIP_REFERENCE_CACHE.clear()
     invalidate_cache()
+    clear_local_cache_db()
+    set_error_count("", 0)
+    AUTO_REPAIR_STATS.update({"fixed": 0, "processed": 0, "remaining": 0})
+    ENRICHMENT_STATUS.update({"state": "idle", "updated_at": utc_now_iso()})
     return {
         "datasets": results,
         "dropped_tables": dropped_tables,

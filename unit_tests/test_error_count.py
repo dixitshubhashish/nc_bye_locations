@@ -34,6 +34,13 @@ class ErrorCountStoreTests(unittest.TestCase):
         sqlite_cache.set_error_count("biz-1", 2)
         self.assertEqual(sqlite_cache.get_error_count("biz-1"), 2)
 
+    def test_clear_local_cache_db_resets_error_count_and_mirrors(self) -> None:
+        sqlite_cache.set_error_count("", 55)
+        sqlite_cache.set_error_count("biz-1", 20)
+        sqlite_cache.clear_local_cache_db()
+        self.assertEqual(sqlite_cache.get_error_count(""), 0)
+        self.assertIsNone(sqlite_cache.get_error_count("biz-1"))
+
 
 class CountErrorListingsCachingTests(unittest.TestCase):
     """count_error_listings serves SQLite on lazy reads and only hits the

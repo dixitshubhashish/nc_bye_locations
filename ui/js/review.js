@@ -612,11 +612,8 @@ async function refreshReviewCount(refresh = false) {
         const response = await fetch(`/api/error-listings/count?business_id=&refresh=${refresh ? "1" : "0"}`);
         const result = await response.json();
         if (response.ok && typeof result.count === "number") {
-          const cached = Number(localStorage.getItem("review_error_count_last") || 0);
-          // A non-forced mirror read must never replace a known count with a
-          // transient zero while background enrichment is still running.
-          const count = !refresh && result.count === 0 && cached > 0 ? cached : result.count;
-          el("reviewCount").textContent = count;
+          const count = result.count;
+          if (el("reviewCount")) el("reviewCount").textContent = count;
           localStorage.setItem("review_error_count_last", String(count));
         }
       } catch (error) {

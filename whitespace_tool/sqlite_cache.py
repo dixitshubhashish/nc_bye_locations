@@ -444,6 +444,46 @@ def invalidate_cache(cache_key: str | None = None) -> None:
         conn.commit()
 
 
+def clear_local_cache_db(include_reference_zips: bool = False) -> None:
+    """Clear all local cache tables so SQLite matches an empty/cleared warehouse state."""
+    init_sqlite_cache()
+    tables_to_clear = [
+        "query_cache",
+        "error_listing_counts",
+        "mirror_quality_listings",
+        "auto_repair_stats",
+        "enrichment_queue",
+        "mirror_zip_brand_activity",
+        "mirror_reporting_locations",
+        "mirror_businesses",
+        "mirror_meta",
+    ]
+    if include_reference_zips:
+        tables_to_clear.extend(["us_zipcodes", "zip_reference_status"])
+
+    with get_db_connection() as conn:
+        for table in tables_to_clear:
+            try:
+                conn.execute(f"DELETE FROM {table};")
+            except Exception as exc:
+                LOGGER.warning("clear_local_cache_table_failed table=%s error=%s", table, exc)
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO error_listing_counts (business_id, count, refreshed_at) VALUES ('', 0, CURRENT_TIMESTAMP);"
+            )
+            conn.execute("""
+                INSERT OR REPLACE INTO auto_repair_stats (id, fixed, manual_fixed, processed, remaining, updated_at)
+                VALUES (1, 0, 0, 0, 0, CURRENT_TIMESTAMP);
+            """)
+            conn.execute("""
+                INSERT OR REPLACE INTO mirror_meta (id, synced_at, zip_brand_rows, location_rows, business_rows)
+                VALUES (1, CURRENT_TIMESTAMP, 0, 0, 0);
+            """)
+        except Exception as exc:
+            LOGGER.warning("clear_local_cache_defaults_failed error=%s", exc)
+        conn.commit()
+
+
 def get_error_count(business_id: str = "") -> int | None:
     """Return the last-known Review Error Listings count for a business
     (empty string = the all-businesses total), or None if it has never been

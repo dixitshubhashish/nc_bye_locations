@@ -2412,6 +2412,7 @@ async function performClearSavedData() {
         });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not clear saved data.");
+        if (typeof refreshReviewCount === "function") await refreshReviewCount(true);
         setStatus("Saved data cleared.", "ok");
       } catch (error) {
         setStatus(productSafeError(error.message, "Could not clear saved data."), "error");
@@ -2479,6 +2480,8 @@ async function performMasterDeleteData() {
         mappingSelections = {};
         selectedBrand = null;
         appDataLoaded = false;
+        localStorage.removeItem("review_error_count_last");
+        if (el("reviewCount")) el("reviewCount").textContent = "0";
         logout();
         prepareReferenceData();
       } catch (error) {

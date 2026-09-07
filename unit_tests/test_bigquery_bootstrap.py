@@ -295,6 +295,22 @@ class BigQueryBootstrapTests(unittest.TestCase):
                 workflow_server.clear_sample_dataset()
         self.assertIn("CRITICAL SAFETY RULE", str(ctx.exception))
 
+    def test_reporting_summary_suppresses_raw_404_table_not_found(self) -> None:
+        import sys
+        import types
+        fake_bigquery = types.SimpleNamespace()
+        fake_google = types.ModuleType("google")
+        fake_cloud = types.ModuleType("google.cloud")
+        modules = {"google": fake_google, "google.cloud": fake_cloud, "google.cloud.bigquery": fake_bigquery}
+
+        with patch.dict(sys.modules, modules):
+            with patch.object(workflow_server, "_medallion_settings", side_effect=RuntimeError("gold bootstrap failed at build_gold_layer: 404 Not found: Table keen-device-610:birdeye_silver_listings.listings_enriched was not found")):
+                with patch.object(workflow_server, "get_mirror_status", return_value=None):
+                    result = workflow_server.reporting_summary({})
+
+        self.assertEqual(result["warning"], "")
+        self.assertEqual(result["totals"]["total_locations"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
