@@ -68,6 +68,29 @@ def init_sqlite_cache() -> None:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_us_zipcodes_lat_lon ON us_zipcodes (latitude, longitude);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_us_zipcodes_state_city ON us_zipcodes (state_code, city_name);")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS worldwide_cities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                country_code TEXT,
+                country_name TEXT,
+                state_name TEXT,
+                state_code TEXT,
+                district TEXT,
+                city TEXT,
+                town TEXT,
+                zip_code TEXT,
+                latitude REAL,
+                longitude REAL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ww_cities_country_city ON worldwide_cities (country_code, city);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ww_cities_city ON worldwide_cities (city);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ww_cities_town ON worldwide_cities (town);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ww_cities_district ON worldwide_cities (district);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ww_cities_lat_lon ON worldwide_cities (latitude, longitude);")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS query_cache (
                 cache_key TEXT PRIMARY KEY,
@@ -270,6 +293,77 @@ def enrichment_cycle_counts(cycle_id: int) -> dict[str, int]:
     return result
 
 
+def seed_or_swap_enrichment_cycle(incoming_listing_ids: list[str] | None = None) -> tuple[int, int]:
+    """Seed or swap the enrichment queue cycle.
+    If 'base' set has pending items, returns (current_cycle_id, pending_count).
+    If 'base' set is exhausted:
+      1. Collects all listing_ids currently in 'failed' set.
+      2. Merges any newly incoming listing_ids.
+      3. Increments cycle_id.
+      4. Swaps them all into queue_set='base', state='pending', cycle_id=new_cycle_id.
+    Returns (new_cycle_id, new_pending_count).
+    """
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT MAX(cycle_id) AS max_cycle FROM enrichment_queue;").fetchone()
+        has_prior = bool(row and row["max_cycle"] is not None)
+        current_cycle = int(row["max_cycle"]) if has_prior else 0
+
+        pending_row = conn.execute(
+            "SELECT COUNT(*) AS count FROM enrichment_queue WHERE cycle_id = ? AND queue_set = 'base' AND state = 'pending';",
+            (current_cycle,)
+        ).fetchone() if has_prior else None
+        pending_count = int(pending_row["count"] or 0) if pending_row else 0
+
+        incoming_set = {str(lid).strip() for lid in (incoming_listing_ids or []) if str(lid).strip()}
+
+        # If base is still actively working and has pending items:
+        if pending_count > 0:
+            if incoming_set:
+                existing = {str(r["listing_id"]) for r in conn.execute("SELECT listing_id FROM enrichment_queue;").fetchall()}
+                new_ids = incoming_set - existing
+                if new_ids:
+                    conn.executemany(
+                        "INSERT OR IGNORE INTO enrichment_queue (listing_id, cycle_id, queue_set, state) VALUES (?, ?, 'base', 'pending');",
+                        [(lid, current_cycle) for lid in new_ids]
+                    )
+                    conn.commit()
+                updated_pending = conn.execute(
+                    "SELECT COUNT(*) AS count FROM enrichment_queue WHERE cycle_id = ? AND queue_set = 'base' AND state = 'pending';",
+                    (current_cycle,)
+                ).fetchone()
+                return current_cycle, int(updated_pending["count"] or 0) if updated_pending else 0
+            return current_cycle, pending_count
+
+        # If base has no pending items, swap failed set to become the new base set!
+        failed_rows = conn.execute(
+            "SELECT listing_id, attempt_count FROM enrichment_queue WHERE queue_set = 'failed';"
+        ).fetchall()
+
+        all_ids_to_run = set(incoming_set)
+        attempt_counts = {}
+        for r in failed_rows:
+            lid = str(r["listing_id"])
+            all_ids_to_run.add(lid)
+            attempt_counts[lid] = int(r["attempt_count"] or 0)
+
+        if not all_ids_to_run:
+            return current_cycle, 0
+
+        new_cycle = current_cycle + 1
+        conn.execute("DELETE FROM enrichment_queue WHERE improved = 1;")
+        conn.execute("DELETE FROM enrichment_queue WHERE queue_set = 'failed';")
+
+        conn.executemany(
+            """INSERT OR REPLACE INTO enrichment_queue 
+               (listing_id, cycle_id, queue_set, state, attempt_count, updated_at)
+               VALUES (?, ?, 'base', 'pending', ?, CURRENT_TIMESTAMP);""",
+            [(lid, new_cycle, attempt_counts.get(lid, 0)) for lid in sorted(all_ids_to_run)]
+        )
+        conn.commit()
+        return new_cycle, len(all_ids_to_run)
+
+
 def replace_quality_mirror(rows: list[dict[str, Any]]) -> None:
     """Persist the latest invalid/review rows for fast quality reporting."""
     init_sqlite_cache()
@@ -355,12 +449,73 @@ def get_cached_zipcode(zip_code: str) -> dict[str, Any] | None:
     return None
 
 
+def find_nearest_zip_in_cache(lat: float, lon: float) -> dict[str, Any] | None:
+    """Find the nearest cached US ZIP code and city to the given coordinates (snapping ocean/offshore coords)."""
+    from whitespace_tool.geo_enrichment import find_nearest_city_and_zip
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        return find_nearest_city_and_zip(lat, lon, conn)
+
+
+def find_nearest_worldwide_city_in_cache(lat: float, lon: float, country: str | None = None) -> dict[str, Any] | None:
+    """Find the nearest cached worldwide city to the given coordinates from cachedb."""
+    from whitespace_tool.geo_enrichment import find_nearest_worldwide_city
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        return find_nearest_worldwide_city(lat, lon, conn, country=country)
+
+
+def lookup_cached_city_state(city: str | None, state: str | None) -> dict[str, Any] | None:
+    """Fuzzy lookup of primary ZIP and coordinates for a city and state from cache."""
+    from whitespace_tool.geo_enrichment import lookup_zip_and_coords_by_city_state
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        return lookup_zip_and_coords_by_city_state(city, state, conn)
+
+
 def get_cached_zipcode_count() -> int:
     """Return the durable ZIP mirror size without loading its rows."""
     init_sqlite_cache()
     with get_db_connection() as conn:
         row = conn.execute("SELECT COUNT(*) AS count FROM us_zipcodes;").fetchone()
         return int(row["count"] or 0)
+
+
+def cache_worldwide_cities(records: list[dict[str, Any]]) -> int:
+    """Cache worldwide city records into SQLite for lightning-fast local matching."""
+    if not records:
+        return 0
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        conn.executemany("""
+            INSERT INTO worldwide_cities
+            (country_code, country_name, state_name, state_code, district, city, town, zip_code, latitude, longitude)
+            VALUES (:country_code, :country_name, :state_name, :state_code, :district, :city, :town, :zip_code, :latitude, :longitude)
+        """, [
+            {
+                "country_code": str(r.get("country_code") or r.get("COUNTRY_CODE") or "").strip().upper() or None,
+                "country_name": str(r.get("country_name") or r.get("COUNTRY") or "").strip() or None,
+                "state_name": str(r.get("state_name") or r.get("STATE") or "").strip() or None,
+                "state_code": str(r.get("state_code") or r.get("STATE_CODE") or "").strip().upper() or None,
+                "district": str(r.get("district") or r.get("DISTRICT") or "").strip() or None,
+                "city": str(r.get("city") or r.get("CITY") or "").strip() or None,
+                "town": str(r.get("town") or r.get("TOWN") or "").strip() or None,
+                "zip_code": str(r.get("zip_code") or r.get("ZIP_CODE") or "").strip() or None,
+                "latitude": float(r["latitude"]) if r.get("latitude") is not None or r.get("LATITUDE") is not None else None,
+                "longitude": float(r["longitude"]) if r.get("longitude") is not None or r.get("LONGITUDE") is not None else None,
+            }
+            for r in records
+        ])
+        conn.commit()
+    return len(records)
+
+
+def get_cached_worldwide_city_count() -> int:
+    """Return the number of cached worldwide city records."""
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT COUNT(*) AS count FROM worldwide_cities;").fetchone()
+        return int(row["count"] or 0) if row else 0
 
 
 def get_zip_reference_status() -> dict[str, Any]:

@@ -34,6 +34,7 @@ class DemoDataValidationTests(unittest.TestCase):
                 "City": "Raleigh",
                 "Region": "NC",
                 "PostalCode": "27601",
+                "Country": "United States",
                 "Phone": "9195550100"
             },
             # Bad row 1: Malformed ZIP (not 5 digits)
@@ -44,6 +45,7 @@ class DemoDataValidationTests(unittest.TestCase):
                 "City": "Durham",
                 "Region": "NC",
                 "PostalCode": "999",  # Bad ZIP
+                "Country": "United States",
                 "Phone": "9195550200"
             },
             # Bad row 2: Missing postal code entirely
@@ -53,7 +55,8 @@ class DemoDataValidationTests(unittest.TestCase):
                 "AddressDescription": "789 No Zip Ave",
                 "City": "Cary",
                 "Region": "NC",
-                "PostalCode": ""  # Missing mandatory ZIP
+                "PostalCode": "",  # Missing mandatory ZIP
+                "Country": "United States"
             }
         ]
 

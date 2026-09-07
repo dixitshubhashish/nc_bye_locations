@@ -118,9 +118,19 @@ def optional_timestamp(value: Any) -> str | None:
 
 
 def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name: str, index: int) -> LocationRecord | None:
+    from whitespace_tool.geo_enrichment import detect_and_fix_inverted_coords, normalize_state_code
+    from whitespace_tool.sqlite_cache import lookup_cached_city_state
+
     fields = mapper["fields"]
     brand = clean_display_text(_text(mapper.get("brand")) or _text(get_nested(row, fields.get("brand", "brand"))), proper_case=True)
-    postal_code = clean_zip(get_nested(row, fields["postal_code"]))
+    postal_code = clean_zip(get_nested(row, fields.get("postal_code", "")))
+    if not postal_code and (mapper.get("is_ai_enriched") or mapper.get("auto_enrich")):
+        raw_city = clean_display_text(get_nested(row, fields.get("city", "")), proper_case=True)
+        raw_state = normalize_state_code(_text(get_nested(row, fields.get("state", ""))))
+        if raw_city and raw_state:
+            match = lookup_cached_city_state(raw_city, raw_state)
+            if match and match.get("zip_code"):
+                postal_code = str(match["zip_code"])
     if not brand or not postal_code:
         return None
 
@@ -131,6 +141,11 @@ def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name:
     raw_observed = _text(get_nested(row, fields.get("observed_at", ""), ""))
     normalized_observed = optional_timestamp(raw_observed) if raw_observed else None
 
+    raw_lat = optional_float(get_nested(row, fields.get("latitude", ""), ""))
+    raw_lon = optional_float(get_nested(row, fields.get("longitude", ""), ""))
+    if raw_lat is not None and raw_lon is not None:
+        raw_lat, raw_lon, _ = detect_and_fix_inverted_coords(raw_lat, raw_lon)
+
     return LocationRecord(
         brand=brand,
         business_id=str(mapper.get("business_id") or "") or None,
@@ -139,10 +154,10 @@ def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name:
         name=clean_display_text(get_nested(row, fields.get("name", ""), ""), proper_case=True),
         address=clean_display_text(get_nested(row, fields.get("address", ""), "")),
         city=clean_display_text(get_nested(row, fields.get("city", ""), ""), proper_case=True),
-        state=_text(get_nested(row, fields.get("state", ""), "")).upper(),
+        state=normalize_state_code(_text(get_nested(row, fields.get("state_code", fields.get("state", ""))))) or _text(get_nested(row, fields.get("state_code", fields.get("state", "")))).upper(),
         postal_code=postal_code,
-        latitude=optional_float(get_nested(row, fields.get("latitude", ""), "")),
-        longitude=optional_float(get_nested(row, fields.get("longitude", ""), "")),
+        latitude=raw_lat,
+        longitude=raw_lon,
         source=source_name,
         observed_at=normalized_observed or raw_observed or utc_now_iso(),
         raw=dict(row),
@@ -152,9 +167,11 @@ def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name:
         town=clean_display_text(get_nested(row, fields.get("town", ""), ""), proper_case=True) or None,
         province=clean_display_text(get_nested(row, fields.get("province", ""), ""), proper_case=True) or None,
         country=_text(get_nested(row, fields.get("country", ""), "")) or None,
+        country_code=_text(get_nested(row, fields.get("country_code", ""), "")) or None,
         neighborhood=_text(get_nested(row, fields.get("neighborhood", ""), "")) or None,
         district=_text(get_nested(row, fields.get("district", ""), "")) or None,
         phone_number=_text(get_nested(row, fields.get("phone_number", ""), "")) or None,
+        email=_text(get_nested(row, fields.get("email", ""), "")) or None,
         website_url=_text(get_nested(row, fields.get("website_url", ""), "")) or None,
         google_maps_link=_text(get_nested(row, fields.get("google_maps_link", ""), "")) or None,
         social_media_handles=_text(get_nested(row, fields.get("social_media_handles", ""), "")) or None,

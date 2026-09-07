@@ -52,6 +52,8 @@ class LocationRecord:
     town: str | None = None
     province: str | None = None
     country: str | None = None
+    country_code: str | None = None
+    email: str | None = None
 
     @property
     def zip5(self) -> str:

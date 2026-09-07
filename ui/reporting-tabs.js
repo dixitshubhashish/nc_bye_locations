@@ -27,7 +27,7 @@
       .dq-table th,.dq-table td{padding:12px 14px;border-bottom:1px solid var(--line);font-size:14px;line-height:1.35;text-align:left}
       .dq-table th{background:#eef4fc;color:var(--navy,var(--ink));font-size:13px;font-weight:750}
       .dq-status{display:inline-flex;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:750}
-      .dq-status.good{background:#dcfce7;color:#15803d}.dq-status.warn{background:#fef3c7;color:#a16207}.dq-status.bad{background:#fee2e2;color:#b91c1c}
+      .dq-status.good{background:#dcfce7;color:#15803d}.dq-status.warn{background:#fef3c7;color:#a16207}.dq-status.bad{background:#fee2e2;color:#b91c1c}.dq-status.neutral{background:#f1f5f9;color:#64748b}
       .dq-improvements{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
       .dq-improvement{background:#fff;border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;padding:12px 14px}
       .dq-improvement strong{display:block;color:var(--navy,var(--ink));margin-bottom:3px}.dq-improvement span{font-size:12px;color:var(--muted)}
@@ -136,14 +136,16 @@
         metricCard(fmt(cities.length), 'Impacted cities')
       ].join('');
 
+      const hasData = raw > 0 || needsReview > 0 || aiFixed > 0 || manualFixed > 0 || reasons.length > 0;
+
       const signals = [
-        ['Manual review queue', fmt(needsReview), needsReview ? 'bad' : 'good'],
-        ['Unresolved rate', pct(unresolvedRate), statusClass(unresolvedRate, 5, 20, true)],
-        ['Automatic fixes', fmt(aiFixed), aiFixed ? 'good' : 'warn'],
-        ['Manual fixes', fmt(manualFixed), manualFixed ? 'good' : 'warn'],
-        ['Issue categories', fmt(reasons.length), reasons.length ? 'warn' : 'good']
+        ['Manual review queue', fmt(needsReview), hasData ? (needsReview ? 'bad' : 'good') : 'neutral'],
+        ['Unresolved rate', hasData ? pct(unresolvedRate) : '—', hasData ? statusClass(unresolvedRate, 5, 20, true) : 'neutral'],
+        ['Automatic fixes', fmt(aiFixed), hasData ? (aiFixed ? 'good' : 'warn') : 'neutral'],
+        ['Manual fixes', fmt(manualFixed), hasData ? (manualFixed ? 'good' : 'warn') : 'neutral'],
+        ['Issue categories', fmt(reasons.length), hasData ? (reasons.length ? 'warn' : 'good') : 'neutral']
       ];
-      $('dqSignals').innerHTML = `<table class="dq-table"><thead><tr><th>Signal</th><th>Current</th><th>Status</th></tr></thead><tbody>${signals.map(([name,val,cls]) => `<tr><td>${name}</td><td>${val}</td><td><span class="dq-status ${cls}">${cls === 'good' ? 'Healthy' : cls === 'warn' ? 'Review' : 'Needs attention'}</span></td></tr>`).join('')}</tbody></table>`;
+      $('dqSignals').innerHTML = `<table class="dq-table"><thead><tr><th>Signal</th><th>Current</th><th>Status</th></tr></thead><tbody>${signals.map(([name,val,cls]) => `<tr><td>${name}</td><td>${val}</td><td><span class="dq-status ${cls}">${cls === 'good' ? 'Healthy' : cls === 'warn' ? 'Review' : cls === 'bad' ? 'Needs attention' : 'No data'}</span></td></tr>`).join('')}</tbody></table>`;
 
       const buckets = reasons.filter((bucket) => num(bucket.count) > 0).map((bucket) => ({...bucket, type: bucket.reason}));
       if (buckets.length) {
@@ -158,7 +160,13 @@
       if (needsReview) improvements.push(['Reduce manual review', `${fmt(needsReview)} invalid listings remain unresolved and require attention.`]);
       if (reasons[0]) improvements.push(['Address the leading issue', `${fmt(reasons[0].count)} listings are affected by ${String(reasons[0].reason).replace(/_/g, ' ')}.`]);
       if (aiFixed) improvements.push(['Automatic improvements completed', `${fmt(aiFixed)} listings have passed through the automatic repair path.`]);
-      if (!improvements.length) improvements.push(['Maintain current quality level', 'No major threshold breach is visible in the current reporting summary. Continue monitoring freshness and source coverage.']);
+      if (!improvements.length) {
+        if (hasData) {
+          improvements.push(['Maintain current quality level', 'No major threshold breach is visible in the current reporting summary. Continue monitoring freshness and source coverage.']);
+        } else {
+          improvements.push(['No data available', 'No validation or review records are currently recorded. Signals will populate once records are processed.']);
+        }
+      }
       $('dqImprovements').innerHTML = improvements.map(([title,text]) => `<div class="dq-improvement"><strong>${title}</strong><span>${text}</span></div>`).join('');
 
       $('dqReconciliation').innerHTML = `<table class="dq-table"><thead><tr><th>Measure</th><th>Value</th><th>Explanation</th></tr></thead><tbody>

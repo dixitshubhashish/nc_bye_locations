@@ -41,7 +41,7 @@ CONTENT_HASH_FIELDS: tuple[str, ...] = (
     "service_types", "opening_date", "status", "annual_revenue", "average_ticket_size",
     "daily_footfall", "monthly_footfall", "rental_cost", "lease_cost",
     "population_density", "average_household_income", "competitor_count",
-    "foot_traffic_score", "parking_availability", "ratings",
+    "foot_traffic_score", "parking_availability", "ratings", "country_code", "email",
 )
 
 
@@ -218,7 +218,8 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "state_code", "type": "STRING", "mode": "REQUIRED"},
         {"name": "province", "type": "STRING", "mode": "NULLABLE"},
         {"name": "zip_code", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "country", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "country", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "country_code", "type": "STRING", "mode": "NULLABLE"},
         {"name": "latitude", "type": "FLOAT", "mode": "NULLABLE"},
         {"name": "longitude", "type": "FLOAT", "mode": "NULLABLE"},
         {"name": "first_observed_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
@@ -239,6 +240,7 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "neighborhood", "type": "STRING", "mode": "NULLABLE"},
         {"name": "district", "type": "STRING", "mode": "NULLABLE"},
         {"name": "phone_number", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "email", "type": "STRING", "mode": "NULLABLE"},
         {"name": "website_url", "type": "STRING", "mode": "NULLABLE"},
         {"name": "google_maps_link", "type": "STRING", "mode": "NULLABLE"},
         {"name": "social_media_handles", "type": "STRING", "mode": "NULLABLE"},
@@ -363,6 +365,7 @@ def _listing_row(row: LocationRecord) -> dict[str, Any]:
         "province": row.province,
         "zip_code": row.zip5,
         "country": row.country,
+        "country_code": getattr(row, "country_code", None),
         "latitude": row.latitude,
         "longitude": row.longitude,
         "first_observed_at": row.observed_at,
@@ -374,6 +377,7 @@ def _listing_row(row: LocationRecord) -> dict[str, Any]:
         "neighborhood": row.neighborhood,
         "district": row.district,
         "phone_number": row.phone_number,
+        "email": getattr(row, "email", None),
         "website_url": row.website_url,
         "google_maps_link": row.google_maps_link,
         "social_media_handles": row.social_media_handles,

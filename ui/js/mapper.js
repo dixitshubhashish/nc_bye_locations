@@ -2,15 +2,15 @@
 // draft save/restore, and save-to-warehouse logic.
 
 let mappingTargets = [
-      { key: "name", table: "listings", field: "name", label: "Restaurant Name", required: true, hints: ["name", "restaurantname", "storename", "displayname"] },
+      { key: "name", table: "listings", field: "name", label: "Brand Name", required: true, hints: ["name", "restaurantname", "storename", "displayname"] },
       { key: "address", table: "listings", field: "address", label: "Street Address", required: true, hints: ["address", "addressdescription", "line1", "street"] },
       { key: "city", table: "listings", field: "city_name", label: "City", required: true, hints: ["city", "town"] },
       { key: "state", table: "listings", field: "state_code", label: "State", required: true, hints: ["state", "region", "province", "state_code"] },
       { key: "postal_code", table: "listings", field: "zip_code", label: "ZIP Code", required: true, hints: ["zip", "zipcode", "zip_code", "postalcode", "postal_code"] },
-      { key: "location_id", table: "listings", field: "location_key", label: "Location ID / Store ID", required: false, hints: ["locationid", "storeid", "store_id", "id", "number"] },
+      { key: "country", table: "listings", field: "country", label: "Country", required: true, hints: ["country", "countrycode"] },
+      { key: "location_id", table: "listings", field: "location_key", label: "Store ID", required: false, hints: ["locationid", "storeid", "store_id", "id", "number"] },
       { key: "town", table: "listings", field: "town", label: "Town", required: false, hints: ["town", "locality"] },
       { key: "province", table: "listings", field: "province", label: "Province", required: false, hints: ["province", "region"] },
-      { key: "country", table: "listings", field: "country", label: "Country", required: false, hints: ["country", "countrycode"] },
       { key: "latitude", table: "listings", field: "latitude", label: "Latitude", required: false, hints: ["lat", "latitude"] },
       { key: "longitude", table: "listings", field: "longitude", label: "Longitude", required: false, hints: ["lng", "lon", "longitude"] },
       { key: "franchise_name", table: "listings", field: "franchise_name", label: "Franchise Name", required: false, hints: ["franchise", "franchisename"] },
@@ -42,7 +42,7 @@ let mappingTargets = [
     ];
 const primaryMappingKeys = new Set(mappingTargets.slice(0, 20).map((target) => target.key));
 const fieldDisplayOrder = [
-      "name", "address", "city", "state", "postal_code", "location_id", "town", "province", "country",
+      "name", "address", "city", "state", "postal_code", "country", "location_id", "town", "province",
       "latitude", "longitude", "franchise_name", "concept_type", "cuisine_type", "neighborhood", "district",
       "phone_number", "website_url", "google_maps_link", "social_media_handles", "operating_hours", "seating_capacity",
       "service_types", "opening_date", "status", "observed_at", "annual_revenue", "average_ticket_size", "daily_footfall",
@@ -633,7 +633,7 @@ function setGlobalHotelsMappings() {
         country: "Country",
         status: "IsDeleted"
       };
-      optionalMappingKeys = new Set(["location_id", "latitude", "longitude", "country", "status"]);
+      optionalMappingKeys = new Set(["location_id", "latitude", "longitude", "status"]);
       hiddenMappingKeys = new Set();
       autoMappedKeys = new Set(Object.keys(mappingSelections));
     }
@@ -696,7 +696,7 @@ function setDemoRestaurantExcelMappings() {
         website_url: "website",
         google_maps_link: "google_maps_url"
       };
-      optionalMappingKeys = new Set(["latitude", "longitude", "country", "phone_number", "franchise_name", "concept_type", "cuisine_type", "neighborhood", "district", "website_url", "google_maps_link"]);
+      optionalMappingKeys = new Set(["latitude", "longitude", "phone_number", "franchise_name", "concept_type", "cuisine_type", "neighborhood", "district", "website_url", "google_maps_link"]);
       hiddenMappingKeys = new Set();
       autoMappedKeys = new Set(Object.keys(mappingSelections));
     }
@@ -846,7 +846,7 @@ function setLittleCaesarsApiMappings() {
         phone_number: "extratags.phone",
         website_url: "extratags.website"
       };
-      optionalMappingKeys = new Set(["location_id", "country", "latitude", "longitude", "phone_number", "website_url"]);
+      optionalMappingKeys = new Set(["location_id", "latitude", "longitude", "phone_number", "website_url"]);
       hiddenMappingKeys = new Set();
       autoMappedKeys = new Set(Object.keys(mappingSelections));
     }

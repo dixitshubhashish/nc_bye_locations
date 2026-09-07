@@ -41,6 +41,7 @@ from whitespace_tool.sqlite_cache import (
     get_error_count, set_error_count, replace_quality_mirror, clear_sample_reporting_mirror,
     get_zip_reference_status, set_zip_reference_status,
     seed_enrichment_cycle, claim_enrichment_batch, complete_enrichment_claim, enrichment_cycle_counts,
+    get_cached_worldwide_city_count, cache_worldwide_cities,
 )
 from whitespace_tool.sample_data import SAMPLE_BATCH_ID, SAMPLE_BRANDS, generate_source_rows, mapper_for, source_configuration, source_label, stable_business_id, stable_template_id
 
@@ -60,6 +61,8 @@ _SAMPLE_CLEAR_LOCK = threading.Lock()
 _SAMPLE_CLEAR_RUNNING = False
 _ZIP_REFERENCE_LOCK = threading.Lock()
 _ZIP_REFERENCE_THREAD: threading.Thread | None = None
+_WORLDWIDE_REFERENCE_LOCK = threading.Lock()
+_WORLDWIDE_REFERENCE_THREAD: threading.Thread | None = None
 
 
 def _build_logger() -> logging.Logger:
@@ -339,6 +342,7 @@ def field_catalog() -> list[dict[str, Any]]:
             )
             load_job.result()
             rows = [dict(row) for row in client.query(f"SELECT * FROM `{table_ref}` ORDER BY is_custom, label").result()]
+    standard_registry_map = {f["key"]: f.get("required", False) for f in load_field_registry()}
     for row in rows:
         for key in ("created_at", "updated_at"):
             if hasattr(row.get(key), "isoformat"):
@@ -346,11 +350,29 @@ def field_catalog() -> list[dict[str, Any]]:
         for key in ("hints", "aliases"):
             if isinstance(row.get(key), str):
                 row[key] = json.loads(row[key])
+        slug = row.get("slug") or row.get("key")
+        if not row.get("is_custom") and slug in standard_registry_map:
+            std_req = standard_registry_map[slug]
+            if row.get("required") != std_req:
+                row["required"] = std_req
+                try:
+                    update_query = f"UPDATE `{table_ref}` SET required = @req, updated_at = @now WHERE slug = @slug AND (is_custom IS NULL OR is_custom = FALSE)"
+                    update_config = bigquery.QueryJobConfig(query_parameters=[
+                        bigquery.ScalarQueryParameter("req", "BOOL", std_req),
+                        bigquery.ScalarQueryParameter("now", "TIMESTAMP", utc_now_iso()),
+                        bigquery.ScalarQueryParameter("slug", "STRING", slug),
+                    ])
+                    client.query(update_query, job_config=update_config).result()
+                except Exception as err:
+                    LOGGER.warning("Could not sync required flag in BigQuery field_catalogs for %s: %s", slug, err)
         row["key"] = row.pop("slug")
         row["table"] = row.pop("table_name")
         row["field"] = row.pop("field_name")
         row["type"] = row.pop("data_type")
         row["hints"] = list(dict.fromkeys(row.get("hints", []) + row.get("aliases", [])))
+
+    registry_order = {field["key"]: idx for idx, field in enumerate(load_field_registry())}
+    rows.sort(key=lambda r: (1 if r.get("is_custom") else 0, 0 if r.get("required") else 1, registry_order.get(r.get("key"), 999)))
     return rows
 
 
@@ -489,8 +511,8 @@ def delete_custom_field(data: dict[str, Any]) -> dict[str, Any]:
     return {"deleted": True, "field_key": field_key, "label": row["label"]}
 
 
-REQUIRED_MAPPER_FIELDS = {"name", "address", "city", "state", "postal_code"}
-REQUIRED_LOCATION_VALUES = ("name", "address", "city", "state", "postal_code")
+REQUIRED_MAPPER_FIELDS = {"name", "address", "city", "state", "postal_code", "country"}
+REQUIRED_LOCATION_VALUES = ("name", "address", "city", "state", "postal_code", "country")
 
 
 def validate_mapper(mapper: dict[str, Any], source_fields: list[str], rows: list[dict[str, Any]]) -> list[str]:
@@ -741,12 +763,65 @@ def prepare_zipcodes(force: bool = False, wait: bool = False) -> dict[str, Any]:
         "rows": int(status.get("rows", 0) or local_rows or 0),
         "loaded": False,
         "created": False,
-        "source": "sqlite_mirror",
         "table": f"{project_id}.{dataset_id}.us_zipcodes",
         "background": True,
         "started": started,
         "message": "US ZIP reference data is loading.",
     }
+
+
+def _load_worldwide_reference_sync(project_id: str, credentials_json: str | None, limit: int = 50000) -> int:
+    """Pre-cache worldwide city reference data from BigQuery into SQLite cachedb for ultra-fast local matching."""
+    current_count = get_cached_worldwide_city_count()
+    if current_count >= 1000:
+        return current_count
+    client = _bigquery_client(project_id, credentials_json)
+    q = f"""
+    SELECT
+      NULLIF(UPPER(TRIM(CAST(COUNTRY_CODE AS STRING))), '') AS country_code,
+      NULLIF(TRIM(CAST(COUNTRY AS STRING)), '') AS country_name,
+      NULLIF(TRIM(CAST(STATE AS STRING)), '') AS state_name,
+      NULLIF(UPPER(TRIM(CAST(STATE_CODE AS STRING))), '') AS state_code,
+      NULLIF(TRIM(CAST(DISTRICT AS STRING)), '') AS district,
+      NULLIF(TRIM(CAST(CITY AS STRING)), '') AS city,
+      NULLIF(TRIM(CAST(TOWN AS STRING)), '') AS town,
+      NULLIF(TRIM(CAST(ZIP_CODE AS STRING)), '') AS zip_code,
+      LATITUDE AS latitude,
+      LONGITUDE AS longitude
+    FROM `{project_id}.sample_locations.worldwide_cities`
+    WHERE LATITUDE IS NOT NULL AND LONGITUDE IS NOT NULL
+      AND (COUNTRY_CODE IN ('CA', 'GB', 'AU', 'FR', 'DE', 'JP', 'US') OR COUNTRY_CODE IS NULL)
+    LIMIT {int(limit)}
+    """
+    try:
+        rows = [dict(r) for r in client.query(q).result()]
+        if rows:
+            cache_worldwide_cities(rows)
+            LOGGER.info("worldwide_cities_cached_to_sqlite count=%d", len(rows))
+            return len(rows)
+    except Exception as exc:
+        LOGGER.warning("worldwide_reference_load_failed error=%s", exc)
+    return get_cached_worldwide_city_count()
+
+
+def _start_worldwide_reference_background(project_id: str, credentials_json: str | None) -> bool:
+    """Spawn low-priority background thread to pre-populate worldwide cities into SQLite cachedb."""
+    global _WORLDWIDE_REFERENCE_THREAD
+    if get_cached_worldwide_city_count() >= 1000:
+        return False
+    with _WORLDWIDE_REFERENCE_LOCK:
+        if _WORLDWIDE_REFERENCE_THREAD and _WORLDWIDE_REFERENCE_THREAD.is_alive():
+            return False
+
+        def worker() -> None:
+            try:
+                _load_worldwide_reference_sync(project_id, credentials_json)
+            except Exception as exc:
+                LOGGER.warning("worldwide_reference_background_load_failed error=%s", exc)
+
+        _WORLDWIDE_REFERENCE_THREAD = threading.Thread(target=worker, name="worldwide-reference-sync", daemon=True)
+        _WORLDWIDE_REFERENCE_THREAD.start()
+        return True
 
 
 def _zip_reference_copy_sql(table_ref: str, source_query: str, source_name: str) -> str:
@@ -1929,23 +2004,29 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
         # Source hierarchy is authoritative for identity. ZIP/reference data
         # fills gaps or corrects a conflicting postal value; it must not
         # silently replace a supplied town/city/state.
-        nearest_city = "(SELECT AS STRUCT geo.* FROM city_geos geo WHERE l.latitude IS NOT NULL AND l.longitude IS NOT NULL AND ST_DISTANCE(ST_GEOGPOINT(l.longitude, l.latitude), ST_GEOGPOINT(geo.longitude, geo.latitude)) <= 100000 ORDER BY ST_DISTANCE(ST_GEOGPOINT(l.longitude, l.latitude), ST_GEOGPOINT(geo.longitude, geo.latitude)) LIMIT 1)"
+        nearest_city = "(SELECT AS STRUCT geo.* FROM city_geos geo WHERE geo.latitude IS NOT NULL AND geo.longitude IS NOT NULL AND l.unswapped_latitude IS NOT NULL AND l.unswapped_longitude IS NOT NULL ORDER BY ST_DISTANCE(ST_GEOGPOINT(l.unswapped_longitude, l.unswapped_latitude), ST_GEOGPOINT(geo.longitude, geo.latitude)) LIMIT 1)"
         latitude_expr = """COALESCE(l.latitude, z.latitude, cg.latitude)"""
         longitude_expr = """COALESCE(l.longitude, z.longitude, cg.longitude)"""
         corrected_latitude_expr = f"""
           CASE
-            WHEN l.latitude IS NOT NULL AND l.longitude IS NOT NULL
-              AND (cg.latitude IS NULL OR ST_DISTANCE(ST_GEOGPOINT(l.longitude, l.latitude), ST_GEOGPOINT(cg.longitude, cg.latitude)) <= 100000)
-              THEN {latitude_expr}
-            ELSE COALESCE(cg.latitude, ({nearest_city}).latitude, z.latitude)
+            WHEN l.unswapped_latitude IS NOT NULL AND l.unswapped_longitude IS NOT NULL
+              AND l.unswapped_latitude BETWEEN 13.0 AND 72.0
+              AND ((l.unswapped_longitude BETWEEN -180.0 AND -64.0) OR (l.unswapped_longitude BETWEEN 144.0 AND 146.0))
+              AND NOT (l.unswapped_latitude = 0.0 AND l.unswapped_longitude = 0.0)
+              AND (cg.latitude IS NULL OR ST_DISTANCE(ST_GEOGPOINT(l.unswapped_longitude, l.unswapped_latitude), ST_GEOGPOINT(cg.longitude, cg.latitude)) <= 150000)
+              THEN l.unswapped_latitude
+            ELSE COALESCE(z.latitude, cg.latitude, ({nearest_city}).latitude)
           END
         """
         corrected_longitude_expr = f"""
           CASE
-            WHEN l.latitude IS NOT NULL AND l.longitude IS NOT NULL
-              AND (cg.longitude IS NULL OR ST_DISTANCE(ST_GEOGPOINT(l.longitude, l.latitude), ST_GEOGPOINT(cg.longitude, cg.latitude)) <= 100000)
-              THEN {longitude_expr}
-            ELSE COALESCE(cg.longitude, ({nearest_city}).longitude, z.longitude)
+            WHEN l.unswapped_latitude IS NOT NULL AND l.unswapped_longitude IS NOT NULL
+              AND l.unswapped_latitude BETWEEN 13.0 AND 72.0
+              AND ((l.unswapped_longitude BETWEEN -180.0 AND -64.0) OR (l.unswapped_longitude BETWEEN 144.0 AND 146.0))
+              AND NOT (l.unswapped_latitude = 0.0 AND l.unswapped_longitude = 0.0)
+              AND (cg.longitude IS NULL OR ST_DISTANCE(ST_GEOGPOINT(l.unswapped_longitude, l.unswapped_latitude), ST_GEOGPOINT(cg.longitude, cg.latitude)) <= 150000)
+              THEN l.unswapped_longitude
+            ELSE COALESCE(z.longitude, cg.longitude, ({nearest_city}).longitude)
           END
         """
         city_name_case = _proper_case_sql(f"COALESCE(NULLIF(TRIM(l.town), ''), NULLIF(TRIM(l.city_name), ''), cg.matched_city, ({nearest_city}).matched_city, z.city_name)")
@@ -1959,6 +2040,7 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
           AND city_name IS NOT NULL AND city_name != ''
           AND state_code IS NOT NULL AND state_code != ''
           AND zip_code IS NOT NULL AND zip_code != ''
+          AND country IS NOT NULL AND country != ''
           AND latitude IS NOT NULL AND longitude IS NOT NULL
         """
         rejection_reason_expr = """
@@ -1970,8 +2052,9 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
               IF(city_name IS NULL OR city_name = '', 'missing_city', NULL),
               IF(state_code IS NULL OR state_code = '', 'missing_state', NULL),
               IF(zip_code IS NULL OR zip_code = '', 'missing_zip', NULL),
+              IF(country IS NULL OR country = '', 'missing_country', NULL),
               IF(latitude IS NULL OR longitude IS NULL, 'unresolved_coordinates', NULL)
-              ,IF(latitude IS NOT NULL AND longitude IS NOT NULL AND NOT (latitude BETWEEN 13.0 AND 72.0 AND ((longitude BETWEEN -180.0 AND -64.0) OR (longitude BETWEEN 144.0 AND 146.0))), 'coordinates_outside_us_boundary', NULL)
+              ,IF(latitude IS NOT NULL AND longitude IS NOT NULL AND LOWER(TRIM(COALESCE(country, ''))) IN ('', 'us', 'usa', 'united states', 'united states of america') AND NOT (latitude BETWEEN 13.0 AND 72.0 AND ((longitude BETWEEN -180.0 AND -64.0) OR (longitude BETWEEN 144.0 AND 146.0))), 'coordinates_outside_us_boundary', NULL)
             ]) AS reason
             WHERE reason IS NOT NULL
           ), ', ')
@@ -1988,6 +2071,21 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
             COALESCE(first_observed_at, CURRENT_TIMESTAMP()) AS first_observed_at_coalesced,
             REGEXP_EXTRACT(CAST(zip_code AS STRING), r'(\\d{{5}})') AS normalized_zip_code,
             LOWER(TRIM(city_name)) AS normalized_city_name,
+            -- Detect and fix inverted coordinates (latitude in longitude range, longitude in latitude range)
+            CASE
+              WHEN latitude IS NOT NULL AND longitude IS NOT NULL
+                AND ((latitude BETWEEN -180.0 AND -64.0) OR (latitude BETWEEN 144.0 AND 146.0))
+                AND (longitude BETWEEN 13.0 AND 72.0)
+              THEN longitude
+              ELSE latitude
+            END AS unswapped_latitude,
+            CASE
+              WHEN latitude IS NOT NULL AND longitude IS NOT NULL
+                AND ((latitude BETWEEN -180.0 AND -64.0) OR (latitude BETWEEN 144.0 AND 146.0))
+                AND (longitude BETWEEN 13.0 AND 72.0)
+              THEN latitude
+              ELSE longitude
+            END AS unswapped_longitude,
             CASE UPPER(TRIM(COALESCE(state_code, '')))
               WHEN 'ALABAMA' THEN 'AL' WHEN 'ALASKA' THEN 'AK' WHEN 'ARIZONA' THEN 'AZ' WHEN 'ARKANSAS' THEN 'AR'
               WHEN 'CALIFORNIA' THEN 'CA' WHEN 'COLORADO' THEN 'CO' WHEN 'CONNECTICUT' THEN 'CT' WHEN 'DELAWARE' THEN 'DE'
@@ -2002,6 +2100,7 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
               WHEN 'SOUTH DAKOTA' THEN 'SD' WHEN 'TENNESSEE' THEN 'TN' WHEN 'TEXAS' THEN 'TX' WHEN 'UTAH' THEN 'UT'
               WHEN 'VERMONT' THEN 'VT' WHEN 'VIRGINIA' THEN 'VA' WHEN 'WASHINGTON' THEN 'WA' WHEN 'WEST VIRGINIA' THEN 'WV'
               WHEN 'WISCONSIN' THEN 'WI' WHEN 'WYOMING' THEN 'WY' WHEN 'DISTRICT OF COLUMBIA' THEN 'DC'
+              WHEN 'PUERTO RICO' THEN 'PR' WHEN 'GUAM' THEN 'GU' WHEN 'VIRGIN ISLANDS' THEN 'VI'
               ELSE NULLIF(UPPER(TRIM(COALESCE(state_code, ''))), '')
             END AS normalized_state_code
           FROM `{bronze_ref}.listings`
@@ -2038,13 +2137,13 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
           COALESCE(l.normalized_state_code, NULLIF(UPPER(TRIM(l.state_code)), ''), cg.state_code, ({nearest_city}).state_code, z.state_code) AS state_code,
           {state_name_case} AS state_name,
           COALESCE(
-            CASE WHEN l.latitude IS NOT NULL AND l.longitude IS NOT NULL
+            CASE WHEN l.unswapped_latitude IS NOT NULL AND l.unswapped_longitude IS NOT NULL
               AND z.latitude IS NOT NULL AND z.longitude IS NOT NULL
-              AND ST_DISTANCE(ST_GEOGPOINT(l.longitude, l.latitude), ST_GEOGPOINT(z.longitude, z.latitude)) <= 100000
+              AND ST_DISTANCE(ST_GEOGPOINT(l.unswapped_longitude, l.unswapped_latitude), ST_GEOGPOINT(z.longitude, z.latitude)) <= 100000
               THEN l.normalized_zip_code END,
             CASE WHEN cg.latitude IS NOT NULL AND cg.longitude IS NOT NULL
-              AND l.latitude IS NOT NULL AND l.longitude IS NOT NULL
-              AND ST_DISTANCE(ST_GEOGPOINT(l.longitude, l.latitude), ST_GEOGPOINT(cg.longitude, cg.latitude)) <= 100000
+              AND l.unswapped_latitude IS NOT NULL AND l.unswapped_longitude IS NOT NULL
+              AND ST_DISTANCE(ST_GEOGPOINT(l.unswapped_longitude, l.unswapped_latitude), ST_GEOGPOINT(cg.longitude, cg.latitude)) <= 100000
               THEN cg.representative_zip END,
             ({nearest_city}).representative_zip,
             l.normalized_zip_code,
@@ -2056,15 +2155,27 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
           -- COALESCE(l.longitude, z.longitude, cg.longitude) AS longitude
           {corrected_longitude_expr} AS longitude,
           CASE
-            WHEN l.latitude IS NOT NULL AND l.longitude IS NOT NULL THEN 'source_listing'
+            WHEN l.unswapped_latitude IS NOT NULL AND l.unswapped_longitude IS NOT NULL
+              AND l.unswapped_latitude BETWEEN 13.0 AND 72.0
+              AND ((l.unswapped_longitude BETWEEN -180.0 AND -64.0) OR (l.unswapped_longitude BETWEEN 144.0 AND 146.0))
+              AND NOT (l.unswapped_latitude = 0.0 AND l.unswapped_longitude = 0.0)
+              AND (cg.latitude IS NULL OR ST_DISTANCE(ST_GEOGPOINT(l.unswapped_longitude, l.unswapped_latitude), ST_GEOGPOINT(cg.longitude, cg.latitude)) <= 150000)
+              THEN 'source_listing'
             WHEN z.latitude IS NOT NULL AND z.longitude IS NOT NULL THEN 'zip_centroid'
             WHEN cg.latitude IS NOT NULL AND cg.longitude IS NOT NULL THEN 'worldwide_city_centroid'
+            WHEN ({nearest_city}).latitude IS NOT NULL THEN 'nearest_city_snapped'
             ELSE 'unresolved'
           END AS coordinate_source,
           CASE
-            WHEN l.latitude IS NOT NULL AND l.longitude IS NOT NULL THEN 1.0
-            WHEN z.latitude IS NOT NULL AND z.longitude IS NOT NULL THEN 0.75
-            WHEN cg.latitude IS NOT NULL AND cg.longitude IS NOT NULL THEN 0.55
+            WHEN l.unswapped_latitude IS NOT NULL AND l.unswapped_longitude IS NOT NULL
+              AND l.unswapped_latitude BETWEEN 13.0 AND 72.0
+              AND ((l.unswapped_longitude BETWEEN -180.0 AND -64.0) OR (l.unswapped_longitude BETWEEN 144.0 AND 146.0))
+              AND NOT (l.unswapped_latitude = 0.0 AND l.unswapped_longitude = 0.0)
+              AND (cg.latitude IS NULL OR ST_DISTANCE(ST_GEOGPOINT(l.unswapped_longitude, l.unswapped_latitude), ST_GEOGPOINT(cg.longitude, cg.latitude)) <= 150000)
+              THEN 1.0
+            WHEN z.latitude IS NOT NULL AND z.longitude IS NOT NULL THEN 0.85
+            WHEN cg.latitude IS NOT NULL AND cg.longitude IS NOT NULL THEN 0.70
+            WHEN ({nearest_city}).latitude IS NOT NULL THEN 0.60
             ELSE 0.0
           END AS coordinate_confidence,
           ARRAY_TO_STRING(
@@ -4455,20 +4566,43 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
 
 
 def auto_repair_error_batch(limit: int = 10, offset: int = 0) -> dict[str, int]:
-    """Retry a small review batch through the exact manual validation path.
-    This deliberately does not delete rows based on a fuzzy match alone.
-    Only save_mapper success allows reprocess_rejected to soft-delete review
-    rows and refresh the SQLite counter."""
-    # Claim only rows not tried by the automatic pass. Rows fixed by the
-    # retry are soft-deleted; unresolved rows are marked AI-enriched so the
-    # next batch advances instead of retrying the same ten forever.
-    records = list_rejected(limit=50, ai_pending_only=True)["records"][:max(1, min(int(limit), 10))]
-    if not records:
+    """Retry review batches through the set-swap queue with progressive advancement.
+    Candidate IDs enter a source set; repaired rows graduate to listings and delete
+    from review; failed rows enter the failed set. Once the source set is empty,
+    it swaps with the failed set and merges any new errors for the next advancement cycle.
+    """
+    from whitespace_tool.sqlite_cache import (
+        seed_or_swap_enrichment_cycle,
+        claim_enrichment_batch,
+        complete_enrichment_claim,
+        get_db_connection,
+    )
+
+    all_rejected = list_rejected(limit=50000).get("records", [])
+    if not all_rejected:
         return {"attempted": 0, "resolved": 0, "remaining": 0}
+
+    record_lookup = {}
+    for r in all_rejected:
+        rec_id = str(r.get("listing_id") or f"{r.get('event_id')}:{r.get('row_number')}")
+        record_lookup[rec_id] = r
+
+    batch_limit = max(1, min(int(limit), 10))
+    cycle_id, pending_count = seed_or_swap_enrichment_cycle(list(record_lookup.keys()))
+    claimed_ids = claim_enrichment_batch(cycle_id, limit=batch_limit)
+    if not claimed_ids and pending_count == 0:
+        cycle_id, pending_count = seed_or_swap_enrichment_cycle()
+        claimed_ids = claim_enrichment_batch(cycle_id, limit=batch_limit)
+
+    records = [record_lookup[cid] for cid in claimed_ids if cid in record_lookup]
+    if not records:
+        records = all_rejected[:batch_limit]
+
     templates = {item.get("workflow_template_id"): item for item in list_templates().get("templates", [])}
     resolved = 0
     processed_keys = []
     for record in records:
+        rec_lid = str(record.get("listing_id") or f"{record.get('event_id')}:{record.get('row_number')}")
         processed_keys.append((str(record.get("event_id") or ""), int(record.get("row_number") or 0)))
         template = templates.get(record.get("template_id"))
         components = (template or {}).get("components") if template else None
@@ -4480,6 +4614,7 @@ def auto_repair_error_batch(limit: int = 10, offset: int = 0) -> dict[str, int]:
         mapper = components.get("mapper") if isinstance(components, dict) else None
         improved = False
         if not isinstance(mapper, dict):
+            complete_enrichment_claim(rec_lid, cycle_id, improved=False)
             try:
                 _record_quality_fix_event(
                     event_id=record.get("event_id"),
@@ -4495,8 +4630,28 @@ def auto_repair_error_batch(limit: int = 10, offset: int = 0) -> dict[str, int]:
         mapper["business_id"] = record.get("business_id") or mapper.get("business_id")
         mapper["source_type_id"] = record.get("source_type_id") or mapper.get("source_type_id")
         mapper["is_ai_enriched"] = True
+
+        raw_rec = record.get("raw_record")
+        reprocess_rows = None
+        if isinstance(raw_rec, dict):
+            from whitespace_tool.geo_enrichment import enrich_raw_listing_row
+            try:
+                with get_db_connection() as conn:
+                    enriched_rec = enrich_raw_listing_row(raw_rec, conn)
+                reprocess_rows = [enriched_rec]
+            except Exception as geo_exc:
+                LOGGER.warning("geo_enrichment_during_repair_failed error=%s", geo_exc)
+
         try:
-            result = reprocess_rejected({"event_id": record["event_id"], "row_numbers": [record["row_number"]], "mapper": mapper, "is_ai_enriched": True})
+            reprocess_payload = {
+                "event_id": record["event_id"],
+                "row_numbers": [record["row_number"]],
+                "mapper": mapper,
+                "is_ai_enriched": True,
+            }
+            if reprocess_rows is not None:
+                reprocess_payload["rows"] = reprocess_rows
+            result = reprocess_rejected(reprocess_payload)
             if (
                 result.get("mapped_rows", 0) > 0
                 and result.get("error_listings_cleanup", {}).get("ok")
@@ -4507,6 +4662,7 @@ def auto_repair_error_batch(limit: int = 10, offset: int = 0) -> dict[str, int]:
         except Exception as exc:
             LOGGER.warning("automatic_error_repair_failed event_id=%s row=%s error=%s", record.get("event_id"), record.get("row_number"), exc)
         finally:
+            complete_enrichment_claim(rec_lid, cycle_id, improved=improved)
             try:
                 _record_quality_fix_event(
                     event_id=record.get("event_id"),
@@ -4533,6 +4689,8 @@ def auto_repair_error_batch(limit: int = 10, offset: int = 0) -> dict[str, int]:
                     bigquery.ScalarQueryParameter("row_number", "INT64", row_number),
                 ])
             ).result()
+    if resolved > 0:
+        invalidate_cache()
     return {"attempted": len(records), "resolved": resolved, "remaining": max(len(records) - resolved, 0)}
 
 
@@ -4578,6 +4736,9 @@ def start_auto_repair() -> dict[str, Any]:
                 set_auto_repair_stats(base_fixed + fixed, base_processed + offset, max(total - fixed, 0), base_manual)
                 refresh_error_count("")
                 _schedule_quality_fix_metrics_refresh(force=True)
+                if fixed > 0:
+                    invalidate_cache()
+                    _refresh_silver_background(low_priority=True)
             except Exception as exc:
                 ENRICHMENT_STATUS.update({"state": "stopped" if ENRICHMENT_STOP_REQUESTED.is_set() else "failed", "updated_at": utc_now_iso()})
                 LOGGER.warning("automatic_review_repair_failed error=%s", exc)
@@ -5321,11 +5482,12 @@ def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
     handler = make_handler(ui_dir)
     socketserver.ThreadingTCPServer.allow_reuse_address = True
     try:
+        project_id, dataset_id, credentials_json = _warehouse_settings()
         if get_cached_zipcode_count() < MINIMUM_US_ZIP_REFERENCE_ROWS:
-            project_id, dataset_id, credentials_json = _warehouse_settings()
             _start_zip_reference_background(project_id, dataset_id, credentials_json)
+        _start_worldwide_reference_background(project_id, credentials_json)
     except Exception as exc:
-        LOGGER.warning("zip_reference_startup_sync_failed error=%s", exc)
+        LOGGER.warning("reference_startup_sync_failed error=%s", exc)
     _start_silver_gold_scheduler()
     with socketserver.ThreadingTCPServer((host, port), handler) as httpd:
         print(f"Workflow UI running at http://{host}:{port}/")

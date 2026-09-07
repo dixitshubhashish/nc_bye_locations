@@ -13,20 +13,20 @@ def _mapper():
         "source_type": "csv",
         "source_type_id": "src-1",  # provided, so ensure_source_type() (BigQuery) is skipped
         "business_id": "biz-1",
-        "fields": {"name": "Name", "address": "Addr", "city": "City", "state": "State", "postal_code": "Zip"},
+        "fields": {"name": "Name", "address": "Addr", "city": "City", "state": "State", "postal_code": "Zip", "country": "Country"},
     }
 
 
-SOURCE_FIELDS = ["Name", "Addr", "City", "State", "Zip"]
+SOURCE_FIELDS = ["Name", "Addr", "City", "State", "Zip", "Country"]
 
 
 def _invalid_rows(n):
     # Empty Zip -> normalize_location() returns None -> required_location error, for every row.
-    return [{"Name": f"S{i}", "Addr": "1 St", "City": "Austin", "State": "TX", "Zip": ""} for i in range(n)]
+    return [{"Name": f"S{i}", "Addr": "1 St", "City": "Austin", "State": "TX", "Zip": "", "Country": "United States"} for i in range(n)]
 
 
 def _valid_row():
-    return {"Name": "Good Store", "Addr": "1 Main St", "City": "Austin", "State": "TX", "Zip": "78701"}
+    return {"Name": "Good Store", "Addr": "1 Main St", "City": "Austin", "State": "TX", "Zip": "78701", "Country": "United States"}
 
 
 class SaveMapperAllInvalidGuardTests(unittest.TestCase):

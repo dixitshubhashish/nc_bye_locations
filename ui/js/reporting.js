@@ -77,7 +77,7 @@ function renderEmptyReportingStructure() {
       ["reportLocations", "reportBrands", "reportStates", "reportCities", "reportZips", "reportStores", "reportBrandStates", "reportWhitespaceGaps"].forEach((id) => {
         if (el(id)) el(id).textContent = "0";
       });
-      renderReportingMap([], [], defaultStateRecords);
+      renderReportingMap([], [], []);
       if (el("reportCompetitorBenchmarkContent")) {
         el("reportCompetitorBenchmarkContent").innerHTML = `
           <div style="color: var(--muted); font-size: 13px; padding: 24px; text-align: center; background: #f8fafc; border: 1px solid var(--line); border-radius: 8px;">
@@ -90,22 +90,22 @@ function renderEmptyReportingStructure() {
           <div style="border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 14px; text-align: center;">
             <h3 style="margin: 0 0 4px; font-size: 18px; color: var(--ink);">State</h3>
             <div style="font-size: 26px; font-weight: 700; color: var(--accent);">0 <span style="font-size: 13px; color: var(--muted); font-weight: 500;">(0.0%)</span></div>
-            <p style="margin: 8px 0 0; font-size: 12px; color: var(--muted); line-height: 1.4;">People per location: <strong>0</strong>. Population: 0</p>
+            <p style="margin: 8px 0 0; font-size: 12px; color: var(--muted); line-height: 1.4;">Pop. per listing: <strong>0</strong>. Population: 0</p>
           </div>
         `).join("");
       }
       renderSimpleTable("reportTopStates", [
         { key: "state_name", label: "State / Territory" },
-        { key: "locations", label: "ZIP Locations", format: formatNumber },
-        { key: "pct", label: "Location Share" },
+        { key: "locations", label: "Listings", format: formatNumber },
+        { key: "pct", label: "Listing Share" },
         { key: "state_population", label: "State Population", format: formatNumber },
-        { key: "pop_per_store", label: "Population Per Location", format: formatNumber },
+        { key: "pop_per_store", label: "Population Per Listing", format: formatNumber },
         { key: "cities", label: "Cities Covered", format: formatNumber }
       ], []);
       renderSimpleTable("reportTopCities", [
         { key: "city", label: "City" },
         { key: "state_name", label: "State / Territory" },
-        { key: "locations", label: "ZIP Locations", format: formatNumber }
+        { key: "locations", label: "Listings", format: formatNumber }
       ], []);
       renderSimpleTable("reportBrandsTable", [
         { key: "brand", label: "Brand" },
@@ -319,7 +319,7 @@ function isUSLatLong(lat, lon) {
 function renderStaticUSMap(stateRecords = []) {
       const target = el("reportingMap");
       if (!target) return;
-      const stateCounts = new Map((stateRecords.length ? stateRecords : defaultStateRecords).map((row) => [String(row.state || "").toUpperCase(), Number(row.locations || 0)]));
+      const stateCounts = new Map((stateRecords || []).filter((row) => Number(row.locations || 0) > 0).map((row) => [String(row.state || "").toUpperCase(), Number(row.locations || 0)]));
       target.innerHTML = `
         <div class="static-us-map-wrap">
           <div class="static-us-map-controls" aria-label="Map zoom controls">
@@ -330,7 +330,9 @@ function renderStaticUSMap(stateRecords = []) {
           <div class="static-us-map-stage" style="transform: scale(${staticMapZoom});">
             <div class="static-us-map">${staticStateLayout.map((code) => {
               if (!code) return '<div></div>';
-              return `<div class="static-state-cell" title="${escapeHtml(stateCodeToName[code] || code)}">${escapeHtml(stateCodeToName[code] || code)}<br>${formatNumber(stateCounts.get(code) || 0)}</div>`;
+              const count = stateCounts.get(code) || 0;
+              if (!count) return `<div class="static-state-cell empty-state-cell" title="${escapeHtml(stateCodeToName[code] || code)}">${escapeHtml(code)}</div>`;
+              return `<div class="static-state-cell" title="${escapeHtml(stateCodeToName[code] || code)}">${escapeHtml(code)}<br>${formatNumber(count)} Listings</div>`;
             }).join("")}</div>
           </div>
         </div>
@@ -377,7 +379,7 @@ let mapZoomListenerAttached = false;
 
 function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [], filters = {}) {
       if (!el("reportingMap")) return;
-      const displayStates = stateRecords.length ? stateRecords : defaultStateRecords;
+      const displayStates = (stateRecords || []).filter((row) => Number(row.locations || 0) > 0);
       if (!window.L) {
         renderStaticUSMap(displayStates);
         return;
@@ -435,7 +437,7 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [],
             style: (feature) => {
               const code = stateNameToCode[feature?.properties?.name] || "";
               const isSelected = activeStateFilter && code === activeStateFilter;
-              const hasData = boundaryStateCounts.has(code);
+              const hasData = (boundaryStateCounts.get(code) || 0) > 0;
               return {
                 color: isSelected ? "#16a34a" : (hasData ? "#2563eb" : "#94a3b8"),
                 weight: isSelected ? 2.2 : (hasData ? 1.4 : 0.8),
@@ -446,16 +448,13 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [],
             onEachFeature: (feature, layer) => {
               const code = stateNameToCode[feature?.properties?.name] || "";
               if (!code) return;
-              layer.bindTooltip(feature.properties.name || stateCodeToName[code] || code, {
-                permanent: true,
-                direction: "center",
-                className: "state-code-label",
-                interactive: false
-              });
+              const count = boundaryStateCounts.get(code) || 0;
+              const fullStateName = feature.properties.name || stateCodeToName[code] || code;
+
               layer.bindPopup(`
-                <div style="font-family: sans-serif; font-size: 13px; line-height: 1.4;">
-                  <strong>${escapeHtml(feature.properties.name || code)}</strong><br/>
-                  <span>${formatNumber(boundaryStateCounts.get(code) || 0)} ZIP locations</span>
+                <div style="font-family: system-ui, -apple-system, sans-serif; font-size: 13px; line-height: 1.4;">
+                  <strong>${escapeHtml(fullStateName)}</strong><br/>
+                  <span style="color: ${count > 0 ? '#2563eb' : '#64748b'}; font-weight: 700;">${formatNumber(count)} Listing${count === 1 ? "" : "s"}</span>
                 </div>
               `);
             }
@@ -463,44 +462,49 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [],
         })
         .catch(() => {});
 
-      // 1. STATE CIRCLES: Shown on state names at national zoom with hover tooltips showing store count inside
-      const statesToRender = (displayStates || []).filter((row) => stateCentroids[String(row.state || "").toUpperCase()]);
-      statesToRender.forEach((row) => {
-        const stateCode = String(row.state || "").toUpperCase();
+      // 1. STATE BUBBLES / LABELS: Shown with 2-digit state code at national zoom, hover tooltip shows full state name and listing count
+      // Always visible for all states irrespective of whether they have records or not
+      const allStateCodes = Object.keys(stateCentroids);
+      allStateCodes.forEach((stateCode) => {
         const [lat, lon] = stateCentroids[stateCode];
-        const storeCount = Number(row.locations || 0);
-        bounds.push([lat, lon]);
+        const storeCount = boundaryStateCounts.get(stateCode) || 0;
+        const stateName = stateCodeToName[stateCode] || stateCode || "Unknown state";
+        const hasRecords = storeCount > 0;
+        const isSelected = activeStateFilter && stateCode === activeStateFilter;
 
-        const marker = L.circleMarker([lat, lon], {
-          radius: Math.max(10, Math.min(26, Math.sqrt(storeCount) * 1.5)),
-          fillColor: "#e7f0ff",
-          color: "#2563eb",
-          weight: 2,
-          opacity: 0.92,
-          fillOpacity: 0.88
+        if (hasRecords || isSelected) {
+          bounds.push([lat, lon]);
+        }
+
+        const radius = hasRecords ? Math.max(13, Math.min(26, Math.round(Math.sqrt(storeCount) * 1.5 + 9))) : 12;
+        const size = radius * 2;
+        const markerHtml = hasRecords
+          ? `<div style="width:${size}px; height:${size}px; line-height:${size - 4}px; border-radius:50%; background:#e7f0ff; border:2px solid #2563eb; color:#1e40af; font-size:11px; font-weight:800; text-align:center; box-sizing:border-box; cursor:pointer; box-shadow:0 1px 4px rgba(0,0,0,0.15);">${escapeHtml(stateCode)}</div>`
+          : `<div style="width:${size}px; height:${size}px; line-height:${size - 2}px; border-radius:50%; background:rgba(255,255,255,0.85); border:1px solid #cbd5e1; color:#475569; font-size:10px; font-weight:700; text-align:center; box-sizing:border-box; cursor:pointer; box-shadow:0 1px 2px rgba(0,0,0,0.08);">${escapeHtml(stateCode)}</div>`;
+
+        const marker = L.marker([lat, lon], {
+          icon: L.divIcon({
+            className: "",
+            html: markerHtml,
+            iconSize: [size, size],
+            iconAnchor: [radius, radius]
+          })
         });
 
-        // Center state code label inside circle
-        const stateName = row.state_name || stateCodeToName[stateCode] || stateCode || "Unknown state";
-        marker.bindTooltip(stateName, {
-          permanent: true,
-          direction: "center",
-          className: "state-code-label"
-        });
-
-        // Interactive hover tooltip showing full state name and exact store count inside
+        // Interactive hover tooltip showing full state name and exact listing count
         marker.bindTooltip(`
           <div style="font-family: system-ui, -apple-system, sans-serif; font-size: 13px; line-height: 1.4; padding: 2px 4px;">
             <strong style="color: #0f172a; font-size: 14px;">${escapeHtml(stateName)}</strong><br/>
-            <span style="color: #2563eb; font-weight: 700; font-size: 13px;">${formatNumber(storeCount)} store${storeCount === 1 ? "" : "s"}</span> inside
+            <span style="color: ${hasRecords ? '#2563eb' : '#64748b'}; font-weight: 700; font-size: 13px;">${formatNumber(storeCount)} Listing${storeCount === 1 ? "" : "s"}</span>
           </div>
         `, {
+          permanent: false,
           sticky: true,
           opacity: 0.96,
           offset: [0, -10]
         });
 
-        // Click on state circle zooms into state at city level
+        // Click on state bubble zooms into state at city level
         marker.on("click", () => {
           if (reportingMap) reportingMap.setView([lat, lon], 7);
         });
@@ -547,11 +551,11 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [],
           fillOpacity: 0.88
         });
 
-        // Hover tooltip showing city, state and exact store count inside
+        // Hover tooltip showing city, state and exact listing count
         cityMarker.bindTooltip(`
           <div style="font-family: system-ui, -apple-system, sans-serif; font-size: 13px; line-height: 1.4; padding: 2px 4px;">
             <strong style="color: #0f172a; font-size: 14px;">${escapeHtml(item.city)}, ${escapeHtml(item.state)}</strong><br/>
-            <span style="color: #7c3aed; font-weight: 700; font-size: 13px;">${formatNumber(item.count)} store${item.count === 1 ? "" : "s"}</span> inside
+            <span style="color: #7c3aed; font-weight: 700; font-size: 13px;">${formatNumber(item.count)} Listing${item.count === 1 ? "" : "s"}</span>
           </div>
         `, {
           sticky: true,
@@ -1263,7 +1267,7 @@ async function loadReporting({ interactive = false } = {}) {
                   <h3 style="margin: 0 0 4px; font-size: 18px; color: var(--ink);">${escapeHtml(stateLabel)}</h3>
                   <div style="font-size: 26px; font-weight: 700; color: var(--accent);">${formatNumber(st.locations)} <span style="font-size: 13px; color: var(--muted); font-weight: 500;">(${pct}%)</span></div>
                   <p style="margin: 8px 0 0; font-size: 12px; color: var(--muted); line-height: 1.4;">
-                    People per location: <strong>${ratioStr}</strong>. Population: ${popStr}
+                    Pop. per listing: <strong>${ratioStr}</strong>. Population: ${popStr}
                   </p>
                 </div>`;
               }).join("");
@@ -1271,10 +1275,10 @@ async function loadReporting({ interactive = false } = {}) {
 
         renderSimpleTable("reportTopStates", [
           { key: "state_name", label: "State / Territory" },
-          { key: "locations", label: "ZIP Locations", format: formatNumber },
+          { key: "locations", label: "Listings", format: formatNumber },
           {
             key: "pct",
-            label: "Location Share",
+            label: "Listing Share",
             html: true,
             format: (v, row) => {
               const pct = ((row.locations / totalLocs) * 100).toFixed(1);
@@ -1293,7 +1297,7 @@ async function loadReporting({ interactive = false } = {}) {
           },
           {
             key: "pop_per_store",
-            label: "Population Per Location",
+            label: "Population Per Listing",
             format: (v, row) => {
               if (!row.state_population || !row.locations) return "N/A";
               const ratio = Math.round(row.state_population / row.locations);
@@ -1306,7 +1310,7 @@ async function loadReporting({ interactive = false } = {}) {
         renderSimpleTable("reportTopCities", [
           { key: "city", label: "City" },
           { key: "state_name", label: "State / Territory" },
-          { key: "locations", label: "ZIP Locations", format: formatNumber }
+          { key: "locations", label: "Listings", format: formatNumber }
         ], result.top_cities || []);
 
         const aggregatedBrandMap = new Map();

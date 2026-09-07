@@ -31,6 +31,7 @@ VALID_MAPPER = {
         "city": "city",
         "state": "state",
         "postal_code": "zip_code",
+        "country": "country",
         "latitude": "latitude",
         "longitude": "longitude",
         "opening_date": "opened_on",
@@ -45,6 +46,7 @@ VALID_ROW = {
     "city": "Raleigh",
     "state": "nc",
     "zip_code": "27601-1234",
+    "country": "United States",
     "latitude": "35.7796",
     "longitude": "-78.6382",
     "opened_on": "04/12/2024",
@@ -109,6 +111,57 @@ class CsvWorkflowTests(unittest.TestCase):
         listing_fields = {field["name"] for field in TABLE_SCHEMAS["listings"]}
         self.assertIn("ratings", listing_fields)
         self.assertIn("ratings", CONTENT_HASH_FIELDS)
+
+    def test_email_district_state_code_country_code_in_registry_and_normalization(self) -> None:
+        registry = load_field_registry()
+        registry_keys = {field["key"] for field in registry}
+        self.assertIn("email", registry_keys)
+        self.assertIn("district", registry_keys)
+        self.assertIn("state_code", registry_keys)
+        self.assertIn("country_code", registry_keys)
+
+        email_field = next(f for f in registry if f["key"] == "email")
+        self.assertEqual(email_field["label"], "Email")
+        self.assertEqual(email_field["table"], "listings")
+        self.assertIn("contact_email", email_field["hints"])
+
+        district_field = next(f for f in registry if f["key"] == "district")
+        self.assertEqual(district_field["label"], "District")
+        self.assertIn("county", district_field["hints"])
+
+        state_code_field = next(f for f in registry if f["key"] == "state_code")
+        self.assertEqual(state_code_field["label"], "State Code")
+        self.assertIn("state_abbr", state_code_field["hints"])
+
+        country_code_field = next(f for f in registry if f["key"] == "country_code")
+        self.assertEqual(country_code_field["label"], "Country Code")
+        self.assertIn("country_iso", country_code_field["hints"])
+
+        # Test normalization mapping
+        mapper = {
+            **VALID_MAPPER,
+            "fields": {
+                **VALID_MAPPER["fields"],
+                "email": "store_email",
+                "district": "county_name",
+                "state_code": "st_code",
+                "country_code": "iso_code",
+            },
+        }
+        row = {
+            **VALID_ROW,
+            "store_email": "contact@example.com",
+            "county_name": "Travis County",
+            "st_code": "TX",
+            "iso_code": "US",
+        }
+        loc = normalize_location(row, mapper, "test_source", 0)
+        self.assertIsNotNone(loc)
+        assert loc is not None
+        self.assertEqual(loc.email, "contact@example.com")
+        self.assertEqual(loc.district, "Travis County")
+        self.assertEqual(loc.state, "TX")
+        self.assertEqual(loc.country_code, "US")
 
     def test_zip_and_scalar_normalization(self) -> None:
         self.assertEqual(clean_zip(" 12-345-6789 "), "12345")
@@ -443,6 +496,31 @@ class CsvWorkflowTests(unittest.TestCase):
         errs_rev = validate_normalized_location(loc_bad_rev, load_field_registry())
         self.assertTrue(any(e["field"] == "annual_revenue" for e in errs_rev))
         self.assertIn("negative monetary amount", [e["reason"] for e in errs_rev])
+
+    def test_country_mandatory_field_and_registry_ordering(self) -> None:
+        """Verify country is mandatory, required fields are at the top of field registry, and country_code is optional."""
+        registry = load_field_registry()
+        required_fields = [f for f in registry if f.get("required") is True]
+        required_keys = [f["key"] for f in required_fields]
+        
+        # Verify required fields order at the top of registry
+        self.assertEqual(required_keys, ["name", "address", "city", "state", "postal_code", "country"])
+        self.assertEqual([registry[i]["key"] for i in range(len(required_keys))], required_keys)
+        
+        # Verify country_code is present and optional
+        country_code_def = next(f for f in registry if f["key"] == "country_code")
+        self.assertFalse(country_code_def.get("required", False))
+
+        # Verify REQUIRED_MAPPER_FIELDS contains country
+        self.assertIn("country", REQUIRED_MAPPER_FIELDS)
+
+        # Verify missing country in location fails validation
+        location = normalize_location(VALID_ROW, VALID_MAPPER, "example_csv", 0)
+        self.assertIsNotNone(location)
+        import dataclasses
+        loc_missing_country = dataclasses.replace(location, country="")
+        errors = validate_normalized_location(loc_missing_country, registry)
+        self.assertTrue(any(e["field"] == "country" for e in errors))
 
 
 if __name__ == "__main__":

@@ -295,12 +295,13 @@ async function openEditRecordModal(record) {
         city: { label: "City", path: mapperFields.city || "city", note: "Required.", required: true },
         state: { label: "State", path: mapperFields.state || "state", note: "Required (2-letter code or state name).", required: true },
         postal_code: { label: "ZIP Code", path: mapperFields.postal_code || "postal_code", note: "Required (5-digit US ZIP code).", required: true },
+        country: { label: "Country", path: mapperFields.country || "country", note: "Required (e.g. United States).", required: true },
         latitude: { label: "Latitude", path: mapperFields.latitude || "latitude", note: "Decimal latitude coordinate (e.g. 40.7128).", required: false },
         longitude: { label: "Longitude", path: mapperFields.longitude || "longitude", note: "Decimal longitude coordinate (e.g. -74.0060).", required: false },
       };
       const renderedPaths = new Set();
 
-      const requiredFieldHtml = ["brand", "name", "address", "city", "state", "postal_code", "latitude", "longitude"]
+      const requiredFieldHtml = ["brand", "name", "address", "city", "state", "postal_code", "country", "latitude", "longitude"]
         .map((key) => {
           const { label, path, note, required } = LOCATION_FIELD_SPECS[key];
           renderedPaths.add(path);
@@ -518,6 +519,7 @@ el("submitEditRecordBtn")?.addEventListener("click", async () => {
           city: "city",
           state: "state",
           postal_code: "postal_code",
+          country: "country",
           latitude: "latitude",
           longitude: "longitude"
         }
