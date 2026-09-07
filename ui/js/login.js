@@ -63,7 +63,7 @@ function setReferenceLoadingMessage() {
   const target = el("loginReadinessStatus");
   if (!target) return;
   target.className = "status";
-  target.innerHTML = `${busyMarkup("Loading US ZIP data for you")} Login will be available when it is ready.`;
+  target.innerHTML = `${busyMarkup("Loading US ZIP data for you")} You can still sign in while reference data syncs.`;
 }
 
 function setButtonBusy(button, label = "Loading") {
@@ -110,9 +110,14 @@ async function prepareReferenceData() {
     const response = await fetch("/api/prepare");
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "ZIP reference data could not be prepared.");
-    referenceDataReady = true;
-    setStatus("loginReadinessStatus", "ZIP reference data ready.", "ok");
-    return true;
+    referenceDataReady = result.status === "ready" || result.loaded === true;
+    setStatus(
+      "loginReadinessStatus",
+      referenceDataReady ? "ZIP reference data ready." : "Loading US ZIP data for you.",
+      referenceDataReady ? "ok" : "warn",
+      referenceDataReady ? {} : { retry: true },
+    );
+    return referenceDataReady;
   } catch (error) {
     referenceDataReady = false;
     setStatus("loginReadinessStatus", productSafeError(error.message, "ZIP reference data needs attention."), "error", { retry: true });
@@ -155,6 +160,24 @@ async function login() {
   }
 }
 
+async function testDbConnection() {
+  const button = el("testDbBtn");
+  const previousButton = setButtonBusy(button, "Testing DB connection");
+  setStatus("dbStatus", "", "hidden");
+  try {
+    const response = await fetch("/api/ping", { cache: "no-store" });
+    const result = await response.json();
+    if (!response.ok || result.ok === false) {
+      throw new Error(result.error || "Database connection needs attention.");
+    }
+    setStatus("dbStatus", "Database connection ready.", "ok");
+  } catch (error) {
+    setStatus("dbStatus", productSafeError(error.message, "Database connection needs attention."), "error");
+  } finally {
+    clearButtonBusy(button, previousButton);
+  }
+}
+
 // Inline SVG wordmark shown if the external CDN logo can't be reached
 // (offline, blocked, or 404). Without this the login page - the first
 // screen users hit - renders a broken image. Mirrors the main app's fallback.
@@ -177,6 +200,7 @@ async function init() {
   }
   prepareReferenceData();
   el("loginBtn").addEventListener("click", login);
+  el("testDbBtn").addEventListener("click", testDbConnection);
   el("loginPassword").addEventListener("keydown", (event) => {
     if (event.key === "Enter") login();
   });

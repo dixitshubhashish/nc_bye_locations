@@ -63,6 +63,14 @@ function resolveCanonicalBrand(brand) {
   return formatBrandName(canonicalBrandMap.get(brand) || getCanonicalBrandName(brand));
 }
 
+function formatBrandList(value) {
+  return String(value || "")
+    .split(/[~,]/)
+    .map((brand) => formatBrandName(brand))
+    .filter(Boolean)
+    .join(" ~ ");
+}
+
 
 function renderEmptyReportingStructure() {
       el("reportContent").classList.remove("hidden");
@@ -113,7 +121,7 @@ function renderEmptyReportingStructure() {
         { key: "city", label: "City" },
         { key: "zip_code", label: "ZIP Code" },
         { key: "competitor_locations", label: "Competitor Stores", format: formatNumber },
-        { key: "brands_present", label: "Competitor Brands" },
+        { key: "brands_present", label: "Competitor Brands", format: formatBrandList },
         { key: "population", label: "Census Population", format: formatNumber },
         { key: "median_household_income", label: "Median Income", format: formatNumber },
         { key: "median_age", label: "Median Age", format: formatNumber }
@@ -612,7 +620,7 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [],
             <span>${escapeHtml(gap.city || "")}, ${escapeHtml(stateLabel)} (${escapeHtml(gap.county || "")})</span><br/>
             <span style="color: #64748b; font-size: 11px;">🌐 Lat: ${lat.toFixed(4)}, Lon: ${lon.toFixed(4)}</span>
             <hr style="margin: 6px 0; border: none; border-top: 1px solid #e2e8f0;"/>
-            <span><strong>Competitors Operating:</strong> ${escapeHtml(gap.brands_present || "")} (${gap.competitor_locations} store${gap.competitor_locations > 1 ? "s" : ""})</span><br/>
+            <span><strong>Competitors Operating:</strong> ${escapeHtml(formatBrandList(gap.brands_present))} (${gap.competitor_locations} store${gap.competitor_locations > 1 ? "s" : ""})</span><br/>
             <span><strong>Population:</strong> ${formatNumber(gap.population)}</span><br/>
             <span><strong>Median Income:</strong> ${gap.median_household_income ? "$" + formatNumber(gap.median_household_income) : "N/A"}</span><br/>
             <span><strong>Median Age:</strong> ${gap.median_age || "N/A"} yrs</span>
@@ -644,6 +652,9 @@ function syncReportingFilters(result) {
           mainSel.value = currentMain;
         } else if (mainSel) {
           mainSel.innerHTML = '<option value="">All Brands</option>';
+        }
+        if (!uniqueBrands.length) {
+          competitorDefaultsAppliedForMainBrand = null;
         }
         updateCompetitorOptions();
         brandDropdownsInitialized = true;
@@ -1093,7 +1104,7 @@ function renderMarketGapsWithPagination(gaps = [], page = 1) {
     { key: "city", label: "City" },
     { key: "zip_code", label: "ZIP Code" },
     { key: "competitor_locations", label: "Competitor Stores", format: formatNumber },
-    { key: "brands_present", label: "Competitor Brands" },
+    { key: "brands_present", label: "Competitor Brands", format: formatBrandList },
     { key: "population", label: "Census Population", format: (v) => (v ? formatNumber(v) : "N/A") },
     { key: "median_household_income", label: "Median Income", format: (v) => (v ? "$" + formatNumber(v) : "N/A") },
     { key: "median_age", label: "Median Age", format: (v) => (v ? v + " yrs" : "N/A") }

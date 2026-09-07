@@ -3,6 +3,7 @@
   const num = (v) => Number.isFinite(Number(v)) ? Number(v) : 0;
   const fmt = (v) => num(v).toLocaleString();
   const pct = (v) => `${num(v).toFixed(1)}%`;
+  const formatIssue = (value) => String(value || '').replace(/[_-]+/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
 
   function injectStyles() {
     if ($('reportingTabsStyles')) return;
@@ -23,13 +24,20 @@
       .dq-card small{display:block;margin-top:4px;color:var(--muted);font-size:11px}
       .dq-section{margin:22px 0}.dq-section h3{margin:0 0 10px;font-size:18px;color:var(--navy,var(--ink))}
       .dq-table{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(--line);border-radius:8px;overflow:hidden}
-      .dq-table th,.dq-table td{padding:9px 10px;border-bottom:1px solid var(--line);font-size:12px;text-align:left}
-      .dq-table th{background:#eef4fc;color:var(--navy,var(--ink));font-weight:750}
+      .dq-table th,.dq-table td{padding:12px 14px;border-bottom:1px solid var(--line);font-size:14px;line-height:1.35;text-align:left}
+      .dq-table th{background:#eef4fc;color:var(--navy,var(--ink));font-size:13px;font-weight:750}
       .dq-status{display:inline-flex;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:750}
       .dq-status.good{background:#dcfce7;color:#15803d}.dq-status.warn{background:#fef3c7;color:#a16207}.dq-status.bad{background:#fee2e2;color:#b91c1c}
       .dq-improvements{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
       .dq-improvement{background:#fff;border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;padding:12px 14px}
       .dq-improvement strong{display:block;color:var(--navy,var(--ink));margin-bottom:3px}.dq-improvement span{font-size:12px;color:var(--muted)}
+      .dq-filters{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:12px;align-items:end;margin:0 0 14px;padding:16px;background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 1px 3px rgba(15,23,42,.05)}
+      .dq-filter-field{display:grid;gap:5px;min-width:0}.dq-filter-field label{font-size:11px;font-weight:700;color:var(--muted)}
+      .dq-filters select,.dq-filters button{width:100%;min-height:38px;padding:8px 11px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink);font-size:12px;box-sizing:border-box}.dq-filters select:focus{outline:2px solid #bfdbfe;outline-offset:1px}.dq-filters button{grid-column:1/-1;justify-self:center;width:min(220px,100%);background:var(--accent);color:#fff;font-weight:700;cursor:pointer;border-color:var(--accent)}
+      .dq-loading-panel{min-height:360px;display:flex;align-items:center;justify-content:center}
+      .dq-loading-panel.hidden,.dq-body.hidden{display:none!important}
+      .dq-loading-box{display:flex;align-items:center;gap:12px;padding:16px 20px;background:#fff;border:1px solid var(--line);border-radius:8px;color:var(--ink);font-weight:750;box-shadow:0 8px 24px rgba(15,23,42,.08)}
+      @media(max-width:900px){.dq-filters{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:520px){.dq-filters{grid-template-columns:1fr}}
       @media(max-width:1000px){.dq-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.dq-improvements{grid-template-columns:1fr}}
     `;
     document.head.appendChild(style);
@@ -52,84 +60,125 @@
     panel.className = 'reporting-tab-panel hidden';
     panel.innerHTML = `
       <div class="dq-intro">
-        <div><h2>Data Quality &amp; Improvements</h2><p>Operational quality view for the same records used by Location Intelligence. This summarizes completeness, duplicates, freshness, confidence, and the highest-value remediation opportunities without replacing the existing Error Listings or Template Library workflows.</p></div>
+        <div><h2>Data Quality &amp; Improvements</h2><p>Focus on invalid listings, unresolved issues, and measurable improvement from automatic and manual fixes.</p></div>
         <button id="refreshDataQualityBtn" type="button">Refresh Quality Metrics</button>
       </div>
+      <div class="dq-filters"><div class="dq-filter-field"><label for="dqBrandFilter">Brand</label><select id="dqBrandFilter"><option value="">All impacted brands</option></select></div><div class="dq-filter-field"><label for="dqStateFilter">State</label><select id="dqStateFilter"><option value="">All impacted states</option></select></div><div class="dq-filter-field"><label for="dqReasonFilter">Issue type</label><select id="dqReasonFilter"><option value="">All issue types</option></select></div><div class="dq-filter-field"><label for="dqStatusFilter">Review status</label><select id="dqStatusFilter"><option value="all">All statuses</option><option value="needs_review">Needs review</option><option value="ai_fixed">AI fixed</option></select></div><button id="applyQualityFiltersBtn" type="button">Apply filters</button></div>
       <div id="dqStatus" class="report-status">Open this tab to load quality metrics.</div>
-      <div id="dqMetricGrid" class="dq-grid"></div>
-      <div class="dq-section"><h3>Quality Signals</h3><div id="dqSignals"></div></div>
-      <div class="dq-section"><h3>Improvement Opportunities</h3><div id="dqImprovements" class="dq-improvements"></div></div>
-      <div class="dq-section"><h3>Reconciliation</h3><div id="dqReconciliation"></div></div>
+      <div id="dqLoadingPanel" class="dq-loading-panel hidden"><div class="dq-loading-box"><span class="spinner"></span><span>Loading quality metrics</span></div></div>
+      <div id="dqBody" class="dq-body hidden">
+        <div id="dqMetricGrid" class="dq-grid"></div>
+        <div class="dq-section"><h3>Quality Signals</h3><div id="dqSignals"></div></div>
+        <div class="dq-section"><h3>Improvement Opportunities</h3><div id="dqImprovements" class="dq-improvements"></div></div>
+        <div class="dq-section"><h3>Quality by Brand</h3><div id="dqBrandTable"></div></div>
+        <div class="dq-section"><h3>Most Impacted States and Cities</h3><div id="dqGeoTables" class="dq-improvements"></div></div>
+        <div class="dq-section"><h3>Reconciliation</h3><div id="dqReconciliation"></div></div>
+      </div>
     `;
     return panel;
   }
 
-  async function loadQuality() {
+  async function loadQuality(forceRefresh = false) {
     const status = $('dqStatus');
     if (!status) return;
-    status.className = 'report-status loading';
-    status.innerHTML = '<span class="spinner"></span> Loading data quality metrics...';
-    try {
-      let qs = '';
-      try { if (typeof window.reportingQueryString === 'function') qs = window.reportingQueryString(); } catch (_) {}
-      const res = await fetch(`/api/reporting${qs ? `?${qs}` : ''}`);
+    const refreshButton = $('refreshDataQualityBtn');
+    const loadingPanel = $('dqLoadingPanel');
+    const body = $('dqBody');
+    const originalRefreshLabel = refreshButton?.innerHTML || 'Refresh Quality Metrics';
+    if (loadingPanel) loadingPanel.classList.remove('hidden');
+    if (body) body.classList.add('hidden');
+    if (forceRefresh) {
+      if (refreshButton) { refreshButton.disabled = true; refreshButton.innerHTML = '<span class="spinner"></span> Refreshing quality metrics'; }
+      status.className = 'report-status hidden';
+      status.textContent = '';
+    } else {
+      status.className = 'report-status hidden';
+      status.textContent = '';
+    }
+      try {
+        let qs = '';
+      try {
+        if (typeof window.reportingQueryString === 'function') {
+          const brandOnly = new URLSearchParams(window.reportingQueryString());
+          ['min_population', 'min_income', 'max_median_age'].forEach((key) => brandOnly.delete(key));
+          qs = brandOnly.toString();
+        }
+      } catch (_) {}
+      const qualityParams = new URLSearchParams(qs);
+      if (forceRefresh) qualityParams.set('refresh', '1');
+      [['brand', 'dqBrandFilter'], ['state', 'dqStateFilter'], ['reason', 'dqReasonFilter'], ['status', 'dqStatusFilter']].forEach(([key, id]) => { const node = $(id); if (node?.value) qualityParams.set(key, node.value); });
+      const res = await fetch(`/api/reporting/quality${qualityParams.toString() ? `?${qualityParams}` : ''}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Unable to load quality metrics.');
-      const q = data.data_quality_summary || {};
-      const totals = data.totals || {};
-      const raw = num(q.total_raw_locations || totals.total_locations);
-      const validRate = num(q.valid_rate_pct);
-      const dupRate = num(q.duplicate_rate_pct);
-      const zipComp = num(q.zip_completeness_pct);
-      const coordComp = num(q.coordinate_completeness_pct);
-      const freshness = num(q.freshness_days);
-      const confidence = String(q.overall_confidence || 'N/A').toUpperCase();
-      const validEstimated = raw && validRate ? Math.round(raw * validRate / 100) : 0;
-      const dupEstimated = raw && dupRate ? Math.round(raw * dupRate / 100) : 0;
+      const q = data.metrics || {};
+      const raw = num(q.invalid_listings);
+      const needsReview = num(q.needs_manual_review);
+      const aiFixed = num(q.ai_fixed);
+      const manualFixed = num(q.manual_fixed);
+      const unresolvedRate = num(q.unresolved_rate_pct);
+      const reasons = Array.isArray(data.reasons) ? data.reasons : [];
+      const states = Array.isArray(data.states) ? data.states : [];
+      const cities = Array.isArray(data.cities) ? data.cities : [];
+      [['dqBrandFilter', data.filters?.brands || [], 'All impacted brands'], ['dqStateFilter', data.filters?.states || [], 'All impacted states'], ['dqReasonFilter', data.filters?.reasons || [], 'All issue types']].forEach(([id, values, label]) => {
+        const node = $(id); if (!node) return; const previous = node.value;
+        node.innerHTML = `<option value="">${label}</option>${values.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(formatIssue(value))}</option>`).join('')}`;
+        if (values.includes(previous)) node.value = previous;
+      });
 
       $('dqMetricGrid').innerHTML = [
-        metricCard(fmt(raw), 'Records in analytical scope', 'Same reporting filter context'),
-        metricCard(validRate ? pct(validRate) : 'N/A', 'Valid rate'),
-        metricCard(dupRate ? pct(dupRate) : 'N/A', 'Duplicate rate'),
-        metricCard(zipComp ? pct(zipComp) : 'N/A', 'ZIP completeness'),
-        metricCard(coordComp ? pct(coordComp) : 'N/A', 'Coordinate completeness'),
-        metricCard(freshness || freshness === 0 ? `${freshness} days` : 'N/A', 'Source freshness'),
-        metricCard(confidence, 'Overall confidence'),
-        metricCard(fmt(validEstimated), 'Estimated usable records', validRate ? 'Derived from backend valid rate' : 'Not available')
+        metricCard(fmt(raw), 'Invalid listings', 'Active validation and review population'),
+        metricCard(fmt(needsReview), 'Needs manual review'),
+        metricCard(fmt(aiFixed), 'Listings fixed automatically'),
+        metricCard(fmt(manualFixed), 'Listings fixed manually'),
+        metricCard(pct(unresolvedRate), 'Unresolved rate'),
+        metricCard(fmt(reasons.length), 'Active issue types'),
+        metricCard(fmt(states.length), 'Impacted states'),
+        metricCard(fmt(cities.length), 'Impacted cities')
       ].join('');
 
       const signals = [
-        ['Valid records', validRate ? pct(validRate) : 'N/A', statusClass(validRate, 98, 95)],
-        ['Duplicate rate', dupRate ? pct(dupRate) : 'N/A', statusClass(dupRate, 1, 3, true)],
-        ['ZIP completeness', zipComp ? pct(zipComp) : 'N/A', statusClass(zipComp, 98, 95)],
-        ['Coordinate completeness', coordComp ? pct(coordComp) : 'N/A', statusClass(coordComp, 98, 92)],
-        ['Freshness', freshness || freshness === 0 ? `${freshness} days` : 'N/A', statusClass(freshness, 7, 30, true)],
-        ['Confidence', confidence, confidence === 'HIGH' ? 'good' : confidence === 'MEDIUM' ? 'warn' : 'bad']
+        ['Manual review queue', fmt(needsReview), needsReview ? 'bad' : 'good'],
+        ['Unresolved rate', pct(unresolvedRate), statusClass(unresolvedRate, 5, 20, true)],
+        ['Automatic fixes', fmt(aiFixed), aiFixed ? 'good' : 'warn'],
+        ['Manual fixes', fmt(manualFixed), manualFixed ? 'good' : 'warn'],
+        ['Issue categories', fmt(reasons.length), reasons.length ? 'warn' : 'good']
       ];
       $('dqSignals').innerHTML = `<table class="dq-table"><thead><tr><th>Signal</th><th>Current</th><th>Status</th></tr></thead><tbody>${signals.map(([name,val,cls]) => `<tr><td>${name}</td><td>${val}</td><td><span class="dq-status ${cls}">${cls === 'good' ? 'Healthy' : cls === 'warn' ? 'Review' : 'Needs attention'}</span></td></tr>`).join('')}</tbody></table>`;
 
+      const buckets = reasons.filter((bucket) => num(bucket.count) > 0).map((bucket) => ({...bucket, type: bucket.reason}));
+      if (buckets.length) {
+        $('dqSignals').insertAdjacentHTML('beforeend', `<table class="dq-table" style="margin-top:12px;"><thead><tr><th>Validation issue</th><th>Records</th><th>Resolution</th></tr></thead><tbody>${buckets.map((bucket) => `<tr><td>${escapeHtml(formatIssue(bucket.type || 'Validation issue'))}</td><td>${fmt(bucket.count)}</td><td>${bucket.resolved === true ? 'Resolved' : 'Needs review'}</td></tr>`).join('')}</tbody></table>`);
+      }
+
+      const brandRows = Array.isArray(data.brands) ? data.brands : [];
+      $('dqBrandTable').innerHTML = `<table class="dq-table"><thead><tr><th>Brand</th><th>Invalid</th><th>Needs review</th><th>AI fixed</th></tr></thead><tbody>${brandRows.length ? brandRows.map((brand) => `<tr><td>${escapeHtml(formatBrandName(brand.brand))}</td><td>${fmt(brand.invalid)}</td><td>${fmt(brand.needs_review)}</td><td>${fmt(brand.ai_enriched)}</td></tr>`).join('') : '<tr><td colspan="4">No invalid brand records are available for this filter.</td></tr>'}</tbody></table>`;
+      $('dqGeoTables').innerHTML = `<div><table class="dq-table"><thead><tr><th>State</th><th>Invalid listings</th></tr></thead><tbody>${states.slice(0, 10).map((row) => `<tr><td>${escapeHtml(row.state)}</td><td>${fmt(row.count)}</td></tr>`).join('') || '<tr><td colspan="2">No impacted states.</td></tr>'}</tbody></table></div><div><table class="dq-table"><thead><tr><th>City</th><th>Invalid listings</th></tr></thead><tbody>${cities.slice(0, 10).map((row) => `<tr><td>${escapeHtml(row.city)}</td><td>${fmt(row.count)}</td></tr>`).join('') || '<tr><td colspan="2">No impacted cities.</td></tr>'}</tbody></table></div>`;
+
       const improvements = [];
-      if (zipComp && zipComp < 99.5) improvements.push(['Improve ZIP completeness', `${Math.max(0, Math.round(raw * (100 - zipComp) / 100)).toLocaleString()} records may need ZIP enrichment or validation.`]);
-      if (coordComp && coordComp < 99) improvements.push(['Improve coordinate coverage', `${Math.max(0, Math.round(raw * (100 - coordComp) / 100)).toLocaleString()} records may benefit from source coordinates, ZIP centroid, or city/state fallback.`]);
-      if (dupRate > 1) improvements.push(['Review duplicate candidates', `Approximately ${dupEstimated.toLocaleString()} records may require canonical-location review.`]);
-      if (freshness > 14) improvements.push(['Refresh stale sources', `Current freshness is ${freshness} days. Prioritize source refresh before relying on market-gap conclusions.`]);
-      if (validRate && validRate < 99) improvements.push(['Reduce validation failures', `Approximately ${Math.max(0, raw - validEstimated).toLocaleString()} records are outside the valid analytical set.`]);
+      if (needsReview) improvements.push(['Reduce manual review', `${fmt(needsReview)} invalid listings remain unresolved and require attention.`]);
+      if (reasons[0]) improvements.push(['Address the leading issue', `${fmt(reasons[0].count)} listings are affected by ${String(reasons[0].reason).replace(/_/g, ' ')}.`]);
+      if (aiFixed) improvements.push(['Automatic improvements completed', `${fmt(aiFixed)} listings have passed through the automatic repair path.`]);
       if (!improvements.length) improvements.push(['Maintain current quality level', 'No major threshold breach is visible in the current reporting summary. Continue monitoring freshness and source coverage.']);
       $('dqImprovements').innerHTML = improvements.map(([title,text]) => `<div class="dq-improvement"><strong>${title}</strong><span>${text}</span></div>`).join('');
 
       $('dqReconciliation').innerHTML = `<table class="dq-table"><thead><tr><th>Measure</th><th>Value</th><th>Explanation</th></tr></thead><tbody>
-        <tr><td>Records in scope</td><td>${fmt(raw)}</td><td>Current reporting scope after selected geography/brand filters.</td></tr>
-        <tr><td>Estimated valid</td><td>${fmt(validEstimated)}</td><td>Calculated from backend-reported valid rate when available.</td></tr>
-        <tr><td>Estimated duplicate observations</td><td>${fmt(dupEstimated)}</td><td>Calculated from backend-reported duplicate rate when available.</td></tr>
-        <tr><td>Location Intelligence source</td><td>Shared</td><td>Both reporting tabs consume the same reporting API and filters.</td></tr>
+        <tr><td>Invalid listings</td><td>${fmt(raw)}</td><td>Active records that failed validation or remain in review.</td></tr>
+        <tr><td>Review status</td><td>${fmt(needsReview)} unresolved</td><td>Only records still requiring user attention are counted here.</td></tr>
+        <tr><td>Change history</td><td>Not tracked yet</td><td>Run-over-run comparison requires snapshot history.</td></tr>
       </tbody></table>`;
 
-      status.className = 'report-status';
-      status.textContent = `Quality metrics loaded${data.reporting_cache ? ` • cache: ${data.reporting_cache}` : ''}.`;
+      if (loadingPanel) loadingPanel.classList.add('hidden');
+      if (body) body.classList.remove('hidden');
+      status.className = 'report-status hidden';
+      status.textContent = '';
     } catch (err) {
+      if (loadingPanel) loadingPanel.classList.add('hidden');
+      if (body) body.classList.add('hidden');
       status.className = 'report-status error';
       status.textContent = err.message || 'Unable to load data quality metrics.';
     } finally {
+      if (forceRefresh && refreshButton) { refreshButton.disabled = false; refreshButton.innerHTML = originalRefreshLabel; }
+      if (forceRefresh && status.className !== 'report-status error') { status.className = 'report-status hidden'; status.textContent = ''; }
       const reportingView = $('reportingView');
       if (reportingView) {
         const shell = reportingView.querySelector('.report-shell');
@@ -178,7 +227,8 @@
       const btn = e.target.closest('[data-report-tab]');
       if (btn) switchTab(btn.dataset.reportTab);
     });
-    $('refreshDataQualityBtn')?.addEventListener('click', loadQuality);
+    $('refreshDataQualityBtn')?.addEventListener('click', () => loadQuality(true));
+    $('applyQualityFiltersBtn')?.addEventListener('click', loadQuality);
     switchTab('location');
     return true;
   }

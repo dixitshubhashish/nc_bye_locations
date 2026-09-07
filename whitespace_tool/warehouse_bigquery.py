@@ -229,6 +229,7 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "validation_status", "type": "STRING", "mode": "NULLABLE"},
         {"name": "validated", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "enriched_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
+        {"name": "max_enriched", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "is_sample_data", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "sample_batch_id", "type": "STRING", "mode": "NULLABLE"},
         # Enhanced location fields
@@ -304,6 +305,16 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "is_deleted", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "deleted_on", "type": "TIMESTAMP", "mode": "NULLABLE"},
         {"name": "is_ai_enriched", "type": "BOOLEAN", "mode": "NULLABLE"},
+    ],
+    "quality_fix_events": [
+        {"name": "fix_id", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "listing_id", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "event_id", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "row_number", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "fix_type", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "processed", "type": "BOOLEAN", "mode": "REQUIRED"},
+        {"name": "improved", "type": "BOOLEAN", "mode": "REQUIRED"},
+        {"name": "created_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
     ],
 }
 
@@ -556,7 +567,7 @@ def _assert_not_protected_dataset(dataset_name: str) -> None:
 
 def _clear_dataset_tables_with_client(client: Any, dataset_ref: str) -> dict[str, list[str]]:
     _assert_not_protected_dataset(dataset_ref)
-    preserved_tables = {"us_zipcodes", "field_catalogs", "field_catalog", "source_types", "workflow_templates"}
+    preserved_tables = {"us_zipcodes", "field_catalogs", "field_catalog", "source_types", "workflow_templates", "quality_fix_events"}
     table_refs = [table.reference for table in client.list_tables(dataset_ref) if table.table_id not in preserved_tables]
     LOGGER.warning("db_clear_started dataset=%s table_count=%d", dataset_ref, len(table_refs))
     soft_deleted: list[str] = []

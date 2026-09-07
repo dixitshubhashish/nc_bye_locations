@@ -2274,7 +2274,7 @@ async function saveMapper() {
           if (typeof loadErrorBrandBreakdown === "function") loadErrorBrandBreakdown();
           hideProgress();
           const prefix = activeTemplateId ? "Template updated. " : "";
-          setStatus(`${prefix}${processedRows} records processed. ${errorListings} need review.`, "ok");
+          showSaveCompletion(`${prefix}${processedRows} records processed. ${errorListings} need review.`);
         } catch (error) {
           hideProgress();
           setStatus(productSafeError(error.message, "Could not save template."), "error");
@@ -2282,6 +2282,21 @@ async function saveMapper() {
       } finally {
         clearButtonBusy(saveBtn, previousSaveBtn);
       }
+    }
+
+function showSaveCompletion(message) {
+      let dialog = document.getElementById("saveCompletionDialog");
+      if (!dialog) {
+        dialog = document.createElement("dialog");
+        dialog.id = "saveCompletionDialog";
+        dialog.style.cssText = "border:1px solid var(--line);border-radius:10px;padding:24px;max-width:420px;color:var(--ink);box-shadow:0 24px 70px rgba(15,23,42,.28);";
+        dialog.innerHTML = `<p id="saveCompletionMessage" style="margin:0 0 20px;font-size:16px;font-weight:650;line-height:1.45"></p><div style="display:flex;justify-content:flex-end"><button id="saveCompletionOk" type="button">OK</button></div>`;
+        document.body.appendChild(dialog);
+        dialog.querySelector("#saveCompletionOk").addEventListener("click", () => dialog.close());
+      }
+      dialog.querySelector("#saveCompletionMessage").textContent = message;
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else window.alert(message);
     }
 async function clearSavedData() {
       const dialog = el("dangerDialog");

@@ -281,13 +281,14 @@ async function refreshHeaderReadiness(force = false) {
       setReadinessButtonDisabled(true);
       readinessCheckInFlight = (async () => {
         try {
-          const response = await fetch("/api/prepare");
+          const response = await fetch(`/api/prepare${force ? "?force=1" : ""}`);
           const result = await response.json();
           if (!response.ok) throw new Error(result.error || "ZIP setup needs attention.");
-          appReady = true;
+          const ready = result.status === "ready" || result.loaded === true;
+          appReady = ready;
           updateLoginButtonReferenceState();
-          setHeaderReadiness("ZIPs loaded", "ok");
-          setReadinessButtonDisabled(true);
+          setHeaderReadiness(ready ? "ZIPs loaded" : "Loading US ZIPs", ready ? "ok" : "warn");
+          setReadinessButtonDisabled(ready);
           return result;
         } catch (error) {
           appReady = false;

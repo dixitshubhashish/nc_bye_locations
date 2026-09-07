@@ -155,6 +155,16 @@ def init_sqlite_cache() -> None:
             );
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS zip_reference_status (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                status TEXT NOT NULL DEFAULT 'not_started',
+                rows INTEGER NOT NULL DEFAULT 0,
+                message TEXT,
+                started_at TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS auto_repair_stats (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 fixed INTEGER NOT NULL DEFAULT 0,
@@ -164,10 +174,144 @@ def init_sqlite_cache() -> None:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS enrichment_queue (
+                listing_id TEXT PRIMARY KEY,
+                cycle_id INTEGER NOT NULL,
+                queue_set TEXT NOT NULL CHECK (queue_set IN ('base', 'failed')),
+                state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'processing', 'completed')),
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                claimed_at TIMESTAMP,
+                completed_at TIMESTAMP,
+                improved INTEGER NOT NULL DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_enrichment_queue_cycle ON enrichment_queue (cycle_id, queue_set, state);")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS mirror_quality_listings (
+                listing_id TEXT PRIMARY KEY,
+                event_id TEXT,
+                business_id TEXT,
+                brand TEXT,
+                state TEXT,
+                city TEXT,
+                reasons TEXT,
+                status TEXT,
+                is_ai_enriched INTEGER NOT NULL DEFAULT 0,
+                raw_record TEXT,
+                synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_quality_mirror_brand ON mirror_quality_listings (brand);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_quality_mirror_geo ON mirror_quality_listings (state, city);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_quality_mirror_status ON mirror_quality_listings (status);")
         try:
             conn.execute("ALTER TABLE auto_repair_stats ADD COLUMN manual_fixed INTEGER NOT NULL DEFAULT 0")
         except sqlite3.OperationalError:
             pass
+        conn.commit()
+
+
+def seed_enrichment_cycle(listing_ids: list[str], cycle_id: int) -> int:
+    """Replace the current pending base set with a new persisted cycle."""
+    init_sqlite_cache()
+    ids = sorted({str(value).strip() for value in listing_ids if str(value).strip()})
+    with get_db_connection() as conn:
+        conn.execute("DELETE FROM enrichment_queue")
+        conn.executemany(
+            "INSERT INTO enrichment_queue (listing_id, cycle_id, queue_set) VALUES (?, ?, 'base')",
+            [(listing_id, int(cycle_id)) for listing_id in ids],
+        )
+        conn.commit()
+    return len(ids)
+
+
+def claim_enrichment_batch(cycle_id: int, limit: int = 2) -> list[str]:
+    """Atomically claim a small batch from the active base set."""
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT listing_id FROM enrichment_queue WHERE cycle_id = ? AND queue_set = 'base' AND state = 'pending' ORDER BY listing_id LIMIT ?",
+            (int(cycle_id), max(1, min(int(limit), 2))),
+        ).fetchall()
+        ids = [str(row["listing_id"]) for row in rows]
+        if ids:
+            now = datetime.now(timezone.utc).isoformat()
+            conn.executemany(
+                "UPDATE enrichment_queue SET state='processing', attempt_count=attempt_count+1, claimed_at=?, updated_at=CURRENT_TIMESTAMP WHERE listing_id=? AND cycle_id=? AND state='pending'",
+                [(now, listing_id, int(cycle_id)) for listing_id in ids],
+            )
+            conn.commit()
+        return ids
+
+
+def complete_enrichment_claim(listing_id: str, cycle_id: int, improved: bool) -> None:
+    """Complete a claim; unresolved rows enter the next cycle's failed set."""
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        if improved:
+            conn.execute("UPDATE enrichment_queue SET state='completed', improved=1, completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE listing_id=? AND cycle_id=?", (listing_id, int(cycle_id)))
+        else:
+            conn.execute("UPDATE enrichment_queue SET state='completed', queue_set='failed', completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE listing_id=? AND cycle_id=?", (listing_id, int(cycle_id)))
+        conn.commit()
+
+
+def enrichment_cycle_counts(cycle_id: int) -> dict[str, int]:
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        rows = conn.execute("SELECT queue_set, state, COUNT(*) AS count FROM enrichment_queue WHERE cycle_id=? GROUP BY queue_set, state", (int(cycle_id),)).fetchall()
+    result = {"base_pending": 0, "base_processing": 0, "failed": 0, "completed": 0}
+    for row in rows:
+        if row["queue_set"] == "base" and row["state"] == "pending": result["base_pending"] = int(row["count"])
+        if row["queue_set"] == "base" and row["state"] == "processing": result["base_processing"] = int(row["count"])
+        if row["queue_set"] == "failed" and row["state"] == "completed": result["failed"] = int(row["count"])
+        result["completed"] += int(row["count"])
+    return result
+
+
+def replace_quality_mirror(rows: list[dict[str, Any]]) -> None:
+    """Persist the latest invalid/review rows for fast quality reporting."""
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        conn.execute("DELETE FROM mirror_quality_listings")
+        conn.executemany("""
+            INSERT OR REPLACE INTO mirror_quality_listings
+            (listing_id, event_id, business_id, brand, state, city, reasons, status, is_ai_enriched, raw_record)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, [
+            (str(row.get("listing_id") or f"{row.get('event_id','')}:{row.get('row_number','')}"), row.get("event_id"), row.get("business_id"), row.get("brand"), row.get("state"), row.get("city"), json.dumps(row.get("quality_reasons", [])), row.get("status", "needs_review"), int(bool(row.get("is_ai_enriched"))), json.dumps(row.get("raw_record"), default=str))
+            for row in rows
+        ])
+        conn.commit()
+
+
+def clear_sample_reporting_mirror(business_ids: list[str], brand_names: list[str]) -> None:
+    """Remove known sample/demo brands from local reporting mirrors."""
+    init_sqlite_cache()
+    clean_business_ids = sorted({str(value).strip() for value in business_ids if str(value).strip()})
+    clean_brand_names = sorted({str(value).strip() for value in brand_names if str(value).strip()})
+    with get_db_connection() as conn:
+        if clean_business_ids:
+            placeholders = ",".join("?" for _ in clean_business_ids)
+            conn.execute(f"DELETE FROM mirror_reporting_locations WHERE business_id IN ({placeholders})", clean_business_ids)
+            conn.execute(f"DELETE FROM mirror_businesses WHERE business_id IN ({placeholders})", clean_business_ids)
+            conn.execute(f"DELETE FROM mirror_quality_listings WHERE business_id IN ({placeholders})", clean_business_ids)
+        if clean_brand_names:
+            placeholders = ",".join("?" for _ in clean_brand_names)
+            conn.execute(f"DELETE FROM mirror_zip_brand_activity WHERE brand_name IN ({placeholders})", clean_brand_names)
+            conn.execute(f"DELETE FROM mirror_reporting_locations WHERE brand IN ({placeholders})", clean_brand_names)
+            conn.execute(f"DELETE FROM mirror_quality_listings WHERE brand IN ({placeholders})", clean_brand_names)
+        conn.execute("""
+            INSERT OR REPLACE INTO mirror_meta (id, synced_at, zip_brand_rows, location_rows, business_rows)
+            VALUES (
+                1,
+                CURRENT_TIMESTAMP,
+                (SELECT COUNT(*) FROM mirror_zip_brand_activity),
+                (SELECT COUNT(*) FROM mirror_reporting_locations),
+                (SELECT COUNT(*) FROM mirror_businesses)
+            )
+        """)
         conn.commit()
 
 
@@ -219,11 +363,39 @@ def get_cached_zipcode_count() -> int:
         return int(row["count"] or 0)
 
 
-def get_auto_repair_stats() -> dict[str, int]:
+def get_zip_reference_status() -> dict[str, Any]:
     init_sqlite_cache()
     with get_db_connection() as conn:
-        row = conn.execute("SELECT fixed, manual_fixed, processed, remaining FROM auto_repair_stats WHERE id = 1;").fetchone()
-        return dict(row) if row else {"fixed": 0, "manual_fixed": 0, "processed": 0, "remaining": 0}
+        row = conn.execute("SELECT status, rows, message, started_at, updated_at FROM zip_reference_status WHERE id = 1").fetchone()
+        if row:
+            return dict(row)
+    return {"status": "not_started", "rows": 0, "message": "", "started_at": "", "updated_at": ""}
+
+
+def set_zip_reference_status(status: str, rows: int = 0, message: str = "") -> None:
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO zip_reference_status (id, status, rows, message, started_at, updated_at)
+            VALUES (1, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO UPDATE SET
+              status=excluded.status,
+              rows=excluded.rows,
+              message=excluded.message,
+              started_at=CASE WHEN excluded.status='loading' THEN CURRENT_TIMESTAMP ELSE zip_reference_status.started_at END,
+              updated_at=CURRENT_TIMESTAMP
+            """,
+            (str(status), int(rows or 0), str(message or "")),
+        )
+        conn.commit()
+
+
+def get_auto_repair_stats() -> dict[str, Any]:
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT fixed, manual_fixed, processed, remaining, updated_at FROM auto_repair_stats WHERE id = 1;").fetchone()
+        return dict(row) if row else {"fixed": 0, "manual_fixed": 0, "processed": 0, "remaining": 0, "updated_at": ""}
 
 
 def set_auto_repair_stats(fixed: int, processed: int, remaining: int, manual_fixed: int | None = None) -> None:
