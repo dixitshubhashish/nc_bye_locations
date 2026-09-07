@@ -1,101 +1,38 @@
-# Codex Working Notes
+# Codex Project Handoff
 
-This is the practical handoff for the Competitive Whitespace prototype. Update it after meaningful behavior changes so future work starts from the current code, not from old branch assumptions.
+## Product
+Competitive Whitespace Tool: secure login, source mapping, validation/review, templates, enrichment, and US location reporting.
 
-## Current Branch And Git Rules
+## Rules
+- Active branch: `develop_new`.
+- Do not commit or push unless explicitly requested.
+- `run.sh` is removed. Start with `.venv/bin/python -m whitespace_tool.cli workflow-ui --host 127.0.0.1 --port 8765`.
+- Preserve unrelated user changes. Ignore `implementation_plan.md` when reconstructing current behavior.
 
-- Active development branch: `develop_new`.
-- `feature_21` contains the Pyodide/demo work and was merged into `develop_new`.
-- Do not commit unless the user explicitly asks.
-- Do not include unrelated local changes such as `.env.example` unless requested.
-- `run.sh` was intentionally removed; start with `python -m whitespace_tool workflow-ui`.
+## Data Flow
+Parse samples up to 50 records for discovery; save reloads and processes the complete source. Valid rows are stored and invalid rows remain in Review Error Listings. Background enrichment uses the worldwide city reference for fuzzy location matching and ZIP/coordinate validation.
 
-## What The App Does
+BigQuery is authoritative. Persistent WAL SQLite mirrors ZIPs, brands, reporting rows, query results, and error counters for fast startup. ZIP readiness checks SQLite first, falls back to BigQuery, and repopulates the mirror. ZIP readiness does not block login; the app provides `Sync US ZIPs` for readiness and retry.
 
-The app starts at a secure login page, then provides one workflow UI with separate tabs for source mapping, review error listings, template library, and reporting. It accepts CSV, XLSX/XLS, JSON, XML, GET JSON API, and browser Pyodide Python sources. Source data is mapped into a common location model, validated, written to BigQuery bronze tables, and invalid rows are retained in `error_listings` for review.
+## UI Contracts
+Root is the centered entry page; `/login` is the secure login page. Session failures and 401/403/404 responses return to login. Login may show ZIP loading status but remains usable. Brands and formats are independent. Demo URLs remain locked with Edit URL support. Required mapping fields appear first; auto-mapped fields use light-red verification. Source Preview is tabular with values; Data Model is a green-indicator two-pane view.
 
-## Important Separation Rules
+Action buttons use verb-ing labels and spinners. Warnings/errors have dismiss controls. Reporting filters include primary, `~`-joined competitors, geography, and demographics; the primary brand is excluded from competitors. Reporting uses responsive full-width layout, spaced tables, full state labels, and orange gap-ZIP markers.
 
-### Brand versus source format
+## Reporting And Enrichment
+Reporting metrics include states, ZIPs, active brands/stores/locations, distributions, comparisons, gaps, missing jurisdictions, data quality, and map data. Dashboard payloads may be display-limited for responsiveness; mirrors retain full source rows. Reporting refresh on load is silent; explicit refresh shows progress. Enrichment runs in background batches and refreshes reporting mirrors.
 
-Brands and source formats are independent. A brand can use any source format over time. `source_type_id` belongs to a mapping/template/source workflow, not to the brand form. Existing legacy source type values may remain in old rows, but they must not drive UI locking or prevent a different format.
-
-### Fast parse versus full save
-
-- Initial parsing samples up to 50 records to discover headers, nested paths, and mapping suggestions.
-- Small files are parsed completely when they contain fewer than 50 records.
-- Saving a template/listing dataset reloads the complete source when only a sample was parsed.
-- Progress and completion messages must use the actual batch total, not the sample size.
-
-### Valid and invalid rows
-
-Every processed row counts toward the processed total. Valid rows go to listings; invalid rows go to `error_listings`. Do not block a batch merely because some or all rows are invalid. The user-facing completion wording is `X records processed. Y need review.`
-
-## Demo And Public URL Rules
-
-- Demo public URLs are locked to their configured source and expose Edit URL when editing is intentionally requested.
-- Switching source input modes must not clear a demo URL or its lock.
-- Demo brands should resolve through the loaded brand list; never assign a config object as if it were a database brand.
-- Current demos include Pizza Hut CSV, Global Hotels CSV, Demo Restaurant Excel, Domino's JSON, Little Caesars GET JSON, Demo XML, and Demo PE Brand Python.
-- Demo XML uses `https://samplelib.com/xml/sample-5mb.xml`.
-- Demo PE Brand code is stored at `config/demo_pe_brand_python.py`, served by `/api/demo-python/pe-brand`, and exposed with Load sample and Copy code controls.
-- LA City is no longer a Python editor radio option.
-
-## Python Editor
-
-Python runs in browser Pyodide. The script must assign a JSON-compatible object or list to `result`. External browser `pyfetch` calls can fail because of CORS or remote server restrictions; use the server-backed Public URL flow for ordinary remote files. Empty or whitespace-only editor content falls back to the starter example.
-
-## State And Navigation Expectations
-
-- Refresh keeps the current page when the session and server launch are valid.
-- A killed/restarted server invalidates the old session and sends the user to the root/login flow.
-- Root shows the centered Go to Whitespace Tool entry screen and must not auto-login.
-- Unknown public URLs use the not-found page.
-- Login URL is `/login`, not a query-string mapper URL.
-- Brand selection must survive switching source formats, input modes, and New/demo radio states. Only selecting Create New Brand or logging out/master deletion intentionally clears it.
-
-## UI Conventions
-
-- Action buttons use verb-ing text and an inline spinner while working: `Parsing`, `Saving Brand`, `Updating Brand`, `Signing in`, etc.
-- Error/status messages have a dismiss cross icon.
-- Existing brand editing opens a centered popup; new-brand creation reuses that popup. Source format is not a brand property and is hidden from both brand forms.
-- Source Preview is a mapped tabular table with sample values. Data Model is a two-pane view: source fields on the left and target listings fields on the right, with green mapped indicators.
-- Required mapping fields appear first. Auto-mapped selections use the light-red verification state.
-
-## Backend And Performance
-
-- `whitespace_tool/workflow_server.py` owns HTTP routes and orchestration.
-- Source adapters live under `whitespace_tool/source_adapters/`.
-- SQLite WAL cache mirrors hot ZIP, brand, reporting, and error-count data. It must persist across server restarts; only stale cache entries should be invalidated.
-- BigQuery remains the fallback/source of truth for brands, ZIPs, and live reporting data.
-- Keep expensive ZIP/brand/report loading out of the first login paint. Lazy-load secondary app data and preload only the lightweight first layer needed by the logged-in app.
-
-## Verification Checklist
-
-For mapper changes, check all source types and these paths: new brand, existing brand, demo brand, public URL, upload file, Parse, Source Preview, Data Model, Save, invalid-row review, template reload, and refresh. Run:
-
+## Verification
 ```bash
 node --check ui/js/mapper.js
-python -m py_compile whitespace_tool/workflow_server.py
+node --check ui/js/reporting.js
+node --check ui/js/login.js
+python3 -m py_compile whitespace_tool/workflow_server.py whitespace_tool/sqlite_cache.py
 git diff --check
-pytest -q
 ```
 
-For backend changes, restart the server on one stable port and smoke-test the real button flow, not only unit tests:
-
-```bash
-.venv/bin/python -m whitespace_tool.cli workflow-ui --host 127.0.0.1 --port 8765
-```
-
-## Known Risk Patterns
-
-- Do not duplicate event handlers in inline HTML and module JS.
-- Do not use `selectedBrand` config objects where a loaded brand with `business_id` is required.
-- Do not let source-specific reset helpers clear brand state.
-- Do not validate mapped fields case-sensitively when CSV/Excel headers differ only by case or punctuation.
-- Do not use sample row count as the save row count.
-- Do not hide a required demo/source radio by forgetting to add it to `updateSourceVisibility()`.
-
-## Documentation Maintenance
-
-Update this file, `docs/assumptions_and_gaps.md`, and the relevant README section whenever a source type, URL, cache layer, route, validation rule, or navigation contract changes. Record unresolved behavior as a gap instead of silently treating it as complete.
+## Gaps
+- Full filtered Excel export with separate location, metrics, gaps, distributions, and quality sheets.
+- Explicit ZIP mirror freshness/TTL reconciliation after manual warehouse changes.
+- Guaranteed high-confidence enrichment write-back to original review rows.
+- Authenticated browser smoke coverage for all buttons and formats.

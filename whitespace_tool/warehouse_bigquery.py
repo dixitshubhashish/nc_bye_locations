@@ -227,6 +227,8 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "ingestion_id", "type": "STRING", "mode": "NULLABLE"},
         {"name": "mapping_id", "type": "STRING", "mode": "NULLABLE"},
         {"name": "validation_status", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "validated", "type": "BOOLEAN", "mode": "NULLABLE"},
+        {"name": "enriched_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
         {"name": "is_sample_data", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "sample_batch_id", "type": "STRING", "mode": "NULLABLE"},
         # Enhanced location fields
@@ -301,6 +303,7 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
         {"name": "is_deleted", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "deleted_on", "type": "TIMESTAMP", "mode": "NULLABLE"},
+        {"name": "is_ai_enriched", "type": "BOOLEAN", "mode": "NULLABLE"},
     ],
 }
 
@@ -337,6 +340,7 @@ def _listing_row(row: LocationRecord) -> dict[str, Any]:
         **(row.raw.get("__meta", {}) if isinstance(row.raw, dict) and isinstance(row.raw.get("__meta"), dict) else {}),
         "listing_id": str(uuid4()),
         "business_id": getattr(row, "business_id", row.brand),
+        "is_ai_enriched": bool((row.raw or {}).get("__meta", {}).get("is_ai_enriched", False)) if isinstance(row.raw, dict) else False,
         "source_type_id": getattr(row, "source_type_id", ""),
         "location_key": row.location_id,
         "name": row.name,
@@ -378,6 +382,8 @@ def _listing_row(row: LocationRecord) -> dict[str, Any]:
         "foot_traffic_score": row.foot_traffic_score,
         "parking_availability": row.parking_availability,
         "ratings": row.ratings,
+        "validated": True,
+        "enriched_at": None,
         "is_deleted": False,
         "deleted_on": None,
     }
@@ -539,7 +545,17 @@ def push_to_bigquery(
             LOGGER.info("db_batch_load_succeeded table=%s rows=%d job_id=%s", table_ref, len(rows), load_job.job_id)
 
 
+PROTECTED_DATASETS: set[str] = {"sample_locations"}
+
+
+def _assert_not_protected_dataset(dataset_name: str) -> None:
+    ds = str(dataset_name).split(".")[-1].strip().lower()
+    if ds in PROTECTED_DATASETS:
+        raise PermissionError(f"CRITICAL SAFETY RULE: '{ds}' is an immutable reference dataset. No delete, drop, update, or truncate operations are permitted.")
+
+
 def _clear_dataset_tables_with_client(client: Any, dataset_ref: str) -> dict[str, list[str]]:
+    _assert_not_protected_dataset(dataset_ref)
     preserved_tables = {"us_zipcodes", "field_catalogs", "field_catalog", "source_types", "workflow_templates"}
     table_refs = [table.reference for table in client.list_tables(dataset_ref) if table.table_id not in preserved_tables]
     LOGGER.warning("db_clear_started dataset=%s table_count=%d", dataset_ref, len(table_refs))
@@ -554,6 +570,8 @@ def _clear_dataset_tables_with_client(client: Any, dataset_ref: str) -> dict[str
             query = f"""
             ALTER TABLE `{dataset_ref}.{t_id}` ADD COLUMN IF NOT EXISTS is_deleted BOOL;
             ALTER TABLE `{dataset_ref}.{t_id}` ADD COLUMN IF NOT EXISTS deleted_on TIMESTAMP;
+            ALTER TABLE `{dataset_ref}.{t_id}` ADD COLUMN IF NOT EXISTS validated BOOL;
+            ALTER TABLE `{dataset_ref}.{t_id}` ADD COLUMN IF NOT EXISTS enriched_at TIMESTAMP;
             UPDATE `{dataset_ref}.{t_id}` SET is_deleted = TRUE, deleted_on = CURRENT_TIMESTAMP() WHERE is_deleted IS NOT TRUE;
             """
             client.query(query).result()
@@ -573,6 +591,7 @@ def clear_dataset_tables(
     dataset_id: str,
     credentials_json: str | None = None,
 ) -> dict[str, list[str]]:
+    _assert_not_protected_dataset(dataset_id)
     try:
         from google.cloud import bigquery
         from google.oauth2 import service_account
@@ -594,6 +613,7 @@ def drop_dataset_tables(
     dataset_id: str,
     credentials_json: str | None = None,
 ) -> dict[str, list[str]]:
+    _assert_not_protected_dataset(dataset_id)
     try:
         from google.cloud import bigquery
         from google.oauth2 import service_account

@@ -9,6 +9,7 @@ from typing import Any
 from whitespace_tool.models import LocationRecord, utc_now_iso
 
 _TRAILING_APOSTROPHE_S = re.compile(r"'S\b")
+_DISPLAY_SAFE_TEXT = re.compile(r"[^A-Za-z0-9\s#'\-.]")
 
 
 def titleize(value: str) -> str:
@@ -19,6 +20,13 @@ def titleize(value: str) -> str:
     if not text:
         return text
     return _TRAILING_APOSTROPHE_S.sub("'s", text.title())
+
+
+def clean_display_text(value: Any, proper_case: bool = False) -> str:
+    """Normalize human name/address text without changing source keys."""
+    text = _DISPLAY_SAFE_TEXT.sub("", str(value or "").replace("_", " "))
+    text = re.sub(r"\s+", " ", text).strip()
+    return titleize(text) if proper_case else text
 
 
 def load_mapper(path: str | Path) -> dict[str, Any]:
@@ -111,7 +119,7 @@ def optional_timestamp(value: Any) -> str | None:
 
 def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name: str, index: int) -> LocationRecord | None:
     fields = mapper["fields"]
-    brand = titleize(_text(mapper.get("brand")) or _text(get_nested(row, fields.get("brand", "brand"))))
+    brand = clean_display_text(_text(mapper.get("brand")) or _text(get_nested(row, fields.get("brand", "brand"))), proper_case=True)
     postal_code = clean_zip(get_nested(row, fields["postal_code"]))
     if not brand or not postal_code:
         return None
@@ -128,9 +136,9 @@ def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name:
         business_id=str(mapper.get("business_id") or "") or None,
         source_type_id=str(mapper.get("source_type_id") or "") or None,
         location_id=location_id,
-        name=titleize(_text(get_nested(row, fields.get("name", ""), ""))),
-        address=_text(get_nested(row, fields.get("address", ""), "")),
-        city=titleize(_text(get_nested(row, fields.get("city", ""), ""))),
+        name=clean_display_text(get_nested(row, fields.get("name", ""), ""), proper_case=True),
+        address=clean_display_text(get_nested(row, fields.get("address", ""), "")),
+        city=clean_display_text(get_nested(row, fields.get("city", ""), ""), proper_case=True),
         state=_text(get_nested(row, fields.get("state", ""), "")).upper(),
         postal_code=postal_code,
         latitude=optional_float(get_nested(row, fields.get("latitude", ""), "")),
@@ -141,8 +149,8 @@ def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name:
         franchise_name=_text(get_nested(row, fields.get("franchise_name", ""), "")) or None,
         concept_type=_text(get_nested(row, fields.get("concept_type", ""), "")) or None,
         cuisine_type=_text(get_nested(row, fields.get("cuisine_type", ""), "")) or None,
-        town=_text(get_nested(row, fields.get("town", ""), "")) or None,
-        province=_text(get_nested(row, fields.get("province", ""), "")) or None,
+        town=clean_display_text(get_nested(row, fields.get("town", ""), ""), proper_case=True) or None,
+        province=clean_display_text(get_nested(row, fields.get("province", ""), ""), proper_case=True) or None,
         country=_text(get_nested(row, fields.get("country", ""), "")) or None,
         neighborhood=_text(get_nested(row, fields.get("neighborhood", ""), "")) or None,
         district=_text(get_nested(row, fields.get("district", ""), "")) or None,

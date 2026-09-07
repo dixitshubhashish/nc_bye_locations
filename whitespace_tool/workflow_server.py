@@ -34,6 +34,7 @@ from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, build_table_rows, 
 from whitespace_tool.storage_config import load_dotenv, load_storage_config
 from whitespace_tool.sqlite_cache import (
     get_cached_query, set_cached_query, invalidate_cache,
+    get_cached_zipcode_count, cache_zipcodes, get_auto_repair_stats, set_auto_repair_stats, increment_manual_fixed_count,
     replace_gold_mirror, get_mirror_status, fetch_mirror_zip_brand_activity,
     fetch_mirror_reporting_locations, fetch_mirror_reporting_locations_by_brand, fetch_mirror_businesses,
     get_error_count, set_error_count,
@@ -74,6 +75,17 @@ LOGGER = _build_logger()
 ZIP_REFERENCE_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 REPORTING_REFRESH_LOCK = threading.Lock()
 REPORTING_REFRESHING = False
+ENRICHMENT_STOP_REQUESTED = threading.Event()
+ENRICHMENT_STATUS: dict[str, Any] = {"state": "idle", "current_id": "", "processed": 0, "updated_at": ""}
+AUTO_REPAIR_THREAD: threading.Thread | None = None
+AUTO_REPAIR_LOCK = threading.Lock()
+AUTO_REPAIR_STATS: dict[str, int] = {"fixed": 0, "processed": 0, "remaining": 0}
+
+
+def _enrichment_checkpoint(current_id: str = "") -> None:
+    if ENRICHMENT_STOP_REQUESTED.is_set():
+        raise RuntimeError("Enrichment stopped by user.")
+    ENRICHMENT_STATUS.update({"state": "running", "current_id": current_id, "updated_at": utc_now_iso()})
 SERVER_LAUNCH_ID = uuid4().hex
 load_dotenv()
 
@@ -565,6 +577,14 @@ def prepare_zipcodes() -> dict[str, Any]:
     if cached:
         LOGGER.info("zip_reference_timing phase=cache_hit elapsed_ms=%.1f", (perf_counter() - started_at) * 1000)
         return dict(cached)
+    local_rows = get_cached_zipcode_count()
+    if local_rows >= MINIMUM_US_ZIP_REFERENCE_ROWS:
+        result = {"status": "ready", "rows": local_rows, "loaded": True,
+                  "created": False, "source": "sqlite_mirror",
+                  "table": f"{project_id}.{dataset_id}.us_zipcodes"}
+        ZIP_REFERENCE_CACHE[cache_key] = result
+        LOGGER.info("zip_reference_timing phase=sqlite_mirror_hit rows=%d elapsed_ms=%.1f", local_rows, (perf_counter() - started_at) * 1000)
+        return dict(result)
     client = _bigquery_client(project_id, credentials_json)
     table_ref = f"{project_id}.{dataset_id}.us_zipcodes"
     metadata_started_at = perf_counter()
@@ -598,6 +618,10 @@ def prepare_zipcodes() -> dict[str, Any]:
     row_count = int(copied.num_rows or 0)
     if row_count < MINIMUM_US_ZIP_REFERENCE_ROWS:
         raise RuntimeError(f"US ZIP reference copy returned only {row_count} rows")
+    # Populate the durable local mirror once the authoritative warehouse copy
+    # succeeds. Subsequent application starts can use SQLite immediately.
+    mirror_rows = [dict(row) for row in client.query(f"SELECT zip_code, city_name, county, state_code, state_name, latitude, longitude, population, median_household_income, median_age FROM `{table_ref}`").result()]
+    cache_zipcodes(mirror_rows)
     LOGGER.info("zip_reference_load_succeeded table=%s rows=%d", table_ref, row_count)
     result = {"status": "ready", "rows": row_count, "loaded": True, "created": True, "source": "bronze_copy", "table": table_ref}
     ZIP_REFERENCE_CACHE[cache_key] = result
@@ -1270,6 +1294,8 @@ def _sample_data_status(client: Any, project_id: str, dataset_id: str) -> dict[s
 
 
 def _reset_sample_data(client: Any, project_id: str, dataset_id: str) -> None:
+    if str(dataset_id).strip().lower() == "sample_locations":
+        raise PermissionError("CRITICAL SAFETY RULE: 'sample_locations' is an immutable source dataset. Cannot reset or delete.")
     _, _, credentials_json = _warehouse_settings()
     push_to_bigquery(
         project_id,
@@ -1286,6 +1312,29 @@ def _reset_sample_data(client: Any, project_id: str, dataset_id: str) -> None:
         except Exception as exc:
             if getattr(exc, "code", None) != 404:
                 raise
+
+
+def clear_sample_dataset() -> dict[str, Any]:
+    """Clears ingested sample records from the bronze layer without touching real data
+    or the protected sample_locations reference dataset, and refreshes the silver layer."""
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    if str(dataset_id).strip().lower() == "sample_locations":
+        raise PermissionError("CRITICAL SAFETY RULE: 'sample_locations' is an immutable source dataset. Cannot clear.")
+
+    client = _bigquery_client(project_id, credentials_json)
+    _reset_sample_data(client, project_id, dataset_id)
+
+    invalidate_cache()
+    ZIP_REFERENCE_CACHE.pop((project_id, dataset_id), None)
+
+    silver_result = _background_medallion_refresh_status()
+
+    return {
+        "cleared": True,
+        "message": "Sample dataset cleared successfully. Reporting is refreshing.",
+        "silver": silver_result,
+    }
+
 
 
 def sample_dataset_status() -> dict[str, Any]:
@@ -1342,7 +1391,7 @@ def load_sample_dataset(reset: bool = False) -> dict[str, Any]:
             return {
                 "already_loaded": True,
                 "sample_batch_id": SAMPLE_BATCH_ID,
-                "message": "Sample dataset already loaded in bronze layer.",
+                "message": "Sample dataset already loaded.",
                 "businesses": sample_status["businesses"],
                 "locations": sample_status["listings"],
                 "errors": sample_status.get("error_listings", 0),
@@ -1397,7 +1446,7 @@ def load_sample_dataset(reset: bool = False) -> dict[str, Any]:
           listing_id, business_id, source_type_id, location_key, name, address, city_name,
           town, state_code, province, zip_code, country, latitude, longitude,
           first_observed_at, last_observed_at, template_id, ingestion_id, mapping_id,
-          validation_status, is_sample_data, sample_batch_id, franchise_name, concept_type,
+          validation_status, validated, enriched_at, is_sample_data, sample_batch_id, franchise_name, concept_type,
           cuisine_type, neighborhood, district, phone_number, website_url, google_maps_link,
           social_media_handles, operating_hours, seating_capacity, service_types, opening_date,
           status, annual_revenue, average_ticket_size, daily_footfall, monthly_footfall,
@@ -1409,7 +1458,7 @@ def load_sample_dataset(reset: bool = False) -> dict[str, Any]:
           s.listing_id, s.business_id, s.source_type_id, s.location_key, s.name, s.address, s.city_name,
           s.town, s.state_code, s.province, s.zip_code, s.country, s.latitude, s.longitude,
           COALESCE(s.first_observed_at, CURRENT_TIMESTAMP()), s.last_observed_at, s.template_id, s.ingestion_id, s.mapping_id,
-          s.validation_status, TRUE AS is_sample_data, '{SAMPLE_BATCH_ID}' AS sample_batch_id, s.franchise_name, s.concept_type,
+          s.validation_status, COALESCE(s.validated, FALSE) AS validated, CAST(NULL AS TIMESTAMP) AS enriched_at, TRUE AS is_sample_data, '{SAMPLE_BATCH_ID}' AS sample_batch_id, s.franchise_name, s.concept_type,
           s.cuisine_type, s.neighborhood, s.district, s.phone_number, s.website_url, s.google_maps_link,
           s.social_media_handles, s.operating_hours, s.seating_capacity, s.service_types, s.opening_date,
           s.status, s.annual_revenue, s.average_ticket_size, s.daily_footfall, s.monthly_footfall,
@@ -1590,6 +1639,7 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
     project_id, bronze_dataset_id, silver_dataset_id, _gold_dataset_id, credentials_json = _medallion_settings()
     client = _bigquery_client(project_id, credentials_json)
     try:
+        _enrichment_checkpoint()
         _ensure_dataset(client, project_id, bronze_dataset_id)
         _ensure_dataset(client, project_id, silver_dataset_id)
         bronze_ref = f"{project_id}.{bronze_dataset_id}"
@@ -1600,9 +1650,11 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
         top_view = f"{silver_ref}.vw_brand_location_top10"
         brand_zip_view = f"{silver_ref}.vw_brand_zip_income"
         _safe_query(client, f"DROP TABLE IF EXISTS `{enriched_table}`", low_priority=low_priority).result()
+        _enrichment_checkpoint()
         if low_priority:
             sleep(0.05)
         _safe_query(client, f"DROP TABLE IF EXISTS `{invalid_table}`", low_priority=low_priority).result()
+        _enrichment_checkpoint()
         if low_priority:
             sleep(0.05)
 
@@ -1610,7 +1662,8 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
         zip_county_case = _proper_case_sql("county")
         zip_state_name_case = _proper_case_sql("state_name")
 
-        # US ZIP code + income/demographic reference data
+        # Keep the existing US ZIP reference for reporting metrics and load the
+        # worldwide city reference separately for global matching.
         _safe_query(client, f"""
         CREATE OR REPLACE TABLE `{zip_reference_table}`
         CLUSTER BY state_code, zip_code
@@ -1636,6 +1689,31 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
           CURRENT_TIMESTAMP() AS silver_updated_at
         FROM `{bronze_ref}.us_zipcodes`
         QUALIFY ROW_NUMBER() OVER (PARTITION BY zip_code ORDER BY population DESC NULLS LAST) = 1
+        """, low_priority=low_priority).result()
+        _enrichment_checkpoint()
+        if low_priority:
+            sleep(0.05)
+
+        worldwide_reference_table = f"{silver_ref}.worldwide_cities"
+        _safe_query(client, f"""
+        CREATE OR REPLACE TABLE `{worldwide_reference_table}`
+        CLUSTER BY country_code, state_code, city
+        AS
+        SELECT
+          NULLIF(UPPER(TRIM(CAST(COUNTRY_CODE AS STRING))), '') AS country_code,
+          NULLIF(TRIM(CAST(COUNTRY AS STRING)), '') AS country_name,
+          NULLIF(TRIM(CAST(STATE AS STRING)), '') AS state_name,
+          NULLIF(UPPER(TRIM(CAST(STATE_CODE AS STRING))), '') AS state_code,
+          NULLIF(TRIM(CAST(DISTRICT AS STRING)), '') AS district,
+          NULLIF(TRIM(CAST(CITY AS STRING)), '') AS city,
+          NULLIF(TRIM(CAST(TOWN AS STRING)), '') AS town,
+          NULLIF(TRIM(CAST(ZIP_CODE AS STRING)), '') AS zip_code,
+          LATITUDE AS latitude,
+          LONGITUDE AS longitude,
+          GEOCODE_ACCURACY AS geocode_accuracy,
+          CURRENT_TIMESTAMP() AS silver_updated_at
+        FROM `{project_id}.sample_locations.worldwide_cities`
+        WHERE LATITUDE IS NOT NULL AND LONGITUDE IS NOT NULL
         """, low_priority=low_priority).result()
         if low_priority:
             sleep(0.05)
@@ -1705,17 +1783,18 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
         ),
         city_geos AS (
           SELECT
-            LOWER(TRIM(city_name)) AS normalized_city_name,
-            state_code AS normalized_state_code,
+            LOWER(TRIM(city)) AS normalized_city_name,
+            LOWER(TRIM(COALESCE(state_code, state_name))) AS normalized_state,
+            LOWER(TRIM(COALESCE(country_code, country_name))) AS normalized_country,
             ANY_VALUE(zip_code) AS representative_zip,
+            ANY_VALUE(city) AS matched_city,
+            ANY_VALUE(state_name) AS matched_state,
+            ANY_VALUE(country_name) AS matched_country,
             AVG(latitude) AS latitude,
             AVG(longitude) AS longitude
-          FROM unique_zips
-          WHERE city_name IS NOT NULL
-            AND state_code IS NOT NULL
-            AND latitude IS NOT NULL
-            AND longitude IS NOT NULL
-          GROUP BY normalized_city_name, normalized_state_code
+          FROM `{worldwide_reference_table}`
+          WHERE city IS NOT NULL
+          GROUP BY normalized_city_name, normalized_state, normalized_country
         )
         SELECT
           l.listing_id,
@@ -1727,16 +1806,27 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
           l.address,
           {city_name_case} AS city_name,
           {county_case} AS county,
-          COALESCE(z.state_code, l.normalized_state_code, cg.normalized_state_code, NULLIF(UPPER(TRIM(l.state_code)), '')) AS state_code,
+          COALESCE(z.state_code, l.normalized_state_code, NULLIF(UPPER(TRIM(l.state_code)), '')) AS state_code,
           {state_name_case} AS state_name,
-          COALESCE(l.normalized_zip_code, cg.representative_zip) AS zip_code,
-          'United States' AS country,
+          COALESCE(
+            CASE WHEN l.latitude IS NOT NULL AND l.longitude IS NOT NULL
+              AND z.latitude IS NOT NULL AND z.longitude IS NOT NULL
+              AND ST_DISTANCE(ST_GEOGPOINT(l.longitude, l.latitude), ST_GEOGPOINT(z.longitude, z.latitude)) <= 100000
+              THEN l.normalized_zip_code END,
+            CASE WHEN cg.latitude IS NOT NULL AND cg.longitude IS NOT NULL
+              AND l.latitude IS NOT NULL AND l.longitude IS NOT NULL
+              AND ST_DISTANCE(ST_GEOGPOINT(l.longitude, l.latitude), ST_GEOGPOINT(cg.longitude, cg.latitude)) <= 100000
+              THEN cg.representative_zip END,
+            l.normalized_zip_code,
+            cg.representative_zip
+          ) AS zip_code,
+          COALESCE(cg.matched_country, NULLIF(TRIM(l.country), ''), 'United States') AS country,
           COALESCE(l.latitude, z.latitude, cg.latitude) AS latitude,
           COALESCE(l.longitude, z.longitude, cg.longitude) AS longitude,
           CASE
             WHEN l.latitude IS NOT NULL AND l.longitude IS NOT NULL THEN 'source_listing'
             WHEN z.latitude IS NOT NULL AND z.longitude IS NOT NULL THEN 'zip_centroid'
-            WHEN cg.latitude IS NOT NULL AND cg.longitude IS NOT NULL THEN 'city_state_centroid'
+            WHEN cg.latitude IS NOT NULL AND cg.longitude IS NOT NULL THEN 'worldwide_city_centroid'
             ELSE 'unresolved'
           END AS coordinate_source,
           CASE
@@ -1775,14 +1865,13 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
         LEFT JOIN unique_zips z
           ON l.normalized_zip_code = z.zip_code
         LEFT JOIN city_geos cg
-          ON COALESCE(l.normalized_city_name, LOWER(TRIM(z.city_name))) = cg.normalized_city_name
-          AND COALESCE(l.normalized_state_code, UPPER(TRIM(z.state_code))) = cg.normalized_state_code
+          ON EDIT_DISTANCE(l.normalized_city_name, cg.normalized_city_name) <= 2
+          AND (cg.normalized_state = LOWER(TRIM(l.state_code)) OR cg.normalized_state = LOWER(TRIM(l.province)) OR cg.normalized_state = LOWER(TRIM(l.town)))
+          AND (cg.normalized_country = LOWER(TRIM(l.country)) OR LOWER(TRIM(l.country)) IN ('', 'us', 'usa', 'united states'))
         WHERE l.is_deleted IS NOT TRUE
-          AND (
-            LOWER(COALESCE(l.country, 'us')) IN ('', 'us', 'u.s.', 'u.s.a.', 'usa', 'united states', 'united states of america')
-          )
         """
         _safe_query(client, query, low_priority=low_priority).result()
+        _enrichment_checkpoint()
         if low_priority:
             sleep(0.05)
 
@@ -1795,6 +1884,7 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
         SELECT * FROM `{staging_table}`
         WHERE {mandatory_check}
         """, low_priority=low_priority).result()
+        _enrichment_checkpoint()
         if low_priority:
             sleep(0.05)
 
@@ -1807,8 +1897,20 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
         FROM `{staging_table}`
         WHERE NOT ({mandatory_check})
         """, low_priority=low_priority).result()
+        _enrichment_checkpoint()
         if low_priority:
             sleep(0.05)
+
+        # Only rows that actually pass silver validation leave the unresolved
+        # queue. Rows remaining in listings_invalid or error_listings must stay
+        # unvalidated so a later repair batch can try them again.
+        _safe_query(client, f"""
+        UPDATE `{bronze_ref}.listings`
+        SET validated = TRUE,
+            enriched_at = CURRENT_TIMESTAMP()
+        WHERE listing_id IN (SELECT listing_id FROM `{enriched_table}`)
+          AND (validated IS NOT TRUE OR enriched_at IS NULL)
+        """, low_priority=low_priority).result()
 
         _safe_query(client, f"DROP TABLE IF EXISTS `{staging_table}`", low_priority=low_priority).result()
         if low_priority:
@@ -1870,6 +1972,10 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
             "priority": "batch" if low_priority else "interactive",
         }
     except Exception as exc:
+        if "stopped by user" in str(exc).lower():
+            ENRICHMENT_STATUS.update({"state": "stopped", "updated_at": utc_now_iso()})
+        else:
+            ENRICHMENT_STATUS.update({"state": "failed", "updated_at": utc_now_iso()})
         LOGGER.warning("build_silver_layer_error error=%s", exc)
         return {
             "bronze_dataset": f"{project_id}.{bronze_dataset_id}",
@@ -2129,6 +2235,10 @@ def _refresh_silver_background(low_priority: bool = True) -> bool:
     def refresh() -> None:
         global REPORTING_REFRESHING
         try:
+            try:
+                auto_repair_error_batch(5)
+            except Exception as repair_exc:
+                LOGGER.warning("auto_repair_error_batch_failed error=%s", repair_exc)
             _invoke_silver_layer(low_priority=low_priority)
             # Reporting reads from the gold layer (mirrored into SQLite) -
             # rebuilding silver alone would leave newly-ingested data (e.g. a
@@ -2136,9 +2246,18 @@ def _refresh_silver_background(low_priority: bool = True) -> bool:
             # the next hourly _run_silver_gold_tick(). Keep gold and the
             # mirror in sync on every on-demand refresh too.
             _rebuild_gold_and_mirror()
+            try:
+                # Keep the lightweight review badge synchronized after an
+                # automatic enrichment pass; SQLite stores only this count,
+                # while BigQuery remains the source of truth for rows.
+                refresh_error_count("")
+            except Exception as count_exc:
+                LOGGER.warning("error_count_refresh_after_background_enrichment_failed error=%s", count_exc)
         except Exception as exc:
             LOGGER.warning("reporting_background_silver_refresh_failed error=%s", exc)
         finally:
+            if ENRICHMENT_STATUS.get("state") == "running":
+                ENRICHMENT_STATUS.update({"state": "idle", "current_id": "", "updated_at": utc_now_iso()})
             with REPORTING_REFRESH_LOCK:
                 REPORTING_REFRESHING = False
 
@@ -2146,7 +2265,20 @@ def _refresh_silver_background(low_priority: bool = True) -> bool:
     return True
 
 
-SILVER_GOLD_REFRESH_INTERVAL_SECONDS = 3600
+def enrichment_status() -> dict[str, Any]:
+    with REPORTING_REFRESH_LOCK:
+        return {**ENRICHMENT_STATUS, "refreshing": REPORTING_REFRESHING, "auto_repair": get_auto_repair_stats()}
+
+
+def stop_enrichment() -> dict[str, Any]:
+    ENRICHMENT_STOP_REQUESTED.set()
+    return {**enrichment_status(), "stop_requested": True}
+
+
+# Recheck for newly-arrived or user-corrected bronze rows without making the
+# foreground mapping/reporting requests wait for the refresh.
+SILVER_GOLD_REFRESH_INTERVAL_SECONDS = 600
+AUTO_REPAIR_BATCH_PAUSE_SECONDS = 5
 
 
 def _run_silver_gold_tick() -> bool:
@@ -2161,9 +2293,18 @@ def _run_silver_gold_tick() -> bool:
         if REPORTING_REFRESHING:
             return False
         REPORTING_REFRESHING = True
+    ENRICHMENT_STOP_REQUESTED.clear()
     try:
+        try:
+            auto_repair_error_batch(5)
+        except Exception as repair_exc:
+            LOGGER.warning("auto_repair_error_batch_in_tick_failed error=%s", repair_exc)
         silver_result = _invoke_silver_layer(low_priority=True)
         combined = _rebuild_gold_and_mirror()
+        try:
+            refresh_error_count("")
+        except Exception as count_exc:
+            LOGGER.warning("error_count_refresh_after_scheduled_enrichment_failed error=%s", count_exc)
         gold_result = combined["gold"]
         LOGGER.info(
             "scheduled_medallion_refresh_succeeded silver_rows=%s invalid_rows=%s gold_views=%s mirror=%s",
@@ -2371,11 +2512,12 @@ def _mirror_state_population_by_state(all_zip_rows: list[dict[str, Any]]) -> dic
     return totals
 
 
-def _mirror_totals(base_rows: list[dict[str, Any]], global_brand_count: int) -> dict[str, Any]:
-    zip_states = {r["zip_state"] for r in base_rows if r.get("zip_state")}
-    zip_codes = {r["zip_code"] for r in base_rows if r.get("zip_code")}
+def _mirror_totals(base_rows: list[dict[str, Any]], global_brand_count: int, zip_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    universe_rows = zip_rows if zip_rows is not None else base_rows
+    zip_states = {r["state_code"] if "state_code" in r else r.get("zip_state") for r in universe_rows if r.get("state_code") or r.get("zip_state")}
+    zip_codes = {r["zip_code"] for r in universe_rows if r.get("zip_code")}
+    zip_cities_all = {r["city_name"] if "city_name" in r else r.get("zip_city") for r in universe_rows if r.get("city_name") or r.get("zip_city")}
     brands_present = {r["brand"] for r in base_rows if r.get("brand")}
-    zip_cities_all = {r["zip_city"] for r in base_rows if r.get("zip_city")}
     active_rows = [r for r in base_rows if (r.get("location_count") or 0) > 0 and r.get("brand")]
     active_zips = {r["zip_code"] for r in active_rows if r.get("zip_code")}
     active_states = {r["zip_state"] for r in active_rows if r.get("zip_state")}
@@ -2383,16 +2525,18 @@ def _mirror_totals(base_rows: list[dict[str, Any]], global_brand_count: int) -> 
     total_locations = {r["listing_id"] for r in base_rows if (r.get("location_count") or 0) > 0 and r.get("listing_id")}
     total_stores = sum(r.get("location_count") or 0 for r in base_rows)
     last_updated = max((r.get("last_observed_at") for r in base_rows if r.get("last_observed_at")), default=None)
+    gap_zips_count = max(0, len(zip_codes) - len(active_zips))
     return {
         "total_states": len(zip_states),
         "total_zips": len(zip_codes),
         "total_brands": len(brands_present) or global_brand_count,
-        "total_stores": total_stores,
+        "total_stores": int(total_stores) if total_stores == int(total_stores) else total_stores,
         "active_market_locations": len(active_zips),
         "active_brand_states": len(active_states),
         "active_brand_cities": len(active_cities),
         "total_locations": len(total_locations),
         "total_cities": len(zip_cities_all),
+        "gap_zips": gap_zips_count,
         "last_updated": last_updated,
     }
 
@@ -2627,7 +2771,7 @@ def _reporting_data_from_mirror(
     global_brand_count = len({r["brand_name"] for r in all_zip_rows if r.get("brand_name") and (r.get("location_count") or 0) > 0})
 
     return {
-        "totals": _mirror_totals(base_rows, global_brand_count),
+        "totals": _mirror_totals(base_rows, global_brand_count, zip_rows),
         "top_states": _mirror_top_states(base_rows, state_population),
         "top_cities": _mirror_top_cities(base_rows),
         "brands": _mirror_brand_query(base_rows),
@@ -2636,7 +2780,7 @@ def _reporting_data_from_mirror(
         "map_records": _mirror_map_records(location_rows, selected_brands, min_population, min_income, max_median_age),
         "sample_records": _mirror_sample_records(location_rows, selected_brands, min_population, min_income, max_median_age),
         "data_quality_row": _mirror_data_quality(quality_rows),
-        "present_states": {r["zip_state"] for r in base_rows if r.get("zip_state")},
+        "present_states": {r["zip_state"] for r in base_rows if r.get("zip_state") and (r.get("location_count") or 0) > 0},
     }
 
 
@@ -2815,8 +2959,18 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
 
     totals_query = base_cte + f"""
     SELECT
-      COUNT(DISTINCT zip_state) AS total_states,
-      COUNT(DISTINCT zip_code) AS total_zips,
+      (SELECT COUNT(DISTINCT state_code) FROM {zip_ref}
+       WHERE (@state = '' OR UPPER(state_code) = @state)
+         AND (@county = '' OR LOWER(COALESCE(county, '')) = LOWER(@county))
+         AND (@city = '' OR LOWER(COALESCE(city_name, '')) = LOWER(@city))
+         AND (@zip = '' OR zip_code = @zip)
+      ) AS total_states,
+      (SELECT COUNT(DISTINCT zip_code) FROM {zip_ref}
+       WHERE (@state = '' OR UPPER(state_code) = @state)
+         AND (@county = '' OR LOWER(COALESCE(county, '')) = LOWER(@county))
+         AND (@city = '' OR LOWER(COALESCE(city_name, '')) = LOWER(@city))
+         AND (@zip = '' OR zip_code = @zip)
+      ) AS total_zips,
       -- Brands actually present in the current filtered view; only fall
       -- back to the platform-wide catalog count when the filter matches
       -- zero listings, so selecting a state/brand narrows this KPI too.
@@ -2826,7 +2980,18 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
       COUNT(DISTINCT IF(location_count > 0 AND brand IS NOT NULL, zip_state, NULL)) AS active_brand_states,
       COUNT(DISTINCT IF(location_count > 0 AND brand IS NOT NULL, zip_city, NULL)) AS active_brand_cities,
       COUNT(DISTINCT IF(location_count > 0, listing_id, NULL)) AS total_locations,
-      COUNT(DISTINCT zip_city) AS total_cities,
+      (SELECT COUNT(DISTINCT city_name) FROM {zip_ref}
+       WHERE (@state = '' OR UPPER(state_code) = @state)
+         AND (@county = '' OR LOWER(COALESCE(county, '')) = LOWER(@county))
+         AND (@city = '' OR LOWER(COALESCE(city_name, '')) = LOWER(@city))
+         AND (@zip = '' OR zip_code = @zip)
+      ) AS total_cities,
+      GREATEST(0, (SELECT COUNT(DISTINCT zip_code) FROM {zip_ref}
+       WHERE (@state = '' OR UPPER(state_code) = @state)
+         AND (@county = '' OR LOWER(COALESCE(county, '')) = LOWER(@county))
+         AND (@city = '' OR LOWER(COALESCE(city_name, '')) = LOWER(@city))
+         AND (@zip = '' OR zip_code = @zip)
+      ) - COUNT(DISTINCT IF(location_count > 0 AND brand IS NOT NULL, zip_code, NULL))) AS gap_zips,
       MAX(last_observed_at) AS last_updated
     FROM base
     """
@@ -3141,7 +3306,7 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
             return payload
         raise
 
-    present_states_extra = {row["state"] for row in client.query(base_cte + "SELECT DISTINCT state_code AS state FROM base", job_config=job_config).result() if row.get("state")}
+    present_states_extra = {row["state"] for row in client.query(base_cte + "SELECT DISTINCT state_code AS state FROM base WHERE location_count > 0", job_config=job_config).result() if row.get("state")}
     return _finish_reporting_summary(
         params, cache_key, totals, top_states, top_cities, brands, filter_options, raw_whitespace,
         map_records, sample_records, data_quality_row, present_states_extra,
@@ -3186,8 +3351,9 @@ def _finish_reporting_summary(
         "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT",
         "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI",
         "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY", "DC",
+        "PR", "GU", "VI", "AS", "MP",
     }
-    present_states = {row["state"] for row in top_states if row.get("state")}
+    present_states = {row["state"] for row in top_states if row.get("state") and (row.get("locations") or 0) > 0}
     present_states.update(present_states_extra)
     states_without_locations = sorted(state_codes - present_states)
 
@@ -3472,7 +3638,9 @@ def _finish_reporting_summary(
         "map_records": map_records,
         "states_without_locations": states_without_locations,
         "sample_records": sample_records,
-        "warning": "Updating." if refresh_started or REPORTING_REFRESHING else "",
+        # Background refresh state is exposed through /api/enrichment/status;
+        # Reporting should not render a persistent "Updating." banner.
+        "warning": "",
     }
     set_cached_query(cache_key, result_payload)
     return result_payload
@@ -3612,18 +3780,22 @@ def save_template_version(data: dict[str, Any]) -> dict[str, Any]:
     return {"workflow_template_id": template_id, "updated": True}
 
 
-def list_rejected(event_id: str = "", business_id: str = "") -> dict[str, Any]:
+def list_rejected(event_id: str = "", business_id: str = "", limit: int = 50, offset: int = 0, ai_pending_only: bool = False) -> dict[str, Any]:
     from google.cloud import bigquery
 
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
-    query = f"""SELECT event_id, business_id, source_type_id, row_number, errors, raw_record
+    safe_limit = max(1, min(int(limit or 50), 50000))
+    safe_offset = max(0, int(offset or 0))
+    ai_clause = "AND is_ai_enriched IS NOT TRUE" if ai_pending_only else ""
+    query = f"""SELECT event_id, business_id, source_type_id, row_number, errors, raw_record, template_id, mapping_id, is_ai_enriched
     FROM `{project_id}.{dataset_id}.error_listings`
     WHERE is_deleted IS NOT TRUE
+      {ai_clause}
       AND (@event_id = '' OR event_id = @event_id)
       AND (@business_id = '' OR business_id = @business_id)
     ORDER BY event_id, row_number
-    LIMIT 500"""
+    LIMIT {safe_limit + 1} OFFSET {safe_offset}"""
     config = bigquery.QueryJobConfig(query_parameters=[
         bigquery.ScalarQueryParameter("event_id", "STRING", event_id),
         bigquery.ScalarQueryParameter("business_id", "STRING", business_id),
@@ -3644,7 +3816,8 @@ def list_rejected(event_id: str = "", business_id: str = "") -> dict[str, Any]:
                 except ValueError:
                     pass
         records.append(item)
-    return {"records": records}
+    has_more = len(records) > safe_limit
+    return {"records": records[:safe_limit], "offset": safe_offset, "limit": safe_limit, "has_more": has_more}
 
 
 def _count_error_listings_live(business_id: str = "") -> int:
@@ -3722,6 +3895,99 @@ def error_listings_by_brand() -> dict[str, Any]:
     return {"brands": rows, "total": sum(row["count"] for row in rows)}
 
 
+def auto_repair_error_batch(limit: int = 10, offset: int = 0) -> dict[str, int]:
+    """Retry a small review batch through the exact manual validation path.
+    This deliberately does not delete rows based on a fuzzy match alone.
+    Only save_mapper success allows reprocess_rejected to soft-delete review
+    rows and refresh the SQLite counter."""
+    # Claim only rows not tried by the automatic pass. Rows fixed by the
+    # retry are soft-deleted; unresolved rows are marked AI-enriched so the
+    # next batch advances instead of retrying the same ten forever.
+    records = list_rejected(limit=50, ai_pending_only=True)["records"][:max(1, min(int(limit), 10))]
+    if not records:
+        return {"attempted": 0, "resolved": 0, "remaining": 0}
+    templates = {item.get("workflow_template_id"): item for item in list_templates().get("templates", [])}
+    resolved = 0
+    processed_keys = []
+    for record in records:
+        processed_keys.append((str(record.get("event_id") or ""), int(record.get("row_number") or 0)))
+        template = templates.get(record.get("template_id"))
+        components = (template or {}).get("components") if template else None
+        if isinstance(components, str):
+            try:
+                components = json.loads(components)
+            except ValueError:
+                components = None
+        mapper = components.get("mapper") if isinstance(components, dict) else None
+        if not isinstance(mapper, dict):
+            continue
+        mapper["business_id"] = record.get("business_id") or mapper.get("business_id")
+        mapper["source_type_id"] = record.get("source_type_id") or mapper.get("source_type_id")
+        mapper["is_ai_enriched"] = True
+        try:
+            result = reprocess_rejected({"event_id": record["event_id"], "row_numbers": [record["row_number"]], "mapper": mapper, "is_ai_enriched": True})
+            if result.get("mapped_rows", 0) > 0 and result.get("error_listings_cleanup", {}).get("ok"):
+                resolved += 1
+        except Exception as exc:
+            LOGGER.warning("automatic_error_repair_failed event_id=%s row=%s error=%s", record.get("event_id"), record.get("row_number"), exc)
+    if processed_keys:
+        project_id, dataset_id, credentials_json = _warehouse_settings()
+        client = _bigquery_client(project_id, credentials_json)
+        from google.cloud import bigquery
+        for event_id, row_number in processed_keys:
+            client.query(
+                f"""UPDATE `{project_id}.{dataset_id}.error_listings`
+                SET is_ai_enriched = TRUE
+                WHERE event_id = @event_id AND row_number = @row_number
+                  AND is_deleted IS NOT TRUE""",
+                job_config=bigquery.QueryJobConfig(query_parameters=[
+                    bigquery.ScalarQueryParameter("event_id", "STRING", event_id),
+                    bigquery.ScalarQueryParameter("row_number", "INT64", row_number),
+                ])
+            ).result()
+    return {"attempted": len(records), "resolved": resolved, "remaining": max(len(records) - resolved, 0)}
+
+
+def start_auto_repair() -> dict[str, Any]:
+    """Run the current review set once in advancing ten-row batches."""
+    global AUTO_REPAIR_THREAD
+    with AUTO_REPAIR_LOCK:
+        if AUTO_REPAIR_THREAD and AUTO_REPAIR_THREAD.is_alive():
+            return {"status": "running", "processed": ENRICHMENT_STATUS.get("processed", 0)}
+
+        def worker() -> None:
+            ENRICHMENT_STOP_REQUESTED.clear()
+            ENRICHMENT_STATUS.update({"state": "running", "processed": 0, "current_id": "", "updated_at": utc_now_iso()})
+            offset = 0
+            fixed = 0
+            try:
+                total = len(list_rejected(limit=50000, ai_pending_only=True)["records"])
+                AUTO_REPAIR_STATS.update({"fixed": 0, "processed": 0, "remaining": total})
+                set_auto_repair_stats(0, 0, total)
+                while offset < total:
+                    _enrichment_checkpoint()
+                    batch = auto_repair_error_batch(1)
+                    if not batch["attempted"]:
+                        break
+                    fixed += batch["resolved"]
+                    AUTO_REPAIR_STATS.update({"fixed": fixed, "processed": offset + batch["attempted"], "remaining": max(total - offset - batch["attempted"], 0)})
+                    set_auto_repair_stats(fixed, offset + batch["attempted"], max(total - offset - batch["attempted"], 0))
+                    ENRICHMENT_STATUS.update({"processed": offset + batch["attempted"], "current_id": "", "updated_at": utc_now_iso()})
+                    offset += batch["attempted"]
+                    sleep(AUTO_REPAIR_BATCH_PAUSE_SECONDS)
+                ENRICHMENT_STATUS.update({"state": "idle", "current_id": "", "updated_at": utc_now_iso()})
+                AUTO_REPAIR_STATS["remaining"] = max(total - fixed, 0)
+                set_auto_repair_stats(fixed, offset, max(total - fixed, 0))
+                refresh_error_count("")
+            except Exception as exc:
+                ENRICHMENT_STATUS.update({"state": "stopped" if ENRICHMENT_STOP_REQUESTED.is_set() else "failed", "updated_at": utc_now_iso()})
+                LOGGER.warning("automatic_review_repair_failed error=%s", exc)
+
+        AUTO_REPAIR_THREAD = threading.Thread(target=worker, name="automatic-review-repair", daemon=True)
+        AUTO_REPAIR_THREAD.start()
+        return {"status": "started", "batch_size": 10}
+
+
 def reprocess_rejected(data: dict[str, Any]) -> dict[str, Any]:
     event_id = str(data.get("event_id", "")).strip()
     mapper = data.get("mapper")
@@ -3776,7 +4042,8 @@ def reprocess_rejected(data: dict[str, Any]) -> dict[str, Any]:
         "source_fields": source_fields,
         "save_template": False,
         "event_id": event_id,
-        "row_offset": (reprocessed_row_numbers[0] - 1) if len(reprocessed_row_numbers) == 1 else 0
+        "row_offset": (reprocessed_row_numbers[0] - 1) if len(reprocessed_row_numbers) == 1 else 0,
+        "is_ai_enriched": bool(data.get("is_ai_enriched", False)),
     })
 
     # Handle soft-deleting old error records:
@@ -3830,6 +4097,8 @@ def reprocess_rejected(data: dict[str, Any]) -> dict[str, Any]:
     # the tab's counter converges instead of showing a stale value. Return
     # them so the UI can update instantly without a second round trip.
     try:
+        if not bool(data.get("is_ai_enriched", False)) and result["error_listings_cleanup"].get("ok") and result["error_listings_cleanup"].get("rows_updated", 0):
+            increment_manual_fixed_count(result["error_listings_cleanup"]["rows_updated"])
         result["error_count_total"] = refresh_error_count("")
         if affected_business_id:
             result["error_count"] = refresh_error_count(affected_business_id)
@@ -4051,6 +4320,7 @@ def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_inval
         "validation_status": "VALID",
         "is_sample_data": bool(sample_meta.get("is_sample_data")),
         "sample_batch_id": sample_meta.get("sample_batch_id"),
+        "is_ai_enriched": bool(payload.get("is_ai_enriched", False)),
     }
     for location in locations:
         if isinstance(location.raw, dict):
@@ -4330,8 +4600,10 @@ def make_handler(ui_dir: Path):
                 params = parse_qs(urlsplit(self.path).query)
                 event_id = params.get("event_id", [""])[0]
                 business_id = params.get("business_id", [""])[0]
+                offset = int(params.get("offset", ["0"])[0] or 0)
+                limit = int(params.get("limit", ["50"])[0] or 50)
                 try:
-                    _json_response(self, 200, list_rejected(event_id, business_id))
+                    _json_response(self, 200, list_rejected(event_id, business_id, limit=limit, offset=offset))
                 except Exception as exc:
                     _json_response(self, 400, {"error": str(exc)})
                 return
@@ -4351,10 +4623,13 @@ def make_handler(ui_dir: Path):
                 except Exception as exc:
                     _json_response(self, 400, {"error": str(exc)})
                 return
+            if self.path == "/api/enrichment/status":
+                _json_response(self, 200, enrichment_status())
+                return
             super().do_GET()
 
         def do_POST(self) -> None:
-            if self.path not in {"/api/login", "/api/preview", "/api/source-url", "/api/sheets", "/api/save", "/api/clear", "/api/master-delete", "/api/brands", "/api/brands/update", "/api/brands/merge", "/api/learning", "/api/reprocess", "/api/field-alias", "/api/custom-field", "/api/custom-field/delete", "/api/templates/save", "/api/silver/enrich", "/api/reporting/refresh", "/api/sample/load"}:
+            if self.path not in {"/api/login", "/api/preview", "/api/source-url", "/api/sheets", "/api/save", "/api/clear", "/api/master-delete", "/api/brands", "/api/brands/update", "/api/brands/merge", "/api/learning", "/api/reprocess", "/api/review/auto-repair", "/api/field-alias", "/api/custom-field", "/api/custom-field/delete", "/api/templates/save", "/api/silver/enrich", "/api/reporting/refresh", "/api/enrichment/stop", "/api/sample/load", "/api/sample/clear"}:
                 _json_response(self, 404, {"error": "Not found"})
                 return
             request_id = uuid4().hex
@@ -4388,6 +4663,8 @@ def make_handler(ui_dir: Path):
                     _json_response(self, 200, learn_mappings(payload))
                 elif self.path == "/api/reprocess":
                     _json_response(self, 200, reprocess_rejected(payload))
+                elif self.path == "/api/review/auto-repair":
+                    _json_response(self, 202, start_auto_repair())
                 elif self.path == "/api/field-alias":
                     _json_response(self, 200, add_field_alias(payload))
                 elif self.path == "/api/custom-field":
@@ -4397,9 +4674,17 @@ def make_handler(ui_dir: Path):
                 elif self.path == "/api/templates/save":
                     _json_response(self, 200, save_template_version(payload))
                 elif self.path in {"/api/silver/enrich", "/api/reporting/refresh"}:
-                    _json_response(self, 200, build_silver_layer(low_priority=bool(payload.get("low_priority", False))))
+                    if self.path == "/api/reporting/refresh":
+                        started = _refresh_silver_background(low_priority=True)
+                        _json_response(self, 202, {"status": "enriching", "refreshing": True, "started": started})
+                    else:
+                        _json_response(self, 200, build_silver_layer(low_priority=bool(payload.get("low_priority", False))))
+                elif self.path == "/api/enrichment/stop":
+                    _json_response(self, 200, stop_enrichment())
                 elif self.path == "/api/sample/load":
                     _json_response(self, 200, load_sample_dataset(bool(payload.get("reset"))))
+                elif self.path == "/api/sample/clear":
+                    _json_response(self, 200, clear_sample_dataset())
                 else:
                     _json_response(self, 200, preview_source(payload))
             except Exception as exc:

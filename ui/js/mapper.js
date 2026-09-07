@@ -164,10 +164,10 @@ function businessCreatedTime(brand = {}) {
     }
 function businessOptionLabel(brand = {}, newestCreatedAt = 0) {
       const newest = newestCreatedAt && businessCreatedTime(brand) === newestCreatedAt ? "Newest, " : "";
-      return `${brand.name || "Unnamed"} (${brand.display_business_id || "BID --------"}, ${formatNumber(brand.listing_count || 0)} listings, ${newest}created ${brand.created_at ? new Date(brand.created_at).toLocaleDateString() : "unknown"})`;
+      return `${formatBrandName(brand.name || "Unnamed")} (${brand.display_business_id || "BID --------"}, ${formatNumber(brand.listing_count || 0)} listings, ${newest}created ${brand.created_at ? new Date(brand.created_at).toLocaleDateString() : "unknown"})`;
     }
 function businessOptionLabelShort(brand = {}) {
-      return `${brand.name || "Unnamed"} (${brand.display_business_id || "BID --------"})`;
+      return `${formatBrandName(brand.name || "Unnamed")} (${brand.display_business_id || "BID --------"})`;
     }
 async function mergeDuplicateBusinesses(targetId, sourceIds) {
       const response = await fetch("/api/brands/merge", {
@@ -270,8 +270,6 @@ function applyBusinessSourceType(business, options = {}) {
       }
       el("sourceType").disabled = false;
       el("sourceInputMode").disabled = false;
-      el("templateBusinessFilter").value = business?.business_id || "";
-      el("templateSourceFilter").value = currentSourceTypeId();
     }
 async function refreshTemplatesForBusiness() {
       resetTemplateSelection();
@@ -1253,6 +1251,13 @@ function sampleValue(path) {
       return "";
     }
 function renderMappings() {
+      const componentsPanel = el("templateComponentsPanel");
+      const optionalPanel = el("optionalFieldsPanel");
+      const previewTabs = el("mappingPreviewTabs");
+      const hasMappingContent = Boolean(sourceParsed || sourceFields.length || activeTemplateId || Object.keys(mappingSelections || {}).length);
+      componentsPanel?.classList.toggle("hidden", !hasMappingContent);
+      optionalPanel?.classList.toggle("hidden", !hasMappingContent);
+      previewTabs?.classList.toggle("hidden", !hasMappingContent);
       const grid = el("mappingGrid");
       grid.innerHTML = `
         <div class="mapping-head">Brand Field</div>
@@ -1444,7 +1449,7 @@ function customFieldBusinessId(mode = "add") {
 function syncCustomFieldBusinessPickers() {
       const brands = JSON.parse(el("brandSelect")?.dataset.brands || "[]");
       const options = '<option value="">Select brand</option>' + brands
-        .map((brand) => `<option value="${escapeHtml(brand.business_id)}">${escapeHtml(brand.name)}</option>`).join("");
+        .map((brand) => `<option value="${escapeHtml(brand.business_id)}">${escapeHtml(formatBrandName(brand.name))}</option>`).join("");
       const activeBusinessId = selectedBrand?.business_id || (el("brandSelect")?.value !== "__create_new__" ? el("brandSelect")?.value : "") || "";
       ["customFieldBusinessSelect", "dropCustomFieldBusinessSelect"].forEach((id) => {
         const picker = el(id);
@@ -1554,7 +1559,7 @@ async function loadBrands(search = "") {
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not load brands.");
         const brands = result.brands || [];
-        el("brandSelect").innerHTML = '<option value="">Select an existing brand</option><option class="create-new-option" value="__create_new__">+ Create New Brand</option>' + brands.map((brand) => `<option value="${escapeHtml(brand.business_id)}">${escapeHtml(brand.name)}</option>`).join("");
+        el("brandSelect").innerHTML = '<option value="">Select an existing brand</option><option class="create-new-option" value="__create_new__">+ Create New Brand</option>' + brands.map((brand) => `<option value="${escapeHtml(brand.business_id)}">${escapeHtml(formatBrandName(brand.name))}</option>`).join("");
         el("brandSelect").dataset.brands = JSON.stringify(brands);
         if (selectedBrand) el("brandSelect").value = selectedBrand.business_id;
         el("editExistingBrandLink")?.classList.toggle("hidden", !selectedBrand);
@@ -1810,7 +1815,7 @@ function renderTable(targetId, rows) {
       });
       const body = rows.map((row) => {
         const flat = flattenObject(row);
-        return `<tr>${columns.map((col) => `<td>${escapeHtml(col === "__brand" ? (selectedBrand?.name || "") : flat[col] ?? "")}</td>`).join("")}</tr>`;
+        return `<tr>${columns.map((col) => `<td>${escapeHtml(col === "__brand" ? formatBrandName(selectedBrand?.name || "") : flat[col] ?? "")}</td>`).join("")}</tr>`;
       }).join("");
       target.innerHTML = `
         <table>
@@ -2099,17 +2104,55 @@ async function loadSampleDataset(reset = false) {
         if (reloadLink) reloadLink.disabled = false;
       }
     }
+async function clearSampleDataset() {
+      const clearLink = el("clearSampleDatasetLink");
+      const previousClear = clearLink ? setButtonBusy(clearLink, "Clearing") : "";
+      const status = el("reportStatus");
+      status.className = "report-status loading";
+      status.innerHTML = '<span class="spinner"></span> Clearing sample dataset...';
+      status.classList.remove("hidden");
+      try {
+        const response = await fetch("/api/sample/clear", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({}),
+          signal: activeAbortController?.signal
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not clear sample dataset.");
+        await loadBrands();
+        await loadTemplateFilters();
+        reportLoaded = false;
+        await loadReporting();
+        const message = "Sample dataset cleared. Reporting now displays active real data only.";
+        status.className = "report-status";
+        status.textContent = message;
+        status.classList.remove("hidden");
+        setStatus(message, "ok");
+        updateSampleDatasetControls({ loaded: false, locations: 0, businesses: 0 });
+      } catch (error) {
+        status.className = "report-status";
+        const message = error.name === "AbortError" ? "Cancelled. No changes." : productSafeError(error.message, "Could not clear sample dataset.");
+        status.textContent = message;
+        status.classList.remove("hidden");
+        setStatus(message, error.name === "AbortError" ? "warn" : "error");
+      } finally {
+        if (clearLink) clearButtonBusy(clearLink, previousClear);
+      }
+    }
 function updateSampleDatasetControls(result = {}) {
       const button = el("loadSampleDatasetBtn");
+      const clearLink = el("clearSampleDatasetLink");
       const reloadLink = el("reloadSampleDatasetLink");
-      if (!button || !reloadLink) return;
+      if (!button) return;
       const loaded = Boolean(result.loaded || result.already_loaded || result.locations);
       button.dataset.sampleLoaded = loaded ? "true" : "false";
       button.disabled = loaded;
       button.classList.toggle("ready", loaded);
       button.title = loaded ? "Sample data already in place." : "";
       button.textContent = loaded ? "Sample Dataset Loaded" : "Load Sample Dataset";
-      reloadLink.classList.toggle("hidden", !loaded);
+      if (clearLink) clearLink.classList.toggle("hidden", !loaded);
+      if (reloadLink) reloadLink.classList.toggle("hidden", !loaded);
     }
 async function refreshSampleDatasetStatus() {
       try {

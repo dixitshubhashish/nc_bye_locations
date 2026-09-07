@@ -159,8 +159,8 @@ async function _loadTemplateFiltersOnce() {
         }),
       ]);
       const businesses = businessResult.status === "fulfilled" ? (businessResult.value.brands || []) : [];
-      templateBrandNames = Object.fromEntries(businesses.map((business) => [business.business_id, business.name]));
-      el("templateBusinessFilter").innerHTML = '<option value="">All brands</option><option class="create-new-option" value="__create_new__">+ Create New Brand</option>' + businesses.map((business) => `<option value="${escapeHtml(business.business_id)}">${escapeHtml(business.name)}</option>`).join("");
+      templateBrandNames = Object.fromEntries(businesses.map((business) => [business.business_id, formatBrandName(business.name)]));
+      el("templateBusinessFilter").innerHTML = '<option value="">All brands</option><option class="create-new-option" value="__create_new__">+ Create New Brand</option>' + businesses.map((business) => `<option value="${escapeHtml(business.business_id)}">${escapeHtml(formatBrandName(business.name))}</option>`).join("");
       sourceTypes = sourceResult.status === "fulfilled" ? (sourceResult.value.source_types || []) : [];
       el("templateSourceFilter").innerHTML = '<option value="">All source types</option>' + sourceTypes.map((source) => `<option value="${escapeHtml(source.source_type_id)}">${escapeHtml(sourceTypeLabel(source.name))}</option>`).join("");
       populateSourceTypeSelects();

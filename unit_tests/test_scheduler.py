@@ -31,17 +31,21 @@ class SchedulerTests(unittest.TestCase):
             calls.append("gold")
             return {"views": ["a"]}
 
-        with patch.object(workflow_server, "build_silver_layer", side_effect=fake_silver):
-            with patch.object(workflow_server, "build_gold_layer", side_effect=fake_gold):
-                ran = workflow_server._run_silver_gold_tick()
+        with patch.object(workflow_server, "auto_repair_error_batch", return_value={"attempted": 0, "resolved": 0, "remaining": 0}):
+            with patch.object(workflow_server, "build_silver_layer", side_effect=fake_silver):
+                with patch.object(workflow_server, "build_gold_layer", side_effect=fake_gold):
+                    with patch.object(workflow_server, "sync_gold_mirror", return_value={"zip_brand_rows": 0, "location_rows": 0, "business_rows": 0}):
+                        with patch.object(workflow_server, "refresh_error_count", return_value=0):
+                            ran = workflow_server._run_silver_gold_tick()
 
         self.assertTrue(ran)
         self.assertEqual(calls, ["silver", "gold"])
         self.assertFalse(workflow_server.REPORTING_REFRESHING)
 
     def test_tick_swallows_errors_and_still_resets_flag(self) -> None:
-        with patch.object(workflow_server, "build_silver_layer", side_effect=RuntimeError("bigquery unavailable")):
-            ran = workflow_server._run_silver_gold_tick()
+        with patch.object(workflow_server, "auto_repair_error_batch", return_value={"attempted": 0, "resolved": 0, "remaining": 0}):
+            with patch.object(workflow_server, "build_silver_layer", side_effect=RuntimeError("bigquery unavailable")):
+                ran = workflow_server._run_silver_gold_tick()
 
         self.assertTrue(ran)
         self.assertFalse(workflow_server.REPORTING_REFRESHING)
@@ -72,17 +76,18 @@ class SchedulerTests(unittest.TestCase):
             calls.append("gold")
             return {"views": ["a"]}
 
-        with patch.object(workflow_server, "build_silver_layer", side_effect=fake_silver):
-            with patch.object(workflow_server, "build_gold_layer", side_effect=fake_gold):
-                with patch.object(workflow_server, "sync_gold_mirror", return_value={"zip_brand_rows": 0, "location_rows": 0, "business_rows": 0}):
-                    started = workflow_server._refresh_silver_background()
-
-        self.assertTrue(started)
-        for thread in threading.enumerate():
-            if thread.name == "reporting-silver-refresh":
-                thread.join(timeout=5)
-        self.assertEqual(calls, ["silver", "gold"])
-        self.assertFalse(workflow_server.REPORTING_REFRESHING)
+        with patch.object(workflow_server, "auto_repair_error_batch", return_value={"attempted": 0, "resolved": 0, "remaining": 0}):
+            with patch.object(workflow_server, "build_silver_layer", side_effect=fake_silver):
+                with patch.object(workflow_server, "build_gold_layer", side_effect=fake_gold):
+                    with patch.object(workflow_server, "sync_gold_mirror", return_value={"zip_brand_rows": 0, "location_rows": 0, "business_rows": 0}):
+                        with patch.object(workflow_server, "refresh_error_count", return_value=0):
+                            started = workflow_server._refresh_silver_background()
+                            self.assertTrue(started)
+                            for thread in threading.enumerate():
+                                if thread.name == "reporting-silver-refresh":
+                                    thread.join(timeout=5)
+                            self.assertEqual(calls, ["silver", "gold"])
+                            self.assertFalse(workflow_server.REPORTING_REFRESHING)
 
     def test_save_mapper_triggers_background_refresh_unless_skipped(self) -> None:
         with patch.object(workflow_server, "_refresh_silver_background") as fake_refresh:

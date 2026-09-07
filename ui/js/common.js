@@ -28,6 +28,25 @@ const loginSessionStorageKey = "competitive_whitespace_login_session";
 const mappingSessionStorageKey = "competitive_whitespace_mapping_session";
 const serverLaunchStorageKey = "competitive_whitespace_server_launch";
 const el = (id) => document.getElementById(id);
+
+// Keep expired sessions and missing app routes from leaving the shell in a
+// partially rendered state. Login/session probes must be allowed to report
+// their own errors without redirecting recursively.
+if (!window.__authResponseGuardInstalled) {
+  const nativeFetch = window.fetch.bind(window);
+  window.fetch = async (...args) => {
+    const response = await nativeFetch(...args);
+    const requestUrl = String(args[0]?.url || args[0] || "");
+    const isAuthProbe = requestUrl.includes("/api/login") || requestUrl.includes("/api/session");
+    if ([401, 403, 404].includes(response.status) && !isAuthProbe && !window.location.pathname.endsWith("/login")) {
+      sessionStorage.removeItem(loginSessionStorageKey);
+      sessionStorage.removeItem(mappingSessionStorageKey);
+      window.location.replace("/login");
+    }
+    return response;
+  };
+  window.__authResponseGuardInstalled = true;
+}
 function newSessionId() {
       return window.crypto?.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     }
@@ -51,6 +70,9 @@ function productSafeError(message, fallback = "Something went wrong. Please try 
 function formatNumber(value) {
       const number = Number(value || 0);
       return Number.isFinite(number) ? number.toLocaleString() : "0";
+    }
+function formatBrandName(value) {
+      return String(value ?? "").trim().replace(/_/g, " ").replace(/[^A-Za-z0-9\s#'\-.]/g, "").replace(/\s+/g, " ").replace(/[A-Za-z][^\s-]*/g, (word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase());
     }
 function renderSimpleTable(targetId, columns, rows) {
       const target = el(targetId);

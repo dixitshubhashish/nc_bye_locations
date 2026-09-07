@@ -3,17 +3,140 @@
 let currentEditingRecord = null;
 let loadRejectedRecordsPromise = null;
 let reviewBrandNames = {};
+let autoRepairPollTimer = null;
+let aiFixedAnimationTimer = null;
+let reviewPage = 0;
+const REVIEW_PAGE_SIZE = 50;
+
+async function reviewFetch(url, options = {}, timeoutMs = 120000) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+function formatAiFixedCount(value, exact = false) {
+  const count = Math.max(0, Number(value) || 0);
+  if (exact || count < 1000) return Math.round(count).toLocaleString();
+  const compact = count / 1000;
+  return `${compact.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")}k`;
+}
+
+function animateAiFixedCount(targetValue) {
+  const target = el("reviewAiFixedCount");
+  if (!target) return;
+  const finalValue = Math.max(0, Number(targetValue) || 0);
+  const currentText = target.dataset.exactValue || "0";
+  let current = Number(currentText) || 0;
+  if (aiFixedAnimationTimer) window.clearInterval(aiFixedAnimationTimer);
+  if (current >= finalValue) {
+    target.dataset.exactValue = String(finalValue);
+    target.textContent = formatAiFixedCount(finalValue, true);
+    return;
+  }
+  aiFixedAnimationTimer = window.setInterval(() => {
+    const remaining = finalValue - current;
+    current += Math.max(1, Math.ceil(remaining / 12));
+    if (current >= finalValue) {
+      current = finalValue;
+      window.clearInterval(aiFixedAnimationTimer);
+      aiFixedAnimationTimer = null;
+    }
+    target.dataset.exactValue = String(current);
+    target.textContent = formatAiFixedCount(current, current === finalValue);
+  }, 80);
+}
+
+async function autoRepairReviewBatch() {
+      const button = el("autoRepairReviewBtn");
+      const target = el("reviewAutoRepairStatus") || el("reviewResults");
+      const previousButton = setButtonBusy(button, "Auto-Fixing");
+      try {
+        const response = await fetch("/api/review/auto-repair", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}"
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Automatic repair could not be started.");
+        if (result.status === "started" || result.status === "running") {
+          button.dataset.autoRepairing = "true";
+          target.className = "status";
+          target.innerHTML = `${busyMarkup("Auto-Fixing review records")} Processing 1 record at a time. ${result.processed || 0} processed so far. The next record will continue automatically.`;
+          if (!autoRepairPollTimer) autoRepairPollTimer = window.setInterval(pollAutoRepairStatus, 2000);
+          return;
+        }
+        const remaining = Number(result.remaining || 0);
+        target.className = "status ok";
+        target.textContent = result.attempted
+          ? `${result.resolved} of ${result.attempted} records fixed automatically. ${remaining} still need manual review.`
+          : "No review records are currently available for automatic fixing.";
+        await loadRejectedRecords();
+      } catch (error) {
+        target.className = "status error";
+        target.textContent = productSafeError(error.message, "Automatic repair could not be completed.");
+        addStatusClose(target);
+      } finally {
+        if (button?.dataset.autoRepairing !== "true") clearButtonBusy(button, previousButton);
+      }
+
+async function pollAutoRepairStatus() {
+  const button = el("autoRepairReviewBtn");
+  const target = el("reviewAutoRepairStatus") || el("reviewResults");
+  try {
+    const response = await fetch("/api/enrichment/status", { cache: "no-store" });
+    const state = await response.json();
+    const fixedCount = el("reviewAiFixedCount");
+    if (fixedCount) animateAiFixedCount(state.auto_repair?.fixed || 0);
+    const manualFixedCount = el("reviewManualFixedCount");
+    if (manualFixedCount) manualFixedCount.textContent = formatAiFixedCount(state.auto_repair?.manual_fixed || 0, true);
+    const aiPercent = el("reviewAiFixedPercent");
+    if (aiPercent) {
+      const ai = Number(state.auto_repair?.fixed || 0);
+      const manual = Number(state.auto_repair?.manual_fixed || 0);
+      const pending = Number(state.auto_repair?.remaining || 0);
+      const total = ai + manual + pending;
+      aiPercent.textContent = `${total ? (ai / total * 100).toFixed(2) : "0.00"}%`;
+      const manualPercent = el("reviewManualFixedPercent");
+      if (manualPercent) manualPercent.textContent = `${total ? (manual / total * 100).toFixed(2) : "0.00"}%`;
+    }
+    if (state.state === "running") {
+      if (target) target.innerHTML = `${busyMarkup("Auto-Fixing review records")} ${Number(state.processed || 0)} records processed. The next record will continue automatically. ${Number(state.auto_repair?.remaining || 0).toLocaleString()} need manual review.`;
+      const manualCount = el("reviewManualCount");
+      if (manualCount) manualCount.textContent = `${Number(state.auto_repair?.remaining || 0).toLocaleString()} need manual review`;
+      return;
+    }
+    window.clearInterval(autoRepairPollTimer);
+    autoRepairPollTimer = null;
+    if (button) { delete button.dataset.autoRepairing; button.disabled = false; button.innerHTML = "Try Auto-Fixing with AI"; }
+    if (target) {
+      target.className = state.state === "failed" ? "status error" : "status ok";
+      const remaining = Number(state.auto_repair?.remaining || 0);
+      target.textContent = state.state === "stopped" ? `${remaining.toLocaleString()} need manual review. Automatic fixing stopped.` : `${remaining.toLocaleString()} need manual review. Automatic fixing completed.`;
+      const manualCount = el("reviewManualCount");
+      if (manualCount) manualCount.textContent = `${remaining.toLocaleString()} need manual review`;
+    }
+    await loadRejectedRecords();
+  } catch (_) {}
+}
+    }
 
 async function loadReviewBrandFilter() {
       const select = el("reviewBrandFilter");
       if (!select || select.options.length > 1) return;
       try {
-        const res = await fetch("/api/brands?search=");
+        // Review filtering is intentionally based only on impacted brands;
+        // the global brand catalog belongs to Mappings and Template Library.
+        const res = await reviewFetch("/api/error-listings/by-brand", { cache: "no-store" });
         const data = await res.json();
         if (res.ok && Array.isArray(data.brands)) {
-          reviewBrandNames = Object.fromEntries(data.brands.map(b => [b.business_id, b.name]));
+          const impactedBrands = data.brands.filter((brand) => Number(brand.count || 0) > 0);
+          reviewBrandNames = Object.fromEntries(impactedBrands.map(b => [b.business_id, formatBrandName(b.brand || b.business_id)]));
           const currentVal = select.value;
-          select.innerHTML = '<option value="">All Brands</option>' + data.brands.map(b => `<option value="${escapeHtml(b.business_id)}">${escapeHtml(b.name)}</option>`).join("");
+          select.innerHTML = '<option value="">All Brands</option>' + impactedBrands.map(b => `<option value="${escapeHtml(b.business_id)}">${escapeHtml(formatBrandName(b.brand || b.business_id))}</option>`).join("");
           select.value = currentVal || "";
         }
       } catch (err) {
@@ -36,9 +159,6 @@ function loadRejectedRecords() {
       return loadRejectedRecordsPromise;
     }
 async function _loadRejectedRecordsOnce() {
-      await loadReviewBrandFilter();
-      const eventId = el("reviewEventId").value.trim();
-      const brandFilter = el("reviewBrandFilter")?.value || "";
       const target = el("reviewResults");
       const searchBtn = el("reviewSearchBtn");
       const originalSearchBtnHtml = searchBtn ? searchBtn.innerHTML : "Search Records";
@@ -48,7 +168,10 @@ async function _loadRejectedRecordsOnce() {
       target.className = "status";
       target.textContent = "Loading error listings...";
       try {
-        const response = await fetch(`/api/rejected?event_id=${encodeURIComponent(eventId)}&business_id=${encodeURIComponent(brandFilter)}`);
+        await loadReviewBrandFilter();
+        const eventId = el("reviewEventId").value.trim();
+        const brandFilter = el("reviewBrandFilter")?.value || "";
+        const response = await reviewFetch(`/api/rejected?event_id=${encodeURIComponent(eventId)}&business_id=${encodeURIComponent(brandFilter)}&limit=${REVIEW_PAGE_SIZE}&offset=${reviewPage * REVIEW_PAGE_SIZE}`);
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not load review records.");
         if (!result.records.length) {
@@ -68,7 +191,7 @@ async function _loadRejectedRecordsOnce() {
           `).join('') : escapeHtml(JSON.stringify(record.errors));
 
           const rawBrand = record.raw_record && typeof record.raw_record === "object" ? (record.raw_record.brand || record.raw_record.Brand || "") : "";
-          const brandDisplayName = reviewBrandNames[record.business_id] || rawBrand || record.business_id || "—";
+          const brandDisplayName = reviewBrandNames[record.business_id] || formatBrandName(rawBrand || record.business_id || "—");
 
           return `<tr>
             <td data-sort-value="${escapeHtml(record.event_id)}" style="font-family: monospace; font-size: 11px;">${escapeHtml(record.event_id)}</td>
@@ -82,6 +205,9 @@ async function _loadRejectedRecordsOnce() {
           </tr>`;
         }).join("")}</tbody></table>`;
         enableSortableTable(target.querySelector("table"));
+        target.insertAdjacentHTML("beforeend", `<div class="review-pagination" style="display:flex; justify-content:center; gap:8px; margin-top:12px;"><button type="button" class="secondary" data-review-page="prev" ${reviewPage === 0 ? "disabled" : ""}>Previous</button><span style="padding:8px 4px; color:var(--muted);">Page ${reviewPage + 1}</span><button type="button" class="secondary" data-review-page="next" ${result.has_more ? "" : "disabled"}>Next</button></div>`);
+        target.querySelector('[data-review-page="prev"]')?.addEventListener("click", () => { reviewPage -= 1; loadRejectedRecords(); });
+        target.querySelector('[data-review-page="next"]')?.addEventListener("click", () => { reviewPage += 1; loadRejectedRecords(); });
         target.querySelectorAll("button[data-open-edit]").forEach((button) => {
           button.addEventListener("click", () => {
             const rec = result.records.find(r => r.event_id === button.dataset.event && String(r.row_number) === button.dataset.openEdit);
@@ -90,7 +216,10 @@ async function _loadRejectedRecordsOnce() {
         });
       } catch (error) {
         target.className = "status error";
-        target.textContent = productSafeError(error.message, "Could not load review records.");
+        target.textContent = error.name === "AbortError"
+          ? "Loading review records took too long. Please try Search Records again."
+          : productSafeError(error.message, "Could not load review records.");
+        addStatusClose(target);
       } finally {
         if (searchBtn) {
           clearButtonBusy(searchBtn, originalSearchBtnHtml);
@@ -179,7 +308,7 @@ async function openEditRecordModal(record) {
             const optionsHtml = ['<option value="">Select a saved brand</option>']
               .concat(savedBrandsList.map(b => {
                 const isSelected = matchedBrand ? b.business_id === matchedBrand.business_id : (b.name.toLowerCase() === rawBrandVal.toLowerCase());
-                return `<option value="${escapeHtml(b.name)}" data-business-id="${escapeHtml(b.business_id)}" ${isSelected ? 'selected' : ''}>${escapeHtml(b.name)}</option>`;
+                return `<option value="${escapeHtml(b.name)}" data-business-id="${escapeHtml(b.business_id)}" ${isSelected ? 'selected' : ''}>${escapeHtml(formatBrandName(b.name))}</option>`;
               }))
               .join('');
             return `
@@ -482,7 +611,14 @@ async function refreshReviewCount(refresh = false) {
       try {
         const response = await fetch(`/api/error-listings/count?business_id=&refresh=${refresh ? "1" : "0"}`);
         const result = await response.json();
-        if (response.ok && typeof result.count === "number") el("reviewCount").textContent = result.count;
+        if (response.ok && typeof result.count === "number") {
+          const cached = Number(localStorage.getItem("review_error_count_last") || 0);
+          // A non-forced mirror read must never replace a known count with a
+          // transient zero while background enrichment is still running.
+          const count = !refresh && result.count === 0 && cached > 0 ? cached : result.count;
+          el("reviewCount").textContent = count;
+          localStorage.setItem("review_error_count_last", String(count));
+        }
       } catch (error) {
         // Keep whatever the badge already showed rather than blanking to 0 -
         // a transient fetch failure shouldn't wipe a valid cached count.
@@ -577,9 +713,9 @@ async function loadErrorBrandBreakdown() {
             <th data-sort-key="errors" data-sort-type="number" style="text-align:right; padding:4px 8px; border-bottom:1px solid var(--line);">Errors</th>
             <th data-sort-key="share" data-sort-type="number" style="text-align:right; padding:4px 8px; border-bottom:1px solid var(--line);">Share</th>
           </tr></thead><tbody>${withColor.map((b) => `<tr>
-            <td data-sort-value="${escapeHtml(b.brand || b.business_id)}" style="padding:4px 8px;"><span style="display:inline-block; width:10px; height:10px; border-radius:2px; background:${b.color}; margin-right:6px; vertical-align:middle;"></span>${escapeHtml(b.brand || b.business_id)}</td>
+            <td data-sort-value="${escapeHtml(formatBrandName(b.brand || b.business_id))}" style="padding:4px 8px;"><span style="display:inline-block; width:10px; height:10px; border-radius:2px; background:${b.color}; margin-right:6px; vertical-align:middle;"></span>${escapeHtml(formatBrandName(b.brand || b.business_id))}</td>
             <td data-sort-value="${b.count}" style="padding:4px 8px; text-align:right; font-variant-numeric: tabular-nums;">${b.count}</td>
-            <td data-sort-value="${total ? Math.round(b.count / total * 100) : 0}" style="padding:4px 8px; text-align:right; color: var(--muted); font-variant-numeric: tabular-nums;">${total ? Math.round(b.count / total * 100) : 0}%</td>
+            <td data-sort-value="${total ? (b.count / total * 100) : 0}" style="padding:4px 8px; text-align:right; color: var(--muted); font-variant-numeric: tabular-nums;">${total ? (b.count / total * 100).toFixed(2) : "0.00"}%</td>
           </tr>`).join("")}</tbody></table>`;
         enableSortableTable(el("reviewBrandTable").querySelector("table"));
         container.style.display = "block";

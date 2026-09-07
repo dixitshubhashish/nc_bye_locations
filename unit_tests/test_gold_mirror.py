@@ -163,7 +163,7 @@ class GoldMirrorReportingTests(unittest.TestCase):
         self.assertEqual(result["totals"], {
             "total_states": 2, "total_zips": 4, "total_brands": 2, "total_stores": 7,
             "active_market_locations": 3, "active_brand_states": 2, "active_brand_cities": 2,
-            "total_locations": 4, "total_cities": 2, "last_updated": "2026-01-04T00:00:00+00:00",
+            "total_locations": 4, "total_cities": 2, "gap_zips": 1, "last_updated": "2026-01-04T00:00:00+00:00",
         })
 
     def test_top_states_grain_and_population_dedup(self) -> None:

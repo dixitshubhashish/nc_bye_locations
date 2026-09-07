@@ -154,6 +154,20 @@ def init_sqlite_cache() -> None:
                 refreshed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS auto_repair_stats (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                fixed INTEGER NOT NULL DEFAULT 0,
+                manual_fixed INTEGER NOT NULL DEFAULT 0,
+                processed INTEGER NOT NULL DEFAULT 0,
+                remaining INTEGER NOT NULL DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        try:
+            conn.execute("ALTER TABLE auto_repair_stats ADD COLUMN manual_fixed INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
 
 
@@ -195,6 +209,35 @@ def get_cached_zipcode(zip_code: str) -> dict[str, Any] | None:
         if row:
             return dict(row)
     return None
+
+
+def get_cached_zipcode_count() -> int:
+    """Return the durable ZIP mirror size without loading its rows."""
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT COUNT(*) AS count FROM us_zipcodes;").fetchone()
+        return int(row["count"] or 0)
+
+
+def get_auto_repair_stats() -> dict[str, int]:
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT fixed, manual_fixed, processed, remaining FROM auto_repair_stats WHERE id = 1;").fetchone()
+        return dict(row) if row else {"fixed": 0, "manual_fixed": 0, "processed": 0, "remaining": 0}
+
+
+def set_auto_repair_stats(fixed: int, processed: int, remaining: int, manual_fixed: int | None = None) -> None:
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        current = conn.execute("SELECT manual_fixed FROM auto_repair_stats WHERE id = 1").fetchone()
+        manual = int(manual_fixed if manual_fixed is not None else (current[0] if current else 0))
+        conn.execute("INSERT OR REPLACE INTO auto_repair_stats (id, fixed, manual_fixed, processed, remaining, updated_at) VALUES (1, ?, ?, ?, ?, CURRENT_TIMESTAMP);", (int(fixed), manual, int(processed), int(remaining)))
+        conn.commit()
+
+
+def increment_manual_fixed_count(amount: int = 1) -> None:
+    stats = get_auto_repair_stats()
+    set_auto_repair_stats(stats["fixed"], stats["processed"], stats["remaining"], stats.get("manual_fixed", 0) + int(amount))
 
 
 def get_cached_query(cache_key: str) -> dict[str, Any] | None:

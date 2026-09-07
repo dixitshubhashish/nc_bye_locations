@@ -153,6 +153,237 @@
       min-height: 860px;
     }
 
+    /* Reporting is a full workspace view; keep the filter rail fixed while the
+       dashboard uses all remaining laptop and desktop width. */
+    .reporting-view,
+    .reporting-view .report-shell {
+      width: 100%;
+      max-width: none;
+      box-sizing: border-box;
+    }
+    .reporting-view {
+      padding: clamp(16px, 2.4vw, 32px);
+      grid-column: 1 / -1;
+      min-width: 0;
+    }
+    .reporting-view .report-shell {
+      max-width: 1600px;
+      margin-inline: auto;
+    }
+    .reporting-dashboard-layout {
+      display: grid !important;
+      grid-template-columns: 290px minmax(0, 1fr);
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .reporting-main-pane,
+    .reporting-main-pane > #reportContent {
+      min-width: 0;
+      width: 100% !important;
+      max-width: none !important;
+      box-sizing: border-box;
+    }
+    .reporting-main-pane {
+      grid-column: 2;
+      display: block !important;
+      grid-template-columns: none !important;
+    }
+    .reporting-sidebar-pane {
+      max-height: none !important;
+      overflow: visible !important;
+      box-sizing: border-box;
+    }
+    .reporting-sidebar-pane .filter-category {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      column-gap: 10px;
+      align-items: start;
+    }
+    .reporting-sidebar-pane .filter-category > :first-child,
+    .reporting-sidebar-pane > div:last-child {
+      grid-column: 1 / -1;
+      display: grid !important;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .reporting-sidebar-pane > div:last-child button {
+      width: 100% !important;
+      min-width: 0;
+      white-space: normal;
+    }
+    #competitorDropdownBtnText {
+      color: var(--ink) !important;
+      opacity: 1 !important;
+    }
+    #competitorDropdownBtn[data-tooltip] {
+      position: relative;
+    }
+    #competitorDropdownBtn[data-tooltip]::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      left: 0;
+      top: calc(100% + 6px);
+      z-index: 1100;
+      display: none;
+      max-width: 360px;
+      padding: 7px 9px;
+      border-radius: 5px;
+      background: #1f2937;
+      color: #ffffff;
+      font-size: 12px;
+      font-weight: 500;
+      line-height: 1.35;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      box-shadow: 0 5px 14px rgba(15, 23, 42, 0.22);
+      pointer-events: none;
+    }
+    #competitorDropdownBtn[data-tooltip]:hover::after,
+    #competitorDropdownBtn[data-tooltip]:focus-visible::after {
+      display: block;
+    }
+    .competitor-dropdown-toolbar button[data-action] {
+      display: inline-block !important;
+      width: auto !important;
+      min-width: 34px;
+      height: auto !important;
+      margin: 0;
+      padding: 3px 5px !important;
+      border: 0 !important;
+      background: transparent !important;
+      color: var(--accent) !important;
+      font-size: 11px !important;
+      font-weight: 700 !important;
+      line-height: 1.2;
+      white-space: nowrap;
+    }
+    .competitor-dropdown-toolbar button[data-action="deselect-all"] {
+      color: var(--muted) !important;
+    }
+    .competitor-dropdown-toolbar > div {
+      margin-right: 8px;
+      flex-shrink: 0;
+    }
+    .report-hero-actions > div:first-child {
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      row-gap: 6px;
+    }
+    .report-hero-actions .sample-load-actions {
+      flex-direction: row;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      align-items: center;
+    }
+    .report-hero-actions > div:first-child > button {
+      flex: 0 0 auto;
+    }
+    .report-hero-actions {
+      min-width: min(100%, 560px);
+      max-width: 100%;
+    }
+    .report-hero-actions > div:first-child {
+      width: 100%;
+      display: grid !important;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+    }
+    .report-hero-actions .sample-load-actions {
+      min-width: 0;
+      justify-content: flex-start;
+    }
+    .report-hero-actions #refreshReportBtn {
+      width: auto !important;
+      min-width: 140px !important;
+      white-space: nowrap;
+    }
+    .report-hero-actions .report-status {
+      width: 100%;
+      box-sizing: border-box;
+    }
+    @media (max-width: 700px) {
+      .report-hero-actions {
+        min-width: 0;
+        width: 100%;
+      }
+      .report-hero-actions > div:first-child {
+        grid-template-columns: 1fr;
+      }
+      .report-hero-actions #refreshReportBtn {
+        width: 100% !important;
+      }
+    }
+    .reporting-sidebar-pane .filter-category > .report-filter-group {
+      min-width: 0;
+    }
+    .reporting-sidebar-pane .filter-category > div[style*="display: grid"] {
+      grid-column: 1 / -1;
+    }
+    .reporting-sidebar-pane .brand-filter-category {
+      grid-template-columns: 1fr;
+    }
+    .reporting-sidebar-pane .brand-filter-category > :first-child,
+    .reporting-sidebar-pane .brand-filter-category > .report-filter-group {
+      grid-column: 1;
+    }
+    .reporting-main-pane > #reportContent > * {
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .reporting-main-pane .report-section,
+    .reporting-main-pane .report-columns {
+      min-width: 0;
+      max-width: none;
+    }
+    .reporting-main-pane .report-columns > .report-section {
+      min-width: 0;
+      overflow: hidden;
+    }
+    .reporting-main-pane .report-columns > .report-section > div {
+      min-width: 0;
+      max-width: 100%;
+      overflow-x: auto;
+    }
+    .reporting-main-pane .report-columns table {
+      width: 100%;
+      min-width: 0;
+    }
+    .reporting-main-pane .report-columns {
+      grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    }
+    .reporting-main-pane #reportingMap {
+      height: clamp(400px, 52vh, 680px) !important;
+      min-height: 400px;
+    }
+    .reporting-main-pane .report-grid {
+      grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)) !important;
+    }
+    @media (max-width: 900px) {
+      .reporting-dashboard-layout {
+        grid-template-columns: 1fr;
+      }
+      .reporting-main-pane {
+        grid-column: 1;
+      }
+      .reporting-sidebar-pane {
+        position: static !important;
+        width: auto !important;
+        max-height: none !important;
+      }
+    }
+    @media (max-width: 600px) {
+      .reporting-view {
+        padding: 12px;
+      }
+      .reporting-main-pane #reportingMap {
+        height: 56vh !important;
+        min-height: 340px;
+      }
+      .reporting-main-pane .report-columns {
+        grid-template-columns: 1fr !important;
+      }
+    }
+
     .report-hero {
       display: flex;
       justify-content: space-between;
@@ -183,24 +414,24 @@
       gap: 4px;
     }
     .sample-load-link {
-      border: 0;
-      background: transparent;
+      border: 1px solid #cbd6e6;
+      background: #ffffff;
       color: var(--accent);
-      padding: 0;
+      padding: 5px 9px;
+      border-radius: 5px;
       font-size: 12px;
-      text-decoration: underline;
       cursor: pointer;
+      white-space: nowrap;
     }
     .sample-load-link:hover {
       color: #005fd3;
-      background: transparent;
-      text-decoration-thickness: 2px;
-      text-underline-offset: 3px;
+      background: var(--navy-soft);
+      border-color: #9ebbe9;
     }
     .sample-load-link:disabled {
       color: var(--muted);
       cursor: not-allowed;
-      text-decoration-color: transparent;
+      background: #f4f6f8;
     }
     .sample-load-link.hidden { display: none; }
     #loadSampleDatasetBtn.ready {
@@ -318,6 +549,207 @@
     .report-columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
     .report-empty-states { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
     .report-empty-states span { border: 1px solid var(--line); border-radius: 999px; padding: 5px 9px; background: #ffffff; color: var(--muted); font-weight: 700; }
+    /* Competitor Benchmark View Styles */
+    .comp-bench-section {
+      background: #ffffff;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 24px;
+      margin-top: 24px;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
+    }
+    .comp-bench-header-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .comp-bench-title {
+      margin: 0;
+      font-size: 26px;
+      font-weight: 750;
+      color: #172554;
+      line-height: 1.2;
+      letter-spacing: -0.015em;
+    }
+    .comp-view-switcher {
+      display: inline-flex;
+      gap: 4px;
+      padding: 4px;
+      background: #f1f5f9;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    .comp-view-btn {
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 650;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .comp-view-btn.active {
+      background: #ffffff;
+      color: #172554;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.12);
+    }
+    .comp-bench-table-wrap {
+      width: 100%;
+      overflow-x: auto;
+      background: #ffffff;
+      border-radius: 8px;
+    }
+    .comp-bench-table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      table-layout: fixed;
+    }
+    .comp-bench-table th {
+      padding: 12px 14px;
+      font-size: 14px;
+      font-weight: 700;
+      color: #1e3a8a;
+      background: #f8fafc;
+      border-bottom: 1px solid #e2e8f0;
+      white-space: nowrap;
+    }
+    .comp-bench-table th.brand-col {
+      background: transparent;
+      width: 38%;
+      min-width: 270px;
+    }
+    .comp-bench-table th.loc-col {
+      width: 22%;
+      min-width: 130px;
+    }
+    .comp-bench-table th.state-col {
+      width: 20%;
+      min-width: 120px;
+    }
+    .comp-bench-table th.city-col {
+      width: 20%;
+      min-width: 120px;
+    }
+    .comp-bench-table td {
+      padding: 16px 14px;
+      border-bottom: 1px solid #f1f5f9;
+      vertical-align: middle;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }
+    .comp-bench-table tr:hover td {
+      background: #fafcff;
+    }
+    .comp-bench-brand-cell {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      width: 100%;
+      min-width: 0;
+    }
+    .comp-brand-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      min-width: 0;
+    }
+    .comp-brand-primary {
+      color: #1e293b;
+    }
+    .comp-brand-vs {
+      color: #2563eb;
+      padding-left: 2px;
+    }
+    .comp-primary-name {
+      font-size: 14px;
+      font-weight: 700;
+      color: #1e293b;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+      min-width: 0;
+      flex: 1;
+      line-height: 1.3;
+    }
+    .comp-vs-badge {
+      font-size: 10px;
+      font-weight: 800;
+      color: #64748b;
+      background: #f1f5f9;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 1px 5px;
+      user-select: none;
+      letter-spacing: 0.04em;
+      flex-shrink: 0;
+    }
+    .comp-link-name {
+      font-size: 14px;
+      font-weight: 600;
+      color: #2563eb;
+      text-decoration: none;
+      cursor: pointer;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+      min-width: 0;
+      flex: 1;
+      line-height: 1.3;
+    }
+    .comp-link-name:hover {
+      color: #1d4ed8;
+      text-decoration: underline;
+    }
+    .comp-logo-icon {
+      width: 22px;
+      height: 22px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .comp-logo-icon svg {
+      width: 22px;
+      height: 22px;
+      display: block;
+    }
+    .comp-metric-cell {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .comp-metric-num {
+      font-size: 16px;
+      font-weight: 700;
+      color: #0f172a;
+      line-height: 1.2;
+    }
+    .comp-metric-diff {
+      font-size: 11.5px;
+      color: #64748b;
+      font-style: italic;
+      line-height: 1.3;
+    }
+    .comp-sales-footer {
+      margin: 20px 0 4px;
+      font-size: 13.5px;
+      color: #475569;
+      line-height: 1.5;
+    }
+    .comp-sales-footer a {
+      color: #2563eb;
+      text-decoration: none;
+      font-weight: 500;
+    }
+    .comp-sales-footer a:hover {
+      text-decoration: underline;
+    }
+
     .state-code-label {
       background: transparent;
       border: 0;
@@ -429,9 +861,21 @@
     }
 
     .review-view { padding: 24px; }
-    .review-toolbar { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(220px, .7fr) auto; gap: 8px; width: 100%; max-width: 980px; margin-bottom: 16px; align-items: stretch; }
+    .review-toolbar { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(220px, .7fr) auto auto; gap: 8px; width: 100%; max-width: none; margin-bottom: 16px; align-items: stretch; }
     .review-toolbar input, .review-toolbar select { width: 100%; min-width: 0; box-sizing: border-box; }
     .review-brand-breakdown-layout { display: grid; grid-template-columns: minmax(300px, .85fr) minmax(360px, 1.15fr); gap: 28px; align-items: center; width: 100%; }
+    .review-chart-side { min-width: 0; display: grid; grid-template-columns: minmax(120px, 170px) minmax(0, 1fr); gap: 14px; align-items: center; }
+    .review-ai-summary { min-width: 0; box-sizing: border-box; padding: 14px 12px; border: 1px solid #b9d6c3; border-radius: 8px; background: #f2fbf5; }
+    .review-ai-summary strong { display: block; color: #147d63; font-size: 24px; line-height: 1.1; }
+    .review-ai-summary span, .review-manual-summary span { display: block; margin-top: 6px; color: #53627d; font-size: 12px; line-height: 1.25; }
+    .review-manual-summary { min-width: 0; box-sizing: border-box; padding: 14px 12px; border: 1px solid #b9d6c3; border-radius: 8px; background: #f2fbf5; grid-column: 1; }
+    .review-manual-summary strong { display: block; color: #147d63; font-size: 24px; line-height: 1.1; }
+    .review-ai-percent-summary, .review-manual-percent-summary { min-width: 0; box-sizing: border-box; padding: 14px 12px; border: 1px solid #cbd8eb; border-radius: 8px; background: #f5f8fd; grid-column: 1; }
+    .review-ai-percent-summary strong, .review-manual-percent-summary strong { display: block; color: #2563eb; font-size: 22px; line-height: 1.1; }
+    .review-ai-percent-summary span, .review-manual-percent-summary span { display: block; margin-top: 6px; color: #53627d; font-size: 12px; line-height: 1.25; }
+    .review-manual-percent-summary { border-color: #f1b8b4; background: #fff1f0; }
+    .review-manual-percent-summary strong { color: #cf1322; }
+    .review-chart-side > #reviewBrandChart { grid-column: 2; grid-row: 1 / span 4; }
     #reviewBrandChart { min-height: 340px; display: flex; justify-content: center; align-items: center; position: relative; }
     #reviewBrandChart svg { width: min(340px, 100%); height: auto; overflow: visible; }
     .review-chart-tooltip { position: absolute; z-index: 4; pointer-events: none; display: none; max-width: 220px; padding: 8px 10px; border-radius: 6px; background: #1f2937; color: #fff; font-size: 12px; line-height: 1.35; box-shadow: 0 4px 12px rgba(15, 23, 42, .22); white-space: nowrap; }
@@ -439,6 +883,11 @@
     @media (max-width: 760px) {
       .review-toolbar { grid-template-columns: 1fr; max-width: none; }
       .review-brand-breakdown-layout { grid-template-columns: 1fr; gap: 12px; }
+      .review-chart-side { grid-template-columns: 1fr; }
+      .review-ai-summary { text-align: center; }
+      .review-manual-summary { text-align: center; }
+      .review-ai-percent-summary, .review-manual-percent-summary { text-align: center; }
+      .review-chart-side > #reviewBrandChart { grid-column: 1; grid-row: auto; }
       #reviewBrandChart { min-height: 280px; }
     }
     .review-row-actions { white-space: nowrap; }
@@ -1442,6 +1891,7 @@
         <button class="secondary" id="resetMappingBtn" type="button">Reset Fields Mapping</button>
         <button class="secondary" id="restartMappingBtn" type="button">Restart Mapping</button>
         <div id="headerReadinessStatus" class="header-readiness">ZIPs not checked</div>
+        <button class="secondary" id="testReadinessBtn" type="button">Sync US ZIPs</button>
         <button class="secondary" id="logoutBtn" type="button">Log out</button>
       </div>
     </header>
@@ -1693,7 +2143,8 @@ result = [
         <h2>Reporting Data</h2>
         <div class="mapping-note">Refresh saved records for reporting.</div>
         <div class="button-row">
-          <button class="secondary" id="reportingDataRefreshBtn" type="button">Refresh Data</button>
+          <button class="secondary" id="reportingDataRefreshBtn" type="button">Start Enriching</button>
+          <button class="secondary hidden" id="stopEnrichmentBtn" type="button">Stop Enriching</button>
         </div>
         <div id="reportingDataRefreshStatus" class="action-feedback" role="status" aria-live="polite"></div>
       </div>
@@ -1703,19 +2154,19 @@ result = [
         <div class="mapping-note">Clear loaded records or reset the warehouse completely.</div>
         <p class="data-risk-note">Risk: deletion can remove saved listings, brands, review rows, and with master deletion every warehouse table/view.</p>
         <button class="secondary danger-soft" id="clearDataBtn" type="button" title="Soft delete saved brands, listings, and review records. Reference ZIPs, fields, source types, and templates stay available.">Clear Saved Data</button>
-        <button class="secondary danger-hard" id="masterDeleteBtn" type="button" title="Drop every table and view across bronze, silver, and gold datasets. Partitioned tables are removed through their base tables.">Master Data Deletion</button>
+        <button class="secondary danger-hard" id="masterDeleteBtn" type="button" title="Permanently remove all stored application data and reporting views.">Master Data Deletion</button>
         <div id="masterDeleteStatus" class="action-feedback" role="status" aria-live="polite"></div>
       </div>
 
     </aside>
 
     <section>
-      <div class="panel">
+      <div class="panel mapper-template-components-panel hidden" id="templateComponentsPanel">
         <h2>Template Components</h2>
         <div class="mapping-grid" id="mappingGrid"></div>
       </div>
 
-      <div class="panel">
+      <div class="panel optional-fields-panel hidden" id="optionalFieldsPanel">
         <h2>Optional Fields</h2>
         <div class="mapping-note">Add fields available in this source. New fields appear at the end of the mapping list.</div>
         <div class="optional-fields-layout">
@@ -1749,7 +2200,7 @@ result = [
         </div>
       </div>
 
-      <div class="tabs">
+      <div class="tabs hidden" id="mappingPreviewTabs">
         <button class="tab active" data-tab="sourcePreview">Source Preview</button>
         <button class="tab" data-tab="entityPreview">Data Model</button>
       </div>
@@ -1779,139 +2230,203 @@ result = [
             <div style="display: flex; gap: 8px; align-items: flex-start;">
               <div class="sample-load-actions">
                 <button class="secondary" id="loadSampleDatasetBtn" type="button">Load Sample Dataset</button>
-                <button class="sample-load-link hidden" id="reloadSampleDatasetLink" type="button">Clear sample data and reload</button>
+                <button class="sample-load-link hidden" id="clearSampleDatasetLink" type="button">Clear sample data</button>
+                <button class="sample-load-link hidden" id="reloadSampleDatasetLink" type="button">Reload</button>
               </div>
               <button id="refreshReportBtn" type="button">Refresh Report</button>
             </div>
             <div id="reportStatus" class="report-status">Ready</div>
           </div>
         </div>
-        <div class="report-filters" style="display: grid; gap: 12px;">
-          <div class="report-filter-row primary">
-          <div class="report-filter-group">
-            <h2>Primary Brand</h2>
-            <select id="reportMainBrandSelect" style="width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px; font-weight: 600; background: var(--panel);">
-              <option value="">Select Primary Brand</option>
-            </select>
-          </div>
-          <div class="report-filter-group">
-            <h2>Competitor Brands (Multi)</h2>
-            <div id="competitorDropdownContainer" style="position: relative;">
-              <button id="competitorDropdownBtn" type="button" style="width: 100%; text-align: left; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px; background: var(--panel); display: flex; justify-content: space-between; align-items: center; cursor: pointer;">
-                <span id="competitorDropdownBtnText">Select Competitor Brands</span>
-                <span style="font-size: 10px; margin-left: 4px;">▼</span>
-              </button>
-              <div id="competitorDropdownMenu" style="display: none; position: absolute; top: 100%; left: 0; right: 0; z-index: 1000; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 20px rgba(0,0,0,0.15); max-height: 220px; overflow-y: auto; padding: 8px; margin-top: 4px;">
-                <div id="competitorBrandChecks" class="report-checks"></div>
+        <!-- 2-Column Dashboard Layout: Left Vertical Filter Pane + Right Main Content Pane -->
+        <div class="reporting-dashboard-layout" style="display: flex; gap: 24px; align-items: flex-start; margin-top: 14px;">
+          <!-- Left Vertical Filter Sidebar -->
+          <aside class="reporting-sidebar-pane" style="width: 290px; flex-shrink: 0; position: sticky; top: 16px; background: #ffffff; border: 1px solid var(--line); border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); max-height: calc(100vh - 40px); overflow-y: auto;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--line);">
+              <h2 style="font-size: 15px; font-weight: 700; color: #1e293b; margin: 0;">Report Filters</h2>
+              <span style="font-size: 11px; font-weight: 600; color: #2563eb; background: #eff6ff; padding: 2px 7px; border-radius: 4px;">Live</span>
+            </div>
+
+            <!-- Brand Filters Category -->
+            <div class="filter-category brand-filter-category" style="margin-bottom: 16px;">
+              <div style="font-size: 11px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;">
+                🏷️ Brand Filters
+              </div>
+              <div class="report-filter-group" style="margin-bottom: 10px;">
+                <label for="reportMainBrandSelect" style="display: block; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px;">Primary Brand</label>
+                <select id="reportMainBrandSelect" style="width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px; font-weight: 600; background: var(--panel);">
+                  <option value="">Select Primary Brand</option>
+                </select>
+              </div>
+              <div class="report-filter-group" style="min-width: 0;">
+                <label style="display: block; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px;">Competitor Brands (Multi)</label>
+                <div id="competitorDropdownContainer" style="position: relative; width: 100%; min-width: 0;">
+                  <button id="competitorDropdownBtn" type="button" style="width: 100%; min-width: 0; max-width: 100%; height: 35px; text-align: left; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px; background: var(--panel); display: flex; justify-content: space-between; align-items: center; cursor: pointer; box-sizing: border-box; overflow: hidden;">
+                    <span id="competitorDropdownBtnText" style="color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; flex: 1 1 auto; min-width: 0; padding-right: 6px;">Select Competitor Brands</span>
+                    <span style="font-size: 10px; flex-shrink: 0; color: var(--muted); margin-left: 4px;">▼</span>
+                  </button>
+                  <div id="competitorDropdownMenu" style="display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 1050; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 10px 25px rgba(15,23,42,0.18); max-height: 250px; overflow-y: auto; padding: 8px;">
+                    <div id="competitorBrandChecks" class="report-checks" style="max-height: 230px; overflow-y: auto;"></div>
+                  </div>
+                </div>
               </div>
             </div>
-          </div>
-          </div>
-          <div class="report-filter-row geo">
-            <div class="report-filter-group">
-              <h2>State</h2>
-              <select id="reportStateFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px;">
-                <option value="">All States</option>
-              </select>
-            </div>
-            <div class="report-filter-group">
-              <h2>County</h2>
-              <select id="reportCountyFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px;">
-                <option value="">All Counties</option>
-              </select>
-            </div>
-            <div class="report-filter-group">
-              <h2>City</h2>
-              <select id="reportCityFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px;">
-                <option value="">All Cities</option>
-              </select>
-            </div>
-            <div class="report-filter-group">
-              <h2>ZIP</h2>
-              <input id="reportZipFilter" list="zipSuggestions" placeholder="Search 30k+ ZIPs..." style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px;">
-              <datalist id="zipSuggestions"></datalist>
-            </div>
-          </div>
-          <div class="report-filter-row demographics">
-            <div class="report-filter-group demographics">
-              <h2>Market Demographics</h2>
-              <div class="demographic-inputs">
-                <input id="reportMinPopFilter" type="number" placeholder="Min Population" style="padding: 7px; font-size: 10px;">
-                <input id="reportMinIncomeFilter" type="number" placeholder="Min Income" style="padding: 7px; font-size: 10px;">
-                <input id="reportMaxAgeFilter" type="number" placeholder="Max Median Age" style="padding: 7px; font-size: 10px;">
+
+            <!-- Geographic Filters Category -->
+            <div class="filter-category" style="margin-bottom: 16px; padding-top: 12px; border-top: 1px solid #f1f5f9;">
+              <div style="font-size: 11px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;">
+                📍 Geographic Filters
+              </div>
+              <div class="report-filter-group" style="margin-bottom: 8px;">
+                <label for="reportStateFilter" style="display: block; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 3px;">State</label>
+                <select id="reportStateFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px;">
+                  <option value="">All States</option>
+                </select>
+              </div>
+              <div class="report-filter-group" style="margin-bottom: 8px;">
+                <label for="reportCountyFilter" style="display: block; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 3px;">County</label>
+                <select id="reportCountyFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px;">
+                  <option value="">All Counties</option>
+                </select>
+              </div>
+              <div class="report-filter-group" style="margin-bottom: 8px;">
+                <label for="reportCityFilter" style="display: block; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 3px;">City</label>
+                <select id="reportCityFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px;">
+                  <option value="">All Cities</option>
+                </select>
+              </div>
+              <div class="report-filter-group">
+                <label for="reportZipFilter" style="display: block; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 3px;">ZIP Code</label>
+                <input id="reportZipFilter" list="zipSuggestions" placeholder="Search 30k+ ZIPs..." style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px; box-sizing: border-box;">
+                <datalist id="zipSuggestions"></datalist>
               </div>
             </div>
-          </div>
-          <div class="report-filter-actions" aria-label="Report filter actions">
-            <button id="applyReportFiltersBtn" type="button">Apply All Filters</button>
-            <button id="resetReportFiltersBtn" type="button" class="secondary">Reset All</button>
-          </div>
-        </div>
 
-        <div id="reportContent" class="hidden" style="margin-top: 20px;">
-          <div class="report-grid" style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px;">
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportStates" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Total State</span></div>
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportZips" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">ZIP Locations</span></div>
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportBrands" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Brands</span></div>
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportStores" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Stores</span></div>
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportLocations" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Market Locations</span></div>
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportBrandStates" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Brand States</span></div>
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportCities" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Brand Cities</span></div>
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportWhitespaceGaps" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Gap ZIPs</span></div>
-          </div>
-          <section class="report-section" style="margin-top: 0;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-              <h2>Location Map</h2>
-              <div style="font-size: 12px; color: var(--muted);">
-                <span style="display: inline-block; width: 10px; height: 10px; background: #16a34a; border-radius: 50%; margin-right: 4px;"></span>Primary Brand
-                <span style="display: inline-block; width: 10px; height: 10px; background: #dc2626; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Competitor Brands
-                <span style="display: inline-block; width: 10px; height: 10px; background: #f59e0b; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Gap ZIPs
+            <!-- Demographic Filters Category -->
+            <div class="filter-category" style="margin-bottom: 16px; padding-top: 12px; border-top: 1px solid #f1f5f9;">
+              <div style="font-size: 11px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;">
+                👥 Demographic Filters
+              </div>
+              <div style="display: grid; gap: 8px;">
+                <div>
+                  <label for="reportMinPopFilter" style="display: block; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 3px;">Min Population</label>
+                  <input id="reportMinPopFilter" type="number" placeholder="Min Population" style="width: 100%; padding: 7px; font-size: 11px; border: 1px solid var(--line); border-radius: 6px; box-sizing: border-box;">
+                </div>
+                <div>
+                  <label for="reportMinIncomeFilter" style="display: block; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 3px;">Min Income ($)</label>
+                  <input id="reportMinIncomeFilter" type="number" placeholder="Min Income" style="width: 100%; padding: 7px; font-size: 11px; border: 1px solid var(--line); border-radius: 6px; box-sizing: border-box;">
+                </div>
+                <div>
+                  <label for="reportMaxAgeFilter" style="display: block; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 3px;">Max Median Age</label>
+                  <input id="reportMaxAgeFilter" type="number" placeholder="Max Age" style="width: 100%; padding: 7px; font-size: 11px; border: 1px solid var(--line); border-radius: 6px; box-sizing: border-box;">
+                </div>
               </div>
             </div>
-            <div id="reportingMapContainer" style="border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #e5e7eb; position: relative;">
-              <div id="reportingMap" style="height: 480px; width: 100%; z-index: 1;"></div>
-            </div>
-          </section>
 
-          <section class="report-section" style="margin-top: 24px;">
-            <h2>Top States</h2>
-            <div id="reportTopStateCards" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 16px;"></div>
-          </section>
-
-          <div class="report-columns" style="margin-top: 20px;">
-            <section class="report-section" style="margin-top: 0;">
-              <h2>State Distribution</h2>
-              <div id="reportTopStates"></div>
-            </section>
-
-            <section class="report-section" style="margin-top: 0;">
-              <h2>Top Cities</h2>
-              <div id="reportTopCities"></div>
-            </section>
-          </div>
-          <section class="report-section">
-            <div id="reportBrandComparisonHeading" style="margin-bottom: 16px;">
-              <h2 id="reportBrandComparisonTitle" style="margin: 0 0 12px;">Brand Comparison</h2>
+            <!-- Actions: Apply All Filters & Reset All -->
+            <div style="display: grid; gap: 8px; padding-top: 12px; border-top: 1px solid #f1f5f9;">
+              <button id="applyReportFiltersBtn" type="button" style="width: 100%; padding: 9px; font-size: 12px; font-weight: 600; border-radius: 6px;">Apply All Filters</button>
+              <button id="resetReportFiltersBtn" type="button" class="secondary" style="width: 100%; padding: 8px; font-size: 12px; font-weight: 600; border-radius: 6px;">Reset All</button>
             </div>
-            <div id="reportBrandComparisonCards" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 16px;"></div>
-            <div style="margin-top: 20px;">
-              <h3 style="margin: 0 0 12px; font-size: 15px; color: var(--ink);">Head-to-Head Comparison</h3>
-              <div id="reportBrandsTable"></div>
+          </aside>
+
+          <!-- Right Main Dashboard Content Pane -->
+          <main class="reporting-main-pane" style="flex: 1; min-width: 0;">
+            <div id="reportContent" class="hidden">
+              <div class="report-grid" style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px;">
+                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportStates" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Total State</span></div>
+                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportZips" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">ZIP Locations</span></div>
+                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportBrands" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Brands</span></div>
+                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportStores" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Stores</span></div>
+                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportLocations" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Market Locations</span></div>
+                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportBrandStates" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Brand States</span></div>
+                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportCities" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Brand Cities</span></div>
+                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportWhitespaceGaps" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Gap ZIPs</span></div>
+              </div>
+
+              <!-- Location Map Section -->
+              <section class="report-section" style="margin-top: 0;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                  <h2>Location Map</h2>
+                  <div style="font-size: 12px; color: var(--muted);">
+                    <span style="display: inline-block; width: 10px; height: 10px; background: #16a34a; border-radius: 50%; margin-right: 4px;"></span>Primary Brand
+                    <span style="display: inline-block; width: 10px; height: 10px; background: #dc2626; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Competitor Brands
+                    <span style="display: inline-block; width: 10px; height: 10px; background: #f59e0b; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Gap ZIPs
+                  </div>
+                </div>
+                <div id="reportingMapContainer" style="border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #e5e7eb; position: relative;">
+                  <div id="reportingMap" style="height: 480px; width: 100%; z-index: 1;"></div>
+                </div>
+              </section>
+
+              <!-- Top States Section (Dynamic Heading: X's Top States) -->
+              <section class="report-section" style="margin-top: 24px;">
+                <h2 id="reportTopStatesHeading">Top States</h2>
+                <div id="reportTopStateCards" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 16px;"></div>
+              </section>
+
+              <!-- State Distribution & Top Cities (Spaced cleanly with 28px gap) -->
+              <div class="report-columns" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 28px; margin-top: 24px;">
+                <section class="report-section" style="margin-top: 0;">
+                  <h2>State Distribution</h2>
+                  <div id="reportTopStates"></div>
+                </section>
+                <section class="report-section" style="margin-top: 0;">
+                  <h2>Top Cities</h2>
+                  <div id="reportTopCities"></div>
+                </section>
+              </div>
+
+              <!-- Brand Comparison Section -->
+              <section class="report-section" id="reportBrandComparisonSection">
+                <div id="reportBrandComparisonHeading" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;">
+                  <h2 id="reportBrandComparisonTitle" style="margin: 0; font-size: 26px; font-weight: 750; color: #172554;">Brand Comparison</h2>
+                  <div id="competitorViewSwitcher" class="comp-view-switcher" role="tablist" aria-label="Brand comparison views">
+                    <button type="button" class="comp-view-btn active" data-comp-view="benchmark">Competitor Benchmark</button>
+                    <button type="button" class="comp-view-btn" data-comp-view="cards">Cards &amp; Overview</button>
+                    <button type="button" class="comp-view-btn" data-comp-view="table">Detailed Table</button>
+                  </div>
+                </div>
+                <div id="reportCompetitorBenchmarkView">
+                  <div id="reportCompetitorBenchmarkContent"></div>
+                </div>
+                <div id="reportBrandComparisonCardsView" class="hidden">
+                  <div id="reportBrandComparisonCards" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 16px;"></div>
+                </div>
+                <div id="reportBrandComparisonTableView" class="hidden">
+                  <div style="margin-top: 10px;">
+                    <h3 style="margin: 0 0 12px; font-size: 15px; color: var(--ink);">Head-to-Head Comparison</h3>
+                    <div id="reportBrandsTable"></div>
+                  </div>
+                </div>
+              </section>
+
+              <!-- Market Gaps Section with Pagination -->
+              <section class="report-section">
+                <h2>Market Gaps</h2>
+                <p style="margin: -4px 0 12px; color: var(--muted); font-size: 13px;">ZIP codes where competitors are present and the selected brand is not.</p>
+                <div id="reportGapsTable"></div>
+                <div id="reportGapsPagination" style="margin-top: 12px;"></div>
+              </section>
+
+              <!-- States & Territories Without Tracked Locations -->
+              <section class="report-section">
+                <h2>States & Territories Without Tracked Locations</h2>
+                <div id="reportEmptyStates" class="report-empty-states"></div>
+              </section>
+
+              <!-- Full filtered reporting export; available only with a primary brand. -->
+              <section class="report-section">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                  <h2 style="margin: 0;">Location Records Sample</h2>
+                  <button id="downloadSampleCsvBtn" class="secondary hidden" type="button" style="font-size: 12px; padding: 6px 14px; border-radius: 6px; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-weight: 600;">
+                    <span>📥</span> Download Excel
+                  </button>
+                </div>
+                <div id="reportSampleRecords"></div>
+              </section>
             </div>
-          </section>
-          <section class="report-section">
-            <h2>Market Gaps</h2>
-            <p style="margin: -4px 0 12px; color: var(--muted); font-size: 13px;">ZIP codes where competitors are present and the selected brand is not.</p>
-            <div id="reportGapsTable"></div>
-          </section>
-          <section class="report-section">
-            <h2>States & Territories Without Tracked Locations</h2>
-            <div id="reportEmptyStates" class="report-empty-states"></div>
-          </section>
-          <section class="report-section">
-            <h2>Location Records Sample</h2>
-            <div id="reportSampleRecords"></div>
-          </section>
+          </main>
         </div>
       </div>
     </section>
@@ -1925,17 +2440,38 @@ result = [
           <option value="">All Brands</option>
         </select>
         <button id="reviewSearchBtn" type="button">Search Records</button>
+        <button id="autoRepairReviewBtn" class="secondary" type="button">Try Auto-Fixing with AI</button>
       </div>
       <div id="reviewBrandBreakdown" class="review-brand-breakdown" style="display: none; margin: 8px 0 18px; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; background: #fff;">
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px;">
           <strong style="font-size: 13px; color: var(--ink);">Error Distribution by Brand</strong>
           <span id="reviewBrandBreakdownTotal" style="font-size: 12px; color: var(--muted);"></span>
+          <span id="reviewManualCount" style="font-size: 12px; color: var(--muted);"></span>
         </div>
         <div class="review-brand-breakdown-layout">
-          <div id="reviewBrandChart"></div>
+          <div class="review-chart-side">
+            <div class="review-ai-summary">
+              <strong id="reviewAiFixedCount">0</strong>
+              <span>Listings Fixed Automatically</span>
+            </div>
+            <div class="review-manual-summary">
+              <strong id="reviewManualFixedCount">0</strong>
+              <span>Listings Fixed Manually</span>
+            </div>
+            <div class="review-ai-percent-summary">
+              <strong id="reviewAiFixedPercent">0.00%</strong>
+              <span>AI Fixed by Total Error</span>
+            </div>
+            <div class="review-manual-percent-summary">
+              <strong id="reviewManualFixedPercent">0.00%</strong>
+              <span>Manual Fixed by Total Error</span>
+            </div>
+            <div id="reviewBrandChart"></div>
+          </div>
           <div id="reviewBrandTable" style="overflow-x: auto; min-height: 200px;"></div>
         </div>
       </div>
+      <div id="reviewAutoRepairStatus" class="status hidden" role="status" aria-live="polite"></div>
       <div id="reviewResults" class="status">Search review records.</div>
     </section>
     <dialog id="editRecordDialog" class="connector-editor-dialog" style="max-width: 700px; height: auto; max-height: 90vh;">
@@ -1980,7 +2516,7 @@ result = [
   </dialog>
   <dialog id="masterDeleteCredentialsDialog" class="danger-dialog">
     <h2>MASTER DATA DELETION</h2>
-    <p>This will drop every table and view across bronze, silver, and gold. Partitioned tables are removed through their base tables. Enter your local login credentials to continue.</p>
+    <p>This will permanently remove all stored application data and reporting views. Enter your local login credentials to continue.</p>
     <label for="masterDeleteUser">Username</label>
     <input id="masterDeleteUser" autocomplete="username" value="admin">
     <label for="masterDeletePassword">Password</label>
@@ -2024,6 +2560,7 @@ result = [
     el("clearDataBtn").addEventListener("click", clearSavedData);
     el("masterDeleteBtn").addEventListener("click", masterDeleteData);
     el("reportingDataRefreshBtn").addEventListener("click", refreshReportingData);
+    el("stopEnrichmentBtn")?.addEventListener("click", stopEnrichment);
     el("logoutBtn").addEventListener("click", logout);
     document.querySelector(".status-close")?.addEventListener("click", () => {
           el("status").className = "status";
@@ -2038,7 +2575,8 @@ result = [
     el("cancelMasterDeleteCredentialsBtn").addEventListener("click", () => el("masterDeleteCredentialsDialog").close());
     el("confirmMasterDeleteBtn").addEventListener("click", performMasterDeleteData);
     el("cancelMasterDeleteBtn").addEventListener("click", () => el("masterDeleteConfirmDialog").close());
-    el("reviewSearchBtn").addEventListener("click", loadRejectedRecords);
+    el("reviewSearchBtn").addEventListener("click", () => { reviewPage = 0; loadRejectedRecords(); });
+    el("autoRepairReviewBtn")?.addEventListener("click", autoRepairReviewBatch);
     el("templateSearchBtn").addEventListener("click", () => { templateLibraryLoaded = false; loadTemplateLibrary(); });
     el("templateSearch").addEventListener("keydown", (event) => {
           if (event.key === "Enter") { templateLibraryLoaded = false; loadTemplateLibrary(); }
@@ -2230,11 +2768,6 @@ result = [
           setStatus(sourceReadyToParseMessage(), "warn");
           el("fileInput").value = "";
           updateSourceVisibility();
-          if (!selectedBrand) {
-            el("templateSourceFilter").value = currentSourceTypeId();
-            resetTemplateSelection();
-            loadTemplateLibrary();
-          }
         });
     el("newBrandSourceType").addEventListener("change", () => {
           const option = el("newBrandSourceType").selectedOptions[0];
@@ -2328,23 +2861,36 @@ result = [
         });
     el("refreshReportBtn").addEventListener("click", () => {
           reportLoaded = false;
-          loadReporting();
+          loadReporting({ interactive: true });
         });
     el("loadSampleDatasetBtn").addEventListener("click", () => loadSampleDataset(false));
+    el("clearSampleDatasetLink")?.addEventListener("click", () => clearSampleDataset());
     el("reloadSampleDatasetLink").addEventListener("click", () => loadSampleDataset(true));
     el("applyReportFiltersBtn")?.addEventListener("click", () => {
+          const menu = el("competitorDropdownMenu");
+          if (menu) menu.style.display = "none";
           reportLoaded = false;
-          loadReporting();
+          loadReporting({ interactive: true });
         });
-    el("resetReportFiltersBtn")?.addEventListener("click", () => {
+    el("resetReportFiltersBtn")?.addEventListener("click", async () => {
+          if (el("reportMainBrandSelect")) el("reportMainBrandSelect").value = "";
           if (el("reportStateFilter")) el("reportStateFilter").value = "";
           if (el("reportCountyFilter")) el("reportCountyFilter").value = "";
           if (el("reportCityFilter")) el("reportCityFilter").value = "";
           if (el("reportZipFilter")) el("reportZipFilter").value = "";
-          if (el("reportMainBrandSelect")) el("reportMainBrandSelect").value = "";
-          document.querySelectorAll("input[name='competitorBrand']").forEach((input) => input.checked = false);
+          if (el("reportMinPopFilter")) el("reportMinPopFilter").value = "";
+          if (el("reportMinIncomeFilter")) el("reportMinIncomeFilter").value = "";
+          if (el("reportMaxAgeFilter")) el("reportMaxAgeFilter").value = "";
+          document.querySelectorAll("input[name='competitorBrand']").forEach((input) => { input.checked = false; });
+          const selectAll = document.querySelector("input[name='competitorBrand_selectAll']");
+          if (selectAll) { selectAll.checked = false; selectAll.indeterminate = false; }
+          if (typeof updateCompetitorOptions === "function") updateCompetitorOptions();
+          if (typeof updateCompetitorDropdownText === "function") updateCompetitorDropdownText();
+          const menu = el("competitorDropdownMenu");
+          if (menu) menu.style.display = "none";
+          await loadGeoOptions();
           reportLoaded = false;
-          loadReporting();
+          loadReporting({ interactive: true });
         });
     el("reportStateFilter")?.addEventListener("change", async () => {
           if (el("reportCountyFilter")) el("reportCountyFilter").value = "";

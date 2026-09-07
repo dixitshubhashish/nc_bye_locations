@@ -76,6 +76,7 @@ class BigQueryBootstrapTests(unittest.TestCase):
             calls.append("gold")
             return {"views": []}
 
+        workflow_server.REPORTING_REFRESHING = False
         self.addCleanup(setattr, workflow_server, "REPORTING_REFRESHING", False)
         with patch.object(workflow_server, "_sample_loader_enabled", return_value=True):
             with patch.object(workflow_server, "_warehouse_settings", return_value=("project", "bronze", None)):
@@ -260,6 +261,39 @@ class BigQueryBootstrapTests(unittest.TestCase):
 
         self.assertIn("gold bootstrap failed at build_silver_layer", result["warning"])
         self.assertEqual(result["filter_options"]["brands"], [])
+
+    def test_sample_locations_dataset_is_strictly_protected_from_deletion(self) -> None:
+        from whitespace_tool import warehouse_bigquery
+
+        with self.assertRaises(PermissionError) as ctx1:
+            warehouse_bigquery.clear_dataset_tables("project", "sample_locations")
+        self.assertIn("CRITICAL SAFETY RULE", str(ctx1.exception))
+
+        with self.assertRaises(PermissionError) as ctx2:
+            warehouse_bigquery.drop_dataset_tables("project", "sample_locations")
+        self.assertIn("CRITICAL SAFETY RULE", str(ctx2.exception))
+
+    def test_clear_sample_dataset_resets_bronze_and_triggers_refresh(self) -> None:
+        reset_called = []
+
+        def fake_reset(client, project_id, dataset_id):
+            reset_called.append((project_id, dataset_id))
+
+        with patch.object(workflow_server, "_warehouse_settings", return_value=("project", "bronze", None)):
+            with patch.object(workflow_server, "_bigquery_client", return_value=object()):
+                with patch.object(workflow_server, "_reset_sample_data", side_effect=fake_reset):
+                    with patch.object(workflow_server, "_background_medallion_refresh_status", return_value={"status": "refreshing"}):
+                        result = workflow_server.clear_sample_dataset()
+
+        self.assertTrue(result["cleared"])
+        self.assertEqual(reset_called, [("project", "bronze")])
+        self.assertEqual(result["silver"]["status"], "refreshing")
+
+    def test_clear_sample_dataset_blocks_if_target_is_sample_locations(self) -> None:
+        with patch.object(workflow_server, "_warehouse_settings", return_value=("project", "sample_locations", None)):
+            with self.assertRaises(PermissionError) as ctx:
+                workflow_server.clear_sample_dataset()
+        self.assertIn("CRITICAL SAFETY RULE", str(ctx.exception))
 
 
 if __name__ == "__main__":

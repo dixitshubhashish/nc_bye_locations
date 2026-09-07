@@ -3,6 +3,8 @@ const MAPPING_SESSION_KEY = "competitive_whitespace_mapping_session";
 const DRAFT_KEY = "competitive_whitespace_mapping_draft";
 const REMEMBER_KEY = "mapper_login_remembered";
 const SERVER_LAUNCH_KEY = "competitive_whitespace_server_launch";
+let referenceDataReady = false;
+let referenceDataPromise = null;
 
 const el = (id) => document.getElementById(id);
 
@@ -57,6 +59,13 @@ function busyMarkup(label = "Loading") {
   return `<span class="busy-label">${escapeHtml(cleanLabel)} <span class="inline-spinner"></span></span>`;
 }
 
+function setReferenceLoadingMessage() {
+  const target = el("loginReadinessStatus");
+  if (!target) return;
+  target.className = "status";
+  target.innerHTML = `${busyMarkup("Loading US ZIP data for you")} Login will be available when it is ready.`;
+}
+
 function setButtonBusy(button, label = "Loading") {
   if (!button) return "";
   const previous = button.innerHTML;
@@ -92,17 +101,28 @@ async function syncServerLaunch() {
 }
 
 async function prepareReferenceData() {
-  setStatus("loginReadinessStatus", "Preparing ZIP reference data...", "");
+  const loginButton = el("loginBtn");
+  if (referenceDataPromise) return referenceDataPromise;
+  referenceDataPromise = (async () => {
+    referenceDataReady = false;
+    setReferenceLoadingMessage();
   try {
     const response = await fetch("/api/prepare");
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "ZIP reference data could not be prepared.");
+    referenceDataReady = true;
     setStatus("loginReadinessStatus", "ZIP reference data ready.", "ok");
     return true;
   } catch (error) {
+    referenceDataReady = false;
     setStatus("loginReadinessStatus", productSafeError(error.message, "ZIP reference data needs attention."), "error", { retry: true });
     return false;
+  } finally {
+    if (loginButton) loginButton.disabled = false;
+    referenceDataPromise = null;
   }
+  })();
+  return referenceDataPromise;
 }
 
 async function login() {

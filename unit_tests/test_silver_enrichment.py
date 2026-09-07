@@ -48,7 +48,7 @@ class SilverEnrichmentTests(unittest.TestCase):
         self.assertIn("z.income_per_capita", sql)
         self.assertIn("city_geos AS", sql)
         self.assertIn("COALESCE(l.latitude, z.latitude, cg.latitude) AS latitude", sql)
-        self.assertIn("COALESCE(l.normalized_city_name, LOWER(TRIM(z.city_name))) = cg.normalized_city_name", sql)
+        self.assertIn("EDIT_DISTANCE(l.normalized_city_name, cg.normalized_city_name) <= 2", sql)
         self.assertIn("coordinate_source", sql)
         self.assertIn("coordinate_confidence", sql)
         self.assertIn("geocode_query", sql)
@@ -110,12 +110,13 @@ class SilverEnrichmentTests(unittest.TestCase):
 
         with patch.object(workflow_server, "_invoke_silver_layer", side_effect=fake_invoke):
             with patch.object(workflow_server, "_rebuild_gold_and_mirror", return_value={"gold": {}, "mirror": {}}):
-                workflow_server.REPORTING_REFRESHING = False
-                started = workflow_server._refresh_silver_background(low_priority=True)
-                for thread in workflow_server.threading.enumerate():
-                    if thread.name == "reporting-silver-refresh":
-                        thread.join(timeout=5)
-                workflow_server.REPORTING_REFRESHING = False
+                with patch.object(workflow_server, "auto_repair_error_batch", return_value={"attempted": 0, "resolved": 0, "remaining": 0}):
+                    workflow_server.REPORTING_REFRESHING = False
+                    started = workflow_server._refresh_silver_background(low_priority=True)
+                    for thread in workflow_server.threading.enumerate():
+                        if thread.name == "reporting-silver-refresh":
+                            thread.join(timeout=5)
+                    workflow_server.REPORTING_REFRESHING = False
 
         self.assertTrue(started)
         self.assertEqual(calls, [True])
