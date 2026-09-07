@@ -340,6 +340,8 @@ async function loadAppData() {
 function enableSortableTable(table) {
   if (!table) return;
   table.querySelectorAll("th[data-sort-key]").forEach((header) => {
+    if (header.dataset.sortBound === "true") return;
+    header.dataset.sortBound = "true";
     header.classList.add("sortable-header");
     header.setAttribute("role", "button");
     header.setAttribute("tabindex", "0");

@@ -56,7 +56,7 @@ async function _loadRejectedRecordsOnce() {
           return;
         }
         target.className = "";
-        target.innerHTML = `<table><thead><tr><th>Event</th><th>Brand</th><th>Row</th><th>Issues & Hints</th><th>Source Record</th><th>Action</th></tr></thead><tbody>${result.records.map((record) => {
+        target.innerHTML = `<table><thead><tr><th data-sort-key="event">Event</th><th data-sort-key="brand">Brand</th><th data-sort-key="row" data-sort-type="number">Row</th><th>Issues & Hints</th><th>Source Record</th><th>Action</th></tr></thead><tbody>${result.records.map((record) => {
           let errs = record.errors;
           if (typeof errs === 'string') {
             try { errs = JSON.parse(errs); } catch (e) { errs = []; }
@@ -71,9 +71,9 @@ async function _loadRejectedRecordsOnce() {
           const brandDisplayName = reviewBrandNames[record.business_id] || rawBrand || record.business_id || "—";
 
           return `<tr>
-            <td style="font-family: monospace; font-size: 11px;">${escapeHtml(record.event_id)}</td>
-            <td><strong>${escapeHtml(brandDisplayName)}</strong></td>
-            <td><strong>#${escapeHtml(record.row_number)}</strong></td>
+            <td data-sort-value="${escapeHtml(record.event_id)}" style="font-family: monospace; font-size: 11px;">${escapeHtml(record.event_id)}</td>
+            <td data-sort-value="${escapeHtml(brandDisplayName)}"><strong>${escapeHtml(brandDisplayName)}</strong></td>
+            <td data-sort-value="${escapeHtml(record.row_number)}"><strong>#${escapeHtml(record.row_number)}</strong></td>
             <td style="max-width: 320px;">${hintsHtml}</td>
             <td style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: monospace; font-size: 11px;">${escapeHtml(JSON.stringify(record.raw_record))}</td>
             <td class="review-row-actions">
@@ -81,6 +81,7 @@ async function _loadRejectedRecordsOnce() {
             </td>
           </tr>`;
         }).join("")}</tbody></table>`;
+        enableSortableTable(target.querySelector("table"));
         target.querySelectorAll("button[data-open-edit]").forEach((button) => {
           button.addEventListener("click", () => {
             const rec = result.records.find(r => r.event_id === button.dataset.event && String(r.row_number) === button.dataset.openEdit);
@@ -572,14 +573,15 @@ async function loadErrorBrandBreakdown() {
         attachDonutTooltips();
         el("reviewBrandBreakdownTotal").textContent = `${total} across ${brands.length} brand${brands.length === 1 ? "" : "s"}`;
         el("reviewBrandTable").innerHTML = `<table style="width:100%; border-collapse: collapse; font-size: 12px;"><thead><tr>
-            <th style="text-align:left; padding:4px 8px; border-bottom:1px solid var(--line);">Brand</th>
-            <th style="text-align:right; padding:4px 8px; border-bottom:1px solid var(--line);">Errors</th>
-            <th style="text-align:right; padding:4px 8px; border-bottom:1px solid var(--line);">Share</th>
+            <th data-sort-key="brand" style="text-align:left; padding:4px 8px; border-bottom:1px solid var(--line);">Brand</th>
+            <th data-sort-key="errors" data-sort-type="number" style="text-align:right; padding:4px 8px; border-bottom:1px solid var(--line);">Errors</th>
+            <th data-sort-key="share" data-sort-type="number" style="text-align:right; padding:4px 8px; border-bottom:1px solid var(--line);">Share</th>
           </tr></thead><tbody>${withColor.map((b) => `<tr>
-            <td style="padding:4px 8px;"><span style="display:inline-block; width:10px; height:10px; border-radius:2px; background:${b.color}; margin-right:6px; vertical-align:middle;"></span>${escapeHtml(b.brand || b.business_id)}</td>
-            <td style="padding:4px 8px; text-align:right; font-variant-numeric: tabular-nums;">${b.count}</td>
-            <td style="padding:4px 8px; text-align:right; color: var(--muted); font-variant-numeric: tabular-nums;">${total ? Math.round(b.count / total * 100) : 0}%</td>
+            <td data-sort-value="${escapeHtml(b.brand || b.business_id)}" style="padding:4px 8px;"><span style="display:inline-block; width:10px; height:10px; border-radius:2px; background:${b.color}; margin-right:6px; vertical-align:middle;"></span>${escapeHtml(b.brand || b.business_id)}</td>
+            <td data-sort-value="${b.count}" style="padding:4px 8px; text-align:right; font-variant-numeric: tabular-nums;">${b.count}</td>
+            <td data-sort-value="${total ? Math.round(b.count / total * 100) : 0}" style="padding:4px 8px; text-align:right; color: var(--muted); font-variant-numeric: tabular-nums;">${total ? Math.round(b.count / total * 100) : 0}%</td>
           </tr>`).join("")}</tbody></table>`;
+        enableSortableTable(el("reviewBrandTable").querySelector("table"));
         container.style.display = "block";
       } catch (error) {
         container.style.display = "none";

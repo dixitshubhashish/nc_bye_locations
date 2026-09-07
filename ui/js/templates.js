@@ -33,7 +33,7 @@ function _templateSpinner() {
 
 function _templateRowHtml(template) {
       const label = templatePaging?.sourceTypeIdToLabel?.[template.source_type_id] || sourceTypeLabel(template.source_type_id);
-      return `<tr><td>${escapeHtml(template.name)}</td><td>${escapeHtml(templateBrandNames[template.business_id] || template.business_id)}</td><td>${escapeHtml(label)}</td><td>${escapeHtml(template.created_at)}</td><td>${escapeHtml(template.updated_at)}</td><td><button type="button" data-load-template="${escapeHtml(template.workflow_template_id)}">Load</button></td></tr>`;
+      return `<tr><td data-sort-value="${escapeHtml(template.name)}">${escapeHtml(template.name)}</td><td data-sort-value="${escapeHtml(templateBrandNames[template.business_id] || template.business_id)}">${escapeHtml(templateBrandNames[template.business_id] || template.business_id)}</td><td data-sort-value="${escapeHtml(label)}">${escapeHtml(label)}</td><td data-sort-value="${escapeHtml(template.created_at)}">${escapeHtml(template.created_at)}</td><td data-sort-value="${escapeHtml(template.updated_at)}">${escapeHtml(template.updated_at)}</td><td><button type="button" data-load-template="${escapeHtml(template.workflow_template_id)}">Load</button></td></tr>`;
     }
 
 async function _fetchTemplatesPage(offset, limit) {
@@ -56,6 +56,7 @@ function _renderTemplateRows(templates) {
         templatePaging.byId[t.workflow_template_id] = t;
         return _templateRowHtml(t);
       }).join("");
+      enableSortableTable(body.closest("table"));
       body.querySelectorAll("button[data-load-template]:not([data-bound])").forEach((button) => {
         button.setAttribute("data-bound", "1");
         button.addEventListener("click", () => {
@@ -121,7 +122,7 @@ async function _loadTemplateLibraryOnce() {
           return;
         }
         target.className = "";
-        target.innerHTML = `<table><thead><tr><th>Template</th><th>Brand</th><th>Source Type</th><th>Created</th><th>Updated</th><th>Action</th></tr></thead><tbody id="templateResultsBody"></tbody></table><div id="templatePagination" class="template-pagination"><button id="templatePreviousBtn" class="secondary" type="button" disabled>Previous</button><span id="templatePageStatus">Showing 1-${firstPage.length}</span><button id="templateNextBtn" type="button" ${firstPage.length < TEMPLATE_PRELOAD_SIZE ? "disabled" : ""}>Next 200</button></div>`;
+        target.innerHTML = `<table><thead><tr><th data-sort-key="template">Template</th><th data-sort-key="brand">Brand</th><th data-sort-key="source">Source Type</th><th data-sort-key="created">Created</th><th data-sort-key="updated">Updated</th><th>Action</th></tr></thead><tbody id="templateResultsBody"></tbody></table><div id="templatePagination" class="template-pagination"><button id="templatePreviousBtn" class="secondary" type="button" disabled>Previous</button><span id="templatePageStatus">Showing 1-${firstPage.length}</span><button id="templateNextBtn" type="button" ${firstPage.length < TEMPLATE_PRELOAD_SIZE ? "disabled" : ""}>Next 200</button></div>`;
         templatePaging.pageRows = firstPage;
         _renderTemplateRows(firstPage);
         templateLibraryLoaded = true;

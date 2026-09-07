@@ -1,4 +1,5 @@
 window.APP_CONSTANTS = Object.freeze({
+  productName: "Competitive Whitespace Tool",
   brandName: "Birdeye",
   birdeyeLogoUrl: "https://cdn2.birdeye.com/version2/containers/header/birdeye-logo-2025@2x.png",
   birdeyeLogoDarkUrl: "https://cdn2.birdeye.com/version2/containers/header/birdeye-logo-2025@2x.png",
@@ -84,6 +85,11 @@ window.APP_CONSTANTS = Object.freeze({
 // Add exactly two internal tabs inside the existing Reporting screen:
 // Location Intelligence & Whitespace, and Data Quality & Improvements.
 (() => {
+  document.addEventListener("DOMContentLoaded", () => {
+    document.querySelectorAll("[data-product-name]").forEach((element) => {
+      element.textContent = window.APP_CONSTANTS.productName;
+    });
+  });
   const script = document.createElement("script");
   script.src = "/reporting-tabs.js";
   script.async = true;
