@@ -45,7 +45,7 @@ window.APP_CONSTANTS = Object.freeze({
     metaDescription: "Demo mapping for LA City restaurant and market inspection JSON data.",
     countryOfOrigin: "United States"
   },
-  littleCaesarsApiDemoUrl: "https://raw.githubusercontent.com/dixitshubhashish/nc_bye_locations/main/little_caesars_locations.json",
+  littleCaesarsApiDemoUrl: "https://nominatim.openstreetmap.org/search",
   littleCaesarsBrand: {
     name: "Little Caesars",
     slug: "little-caesars",

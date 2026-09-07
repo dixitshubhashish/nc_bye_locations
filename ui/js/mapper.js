@@ -84,6 +84,7 @@ let connectorEditor = null;
 let pyodideRuntimePromise = null;
 let activeCsvPresetConfig = null;
 let presetBrandEditMode = false;
+let presetCreateMode = false;
 let brandEditMode = false;
 const pythonEditorStarterCode = `# Return a JSON-compatible list of records in \`result\`.
 result = [
@@ -320,6 +321,7 @@ function syncBrandSelection(brandConfig) {
 
       if (existing) {
         selectedBrand = existing;
+        presetCreateMode = false;
         el("brandSelect").value = existing.business_id;
         el("editExistingBrandLink")?.classList.remove("hidden");
         el("newBrandFields").classList.add("hidden");
@@ -508,21 +510,23 @@ function updatePresetBrandPanel(brandConfig = activeCsvPresetConfig?.brand || nu
 function hidePresetBrandPanel() {
       activeCsvPresetConfig = null;
       presetBrandEditMode = false;
+      presetCreateMode = false;
       el("presetBrandPanel")?.classList.add("hidden");
       el("brandSelect").disabled = false;
       el("brandSelect")?.classList.remove("hidden");
       el("brandSelectLabel")?.classList.remove("hidden");
       lockBrandFields(false);
-      el("createBrandBtn")?.classList.remove("hidden");
+      el("createBrandBtn")?.classList.toggle("hidden", Boolean(selectedBrand?.business_id) && !brandEditMode);
       el("newBrandFields")?.classList.toggle("hidden", el("brandSelect")?.value !== "__create_new__");
     }
 function resetPresetBrandEditState() {
       presetBrandEditMode = false;
+      presetCreateMode = false;
       el("newBrandFields")?.classList.add("hidden");
       lockBrandFields(false);
       el("presetBrandEditBtn")?.classList.remove("hidden");
       el("presetBrandCreateBtn")?.classList.remove("hidden");
-      el("createBrandBtn")?.classList.remove("hidden");
+      el("createBrandBtn")?.classList.toggle("hidden", Boolean(selectedBrand?.business_id) && !brandEditMode);
     }
 function resetSourceInputsForNewMode(sourceType = el("sourceType").value) {
       const preservedBrand = selectedBrand;
@@ -824,38 +828,73 @@ function updateJsonFunctionSelection(value) {
       if (value === "dominos") applyDominosJsonFunction();
       else resetJsonDemoLock();
     }
-function setLittleCaesarsMappings() {
+function clearPairRows(targetId) {
+      const target = el(targetId);
+      if (target) target.innerHTML = "";
+    }
+function setLittleCaesarsApiMappings() {
       mappingSelections = {
-        location_id: "store_number",
-        name: "store_name",
-        address: "street_address",
-        city: "city",
-        state: "state_code",
-        postal_code: "zip_code",
-        phone_number: "phone",
+        location_id: "place_id",
+        name: "name",
+        address: "display_name",
+        city: "address.city",
+        state: "address.state",
+        postal_code: "address.postcode",
+        country: "address.country",
         latitude: "lat",
-        longitude: "lng"
+        longitude: "lon",
+        phone_number: "extratags.phone",
+        website_url: "extratags.website"
       };
-      optionalMappingKeys = new Set(["location_id", "phone_number", "latitude", "longitude"]);
+      optionalMappingKeys = new Set(["location_id", "country", "latitude", "longitude", "phone_number", "website_url"]);
       hiddenMappingKeys = new Set();
       autoMappedKeys = new Set(Object.keys(mappingSelections));
     }
 function applyLittleCaesarsApiDemo() {
       apiFunctionMode = "little_caesars";
+      activeCsvPresetConfig = {
+        mode: "little_caesars",
+        brand: window.APP_CONSTANTS.littleCaesarsBrand || {},
+        url: window.APP_CONSTANTS.littleCaesarsApiDemoUrl || "",
+        sourceName: "little_caesars_locations_api",
+        status: "Little Caesars GET API source from a public URL is ready to parse.",
+        statusType: "ok"
+      };
       el("sourceType").value = "api_get_json";
       el("apiUrl").value = window.APP_CONSTANTS.littleCaesarsApiDemoUrl || "";
       el("sourceName").value = "little_caesars_locations_api";
-      el("recordPath").value = "locations";
-      fillBrandFromConfig(window.APP_CONSTANTS.littleCaesarsBrand || {});
-      setLittleCaesarsMappings();
+      el("recordPath").value = "";
+      el("authType").value = "none";
+      clearPairRows("queryParams");
+      clearPairRows("customHeaders");
+      addPairRow("queryParams", "q", "restaurants near Manhattan New York", "q", "restaurants near Manhattan New York");
+      addPairRow("queryParams", "viewbox", "-74.02,40.78,-73.94,40.70", "viewbox", "-74.02,40.78,-73.94,40.70");
+      addPairRow("queryParams", "bounded", "1", "bounded", "1");
+      addPairRow("queryParams", "countrycodes", "us", "countrycodes", "us");
+      addPairRow("queryParams", "format", "json", "format", "json");
+      addPairRow("queryParams", "addressdetails", "1", "addressdetails", "1");
+      addPairRow("queryParams", "extratags", "1", "extratags", "1");
+      addPairRow("queryParams", "namedetails", "1", "namedetails", "1");
+      addPairRow("queryParams", "limit", "25", "limit", "25");
+      addPairRow("customHeaders", "Accept", "application/json", "Accept", "application/json");
+      addPairRow("customHeaders", "User-Agent", "CompetitiveWhitespaceTool/1.0", "User-Agent", "CompetitiveWhitespaceTool/1.0");
+      addPairRow("customHeaders", "Accept-Language", "en", "Accept-Language", "en");
+      fillBrandFromConfig(activeCsvPresetConfig.brand);
+      updatePresetBrandPanel(activeCsvPresetConfig.brand, Boolean(selectedBrand));
+      setLittleCaesarsApiMappings();
+      updateAuthVisibility();
       updateSourceVisibility();
       renderMappings();
       setPresetLocked(false, []);
       updateOutput();
-      setStatus("Demo source ready. Click Parse.", "ok");
+      setStatus("Little Caesars GET API source from a public URL is ready to parse.", "ok");
     }
 function resetApiDemoLock() {
       apiFunctionMode = "new";
+      activeCsvPresetConfig = null;
+      presetCreateMode = false;
+      clearPairRows("queryParams");
+      clearPairRows("customHeaders");
       resetSourceInputsForNewMode("api_get_json");
       setStatus(sourceReadyToParseMessage(), "warn");
     }
@@ -1254,7 +1293,7 @@ function renderMappings() {
       const componentsPanel = el("templateComponentsPanel");
       const optionalPanel = el("optionalFieldsPanel");
       const previewTabs = el("mappingPreviewTabs");
-      const hasMappingContent = Boolean(sourceParsed || sourceFields.length || activeTemplateId || Object.keys(mappingSelections || {}).length);
+      const hasMappingContent = Boolean(sourceParsed || sourceFields.length || activeTemplateId);
       componentsPanel?.classList.toggle("hidden", !hasMappingContent);
       optionalPanel?.classList.toggle("hidden", !hasMappingContent);
       previewTabs?.classList.toggle("hidden", !hasMappingContent);
@@ -1301,7 +1340,7 @@ function renderMappings() {
           }))
           .join("");
         grid.insertAdjacentHTML("beforeend", `
-          <div>${target.label} ${target.required ? '<span class="required">*</span>' : ''}</div>
+          <div>${target.required ? '<span class="required">*</span> ' : ''}${escapeHtml(target.label)}</div>
           <select data-field="${target.key}" class="${selected && autoMappedKeys.has(target.key) ? 'auto-mapped' : ''}">${options}</select>
           <div data-sample="${target.key}">${escapeHtml(selected ? sampleValue(selected) : "")}</div>
           <div>${target.required ? '' : `<button class="secondary mapping-remove" type="button" data-remove-field="${target.key}" title="Remove field" aria-label="Remove ${escapeHtml(target.label)}">&#128465;</button>`}</div>
@@ -1309,24 +1348,6 @@ function renderMappings() {
         const select = grid.querySelector(`select[data-field="${target.key}"]`);
         select.value = selected;
       });
-function applyMappingSelection(key, nextValue, selectElement) {
-      const previousOwner = Object.entries(mappingSelections).find(([otherKey, value]) => otherKey !== key && value === nextValue);
-      if (nextValue && previousOwner) {
-        const previousTarget = mappingTargets.find((target) => target.key === previousOwner[0]);
-        const currentTarget = mappingTargets.find((target) => target.key === key);
-        const move = window.confirm(`${nextValue} is already mapped to ${previousTarget ? previousTarget.label : previousOwner[0]}. Move it to ${currentTarget ? currentTarget.label : key}?\n\nChoose Cancel to keep it mapped to ${previousTarget ? previousTarget.label : previousOwner[0]}.`);
-        if (!move) {
-          if (selectElement) selectElement.value = mappingSelections[key] || "";
-          return;
-        }
-        mappingSelections[previousOwner[0]] = "";
-        autoMappedKeys.delete(previousOwner[0]);
-        setStatus(`Moved ${nextValue} from ${previousTarget ? previousTarget.label : previousOwner[0]} to ${currentTarget ? currentTarget.label : key}.`, "warn");
-      }
-      mappingSelections[key] = nextValue;
-      autoMappedKeys.delete(key);
-      renderMappings();
-    }
       grid.querySelectorAll("select").forEach((select) => {
         select.addEventListener("change", () => {
           const key = select.dataset.field;
@@ -1347,6 +1368,29 @@ function applyMappingSelection(key, nextValue, selectElement) {
       updateOptionalFieldPicker();
       updateDropCustomFieldPicker();
       updateOutput();
+    }
+function applyMappingSelection(key, nextValue, selectElement) {
+      const previousOwner = Object.entries(mappingSelections).find(([otherKey, value]) => otherKey !== key && value === nextValue);
+      if (nextValue && previousOwner) {
+        const previousTarget = mappingTargets.find((target) => target.key === previousOwner[0]);
+        const currentTarget = mappingTargets.find((target) => target.key === key);
+        const move = window.confirm(`${nextValue} is already mapped to ${previousTarget ? previousTarget.label : previousOwner[0]}. Move it to ${currentTarget ? currentTarget.label : key}?\n\nChoose Cancel to keep it mapped to ${previousTarget ? previousTarget.label : previousOwner[0]}.`);
+        if (!move) {
+          if (selectElement) selectElement.value = mappingSelections[key] || "";
+          return;
+        }
+        mappingSelections[previousOwner[0]] = "";
+        autoMappedKeys.delete(previousOwner[0]);
+        if (!primaryMappingKeys.has(previousOwner[0])) optionalMappingKeys.delete(previousOwner[0]);
+        setStatus(`Moved ${nextValue} from ${previousTarget ? previousTarget.label : previousOwner[0]} to ${currentTarget ? currentTarget.label : key}.`, "warn");
+      }
+      mappingSelections[key] = nextValue;
+      autoMappedKeys.delete(key);
+      if (!nextValue && !primaryMappingKeys.has(key)) {
+        optionalMappingKeys.delete(key);
+        delete mappingSelections[key];
+      }
+      renderMappings();
     }
 function updateOptionalFieldPicker() {
       const picker = el("optionalFieldSelect");
@@ -1371,9 +1415,6 @@ function getVisibleTargets() {
         const found = mappingTargets.find((target) => target.key === key);
         if (found && !targets.some((target) => target.key === key)) targets.push(found);
       });
-      // Registry responses can contain repeated keys and do not always retain
-      // the local field order. Keep one row per target and put required fields
-      // first so the mapping contract is visible before optional fields.
       const unique = [];
       const seen = new Set();
       targets.forEach((target) => {
@@ -1381,7 +1422,40 @@ function getVisibleTargets() {
         seen.add(target.key);
         unique.push(target);
       });
+      const optionalOrder = new Map([...optionalMappingKeys].map((key, index) => [key, index]));
       return unique
+        .map((target, index) => ({ target, index }))
+        .sort((a, b) => {
+          const requiredOrder = Number(Boolean(b.target.required)) - Number(Boolean(a.target.required));
+          if (requiredOrder) return requiredOrder;
+          const aAddedOptional = optionalOrder.has(a.target.key) && !primaryMappingKeys.has(a.target.key);
+          const bAddedOptional = optionalOrder.has(b.target.key) && !primaryMappingKeys.has(b.target.key);
+          if (aAddedOptional !== bAddedOptional) return aAddedOptional ? 1 : -1;
+          if (aAddedOptional && bAddedOptional) return optionalOrder.get(a.target.key) - optionalOrder.get(b.target.key);
+          const fieldOrder = (fieldOrderIndex.get(a.target.key) ?? 999) - (fieldOrderIndex.get(b.target.key) ?? 999);
+          return fieldOrder || a.index - b.index;
+        })
+        .map(({ target }) => target);
+    }
+function autoAddDetectedOptionalFields() {
+      if (!sourceParsed || !sourceFields.length) return;
+      const usedFields = new Set(Object.values(mappingSelections).filter(Boolean));
+      mappingTargets
+        .filter((target) => !target.required && !primaryMappingKeys.has(target.key) && !optionalMappingKeys.has(target.key))
+        .forEach((target) => {
+          const selected = suggestField(target, usedFields);
+          if (!selected) return;
+          mappingSelections[target.key] = selected;
+          optionalMappingKeys.add(target.key);
+          autoMappedKeys.add(target.key);
+          usedFields.add(selected);
+        });
+    }
+function targetOptionsForSourceField(sourceField) {
+      const currentTargetKey = Object.entries(mappingSelections).find(([, value]) => value === sourceField)?.[0] || "";
+      const visibleKeys = new Set(getVisibleTargets().map((target) => target.key));
+      const targets = mappingTargets
+        .filter((target) => target.required || visibleKeys.has(target.key) || !hiddenMappingKeys.has(target.key))
         .map((target, index) => ({ target, index }))
         .sort((a, b) => {
           const requiredOrder = Number(Boolean(b.target.required)) - Number(Boolean(a.target.required));
@@ -1390,6 +1464,19 @@ function getVisibleTargets() {
           return fieldOrder || a.index - b.index;
         })
         .map(({ target }) => target);
+      return ['<option value="">Map to field...</option>']
+        .concat(targets.map((target) => {
+          const selected = target.key === currentTargetKey ? " selected" : "";
+          const status = mappingSelections[target.key] ? " \u2713" : "";
+          return `<option value="${escapeHtml(target.key)}"${selected}>${target.required ? "* " : ""}${escapeHtml(target.label)}${escapeHtml(status)}</option>`;
+        }))
+        .join("");
+    }
+function handleSourceFieldTargetSelection(sourceField, targetKey, selectElement) {
+      if (!targetKey) return;
+      hiddenMappingKeys.delete(targetKey);
+      if (!primaryMappingKeys.has(targetKey)) optionalMappingKeys.add(targetKey);
+      applyMappingSelection(targetKey, sourceField);
     }
 function buildTargetRow(target, availableOptionsList, selected) {
       const row = document.createElement("div");
@@ -1587,6 +1674,7 @@ async function createNewBrand(brandNameOverride = "", extra = {}) {
         el("newBrandFields").classList.add("hidden");
         el("newBrandFields").classList.remove("is-open");
         el("newBrandFields").classList.remove("editing-brand");
+        presetCreateMode = false;
         applyBusinessSourceType(selectedBrand);
         await refreshTemplatesForBusiness();
         setStatus(`Brand ${selectedBrand.name} is ready for mapping.`, "ok");
@@ -1633,6 +1721,7 @@ async function updateExistingBrand() {
         fillBrandFields(selectedBrand, activeCsvPresetConfig?.brand || {});
         presetBrandEditMode = false;
         brandEditMode = false;
+        presetCreateMode = false;
         el("newBrandFields").classList.add("hidden");
         el("newBrandFields").classList.remove("is-open");
         el("newBrandFields").classList.remove("editing-brand");
@@ -1668,14 +1757,17 @@ async function createOrUsePresetBrand() {
           setStatus(`${selectedBrand.name} already exists and is selected.`, "ok");
           return selectedBrand;
         }
-      el("newBrandFields").classList.add("hidden");
-      const created = await createNewBrand(activeCsvPresetConfig.brand.name, presetMetadata());
-      if (created) {
-        el("newBrandFields").classList.add("hidden");
-        lockBrandFields(true);
-        updatePresetBrandPanel(activeCsvPresetConfig.brand, true);
-      }
-      return created;
+        presetCreateMode = true;
+        brandEditMode = false;
+        fillBrandFields({}, activeCsvPresetConfig.brand);
+        el("newBrandFields").classList.remove("hidden");
+        el("newBrandFields").classList.add("is-open");
+        el("newBrandFields").classList.remove("editing-brand");
+        el("brandFormHeading").textContent = `Create ${activeCsvPresetConfig.brand.name}`;
+        el("createBrandBtn").textContent = "Save Brand";
+        el("createBrandBtn").classList.remove("hidden");
+        setStatus(`Review ${activeCsvPresetConfig.brand.name} details, then save the brand.`, "warn");
+        return null;
     } finally {
       clearButtonBusy(button, previousButton);
     }
@@ -1738,31 +1830,27 @@ function renderEntityMap() {
         (groups[item.table] ||= []).push(item);
         return groups;
       }, {});
-      const sourceItems = sourceFields.map((field) => `
-        <div class="entity-field source-row-item">
-          <div class="entity-field-name">${escapeHtml(field)}</div>
-          <div class="entity-field-source ${mappedSourceFields.has(field) ? "mapped" : "unmapped"}">${mappedSourceFields.has(field) ? "&#10003; Mapped" : "Unmapped"}</div>
-        </div>
-      `).join("");
+      const sourceItems = sourceFields.map((field) => {
+        const mappedTarget = Object.entries(mappingSelections).find(([, source]) => source === field);
+        const targetDefinition = mappedTarget && mappingTargets.find((item) => item.key === mappedTarget[0]);
+        return `
+          <div class="entity-field source-row-item">
+            <div class="entity-field-name">${escapeHtml(field)}</div>
+            <div class="entity-field-source ${mappedSourceFields.has(field) ? "mapped" : "unmapped"}">${targetDefinition ? `&#10003; ${escapeHtml(targetDefinition.label)}` : "Unmapped"}</div>
+            <select class="source-map-select" data-source-field="${escapeHtml(field)}" aria-label="Map ${escapeHtml(field)}">${targetOptionsForSourceField(field)}</select>
+          </div>
+        `;
+      }).join("");
       const entityItems = Object.entries(groupedTargets).map(([table, fields]) => `
         <div class="entity-box">
           <div class="entity-title">${escapeHtml(entityNames[table] || table)}</div>
           <div class="entity-subtitle">Fields received from the source</div>
           <div class="entity-fields">${fields.map((item) => {
             const source = mappingSelections[item.key] || "";
-            const options = ['<option value="">(Unmapped)</option>']
-              .concat(sourceFields.map((field) => {
-                const owner = Object.entries(mappingSelections).find(([, value]) => value === field);
-                const ownerLabel = owner && owner[0] !== item.key ? mappingTargets.find((t) => t.key === owner[0])?.label : "";
-                const isSelected = field === source;
-                return `<option value="${escapeHtml(field)}"${isSelected ? " selected" : ""}>${escapeHtml(field)}${ownerLabel ? ` (mapped to ${escapeHtml(ownerLabel)})` : ""}</option>`;
-              }))
-              .join("");
             return `
               <div class="entity-field">
-                <div class="entity-field-name">${escapeHtml(item.label)}${item.required ? ' <span style="color:#cf1322;">*</span>' : ''}</div>
+                <div class="entity-field-name">${item.required ? '<span class="required">*</span> ' : ''}${escapeHtml(item.label)}</div>
                 <div class="entity-field-source ${source ? "mapped" : "unmapped"}">${source ? `&#8592; ${escapeHtml(source)}` : "Unmapped"}</div>
-                <select class="entity-map-select" data-field="${escapeHtml(item.key)}" aria-label="Map ${escapeHtml(item.label)}">${options}</select>
               </div>
             `;
           }).join("")}</div>
@@ -1780,11 +1868,9 @@ function renderEntityMap() {
           <div class="entity-column">${entityItems || '<div class="status">Parse a source to view the data model.</div>'}</div>
         </div>
       `;
-      target.querySelectorAll(".entity-map-select").forEach((select) => {
+      target.querySelectorAll(".source-map-select").forEach((select) => {
         select.addEventListener("change", () => {
-          const key = select.dataset.field;
-          const nextValue = select.value;
-          applyMappingSelection(key, nextValue, select);
+          handleSourceFieldTargetSelection(select.dataset.sourceField, select.value, select);
         });
       });
     }
@@ -1810,8 +1896,8 @@ function renderTable(targetId, rows) {
         const target = Object.entries(mappingSelections).find(([, source]) => source === column);
         const targetDefinition = target && mappingTargets.find((item) => item.key === target[0]);
         return targetDefinition
-          ? `<span class="source-column-standard">${escapeHtml(targetDefinition.label)}</span><span class="source-column-name">[${escapeHtml(column)}]</span>`
-          : escapeHtml(column);
+          ? `<span class="source-column-standard">${targetDefinition.required ? '<span class="required">*</span> ' : ''}${escapeHtml(targetDefinition.label)}</span><span class="source-column-name">[${escapeHtml(column)}]</span>`
+          : `<span class="source-column-name">${escapeHtml(column)}</span><select class="source-preview-map-select" data-source-field="${escapeHtml(column)}" aria-label="Map ${escapeHtml(column)}">${targetOptionsForSourceField(column)}</select>`;
       });
       const body = rows.map((row) => {
         const flat = flattenObject(row);
@@ -1823,6 +1909,12 @@ function renderTable(targetId, rows) {
           <tbody>${body}</tbody>
         </table>
       `;
+      target.querySelectorAll(".source-preview-map-select").forEach((select) => {
+        select.addEventListener("change", () => {
+          handleSourceFieldTargetSelection(select.dataset.sourceField, select.value, select);
+          renderTable(targetId, rows);
+        });
+      });
     }
 function mapperHasField(key) {
       return Boolean(mappingSelections[key]);
@@ -1936,7 +2028,9 @@ async function parseSource() {
         else if (csvFunctionMode === "global_hotels") setGlobalHotelsMappings();
         else if (excelFunctionMode === "demo_restaurant") setDemoRestaurantExcelMappings();
         else if (jsonFunctionMode === "dominos") setDominosMappings();
+        else if (apiFunctionMode === "little_caesars") setLittleCaesarsApiMappings();
         else if (document.querySelector("input[name='pythonFunction']:checked")?.value === "la_city") setLaCityDemoMappings();
+        autoAddDetectedOptionalFields();
         sessionStorage.removeItem(draftStorageKey);
         if (resolvedRecordPath && recordExtractionMode === "custom" && !el("recordPath").value.trim()) el("recordPath").value = resolvedRecordPath;
         if (sourceType === "excel" && resolvedRecordPath) el("sheetName").value = resolvedRecordPath;
@@ -2404,9 +2498,19 @@ function resetMapping() {
       optionalMappingKeys = new Set();
       hiddenMappingKeys = new Set();
       customAliases = {};
+      sourceRows = [];
+      sourceFields = [];
+      sourceRecordCount = 0;
+      sourceParsed = false;
+      lastSourcePreviewPayload = null;
+      resolvedRecordPath = "";
+      jsonRecordPaths = [];
+      populateJsonRecordPaths([]);
+      renderTable("sourcePreview", []);
+      el("entityPreview").innerHTML = "";
       saveDraft();
       renderMappings();
-      setStatus("Fields restored to the default suggestions.", "ok");
+      setStatus("Choose a source and parse it to start mapping in left pane.", "ok");
     }
 
 function restartMapping() {

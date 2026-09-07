@@ -314,6 +314,7 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "fix_type", "type": "STRING", "mode": "REQUIRED"},
         {"name": "processed", "type": "BOOLEAN", "mode": "REQUIRED"},
         {"name": "improved", "type": "BOOLEAN", "mode": "REQUIRED"},
+        {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
         {"name": "created_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
     ],
 }

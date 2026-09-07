@@ -1277,9 +1277,27 @@
       padding-bottom: 4px;
     }
 
+    .panel-title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .mandatory-note {
+      color: var(--error);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
     .required {
       color: var(--error);
       font-weight: 800;
+      display: inline-block;
+      transform: translateY(-0.22em);
+      margin-right: 3px;
+      line-height: 1;
     }
 
     select.auto-mapped {
@@ -1591,20 +1609,26 @@
     }
 
     .entity-field.source-row-item {
-      grid-template-columns: minmax(130px, 1fr) minmax(100px, 1fr);
+      grid-template-columns: minmax(130px, 1.1fr) minmax(96px, 0.7fr) minmax(180px, 1fr);
     }
 
     .entity-field-name { font-weight: 700; }
     .entity-field-source { color: var(--muted); overflow-wrap: anywhere; font-size: 11px; }
     .entity-field-source.mapped { color: var(--ok); font-weight: 600; }
     .entity-field-source.unmapped { color: #8a9298; font-style: italic; }
-    .entity-map-select {
+    .source-map-select,
+    .source-preview-map-select {
       width: 100%;
       padding: 4px 6px;
       font-size: 11px;
       border: 1px solid var(--line);
       border-radius: 4px;
       background: #ffffff;
+    }
+    .source-preview-map-select {
+      display: block;
+      margin-top: 4px;
+      min-width: 150px;
     }
 
     /* Birdeye-inspired product styling: bright blue actions, white navigation, cool gray workspace. */
@@ -2162,7 +2186,10 @@ result = [
 
     <section>
       <div class="panel mapper-template-components-panel hidden" id="templateComponentsPanel">
-        <h2>Template Components</h2>
+        <div class="panel-title-row">
+          <h2>Template Components</h2>
+          <span class="mandatory-note">* indicates mandatory fields required</span>
+        </div>
         <div class="mapping-grid" id="mappingGrid"></div>
       </div>
 
@@ -2609,8 +2636,10 @@ result = [
           if (event.target.value === "__create_new__") {
             selectedBrand = null;
             brandEditMode = false;
+            presetCreateMode = false;
             el("editExistingBrandLink").classList.add("hidden");
             el("createBrandBtn").textContent = "Save Brand";
+            el("createBrandBtn").classList.remove("hidden");
             el("sourceType").disabled = false;
             resetSourceInputsForNewMode(el("sourceType").value);
             setNewBusinessSourceType(el("sourceType").value);
@@ -2628,8 +2657,10 @@ result = [
           const brands = JSON.parse(event.target.dataset.brands || "[]");
           selectedBrand = brands.find((brand) => brand.business_id === event.target.value) || null;
           brandEditMode = false;
+          presetCreateMode = false;
           el("editExistingBrandLink").classList.toggle("hidden", !selectedBrand);
           el("createBrandBtn").textContent = "Save Brand";
+          el("createBrandBtn").classList.toggle("hidden", Boolean(selectedBrand));
           el("newBrandFields").classList.add("hidden");
           el("newBrandFields").classList.remove("is-open");
           if (selectedBrand) applyBusinessSourceType(selectedBrand);
@@ -2646,7 +2677,10 @@ result = [
         });
     el("customFieldBusinessSelect").addEventListener("change", updateDropCustomFieldPicker);
     el("dropCustomFieldBusinessSelect").addEventListener("change", updateDropCustomFieldPicker);
-    el("createBrandBtn").addEventListener("click", () => brandEditMode ? updateExistingBrand() : createNewBrand());
+    el("createBrandBtn").addEventListener("click", () => {
+          if (brandEditMode) return updateExistingBrand();
+          return createNewBrand("", presetCreateMode && activeCsvPresetConfig ? presetMetadata() : {});
+        });
     el("loadDemoPeBrandBtn")?.addEventListener("click", () => applyDemoPeBrandFunction());
     el("copyDemoPeBrandBtn")?.addEventListener("click", async () => {
           try {
@@ -2676,14 +2710,17 @@ result = [
           el("newBrandFields").classList.add("editing-brand");
           el("brandFormHeading").textContent = "Edit brand details";
           el("createBrandBtn").textContent = "Update Brand";
+          el("createBrandBtn").classList.remove("hidden");
           el("editExistingBrandLink").classList.add("hidden");
         });
     el("cancelBrandEditBtn").addEventListener("click", () => {
           brandEditMode = false;
+          presetCreateMode = false;
           el("newBrandFields").classList.add("hidden");
           el("newBrandFields").classList.remove("is-open");
           el("newBrandFields").classList.remove("editing-brand");
           el("createBrandBtn").textContent = "Save Brand";
+          el("createBrandBtn").classList.toggle("hidden", Boolean(selectedBrand));
           el("brandFormHeading").textContent = "Brand details";
           el("editExistingBrandLink").classList.toggle("hidden", !selectedBrand);
         });

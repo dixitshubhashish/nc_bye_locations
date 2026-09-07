@@ -200,7 +200,7 @@ async function init() {
   }
   prepareReferenceData();
   el("loginBtn").addEventListener("click", login);
-  el("testDbBtn").addEventListener("click", testDbConnection);
+  el("testDbBtn")?.addEventListener("click", testDbConnection);
   el("loginPassword").addEventListener("keydown", (event) => {
     if (event.key === "Enter") login();
   });

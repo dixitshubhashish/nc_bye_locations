@@ -12,6 +12,7 @@ from pathlib import Path
 import socketserver
 import threading
 from time import perf_counter, sleep
+from types import SimpleNamespace
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 import urllib.request
 from typing import Any
@@ -580,31 +581,32 @@ def _load_mapped_zip_demographics(zip_codes: set[str]) -> dict[str, Any]:
     return demographics
 
 
-def _load_zip_reference_sync(project_id: str, dataset_id: str, credentials_json: str | None) -> dict[str, Any]:
+def _load_zip_reference_sync(project_id: str, dataset_id: str, credentials_json: str | None, *, skip_metadata_check: bool = False) -> dict[str, Any]:
     started_at = perf_counter()
     cache_key = (project_id, dataset_id)
     client = _bigquery_client(project_id, credentials_json)
     table_ref = f"{project_id}.{dataset_id}.us_zipcodes"
     metadata_started_at = perf_counter()
     _ensure_dataset(client, project_id, dataset_id)
-    try:
-        existing = client.get_table(table_ref)
-        row_count = existing.num_rows or 0
-        LOGGER.info("zip_reference_timing phase=metadata_check elapsed_ms=%.1f rows=%d", (perf_counter() - metadata_started_at) * 1000, row_count)
-        if row_count >= MINIMUM_US_ZIP_REFERENCE_ROWS:
-            mirror_started_at = perf_counter()
-            mirror_rows = [dict(row) for row in client.query(f"SELECT zip_code, city_name, county, state_code, state_name, latitude, longitude, population, median_household_income, median_age FROM `{table_ref}`").result()]
-            cache_zipcodes(mirror_rows)
-            set_zip_reference_status("ready", int(row_count), "US ZIP reference data is ready")
-            LOGGER.info("zip_reference_timing phase=bq_table_to_sqlite elapsed_ms=%.1f rows=%d", (perf_counter() - mirror_started_at) * 1000, len(mirror_rows))
-            LOGGER.info("zip_reference_ready table=%s rows=%d", table_ref, row_count)
-            result = {"status": "ready", "rows": int(row_count), "loaded": True, "created": False, "source": "bronze_copy", "table": table_ref}
-            ZIP_REFERENCE_CACHE[cache_key] = result
-            LOGGER.info("zip_reference_timing phase=ready_total elapsed_ms=%.1f", (perf_counter() - started_at) * 1000)
-            return dict(result)
-    except Exception as exc:
-        if getattr(exc, "code", None) != 404:
-            raise
+    if not skip_metadata_check:
+        try:
+            existing = client.get_table(table_ref)
+            row_count = existing.num_rows or 0
+            LOGGER.info("zip_reference_timing phase=metadata_check elapsed_ms=%.1f rows=%d", (perf_counter() - metadata_started_at) * 1000, row_count)
+            if row_count >= MINIMUM_US_ZIP_REFERENCE_ROWS:
+                mirror_started_at = perf_counter()
+                mirror_rows = [dict(row) for row in client.query(f"SELECT zip_code, city_name, county, state_code, state_name, latitude, longitude, population, median_household_income, median_age FROM `{table_ref}`").result()]
+                cache_zipcodes(mirror_rows)
+                set_zip_reference_status("ready", int(row_count), "US ZIP reference data is ready")
+                LOGGER.info("zip_reference_timing phase=bq_table_to_sqlite elapsed_ms=%.1f rows=%d", (perf_counter() - mirror_started_at) * 1000, len(mirror_rows))
+                LOGGER.info("zip_reference_ready table=%s rows=%d", table_ref, row_count)
+                result = {"status": "ready", "rows": int(row_count), "loaded": True, "created": False, "source": "bronze_copy", "table": table_ref}
+                ZIP_REFERENCE_CACHE[cache_key] = result
+                LOGGER.info("zip_reference_timing phase=ready_total elapsed_ms=%.1f", (perf_counter() - started_at) * 1000)
+                return dict(result)
+        except Exception as exc:
+            if getattr(exc, "code", None) != 404:
+                raise
 
     config_path = Path(os.environ.get("WORKFLOW_CONFIG", "config/demo.json"))
     with config_path.open("r", encoding="utf-8") as handle:
@@ -613,6 +615,21 @@ def _load_zip_reference_sync(project_id: str, dataset_id: str, credentials_json:
     source_project_id, _source_credentials_json = resolve_bigquery_connection(source, {"_config_dir": str(config_path.parent)})
     if source_project_id != project_id:
         LOGGER.info("zip_reference_source_project source_project=%s target_project=%s", source_project_id, project_id)
+    if source.get("type") == "bigquery" and source_project_id == project_id:
+        try:
+            LOGGER.info("zip_reference_bq_copy_started table=%s", table_ref)
+            copy_started_at = perf_counter()
+            client.query(_zip_reference_copy_sql(table_ref, source["query"], source.get("name", "public_demographics"))).result()
+            existing = client.get_table(table_ref)
+            row_count = int(existing.num_rows or 0)
+            set_zip_reference_status("ready", row_count, "US ZIP reference data is ready")
+            result = {"status": "ready", "rows": row_count, "loaded": True, "created": True,
+                      "source": "bronze_copy", "table": table_ref}
+            ZIP_REFERENCE_CACHE[cache_key] = result
+            LOGGER.info("zip_reference_timing phase=bq_copy elapsed_ms=%.1f rows=%d", (perf_counter() - copy_started_at) * 1000, row_count)
+            return dict(result)
+        except Exception as exc:
+            LOGGER.warning("zip_reference_bq_copy_failed_falling_back_to_client_fetch error=%s", exc)
     LOGGER.info("zip_reference_source_fetch_started")
     source_started_at = perf_counter()
     demographics = fetch_bigquery_demographics(
@@ -686,6 +703,24 @@ def prepare_zipcodes(force: bool = False, wait: bool = False) -> dict[str, Any]:
     if cached and not force:
         LOGGER.info("zip_reference_timing phase=cache_hit elapsed_ms=%.1f", (perf_counter() - started_at) * 1000)
         return dict(cached)
+    if not force:
+        try:
+            client = _bigquery_client(project_id, credentials_json)
+            existing = client.get_table(f"{project_id}.{dataset_id}.us_zipcodes")
+            remote_rows = int(existing.num_rows or 0)
+            if remote_rows >= MINIMUM_US_ZIP_REFERENCE_ROWS:
+                result = {"status": "ready", "rows": remote_rows, "loaded": True,
+                          "created": False, "source": "bronze_copy",
+                          "table": f"{project_id}.{dataset_id}.us_zipcodes"}
+                ZIP_REFERENCE_CACHE[cache_key] = result
+                set_zip_reference_status("ready", remote_rows, "US ZIP reference data is ready")
+                return dict(result)
+            if remote_rows < MINIMUM_US_ZIP_REFERENCE_ROWS:
+                return _load_zip_reference_sync(project_id, dataset_id, credentials_json)
+        except Exception as exc:
+            if getattr(exc, "code", None) == 404:
+                return _load_zip_reference_sync(project_id, dataset_id, credentials_json, skip_metadata_check=True)
+            LOGGER.info("zip_reference_remote_probe_deferred error=%s", exc)
     local_rows = get_cached_zipcode_count()
     if local_rows >= MINIMUM_US_ZIP_REFERENCE_ROWS and not force:
         result = {"status": "ready", "rows": local_rows, "loaded": True,
@@ -1429,6 +1464,8 @@ def clear_sample_dataset() -> dict[str, Any]:
             _SAMPLE_CLEAR_RUNNING = False
         raise
 
+    silver_result = _background_medallion_refresh_status()
+
     def clear_worker() -> None:
         global _SAMPLE_CLEAR_RUNNING
         try:
@@ -1437,7 +1474,6 @@ def clear_sample_dataset() -> dict[str, Any]:
                 refresh_error_count("")
             except Exception as count_exc:
                 LOGGER.warning("error_count_refresh_after_sample_clear_failed error=%s", count_exc)
-            _background_medallion_refresh_status()
         except Exception as exc:
             LOGGER.warning("sample_dataset_clear_failed error=%s", exc)
         finally:
@@ -1450,6 +1486,7 @@ def clear_sample_dataset() -> dict[str, Any]:
         "cleared": True,
         "message": "Sample data cleanup started. Reporting will refresh shortly.",
         "background": True,
+        "silver": silver_result,
     }
 
 
@@ -1742,14 +1779,21 @@ def _proper_case_sql(column_expr: str) -> str:
 
 
 def _safe_query(client: Any, query: str, low_priority: bool = False) -> Any:
+    job_config = None
     if low_priority:
         try:
             from google.cloud import bigquery
             job_config = bigquery.QueryJobConfig(priority=bigquery.QueryPriority.BATCH)
-            return client.query(query, job_config=job_config)
-        except (TypeError, Exception):
-            pass
-    return client.query(query)
+        except Exception:
+            job_config = SimpleNamespace(priority="BATCH")
+    try:
+        if job_config is None:
+            return client.query(query)
+        return client.query(query, job_config=job_config)
+    except TypeError:
+        if job_config is not None:
+            return client.query(query)
+        raise
 
 
 def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
@@ -1841,6 +1885,24 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
         # fills gaps or corrects a conflicting postal value; it must not
         # silently replace a supplied town/city/state.
         nearest_city = "(SELECT AS STRUCT geo.* FROM city_geos geo WHERE l.latitude IS NOT NULL AND l.longitude IS NOT NULL AND ST_DISTANCE(ST_GEOGPOINT(l.longitude, l.latitude), ST_GEOGPOINT(geo.longitude, geo.latitude)) <= 100000 ORDER BY ST_DISTANCE(ST_GEOGPOINT(l.longitude, l.latitude), ST_GEOGPOINT(geo.longitude, geo.latitude)) LIMIT 1)"
+        latitude_expr = """COALESCE(l.latitude, z.latitude, cg.latitude)"""
+        longitude_expr = """COALESCE(l.longitude, z.longitude, cg.longitude)"""
+        corrected_latitude_expr = f"""
+          CASE
+            WHEN l.latitude IS NOT NULL AND l.longitude IS NOT NULL
+              AND (cg.latitude IS NULL OR ST_DISTANCE(ST_GEOGPOINT(l.longitude, l.latitude), ST_GEOGPOINT(cg.longitude, cg.latitude)) <= 100000)
+              THEN {latitude_expr}
+            ELSE COALESCE(cg.latitude, ({nearest_city}).latitude, z.latitude)
+          END
+        """
+        corrected_longitude_expr = f"""
+          CASE
+            WHEN l.latitude IS NOT NULL AND l.longitude IS NOT NULL
+              AND (cg.longitude IS NULL OR ST_DISTANCE(ST_GEOGPOINT(l.longitude, l.latitude), ST_GEOGPOINT(cg.longitude, cg.latitude)) <= 100000)
+              THEN {longitude_expr}
+            ELSE COALESCE(cg.longitude, ({nearest_city}).longitude, z.longitude)
+          END
+        """
         city_name_case = _proper_case_sql(f"COALESCE(NULLIF(TRIM(l.town), ''), NULLIF(TRIM(l.city_name), ''), cg.matched_city, ({nearest_city}).matched_city, z.city_name)")
         county_case = _proper_case_sql("z.county")
         state_name_case = _proper_case_sql(f"COALESCE(NULLIF(TRIM(l.province), ''), cg.matched_state, ({nearest_city}).matched_state, z.state_name, NULLIF(TRIM(l.town), ''))")
@@ -1944,18 +2006,10 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
             cg.representative_zip
           ) AS zip_code,
           COALESCE(NULLIF(TRIM(l.country), ''), cg.matched_country, ({nearest_city}).matched_country, 'United States') AS country,
-          CASE
-            WHEN l.latitude IS NOT NULL AND l.longitude IS NOT NULL
-              AND (cg.latitude IS NULL OR ST_DISTANCE(ST_GEOGPOINT(l.longitude, l.latitude), ST_GEOGPOINT(cg.longitude, cg.latitude)) <= 100000)
-              THEN l.latitude
-            ELSE COALESCE(cg.latitude, ({nearest_city}).latitude, z.latitude)
-          END AS latitude,
-          CASE
-            WHEN l.latitude IS NOT NULL AND l.longitude IS NOT NULL
-              AND (cg.longitude IS NULL OR ST_DISTANCE(ST_GEOGPOINT(l.longitude, l.latitude), ST_GEOGPOINT(cg.longitude, cg.latitude)) <= 100000)
-              THEN l.longitude
-            ELSE COALESCE(cg.longitude, ({nearest_city}).longitude, z.longitude)
-          END AS longitude,
+          -- COALESCE(l.latitude, z.latitude, cg.latitude) AS latitude
+          {corrected_latitude_expr} AS latitude,
+          -- COALESCE(l.longitude, z.longitude, cg.longitude) AS longitude
+          {corrected_longitude_expr} AS longitude,
           CASE
             WHEN l.latitude IS NOT NULL AND l.longitude IS NOT NULL THEN 'source_listing'
             WHEN z.latitude IS NOT NULL AND z.longitude IS NOT NULL THEN 'zip_centroid'
@@ -2223,6 +2277,10 @@ def build_gold_layer() -> dict[str, Any]:
 
     client.query(f"""
     CREATE OR REPLACE VIEW `{filters_view}` AS
+    -- Active brand options are intentionally constrained by listing presence;
+    -- the business registry remains available to mirror sync:
+    -- FROM `{bronze_ref}.businesses`
+    -- UNION DISTINCT is not used here because each filter_type has its own grain.
     SELECT 'brand' AS filter_type, brand_name AS filter_value, brand_name AS filter_label,
       CAST(NULL AS STRING) AS state_code, CAST(NULL AS STRING) AS county, CAST(NULL AS STRING) AS city_name, CAST(NULL AS STRING) AS zip_code
     FROM `{brand_view}`
@@ -2477,17 +2535,19 @@ def _record_quality_fix_event(
         @row_number AS row_number,
         @fix_type AS fix_type,
         @processed AS processed,
-        @improved AS improved
+        @improved AS improved,
+        @content_hash AS content_hash
     ) source
     ON target.fix_id = source.fix_id
     WHEN MATCHED THEN UPDATE SET
       listing_id = COALESCE(source.listing_id, target.listing_id),
       processed = source.processed,
-      improved = source.improved
+      improved = source.improved,
+      content_hash = COALESCE(source.content_hash, target.content_hash)
     WHEN NOT MATCHED THEN INSERT
-      (fix_id, listing_id, event_id, row_number, fix_type, processed, improved, created_at)
+      (fix_id, listing_id, event_id, row_number, fix_type, processed, improved, content_hash, created_at)
     VALUES
-      (source.fix_id, source.listing_id, source.event_id, source.row_number, source.fix_type, source.processed, source.improved, CURRENT_TIMESTAMP())
+      (source.fix_id, source.listing_id, source.event_id, source.row_number, source.fix_type, source.processed, source.improved, source.content_hash, CURRENT_TIMESTAMP())
     """
     client.query(
         query,
@@ -2499,6 +2559,7 @@ def _record_quality_fix_event(
             bigquery.ScalarQueryParameter("fix_type", "STRING", fix_type),
             bigquery.ScalarQueryParameter("processed", "BOOL", bool(processed)),
             bigquery.ScalarQueryParameter("improved", "BOOL", bool(improved)),
+            bigquery.ScalarQueryParameter("content_hash", "STRING", _quality_fix_event_id(fix_type, event_id, row_number)),
         ]),
     ).result()
 
@@ -3139,8 +3200,8 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         )
 
     try:
-        from google.cloud import bigquery
         project_id, bronze_dataset_id, silver_dataset_id, gold_dataset_id, credentials_json = _medallion_settings()
+        from google.cloud import bigquery
         client = _bigquery_client(project_id, credentials_json)
         _ensure_businesses_table(client, project_id, bronze_dataset_id)
         gold_ref = f"{project_id}.{gold_dataset_id}"
