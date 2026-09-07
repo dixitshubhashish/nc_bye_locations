@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Location Intelligence Login</title>
+  <title>Competitive Whitespace Tool Login</title>
   <script src="constants.js"></script>
   <link id="appFavicon" rel="icon" type="image/png">
   <script>document.getElementById("appFavicon").href = window.APP_CONSTANTS.birdeyeFaviconUrl;</script>
@@ -128,12 +128,15 @@
     .status.ok { border-color: #b7e0c6; background: #f1fbf7; color: var(--ok); }
     .status.error { border-color: #e4b3bf; background: #fff1f4; color: var(--error); }
     .status.warn { border-color: #f2d5a6; background: #fff8ed; color: var(--warn); }
+    .status { display: flex; align-items: flex-start; gap: 10px; }
+    .status-close { flex: 0 0 auto; margin-left: auto; border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 19px; line-height: 1; padding: 0 2px; opacity: .75; }
+    .status-close:hover { opacity: 1; }
   </style>
 </head>
 <body>
   <main class="login-box">
     <img class="brand-logo-image" data-logo-src="birdeyeLogoDarkUrl" alt="Birdeye">
-    <h1>Location Intelligence</h1>
+    <h1 data-product-name></h1>
     <label for="loginUser">Username</label>
     <input id="loginUser" autocomplete="username" value="admin">
     <label for="loginPassword">Password</label>

@@ -10,11 +10,31 @@ function newSessionId() {
   return window.crypto?.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function setStatus(targetId, message, type = "") {
+function setStatus(targetId, message, type = "", options = {}) {
   const target = el(targetId);
   if (!target) return;
   target.className = `status ${type}`.trim();
   target.textContent = message;
+  if (["warn", "warning", "error"].includes(String(type).toLowerCase())) {
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "status-close";
+    close.setAttribute("aria-label", "Dismiss message");
+    close.textContent = "×";
+    close.addEventListener("click", () => {
+      target.className = "status hidden";
+      target.textContent = "";
+    });
+    target.appendChild(close);
+    if (options.retry) {
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "status-retry";
+      retry.textContent = "Reload reference data";
+      retry.addEventListener("click", () => prepareReferenceData());
+      target.insertBefore(retry, close);
+    }
+  }
 }
 
 function escapeHtml(value) {
@@ -80,7 +100,7 @@ async function prepareReferenceData() {
     setStatus("loginReadinessStatus", "ZIP reference data ready.", "ok");
     return true;
   } catch (error) {
-    setStatus("loginReadinessStatus", productSafeError(error.message, "ZIP reference data needs attention."), "error");
+    setStatus("loginReadinessStatus", productSafeError(error.message, "ZIP reference data needs attention."), "error", { retry: true });
     return false;
   }
 }

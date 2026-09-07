@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Location Intelligence</title>
+  <title>Competitive Whitespace Tool</title>
   <script src="constants.js"></script>
   <script>
     (function() {
@@ -66,7 +66,9 @@
     html, body {
       margin: 0;
       padding: 0;
-      min-width: 1280px;
+      min-width: 0;
+      width: 100%;
+      overflow-x: hidden;
       background: var(--bg);
       color: var(--ink);
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -85,6 +87,8 @@
       align-items: center;
       justify-content: space-between;
       gap: 16px;
+      min-width: 0;
+      flex-wrap: wrap;
     }
 
     .top-tabs {
@@ -442,6 +446,9 @@
     .text-link:hover { color: #005fd3; background: #edf4ff; }
     .text-link:focus-visible { outline: 2px solid #8bb8ff; outline-offset: 2px; }
     .text-link:active { color: #ffffff; background: var(--accent); }
+    .sortable-header { cursor: pointer; user-select: none; white-space: nowrap; }
+    .sortable-header:focus-visible { outline: 2px solid #8bb8ff; outline-offset: -2px; }
+    .sort-indicator { display: inline-block; margin-left: 5px; color: var(--muted); font-size: 11px; }
     .demo-code-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 7px; background: #f8fafc; }
     .demo-code-actions button { padding: 7px 10px; font-size: 12px; }
     .demo-code-feedback { flex: 1 1 180px; color: var(--muted); font-size: 12px; }
@@ -573,7 +580,7 @@
       overflow: hidden;
     }
 
-    .python-function-options { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
+    .python-function-options { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; padding: 8px 10px; border: 1px solid var(--accent-tint-line); border-radius: 6px; background: var(--accent-tint); }
     .python-function-options label { display: inline-flex; align-items: center; gap: 6px; width: auto; margin: 0; font-weight: 700; }
     .python-function-options input { width: auto; }
 
@@ -703,8 +710,9 @@
 
     main {
       display: grid;
-      grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
+      grid-template-columns: minmax(0, 380px) minmax(0, 1fr);
       min-height: calc(100vh - 70px);
+      min-width: 0;
     }
 
     aside {
@@ -924,10 +932,11 @@
     .status.warn, #status.warn { color: var(--warn); border-color: #e5cfaa; border-left-color: #f59e0b; background: #fff9ed; }
     .status.error, #status.error { color: var(--error); border-color: #e8bbbb; border-left-color: #ef4444; background: #fff5f5; }
 
-    #status { position: relative; display: flex; justify-content: space-between; align-items: flex-start; }
-    .status-close { display: none; background: none; border: none; cursor: pointer; font-size: 20px; padding: 0; margin: -2px 0 0 12px; color: inherit; opacity: 0.7; }
+    .status { position: relative; display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+    .status-close { display: block; flex: 0 0 auto; background: none; border: none; cursor: pointer; font-size: 20px; line-height: 1; padding: 0; margin: -2px 0 0 auto; color: inherit; opacity: 0.7; }
     .status-close:hover { opacity: 1; }
-    #status.error .status-close, #status.warn .status-close { display: block; }
+    .status-retry { flex: 0 0 auto; border: 1px solid currentColor; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; padding: 4px 9px; font-weight: 700; }
+    .status-retry:hover { background: rgba(255,255,255,0.55); }
 
     table {
       width: 100%;
@@ -1319,7 +1328,7 @@
     .app-footer .brand-logo-image { filter: brightness(0) invert(1); }
     header .brand-mark { color: var(--cyan); }
     .app-title { display: flex; align-items: center; gap: 18px; }
-    .app-title h1 { white-space: nowrap; }
+    .app-title h1 { white-space: normal; overflow-wrap: anywhere; }
     .app-footer {
       display: flex;
       justify-content: space-between;
@@ -1398,7 +1407,7 @@
       <div class="brand-lockup login-brand" aria-label="Birdeye brand reference">
         <span class="brand-icon-crop"><img class="brand-logo-image" data-logo-src="birdeyeLogoDarkUrl" alt="Birdeye"></span>
       </div>
-      <h1 id="productTitle">Location Intelligence</h1>
+      <h1 id="productTitle" data-product-name></h1>
       <label for="loginUser">Username</label>
       <input id="loginUser" autocomplete="username" value="admin">
       <label for="loginPassword">Password</label>
@@ -1421,7 +1430,7 @@
         <div class="brand-lockup" aria-label="Birdeye brand reference">
           <span class="brand-icon-crop"><img class="brand-logo-image" data-logo-src="birdeyeLogoLightUrl" alt="Birdeye"></span>
         </div>
-        <h1>Location Intelligence</h1>
+        <h1 data-product-name></h1>
       </div>
       <nav class="top-tabs" aria-label="Primary navigation">
         <button class="top-tab active" data-view="mapperView" type="button">Mappings</button>
@@ -2165,7 +2174,7 @@ result = [
         });
     el("fileInput").addEventListener("change", () => {
           sourceParsed = false;
-          setStatus("Source ready. Ready to review fields.", "ok");
+          setStatus(sourceReadyToParseMessage(), "warn");
           loadExcelSheets();
         });
     el("sheetName").addEventListener("change", () => {
@@ -2218,7 +2227,7 @@ result = [
           }
           el("newBrandFields").classList.add("hidden");
           resetSourceInputsForNewMode(nextSourceType);
-          setStatus("Source ready. Ready to review fields.", "ok");
+          setStatus(sourceReadyToParseMessage(), "warn");
           el("fileInput").value = "";
           updateSourceVisibility();
           if (!selectedBrand) {
@@ -2257,6 +2266,7 @@ result = [
           sourceParsed = false;
           updateSourceVisibility();
           loadExcelSheets();
+          setStatus(sourceReadyToParseMessage(), "warn");
         });
     document.querySelectorAll("input[name='csvFunction']").forEach((input) => {
           input.addEventListener("change", () => updateCsvFunctionSelection(input.value));
@@ -2382,6 +2392,12 @@ result = [
         return;
       }
       setTimeout(() => refreshHeaderReadiness(), 10);
+      const urlParams = new URLSearchParams(window.location.search);
+      let activeTab = urlParams.get("view") || sessionStorage.getItem("activeTab") || "mapperView";
+      if (!["mapperView", "reportingView", "reviewView", "templateLibraryView"].includes(activeTab)) {
+        activeTab = "mapperView";
+      }
+      switchView(activeTab);
       setupZipTypeahead();
       setupBrandDropdownListeners();
       refreshSampleDatasetStatus();
@@ -2392,12 +2408,6 @@ result = [
       // tab opens first. A live re-count happens whenever data actually
       // moves (reprocess/save), keeping the cached number honest.
       refreshReviewCount();
-      const urlParams = new URLSearchParams(window.location.search);
-      let activeTab = urlParams.get("view") || sessionStorage.getItem("activeTab") || "mapperView";
-      if (!["mapperView", "reportingView", "reviewView", "templateLibraryView"].includes(activeTab)) {
-        activeTab = "mapperView";
-      }
-      switchView(activeTab);
     })();
 
   </script>

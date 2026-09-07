@@ -104,6 +104,26 @@ const saveBatchMinRows = 250;
 function normalizeName(value) {
       return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
     }
+function sourceReadyToParseMessage() {
+      const sourceType = el("sourceType");
+      const format = sourceType?.selectedOptions?.[0]?.textContent?.trim() || "source";
+      const selectedRadio = document.querySelector(`input[name='${sourceType?.value === "csv" ? "csvFunction" : sourceType?.value === "excel" ? "excelFunction" : sourceType?.value === "json" ? "jsonFunction" : sourceType?.value === "xml" ? "xmlFunction" : sourceType?.value === "api_get_json" ? "apiFunction" : "pythonFunction"}']:checked`);
+      const mode = selectedRadio?.value === "new" ? "New" : "Demo";
+      const inputMode = el("sourceInputMode")?.value;
+      const hasInput = sourceType?.value === "python_editor"
+        ? Boolean(el("pythonCode")?.value?.trim())
+        : inputMode === "file"
+        ? Boolean(el("fileInput")?.files?.length)
+        : Boolean(el("sourceUrl")?.value?.trim()) || Boolean(el("apiUrl")?.value?.trim());
+      if (!hasInput) {
+        if (sourceType?.value === "python_editor") return `${mode} ${format} source needs connector code before parsing.`;
+        return inputMode === "file"
+          ? `${mode} ${format} upload needs a file before parsing.`
+          : `${mode} ${format} source needs a public URL before parsing.`;
+      }
+      const inputText = inputMode === "file" ? "as an upload" : "from a public URL";
+      return `${mode} ${format} source ${inputText} is ready to parse.`;
+    }
 async function fallbackDisplayBusinessId(brand = {}) {
       const payload = JSON.stringify({
         name: brand.name || "",
@@ -354,7 +374,7 @@ function applyDominosPythonFunction() {
       updateOutput();
       updateSourceVisibility();
       setDominosLocked(false);
-      setStatus("Domino's ready. Click Parse.", "ok");
+      setStatus("Demo source ready. Click Parse.", "ok");
     }
 function updatePythonFunctionSelection(value) {
       el("demoPeBrandActions")?.classList.toggle("hidden", value !== "demo_pe_brand");
@@ -382,7 +402,7 @@ async function applyDemoPeBrandFunction() {
       try {
         await loadDemoPeBrandCode();
         fillBrandFields({}, { name: "Demo PE Brand", slug: "demo-pe-brand", description: "Greater Los Angeles restaurant demo from Overpass.", websiteUrl: "https://www.openstreetmap.org/", status: "active", metaTitle: "Demo PE Brand", metaDescription: "Demo Python source for restaurant locations.", countryOfOrigin: "United States" });
-        setStatus("Demo PE Brand sample loaded. Click Parse.", "ok");
+        setStatus("Demo source loaded. Click Parse.", "ok");
         setDemoPeBrandFeedback("Sample loaded into the editor.", "ok");
       } catch (error) {
         setStatus(productSafeError(error.message, "Could not load Demo PE Brand sample."), "error");
@@ -566,7 +586,7 @@ function applyCsvPreset(config) {
       renderMappings();
       updateOutput();
       updatePresetBrandPanel(config.brand || {}, Boolean(selectedBrand));
-      setStatus(config.status || "CSV preset ready. Click Parse.", config.statusType || "ok");
+      setStatus("Demo source ready. Click Parse.", "ok");
     }
 function setPizzaHutMappings() {
       mappingSelections = {
@@ -593,7 +613,7 @@ function applyPizzaHutCsvDemo() {
         brand: window.APP_CONSTANTS.pizzaHutBrand || {},
         url: window.APP_CONSTANTS.pizzaHutCsvDemoUrl || "",
         sourceName: "pizza_hut_locations_csv",
-        status: "Pizza Hut CSV URL is ready. Click Parse.",
+        status: "Demo source ready. Click Parse.",
         statusType: "ok"
       });
       setPizzaHutLocked(false);
@@ -621,8 +641,8 @@ function applyGlobalHotelsCsvDemo() {
         brand: window.APP_CONSTANTS.globalHotelsBrand || {},
         url: window.APP_CONSTANTS.globalHotelsCorruptDemoUrl || "",
         sourceName: "global_hotels_mixed_csv",
-        status: "Global Hotels CSV URL is ready. Click Parse.",
-        statusType: "warn"
+        status: "Demo source ready. Click Parse.",
+        statusType: "ok"
       });
       setPresetLocked(false, []);
     }
@@ -630,6 +650,7 @@ function resetCsvDemoLock() {
       resetPresetBrandEditState();
       csvFunctionMode = "new";
       resetSourceInputsForNewMode("csv");
+      setStatus(sourceReadyToParseMessage(), "warn");
     }
 function updateCsvFunctionSelection(value) {
       resetPresetBrandEditState();
@@ -698,12 +719,13 @@ function applyDemoRestaurantExcel() {
       loadExcelSheets();
       renderMappings();
       updateOutput();
-      setStatus(selectedBrand ? "Demo Restaurant Excel URL is ready with an existing brand. Click Parse." : "Demo Restaurant Excel URL is ready. Choose or create a brand, then click Parse.", selectedBrand ? "ok" : "warn");
+      setStatus("Demo source ready. Click Parse.", "ok");
     }
 function resetExcelDemoLock() {
       resetPresetBrandEditState();
       excelFunctionMode = "new";
       resetSourceInputsForNewMode("excel");
+      setStatus(sourceReadyToParseMessage(), "warn");
     }
 function updateExcelFunctionSelection(value) {
       resetPresetBrandEditState();
@@ -748,7 +770,7 @@ function applyDominosJsonFunction() {
       renderMappings();
       setDominosLocked(false);
       updateOutput();
-      setStatus("Domino's JSON ready. Click Parse.", "ok");
+      setStatus("Demo source ready. Click Parse.", "ok");
     }
 function applyLaCityPythonFunction() {
       el("sourceType").value = "python_editor";
@@ -768,14 +790,16 @@ function applyLaCityPythonFunction() {
 function resetJsonDemoLock() {
       jsonFunctionMode = "new";
       resetSourceInputsForNewMode("json");
+      setStatus(sourceReadyToParseMessage(), "warn");
     }
 function resetXmlDemoLock() {
       resetPresetBrandEditState();
       resetSourceInputsForNewMode("xml");
+      setStatus(sourceReadyToParseMessage(), "warn");
     }
 function applyDemoXml() {
       resetPresetBrandEditState();
-      activeCsvPresetConfig = { mode: "demo_xml", brand: window.APP_CONSTANTS.demoXmlBrand || {}, url: window.APP_CONSTANTS.demoXmlUrl || "", sourceName: "demo_xml_complex_sample", status: "Demo XML URL is ready. Click Parse.", statusType: "ok" };
+      activeCsvPresetConfig = { mode: "demo_xml", brand: window.APP_CONSTANTS.demoXmlBrand || {}, url: window.APP_CONSTANTS.demoXmlUrl || "", sourceName: "demo_xml_complex_sample", status: "Demo source ready. Click Parse.", statusType: "ok" };
       el("sourceType").value = "xml";
       el("sourceInputMode").value = "url";
       el("sourceUrl").value = window.APP_CONSTANTS.demoXmlUrl || "";
@@ -792,7 +816,7 @@ function applyDemoXml() {
       updateSourceVisibility();
       renderMappings();
       updateOutput();
-      setStatus("Demo XML URL is ready. Click Parse.", "ok");
+      setStatus("Demo source ready. Click Parse.", "ok");
     }
 function updateXmlFunctionSelection(value) {
       if (value === "demo_xml") applyDemoXml();
@@ -830,11 +854,12 @@ function applyLittleCaesarsApiDemo() {
       renderMappings();
       setPresetLocked(false, []);
       updateOutput();
-      setStatus("Little Caesars ready.", "ok");
+      setStatus("Demo source ready. Click Parse.", "ok");
     }
 function resetApiDemoLock() {
       apiFunctionMode = "new";
       resetSourceInputsForNewMode("api_get_json");
+      setStatus(sourceReadyToParseMessage(), "warn");
     }
 function updateApiFunctionSelection(value) {
       if (value === "little_caesars") applyLittleCaesarsApiDemo();
@@ -1923,7 +1948,14 @@ async function parseSource() {
         sourceRows = [];
         sourceFields = [];
         sourceParsed = false;
-        setStatus(productSafeError(error.message, "Preview failed."), "error");
+        const timedOut = /timed out|timeout|time out|aborterror/i.test(String(error.message || ""));
+        setStatus(
+          timedOut
+            ? "The source is taking longer than expected. Check the URL or reload it to try again."
+            : productSafeError(error.message, "Preview failed."),
+          "error",
+          { retry: timedOut }
+        );
       } finally {
         clearButtonBusy(parseBtn, previousParseBtn);
         clearButtonBusy(runBtn, previousRunBtn);

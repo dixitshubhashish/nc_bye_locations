@@ -59,7 +59,7 @@ def preview_url(
     request_headers.update(headers or {})
     request_headers.update(_auth_headers(auth))
     request = urllib.request.Request(request_url, headers=request_headers)
-    with urllib.request.urlopen(request, timeout=60) as response:
+    with urllib.request.urlopen(request, timeout=300) as response:
         content_type = response.headers.get("content-type", "")
         if "json" not in content_type.lower():
             raise ValueError(f"GET API response must be JSON. Received content-type: {content_type}")

@@ -91,9 +91,47 @@ function getByPath(row, path) {
         return "";
       }, row);
     }
-function setStatus(message, type = "") {
-      el("status").className = `status ${type}`;
-      el("status").textContent = message;
+function setStatus(message, type = "", options = {}) {
+      const target = el("status");
+      if (!target) return;
+      target.className = `status ${type}`.trim();
+      target.textContent = message;
+      if (["warn", "warning", "error"].includes(String(type).toLowerCase())) {
+        const close = document.createElement("button");
+        close.type = "button";
+        close.className = "status-close";
+        close.setAttribute("aria-label", "Dismiss message");
+        close.textContent = "×";
+        close.addEventListener("click", () => {
+          target.className = "status hidden";
+          target.textContent = "";
+        });
+        target.appendChild(close);
+        if (options.retry) {
+          const retry = document.createElement("button");
+          retry.type = "button";
+          retry.className = "status-retry";
+          retry.textContent = "Reload source";
+          retry.addEventListener("click", () => {
+            if (typeof window.parseSource === "function") window.parseSource();
+          });
+          target.insertBefore(retry, close);
+        }
+      }
+    }
+
+function addStatusClose(target) {
+      if (!target || target.querySelector(".status-close")) return;
+      const close = document.createElement("button");
+      close.type = "button";
+      close.className = "status-close";
+      close.setAttribute("aria-label", "Dismiss message");
+      close.textContent = "×";
+      close.addEventListener("click", () => {
+        target.className = "status hidden";
+        target.textContent = "";
+      });
+      target.appendChild(close);
     }
 
 function showLoadingOverlay(message, onCancel) {
@@ -261,6 +299,7 @@ async function runReadinessCheck(target) {
         updateLoginButtonReferenceState();
         target.className = "status error";
         target.textContent = "Setup is still finishing.";
+        addStatusClose(target);
       }
     }
 
@@ -296,6 +335,47 @@ async function loadAppData() {
       // Template records are intentionally fetched only after authentication
       // and app initialization, so the library tab opens instantly later.
       if (typeof loadTemplateLibrary === "function") await loadTemplateLibrary();
+}
+
+function enableSortableTable(table) {
+  if (!table) return;
+  table.querySelectorAll("th[data-sort-key]").forEach((header) => {
+    header.classList.add("sortable-header");
+    header.setAttribute("role", "button");
+    header.setAttribute("tabindex", "0");
+    header.setAttribute("aria-sort", "none");
+    const indicator = document.createElement("span");
+    indicator.className = "sort-indicator";
+    indicator.textContent = "↕";
+    header.appendChild(indicator);
+    const sort = () => {
+      const ascending = header.dataset.sortDirection !== "asc";
+      table.querySelectorAll("th[data-sort-key]").forEach((item) => {
+        item.dataset.sortDirection = "";
+        item.setAttribute("aria-sort", "none");
+        const icon = item.querySelector(".sort-indicator");
+        if (icon) icon.textContent = "↕";
+      });
+      header.dataset.sortDirection = ascending ? "asc" : "desc";
+      header.setAttribute("aria-sort", ascending ? "ascending" : "descending");
+      indicator.textContent = ascending ? "↑" : "↓";
+      const rows = [...table.querySelectorAll("tbody tr")];
+      const column = header.cellIndex;
+      rows.sort((left, right) => {
+        const a = left.cells[column]?.dataset.sortValue ?? left.cells[column]?.textContent.trim() ?? "";
+        const b = right.cells[column]?.dataset.sortValue ?? right.cells[column]?.textContent.trim() ?? "";
+        const numeric = header.dataset.sortType === "number";
+        const comparison = numeric ? Number(a) - Number(b) : String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });
+        return (ascending ? 1 : -1) * comparison;
+      });
+      const body = table.querySelector("tbody");
+      rows.forEach((row) => body.appendChild(row));
+    };
+    header.addEventListener("click", sort);
+    header.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); sort(); }
+    });
+  });
 }
 function restoreRememberedLogin() {
       const remembered = localStorage.getItem("mapper_login_remembered") === "true";
