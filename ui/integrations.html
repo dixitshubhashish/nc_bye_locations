@@ -23,6 +23,7 @@
   <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.0/min/vs/loader.js"></script>
   <script src="https://cdn.jsdelivr.net/pyodide/v0.27.0/full/pyodide.js"></script>
   <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
+  <link rel="stylesheet" href="css/mapper.css?v=parser-type-v1" />
   <script>
     // Monaco's AMD loader.js (above) defines a global `define()` function.
     // Leaflet and topojson-client are both UMD-wrapped and check for
@@ -82,24 +83,37 @@
       z-index: 10;
       border-bottom: 1px solid var(--line);
       background: #ffffff;
-      padding: 18px 24px;
-      display: flex;
+      padding: 10px 18px;
+      display: grid;
+      grid-template-columns: auto auto minmax(0, 1fr);
+      grid-template-areas: "title tabs utilities";
       align-items: center;
-      justify-content: space-between;
-      gap: 16px;
+      gap: 14px;
       min-width: 0;
-      flex-wrap: wrap;
     }
+
+    .app-title { grid-area: title; min-width: 0; }
+    header .top-tabs { grid-area: tabs; justify-self: start; margin-left: clamp(8px, 1.6vw, 28px); }
+    header .header-actions { justify-self: end; min-width: 0; flex-wrap: nowrap; justify-content: flex-end; }
 
     .top-tabs {
       display: flex;
       gap: 6px;
+      align-items: center;
+      padding: 5px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--navy-soft);
     }
 
     .top-tab {
       background: #ffffff;
       color: var(--ink);
       border-color: var(--line);
+      min-height: 40px;
+      padding: 9px 16px;
+      font-size: 14px;
+      font-weight: 800;
     }
 
     .top-tab.active {
@@ -107,19 +121,20 @@
       color: #ffffff;
     }
 
-    .header-actions { display: flex; gap: 6px; align-items: center; }
-    .header-actions button { font-size: 12px; padding: 6px 8px; }
+    .header-actions { grid-area: utilities; display: flex; gap: 12px; align-items: center; justify-content: flex-end; min-width: 0; }
+    .header-actions button { font-size: 11px; padding: 5px 7px; }
     .header-readiness {
       display: inline-flex;
       align-items: center;
+      justify-content: center;
       gap: 6px;
-      min-height: 30px;
-      padding: 5px 9px;
+      min-height: 26px;
+      padding: 4px 8px;
       border: 1px solid var(--line);
       border-radius: 6px;
       background: #ffffff;
       color: var(--muted);
-      font-size: 12px;
+      font-size: 11px;
       white-space: nowrap;
     }
     .header-readiness::before {
@@ -133,13 +148,28 @@
     .header-readiness.ok { color: var(--ok); border-color: #b9d6c3; background: #f2fbf5; }
     .header-readiness.warn { color: var(--warn); border-color: #e5cfaa; background: #fff9ed; }
     .header-readiness.error { color: var(--error); border-color: #e8bbbb; background: #fff5f5; }
+    .header-zip-status { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+    .header-zip-status #testReadinessBtn { align-self: flex-start; }
+    .header-link-actions { display: flex; align-items: center; gap: 12px; margin-left: 6px; }
+    .header-data-actions { justify-self: end; display: grid; grid-template-columns: 132px 148px 158px; grid-template-areas: "sample reset zipstatus" "sample restart zipsync"; align-items: stretch; gap: 5px 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--navy-soft); max-width: 100%; }
+    .header-data-actions #resetMappingBtn { grid-area: reset; }
+    .header-data-actions #restartMappingBtn { grid-area: restart; }
+    .header-data-actions #loadSampleDatasetHeaderBtn { grid-area: sample; }
+    .header-data-actions .header-zip-status { display: contents; }
+    .header-data-actions #headerReadinessStatus { grid-area: zipstatus; justify-self: stretch; text-align: center; }
+    .header-data-actions #testReadinessBtn { grid-area: zipsync; justify-self: center; align-self: center; padding-block: 0; text-align: center; }
+    .header-data-actions > button { min-height: 26px; padding: 4px 8px; font-size: 10px; line-height: 1.2; white-space: normal; }
+    .header-data-actions #loadSampleDatasetHeaderBtn { min-height: 52px; align-self: stretch; }
+    .header-account-actions { display: flex; flex-direction: column; align-items: stretch; justify-content: center; gap: 6px; min-width: 132px; padding-left: 12px; border-left: 1px solid var(--line); }
+    .header-account-actions button { min-height: 24px; padding: 4px 7px; font-size: 10px; white-space: nowrap; }
+    .header-account-actions #appHelpBtn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+    .header-account-actions #appHelpBtn::before { content: "i"; display: inline-grid; place-items: center; width: 14px; height: 14px; border: 1px solid currentColor; border-radius: 50%; font-size: 10px; font-weight: 800; line-height: 1; }
     .danger-dialog { border: 2px solid var(--error); border-radius: 8px; padding: 22px; color: var(--ink); }
     .danger-dialog::backdrop { background: rgba(31, 41, 51, 0.48); }
     .danger-dialog h2 { color: var(--error); font-size: 20px; }
     .danger-dialog p { max-width: 440px; }
 
     header.reporting-active #productTitle,
-    header.reporting-active #resetMappingBtn,
     header.reporting-active #clearDataBtn { visibility: hidden; }
 
     .reporting-view {
@@ -161,6 +191,26 @@
       max-width: none;
       box-sizing: border-box;
     }
+    .reporting-subtabs { display: flex; gap: 6px; margin: 14px 0 18px; padding: 5px; width: fit-content; border: 1px solid var(--line); border-radius: 8px; background: var(--navy-soft); }
+    .reporting-subtab { border: 0; background: transparent; color: var(--muted); min-height: 34px; padding: 7px 13px; font-size: 12px; font-weight: 800; }
+    .reporting-subtab.active { color: #ffffff; background: var(--accent); border-radius: 6px; }
+    .report-quality-panel { margin: 0 0 20px; padding: 20px; border: 1px solid var(--line); border-radius: 9px; background: #ffffff; }
+    .report-quality-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; border-bottom: 1px solid var(--line); padding-bottom: 14px; }
+    .report-quality-heading h2 { margin: 0; font-size: 21px; color: var(--navy); }
+    .report-quality-heading p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+    .report-quality-period { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .report-quality-kpis { display: grid; grid-template-columns: repeat(6, minmax(120px, 1fr)); gap: 10px; margin: 16px 0; }
+    .report-quality-kpi { padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: #f8fbff; }
+    .report-quality-kpi strong { display: block; color: var(--navy); font-size: 22px; line-height: 1.15; }
+    .report-quality-kpi span { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.25; }
+    .report-quality-trend-layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); gap: 18px; }
+    .report-quality-chart-section, .report-quality-comparison { min-width: 0; }
+    .report-quality-chart-section h3, .report-quality-comparison h3 { margin: 0 0 8px; color: var(--navy); font-size: 14px; }
+    .report-quality-chart { min-height: 190px; border: 1px solid var(--line); border-radius: 7px; padding: 8px; background: #fbfdff; }
+    .report-quality-chart svg { display: block; width: 100%; height: 175px; }
+    .quality-comparison-row { display: flex; justify-content: space-between; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+    .quality-comparison-row strong { color: var(--navy); }
+    @media (max-width: 900px) { .report-quality-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } .report-quality-trend-layout { grid-template-columns: 1fr; } }
     .reporting-view {
       padding: clamp(16px, 2.4vw, 32px);
       grid-column: 1 / -1;
@@ -285,14 +335,17 @@
     .report-hero-actions > div:first-child {
       width: 100%;
       display: grid !important;
-      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-columns: auto auto;
+      justify-content: end;
+      gap: 10px !important;
       align-items: center;
     }
     .report-hero-actions .sample-load-actions {
       min-width: 0;
-      justify-content: flex-start;
+      justify-content: flex-end;
     }
-    .report-hero-actions #refreshReportBtn {
+    .report-hero-actions #refreshReportBtn,
+    .report-hero-actions #clearSampleDatasetLink {
       width: auto !important;
       min-width: 140px !important;
       white-space: nowrap;
@@ -309,7 +362,8 @@
       .report-hero-actions > div:first-child {
         grid-template-columns: 1fr;
       }
-      .report-hero-actions #refreshReportBtn {
+      .report-hero-actions #refreshReportBtn,
+      .report-hero-actions #clearSampleDatasetLink {
         width: 100% !important;
       }
     }
@@ -325,6 +379,18 @@
     .reporting-sidebar-pane .brand-filter-category > :first-child,
     .reporting-sidebar-pane .brand-filter-category > .report-filter-group {
       grid-column: 1;
+    }
+    .report-filter-category-title {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      font-weight: 700;
+      color: #475569;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 8px;
+      white-space: nowrap;
     }
     .reporting-main-pane > #reportContent > * {
       width: 100%;
@@ -417,16 +483,28 @@
       border: 1px solid #cbd6e6;
       background: #ffffff;
       color: var(--accent);
-      padding: 5px 9px;
-      border-radius: 5px;
-      font-size: 12px;
+      padding: 12px 18px;
+      border-radius: 7px;
+      font-size: 14px;
+      font-weight: 800;
       cursor: pointer;
       white-space: nowrap;
+      min-height: 44px;
     }
     .sample-load-link:hover {
       color: #005fd3;
       background: var(--navy-soft);
       border-color: #9ebbe9;
+    }
+    .sample-load-link.danger {
+      border-color: #ef4444;
+      background: #dc2626;
+      color: #ffffff;
+    }
+    .sample-load-link.danger:hover {
+      border-color: #b91c1c;
+      background: #b91c1c;
+      color: #ffffff;
     }
     .sample-load-link:disabled {
       color: var(--muted);
@@ -434,13 +512,6 @@
       background: #f4f6f8;
     }
     .sample-load-link.hidden { display: none; }
-    #loadSampleDatasetBtn.ready {
-      color: var(--ok);
-      border-color: #b9d6c3;
-      background: #f2fbf5;
-      cursor: default;
-    }
-
     .report-hero p { margin: 0; color: var(--muted); max-width: 780px; }
     .report-source { color: var(--muted); font-size: 12px; margin-top: 8px; overflow-wrap: anywhere; }
     .report-filters {
@@ -903,10 +974,7 @@
     .demo-code-feedback { flex: 1 1 180px; color: var(--muted); font-size: 12px; }
     .demo-code-feedback.ok { color: #147d63; }
     .demo-code-feedback.error { color: #c43b54; }
-    #newBrandFields.brand-edit-modal.is-open { position: fixed; inset: 50% auto auto 50%; z-index: 1200; width: min(520px, calc(100vw - 32px)); max-height: min(720px, calc(100vh - 32px)); overflow-y: auto; transform: translate(-50%, -50%); margin: 0; padding: 22px; background: #ffffff; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 24px 70px rgba(15, 23, 42, 0.28); }
-    #newBrandFields.brand-edit-modal.is-open::before { content: ""; position: fixed; inset: 50% auto auto 50%; width: 100vw; height: 100vh; transform: translate(-50%, -50%); z-index: -1; background: rgba(15, 23, 42, 0.38); }
     .brand-edit-heading { display: none; margin: 0 0 14px; font-size: 18px; }
-    #newBrandFields.brand-edit-modal.is-open .brand-edit-heading { display: block; }
     .brand-source-format-field { display: none; }
     .template-library { padding: 24px; }
     .template-search { display: flex; gap: 8px; max-width: 900px; margin-bottom: 16px; }
@@ -1164,6 +1232,80 @@
       min-width: 0;
     }
 
+    #mapperView main.pre-parse-layout {
+      grid-template-columns: minmax(320px, 40%) minmax(0, 60%);
+    }
+    .default-brand-model-panel {
+      min-height: 340px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      background: #ffffff;
+      border: 1px solid #d9e3f2;
+      border-top: 4px solid var(--accent);
+      border-radius: 8px;
+      padding: clamp(24px, 4vw, 56px);
+      box-shadow: 0 8px 24px rgba(26, 61, 96, 0.06);
+    }
+    .default-brand-model-panel h2 {
+      color: #1f2d3d;
+      font-size: clamp(20px, 2vw, 28px);
+      margin-bottom: 10px;
+    }
+    .default-brand-model-panel p {
+      max-width: 620px;
+      color: #53627d;
+      font-size: 15px;
+      line-height: 1.6;
+      margin: 0;
+    }
+    .default-brand-model-summary {
+      margin-top: 22px;
+      padding: 14px 16px;
+      background: var(--navy-soft);
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      color: #34445b;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .default-brand-model-summary strong { color: #147d63; }
+    .default-brand-model-panel .button-row { margin-top: 22px; }
+    .default-brand-model-panel .button-row button { min-width: 170px; }
+    .help-link { align-self: center; color: var(--accent); background: transparent; border: 0; padding: 4px 6px; font-size: 12px; font-weight: 750; text-decoration: underline; }
+    .help-link:hover { color: #0759e8; background: var(--navy-soft); }
+    .app-help-dialog { width: min(760px, calc(100vw - 32px)); max-height: min(760px, calc(100vh - 32px)); border: 1px solid var(--line); border-radius: 10px; padding: 0; color: var(--ink); box-shadow: 0 24px 70px rgba(15, 23, 42, 0.28); }
+    .app-help-dialog::backdrop { background: rgba(15, 23, 42, 0.38); }
+    .app-help-content { padding: 24px; background: var(--panel); }
+    .app-help-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--line); padding-bottom: 14px; }
+    .app-help-header h2 { margin: 0; color: var(--navy); font-size: 22px; }
+    .app-help-close { padding: 6px 10px; }
+    .app-help-content h3 { margin: 20px 0 6px; color: var(--navy); font-size: 15px; }
+    .app-help-content p, .app-help-content li { color: var(--muted); font-size: 14px; line-height: 1.55; }
+    .app-help-content ul { margin: 6px 0 0; padding-left: 20px; }
+    .pre-parse-brand-panel, .pre-parse-parser-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px; }
+    .pre-parse-brand-panel { margin-bottom: 16px; }
+    .pre-parse-brand-panel h2, .pre-parse-parser-panel h2 { color: var(--navy); }
+    .pre-parse-brand-panel .brand-mode-choice { display: flex; gap: 14px; flex-wrap: wrap; margin: 12px 0 16px; padding: 10px; background: var(--accent-tint); border: 1px solid var(--accent-tint-line); border-radius: 6px; }
+    .pre-parse-brand-panel .brand-mode-choice label { display: inline-flex; align-items: center; gap: 7px; width: auto; margin: 0; color: var(--navy); }
+    .pre-parse-brand-panel .brand-mode-choice input { width: auto; }
+    .pre-parse-brand-validation { margin: 8px 0 0; padding: 8px 10px; color: #b42318; background: #fff5f5; border: 1px solid #f2b8b5; border-left: 3px solid #d92d20; border-radius: 6px; font-size: 12px; font-weight: 700; }
+    .parser-business-field { margin: 0 0 14px; }
+    .parser-business-field label { display: block; margin-bottom: 8px; color: var(--muted); font-weight: 800; }
+    .parser-business-field select { width: 100%; }
+    .pre-parse-parser-panel { min-height: 100%; }
+    .pre-parse-parser-panel > .panel { margin-bottom: 0; }
+    .pre-parse-parser-panel > #status { margin: 0 0 16px; background: var(--accent-tint); border-color: var(--accent-tint-line); color: var(--navy); }
+    #mapperView.pre-parse-active aside > .panel:not(#sourceControlsPanel) { display: none; }
+    #mapperView.pre-parse-active #sourceControlsPanel { display: none; }
+    #mapperView.pre-parse-active #defaultBrandModelPanel { display: none; }
+    #mapperView.pre-parse-active #templateComponentsPanel,
+    #mapperView.pre-parse-active #optionalFieldsPanel,
+    #mapperView.pre-parse-active #mappingPreviewTabs,
+    #mapperView.pre-parse-active #sourcePreview,
+    #mapperView.pre-parse-active #entityPreview { display: none; }
+    #mapperView.pre-parse-active #preParseBrandPanel,
+    #mapperView.pre-parse-active #preParseParserHost { display: block; }
     aside {
       border-right: 1px solid var(--line);
       background: #fbfcfa;
@@ -1822,12 +1964,15 @@
     }
 
     @media (max-width: 900px) {
-      main, main.connector-active { grid-template-columns: 1fr; }
+      main, main.connector-active, #mapperView main.pre-parse-layout { grid-template-columns: 1fr; }
       header { display: block; min-width: 0; padding: 14px 16px; }
       .app-title { margin-bottom: 12px; }
       .app-title h1 { white-space: normal; }
       .top-tabs, .header-actions { max-width: 100%; overflow-x: auto; padding-bottom: 2px; }
       .header-actions { flex-wrap: wrap; margin-top: 8px; }
+      .header-data-actions { width: 100%; max-width: none; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-areas: "sample zipstatus" "reset zipsync" "restart ."; }
+      .header-data-actions #loadSampleDatasetHeaderBtn { min-height: 42px; }
+      .header-account-actions { margin-left: 0; padding-left: 0; border-left: 0; min-width: 0; }
       .header-actions #clearDataBtn { margin-left: auto; }
       .header-actions #logoutBtn { margin-left: 0; }
       .top-tab { padding: 7px 9px; font-size: 12px; }
@@ -1901,7 +2046,7 @@
     <header>
       <div class="app-title">
         <div class="brand-lockup" aria-label="Birdeye brand reference">
-          <span class="brand-icon-crop"><img class="brand-logo-image" data-logo-src="birdeyeLogoLightUrl" alt="Birdeye"></span>
+          <span class="brand-icon-crop"><img class="brand-logo-image" data-logo-src="birdeyeLogoDarkUrl" alt="Birdeye"></span>
         </div>
         <h1 data-product-name></h1>
       </div>
@@ -1912,14 +2057,22 @@
         <button class="top-tab" data-view="reportingView" type="button">Reporting</button>
       </nav>
       <div class="header-actions">
-        <button class="secondary" id="resetMappingBtn" type="button">Reset Fields Mapping</button>
-        <button class="secondary" id="restartMappingBtn" type="button">Restart Mapping</button>
-        <div id="headerReadinessStatus" class="header-readiness">ZIPs not checked</div>
-        <button class="secondary" id="testReadinessBtn" type="button">Sync US ZIPs</button>
-        <button class="secondary" id="logoutBtn" type="button">Log out</button>
+        <div class="header-data-actions">
+          <button class="secondary" id="loadSampleDatasetHeaderBtn" type="button">Load Sample Dataset</button>
+          <button class="secondary" id="resetMappingBtn" type="button">Reset Fields Mapping</button>
+          <button class="secondary" id="restartMappingBtn" type="button">Restart Mapping</button>
+          <div class="header-zip-status">
+            <div id="headerReadinessStatus" class="header-readiness">ZIPs not checked</div>
+            <button class="text-link" id="testReadinessBtn" type="button">Sync US ZIPs</button>
+          </div>
+        </div>
+        <div class="header-account-actions">
+          <button class="secondary" id="logoutBtn" type="button">Log out</button>
+          <button class="text-link" id="appHelpBtn" type="button">How this works</button>
+        </div>
       </div>
     </header>
-    <div id="mapperView">
+    <div id="mapperView" class="pre-parse-active">
       <div id="status" class="status">Choose a source and parse it to start mapping in left pane.<button class="status-close" aria-label="Dismiss message" style="display: none;">×</button></div>
       <div id="saveProgress" class="progress-wrap hidden" aria-live="polite" aria-busy="false">
       <div class="progress-label"><span id="progressMessage">Preparing your records</span><span id="progressValue">0%</span></div>
@@ -1927,14 +2080,32 @@
     </div>
     <main>
     <aside>
-      <div class="panel">
+      <div class="pre-parse-brand-panel hidden" id="preParseBrandPanel">
+        <h2>Brand Model</h2>
+        <div class="brand-mode-choice" role="radiogroup" aria-label="Brand mode">
+          <label><input type="radio" name="preParseBrandMode" id="preParseCreateBrand" value="create" checked> Create a brand</label>
+          <label><input type="radio" name="preParseBrandMode" id="preParseEditBrand" value="edit"> Edit a brand</label>
+        </div>
+        <div id="preParseBrandValidation" class="pre-parse-brand-validation hidden" role="alert" aria-live="polite"></div>
+        <div id="preParseBrandHost"></div>
+      </div>
+      <div class="panel" id="sourceControlsPanel">
         <h2>Source Controls</h2>
         <label id="brandSelectLabel" for="brandSelect">Brand</label>
         <select id="brandSelect" aria-label="Select brand">
           <option value="">Select an existing brand</option>
           <option class="create-new-option" value="__create_new__">+ Create New Brand</option>
         </select>
+        <div id="brandSelectValidation" class="pre-parse-brand-validation hidden" role="alert" aria-live="polite"></div>
         <button id="editExistingBrandLink" class="text-link hidden" type="button">Edit brand details</button>
+        <div id="parserBusinessField" class="parser-business-field hidden">
+          <label for="parserBusinessSelect">Business</label>
+          <select id="parserBusinessSelect" aria-label="Select business before parsing">
+            <option value="">Select an existing brand</option>
+            <option class="create-new-option" value="__create_new__">+ Create New Brand</option>
+          </select>
+          <div id="parserBusinessValidation" class="pre-parse-brand-validation hidden" role="alert" aria-live="polite"></div>
+        </div>
         <label for="sourceType">Source format</label>
         <select id="sourceType">
           <option value="csv">CSV</option>
@@ -2185,6 +2356,18 @@ result = [
     </aside>
 
     <section>
+      <div class="pre-parse-parser-panel hidden" id="preParseParserHost"></div>
+      <div class="default-brand-model-panel" id="defaultBrandModelPanel">
+        <h2>Default Brand Model</h2>
+        <p>Create or edit the brand profile that will be used when this source is launched. Brand details stay independent from source format and will remain linked to the existing brand workflow after parsing.</p>
+        <div class="default-brand-model-summary" id="defaultBrandModelSummary">
+          <strong>No brand selected</strong><br>
+          Choose an existing brand or create a new one to begin.
+        </div>
+        <div class="button-row">
+          <button id="defaultBrandModelBtn" type="button">Create Default Brand</button>
+        </div>
+      </div>
       <div class="panel mapper-template-components-panel hidden" id="templateComponentsPanel">
         <div class="panel-title-row">
           <h2>Template Components</h2>
@@ -2246,6 +2429,29 @@ result = [
         <div id="pythonConnectorDialogHost"></div>
       </div>
     </dialog>
+    <dialog id="appHelpDialog" class="app-help-dialog" aria-labelledby="appHelpTitle">
+      <div class="app-help-content">
+        <div class="app-help-header">
+          <h2 id="appHelpTitle">How this works</h2>
+          <button class="secondary app-help-close" id="appHelpCloseBtn" type="button">Close</button>
+        </div>
+        <h3>1. Map a source</h3>
+        <p>Choose a brand and source format independently. Select Upload File, Public URL, GET API, or Python Editor, then click Parse. Parsing inspects a small sample to discover fields and values.</p>
+        <h3>2. Confirm the model</h3>
+        <p>Source Preview shows the actual records. Data Model shows source fields on the left and target listing fields on the right. Required fields appear first; green mappings are recognized and light-red mappings are suggestions to verify.</p>
+        <h3>3. Save and review</h3>
+        <p>Saving reloads the complete source, not only the discovery sample. Valid records continue into reporting. Invalid records remain available in Review Error Listings for manual edits or automatic enrichment.</p>
+        <h3>4. Use the tabs</h3>
+        <ul>
+          <li><strong>Mappings:</strong> ingest sources, map fields, manage brands, and start enrichment.</li>
+          <li><strong>Review Error Listings:</strong> search, edit, retry, and monitor automatic fixes.</li>
+          <li><strong>Template Library:</strong> reuse saved field mappings with lazy loading and pagination.</li>
+          <li><strong>Reporting:</strong> compare brands, identify ZIP gaps, inspect location coverage, and review data quality improvements.</li>
+        </ul>
+        <h3>5. Understand the numbers</h3>
+        <p>Reporting uses the latest available location and quality data. The app may refresh background data quietly, while explicit refresh actions show progress. Filters apply only to the active reporting view.</p>
+      </div>
+    </dialog>
     <section id="reportingView" class="reporting-view hidden">
       <div class="report-shell">
         <div class="report-hero">
@@ -2254,13 +2460,11 @@ result = [
             <p>Locations, markets, and gaps.</p>
           </div>
           <div class="report-hero-actions">
-            <div style="display: flex; gap: 8px; align-items: flex-start;">
-              <div class="sample-load-actions">
-                <button class="secondary" id="loadSampleDatasetBtn" type="button">Load Sample Dataset</button>
-                <button class="sample-load-link hidden" id="clearSampleDatasetLink" type="button">Clear sample data</button>
-                <button class="sample-load-link hidden" id="reloadSampleDatasetLink" type="button">Reload</button>
-              </div>
+            <div style="display: flex; gap: 10px; align-items: center;">
               <button id="refreshReportBtn" type="button">Refresh Report</button>
+              <div class="sample-load-actions">
+                <button class="sample-load-link danger hidden" id="clearSampleDatasetLink" type="button">Clear Sample Data</button>
+              </div>
             </div>
             <div id="reportStatus" class="report-status">Ready</div>
           </div>
@@ -2301,7 +2505,7 @@ result = [
 
             <!-- Geographic Filters Category -->
             <div class="filter-category" style="margin-bottom: 16px; padding-top: 12px; border-top: 1px solid #f1f5f9;">
-              <div style="font-size: 11px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;">
+              <div class="report-filter-category-title">
                 📍 Geographic Filters
               </div>
               <div class="report-filter-group" style="margin-bottom: 8px;">
@@ -2331,7 +2535,7 @@ result = [
 
             <!-- Demographic Filters Category -->
             <div class="filter-category" style="margin-bottom: 16px; padding-top: 12px; border-top: 1px solid #f1f5f9;">
-              <div style="font-size: 11px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;">
+              <div class="report-filter-category-title">
                 👥 Demographic Filters
               </div>
               <div style="display: grid; gap: 8px;">
@@ -2563,11 +2767,12 @@ result = [
     </div>
   </dialog>
 
-  <script src="js/common.js"></script>
+  <script src="js/common.js?v=preparse-layout-v2"></script>
   <script src="js/reporting.js"></script>
+  <script src="reporting-tabs.js?v=quality-layout-v2"></script>
   <script src="js/review.js"></script>
   <script src="js/templates.js"></script>
-  <script src="js/mapper.js"></script>
+  <script src="js/mapper.js?v=preparse-layout-v5"></script>
   <script>
     el("parseBtn").addEventListener("click", parseSource);
     el("testReadinessBtn")?.addEventListener("click", testReadiness);
@@ -2632,9 +2837,13 @@ result = [
         });
     el("resetBtn").addEventListener("click", () => location.reload());
     el("brandSelect").addEventListener("change", (event) => {
+          if (el("parserBusinessSelect") && el("parserBusinessSelect").value !== event.target.value) {
+            el("parserBusinessSelect").value = event.target.value;
+          }
           resetTemplateSelection();
           if (event.target.value === "__create_new__") {
             selectedBrand = null;
+            if (businessRequirementTouched) setPreParseBrandValidation("Select an existing brand or create a new one before parsing.");
             brandEditMode = false;
             presetCreateMode = false;
             el("editExistingBrandLink").classList.add("hidden");
@@ -2652,10 +2861,13 @@ result = [
             syncCustomFieldBusinessPickers();
             updateOutput();
             updateDropCustomFieldPicker();
+            renderMappings();
             return;
           }
           const brands = JSON.parse(event.target.dataset.brands || "[]");
           selectedBrand = brands.find((brand) => brand.business_id === event.target.value) || null;
+          if (selectedBrand) setPreParseBrandValidation("");
+          else if (businessRequirementTouched) setPreParseBrandValidation("Select an existing brand or create a new one before parsing.");
           brandEditMode = false;
           presetCreateMode = false;
           el("editExistingBrandLink").classList.toggle("hidden", !selectedBrand);
@@ -2663,6 +2875,11 @@ result = [
           el("createBrandBtn").classList.toggle("hidden", Boolean(selectedBrand));
           el("newBrandFields").classList.add("hidden");
           el("newBrandFields").classList.remove("is-open");
+          if (selectedBrand && el("preParseEditBrand") && el("mapperView")?.classList.contains("pre-parse-active")) {
+            el("preParseEditBrand").checked = true;
+            el("preParseCreateBrand").checked = false;
+            openBrandEditorForm("edit");
+          }
           if (selectedBrand) applyBusinessSourceType(selectedBrand);
           else {
             el("sourceType").disabled = false;
@@ -2674,6 +2891,37 @@ result = [
           syncCustomFieldBusinessPickers();
           updateOutput();
           updateDropCustomFieldPicker();
+          renderMappings();
+        });
+    el("parserBusinessSelect")?.addEventListener("change", (event) => {
+          businessRequirementTouched = true;
+          setBusinessSelectValue(event.target.value, true);
+        });
+    el("defaultBrandModelBtn")?.addEventListener("click", () => {
+          if (selectedBrand) {
+            el("editExistingBrandLink")?.click();
+            return;
+          }
+          el("brandSelect").value = "__create_new__";
+          el("brandSelect").dispatchEvent(new Event("change"));
+        });
+    el("preParseCreateBrand")?.addEventListener("change", () => {
+          if (!el("preParseCreateBrand").checked) return;
+          openBrandEditorForm("create");
+        });
+    el("preParseEditBrand")?.addEventListener("change", () => {
+          if (!el("preParseEditBrand").checked) return;
+          const brands = JSON.parse(el("brandSelect")?.dataset.brands || "[]");
+          if (!brands.some((brand) => brand?.business_id)) {
+            setStatus("No existing brands are available to edit.", "warn");
+            el("preParseCreateBrand").checked = true;
+            openBrandEditorForm("create");
+            return;
+          }
+          el("newBrandFields")?.classList.add("hidden");
+          el("newBrandFields")?.classList.remove("is-open", "editing-brand");
+          el("brandSelect")?.focus();
+          setStatus("Select an existing brand to edit its details.", "ok");
         });
     el("customFieldBusinessSelect").addEventListener("change", updateDropCustomFieldPicker);
     el("dropCustomFieldBusinessSelect").addEventListener("change", updateDropCustomFieldPicker);
@@ -2741,13 +2989,33 @@ result = [
           setStatus("Preset URL is editable for this run.", "warn");
         });
     el("newBrandName").addEventListener("input", updateOutput);
+    el("newBrandDescription").addEventListener("input", () => {
+          autoGrowBrandTextarea(el("newBrandDescription"));
+          updateOutput();
+        });
+    el("newBrandMetaDescription").addEventListener("input", () => {
+          autoGrowBrandTextarea(el("newBrandMetaDescription"));
+          updateOutput();
+        });
     el("sourceName").addEventListener("input", updateOutput);
     el("sourceUrl").addEventListener("input", () => {
+          if (el("sourceUrl").value.trim()) markBusinessRequirementTouched();
           sourceParsed = false;
           loadExcelSheets();
           updateOutput();
         });
+    el("apiUrl").addEventListener("input", () => {
+          if (el("apiUrl").value.trim()) markBusinessRequirementTouched();
+          sourceParsed = false;
+          updateOutput();
+        });
+    el("pythonConnectorCode")?.addEventListener("input", () => {
+          if (el("pythonConnectorCode").value.trim()) markBusinessRequirementTouched();
+          sourceParsed = false;
+          updateOutput();
+        });
     el("fileInput").addEventListener("change", () => {
+          if (el("fileInput").files.length) markBusinessRequirementTouched();
           sourceParsed = false;
           setStatus(sourceReadyToParseMessage(), "warn");
           loadExcelSheets();
@@ -2802,7 +3070,7 @@ result = [
           }
           el("newBrandFields").classList.add("hidden");
           resetSourceInputsForNewMode(nextSourceType);
-          setStatus(sourceReadyToParseMessage(), "warn");
+          setStatus("Choose a source and parse it to start mapping in left pane.", "");
           el("fileInput").value = "";
           updateSourceVisibility();
         });
@@ -2836,7 +3104,7 @@ result = [
           sourceParsed = false;
           updateSourceVisibility();
           loadExcelSheets();
-          setStatus(sourceReadyToParseMessage(), "warn");
+          setStatus("Choose a source and parse it to start mapping in left pane.", "");
         });
     document.querySelectorAll("input[name='csvFunction']").forEach((input) => {
           input.addEventListener("change", () => updateCsvFunctionSelection(input.value));
@@ -2898,11 +3166,14 @@ result = [
         });
     el("refreshReportBtn").addEventListener("click", () => {
           reportLoaded = false;
-          loadReporting({ interactive: true });
+          refreshReportingNow();
         });
-    el("loadSampleDatasetBtn").addEventListener("click", () => loadSampleDataset(false));
+    el("loadSampleDatasetBtn")?.addEventListener("click", () => loadSampleDataset(false));
+    el("loadSampleDatasetHeaderBtn")?.addEventListener("click", () => loadSampleDataset(false));
     el("clearSampleDatasetLink")?.addEventListener("click", () => clearSampleDataset());
-    el("reloadSampleDatasetLink").addEventListener("click", () => loadSampleDataset(true));
+    el("appHelpBtn")?.addEventListener("click", () => el("appHelpDialog")?.showModal());
+    el("appHelpCloseBtn")?.addEventListener("click", () => el("appHelpDialog")?.close());
+    el("reloadSampleDatasetLink")?.addEventListener("click", () => loadSampleDataset(true));
     el("applyReportFiltersBtn")?.addEventListener("click", () => {
           const menu = el("competitorDropdownMenu");
           if (menu) menu.style.display = "none";

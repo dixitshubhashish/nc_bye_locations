@@ -68,6 +68,16 @@ window.APP_CONSTANTS = Object.freeze({
     countryOfOrigin: "Global"
   },
   demoRestaurantExcelUrl: "https://docs.google.com/spreadsheets/d/e/2PACX-1vSHa0iIxTVG7odLSlxL8PKDdAt0Xo2ciufPLMpGm9pQuOi44nlwgs3N-Dew4pyz7g/pub?output=xlsx",
+  demoRestaurantBrand: {
+    name: "Demo Restaurant",
+    slug: "demo-restaurant",
+    description: "Demo restaurant locations from a public Excel workbook.",
+    websiteUrl: "https://docs.google.com/",
+    status: "active",
+    metaTitle: "Demo Restaurant",
+    metaDescription: "Demo Excel source for restaurant location mapping.",
+    countryOfOrigin: "United States"
+  },
   demoXmlUrl: "https://samplelib.com/xml/sample-5mb.xml",
   demoXmlBrand: {
     name: "Demo XML",

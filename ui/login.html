@@ -138,7 +138,15 @@
     .status.ok { border-color: #b7e0c6; background: #f1fbf7; color: var(--ok); }
     .status.error { border-color: #e4b3bf; background: #fff1f4; color: var(--error); }
     .status.warn { border-color: #f2d5a6; background: #fff8ed; color: var(--warn); }
-    .status { display: flex; align-items: flex-start; gap: 10px; }
+    .status { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+    .status-message {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      white-space: normal;
+      line-height: 1.45;
+    }
     .status-close { flex: 0 0 auto; margin-left: auto; border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 19px; line-height: 1; padding: 0 2px; opacity: .75; }
     .status-close:hover { opacity: 1; }
   </style>

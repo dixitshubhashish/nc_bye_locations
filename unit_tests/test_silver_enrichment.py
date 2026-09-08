@@ -47,6 +47,8 @@ class SilverEnrichmentTests(unittest.TestCase):
         self.assertIn("median_household_income", sql)
         self.assertIn("z.income_per_capita", sql)
         self.assertIn("city_geos AS", sql)
+        self.assertIn("ANY_VALUE(state_code) AS state_code", sql)
+        self.assertIn("COALESCE(l.normalized_state_code, NULLIF(UPPER(TRIM(l.state_code)), ''), cg.state_code", sql)
         self.assertIn("COALESCE(l.latitude, z.latitude, cg.latitude) AS latitude", sql)
         self.assertIn("EDIT_DISTANCE(l.normalized_city_name, cg.normalized_city_name) <= 2", sql)
         self.assertIn("coordinate_source", sql)

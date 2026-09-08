@@ -76,6 +76,10 @@ class BigQueryBootstrapTests(unittest.TestCase):
             calls.append("gold")
             return {"views": []}
 
+        def fake_quality(*_args: object, **_kwargs: object) -> dict[str, object]:
+            calls.append("quality")
+            return {"metrics": {"invalid_listings": 0}}
+
         workflow_server.REPORTING_REFRESHING = False
         self.addCleanup(setattr, workflow_server, "REPORTING_REFRESHING", False)
         with patch.object(workflow_server, "_sample_loader_enabled", return_value=True):
@@ -88,15 +92,16 @@ class BigQueryBootstrapTests(unittest.TestCase):
                                     with patch.object(workflow_server, "_sample_data_status", side_effect=fake_status):
                                         with patch.object(workflow_server, "build_silver_layer", side_effect=fake_silver):
                                             with patch.object(workflow_server, "build_gold_layer", side_effect=fake_gold):
-                                                # Sample loading no longer blocks the response on the silver/gold
-                                                # rebuild (see _background_medallion_refresh_status) - it kicks
-                                                # that off in a background thread instead, so wait for it here.
-                                                result = workflow_server.load_sample_dataset()
-                                                for thread in threading.enumerate():
-                                                    if thread.name == "reporting-silver-refresh":
-                                                        thread.join(timeout=5)
+                                                with patch.object(workflow_server, "reporting_quality_summary", side_effect=fake_quality):
+                                                    # Sample loading no longer blocks the response on the silver/gold
+                                                    # rebuild (see _background_medallion_refresh_status) - it kicks
+                                                    # that off in a background thread instead, so wait for it here.
+                                                    result = workflow_server.load_sample_dataset()
+                                                    for thread in threading.enumerate():
+                                                        if thread.name == "reporting-silver-refresh":
+                                                            thread.join(timeout=5)
 
-        self.assertEqual(calls, ["prepare_zips", "sample_status", "silver", "gold"])
+        self.assertEqual(calls, ["prepare_zips", "sample_status", "silver", "gold", "quality"])
         self.assertTrue(result["already_loaded"])
         self.assertEqual(result["zips"]["rows"], 33791)
         self.assertEqual(result["silver"]["status"], "refreshing")
@@ -241,11 +246,10 @@ class BigQueryBootstrapTests(unittest.TestCase):
         self.assertEqual(len(client.loaded_batches), 1)  # one top-up batch, not a full reseed
         self.assertGreater(len(client.loaded_batches[0]), 1)  # every missing field, not just ratings
 
-    def test_reporting_fallback_surfaces_the_real_bootstrap_error(self) -> None:
-        # A failed first-time gold bootstrap (or any other setup error) used
-        # to report as "Connected to geographic baseline data." - a
-        # reassuring-sounding message that hid a real outage. It should name
-        # what actually broke.
+    def test_reporting_fallback_uses_product_safe_bootstrap_message(self) -> None:
+        # A failed first-time bootstrap should not leak BigQuery URLs/job IDs
+        # into the UI. The real exception is logged server-side; the response
+        # stays product-safe.
         import sys
         import types
 
@@ -255,11 +259,14 @@ class BigQueryBootstrapTests(unittest.TestCase):
         modules = {"google": fake_google, "google.cloud": fake_cloud, "google.cloud.bigquery": fake_bigquery}
 
         with patch.dict(sys.modules, modules):
-            with patch.object(workflow_server, "_medallion_settings", side_effect=RuntimeError("gold bootstrap failed at build_silver_layer: table not found")):
+            with patch.object(workflow_server, "_medallion_settings", side_effect=RuntimeError("gold bootstrap failed at build_silver_layer: 400 GET https://bigquery.googleapis.com/example Job ID: abc")):
                 with patch.object(workflow_server, "get_mirror_status", return_value=None):
-                    result = workflow_server.reporting_summary({})
+                    result = workflow_server.reporting_summary({"test_case": ["product_safe_bootstrap_message"]})
 
-        self.assertIn("gold bootstrap failed at build_silver_layer", result["warning"])
+        self.assertEqual(result["warning"], "Reporting data is being prepared. Please refresh shortly.")
+        self.assertTrue(result["refreshing"])
+        self.assertNotIn("bigquery.googleapis.com", result["warning"])
+        self.assertNotIn("Job ID", result["warning"])
         self.assertEqual(result["filter_options"]["brands"], [])
 
     def test_sample_locations_dataset_is_strictly_protected_from_deletion(self) -> None:

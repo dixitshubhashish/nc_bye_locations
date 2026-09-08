@@ -7,7 +7,7 @@ let mappingTargets = [
       { key: "city", table: "listings", field: "city_name", label: "City", required: true, hints: ["city", "town"] },
       { key: "state", table: "listings", field: "state_code", label: "State", required: true, hints: ["state", "region", "province", "state_code"] },
       { key: "postal_code", table: "listings", field: "zip_code", label: "ZIP Code", required: true, hints: ["zip", "zipcode", "zip_code", "postalcode", "postal_code"] },
-      { key: "country", table: "listings", field: "country", label: "Country", required: true, hints: ["country", "countrycode"] },
+      { key: "country", table: "listings", field: "country", label: "Country", required: false, hints: ["country", "countrycode"] },
       { key: "location_id", table: "listings", field: "location_key", label: "Store ID", required: false, hints: ["locationid", "storeid", "store_id", "id", "number"] },
       { key: "town", table: "listings", field: "town", label: "Town", required: false, hints: ["town", "locality"] },
       { key: "province", table: "listings", field: "province", label: "Province", required: false, hints: ["province", "region"] },
@@ -62,6 +62,9 @@ let jsonRecordPaths = [];
 let autoMappedKeys = new Set();
 let learnedSuggestions = {};
 let sourceParsed = false;
+let mappingWorkspaceActivated = false;
+let preParseRelocatedNodes = null;
+let preParseStatusLocation = null;
 // True while a template loaded from the Template Library is being edited
 // without a freshly parsed source file. The mapping grid and Save must work
 // off the template's stored source_fields (there are no live sourceRows),
@@ -85,6 +88,44 @@ let pyodideRuntimePromise = null;
 let activeCsvPresetConfig = null;
 let presetBrandEditMode = false;
 let presetCreateMode = false;
+let businessRequirementTouched = false;
+function setPreParseBrandValidation(message = "") {
+  const inPreParse = el("mapperView")?.classList.contains("pre-parse-active");
+  const ids = inPreParse ? ["parserBusinessValidation"] : ["brandSelectValidation"];
+  ["preParseBrandValidation", "parserBusinessValidation", "brandSelectValidation"].forEach((id) => {
+    const node = el(id);
+    if (!node) return;
+    const shouldShow = ids.includes(id) && Boolean(message);
+    node.textContent = shouldShow ? message : "";
+    node.classList.toggle("hidden", !shouldShow);
+  });
+}
+function hasSelectedBusiness() {
+  const value = el("brandSelect")?.value || "";
+  return Boolean(selectedBrand?.business_id || (value && value !== "__create_new__"));
+}
+function syncParserBusinessSelect() {
+  const sourceSelect = el("brandSelect");
+  const parserSelect = el("parserBusinessSelect");
+  if (!sourceSelect || !parserSelect) return;
+  parserSelect.innerHTML = sourceSelect.innerHTML;
+  parserSelect.dataset.brands = sourceSelect.dataset.brands || "[]";
+  parserSelect.value = sourceSelect.value || "";
+  parserSelect.disabled = sourceSelect.disabled;
+}
+function setBusinessSelectValue(value, dispatch = true) {
+  const brandSelect = el("brandSelect");
+  const parserSelect = el("parserBusinessSelect");
+  if (brandSelect) brandSelect.value = value;
+  if (parserSelect) parserSelect.value = value;
+  if (dispatch && brandSelect) brandSelect.dispatchEvent(new Event("change"));
+}
+function markBusinessRequirementTouched() {
+  businessRequirementTouched = true;
+  if (!hasSelectedBusiness()) {
+    setPreParseBrandValidation("Select an existing brand or create a new one before parsing.");
+  }
+}
 let brandEditMode = false;
 const pythonEditorStarterCode = `# Return a JSON-compatible list of records in \`result\`.
 result = [
@@ -206,6 +247,15 @@ function setNewBusinessSourceType(format) {
       const match = Array.from(sourceTypeSelect.options).find((option) => option.dataset.format === format || option.value === format);
       if (match) el("newBrandSourceType").value = match.value;
     }
+function autoGrowBrandTextarea(node) {
+      if (!node) return;
+      node.style.height = "38px";
+      node.style.height = `${Math.min(Math.max(node.scrollHeight, 38), 140)}px`;
+    }
+function autoGrowBrandTextareas() {
+      autoGrowBrandTextarea(el("newBrandDescription"));
+      autoGrowBrandTextarea(el("newBrandMetaDescription"));
+    }
 function fillBrandFields(brand = {}, fallback = {}) {
       setNewBusinessSourceType(el("sourceType").value);
       el("newBrandName").value = brand.name || fallback.name || "";
@@ -217,6 +267,7 @@ function fillBrandFields(brand = {}, fallback = {}) {
       el("newBrandMetaTitle").value = brand.meta_title || fallback.metaTitle || "";
       el("newBrandMetaDescription").value = brand.meta_description || fallback.metaDescription || "";
       el("newBrandOrigin").value = brand.country_of_origin || fallback.countryOfOrigin || "";
+      autoGrowBrandTextareas();
     }
 function presetMetadata(config = activeCsvPresetConfig || {}) {
       return {
@@ -294,6 +345,21 @@ function setConnectorCode(code) {
       if (connectorEditor) connectorEditor.setValue(nextCode);
       else el("pythonConnectorCode").value = nextCode;
     }
+function openPrefilledBrandCreateForm(brandConfig = {}) {
+      selectedBrand = null;
+      presetCreateMode = Boolean(activeCsvPresetConfig);
+      brandEditMode = false;
+      el("brandSelect").value = "__create_new__";
+      syncParserBusinessSelect();
+      fillBrandFields({}, brandConfig);
+      el("newBrandFields").classList.remove("hidden");
+      el("newBrandFields").classList.toggle("is-open", Boolean(el("mapperView")?.classList.contains("pre-parse-active")));
+      el("newBrandFields").classList.remove("editing-brand");
+      el("brandFormHeading").textContent = brandConfig.name ? `Create ${brandConfig.name}` : "Create new brand";
+      el("createBrandBtn").textContent = "Save Brand";
+      el("createBrandBtn").classList.remove("hidden");
+      lockBrandFields(false);
+    }
 function dominosPythonCode() {
       const limit = window.APP_CONSTANTS.dominosZipFetchLimit || 1;
       const storesPerZip = window.APP_CONSTANTS.dominosStoresPerZipLimit || 1;
@@ -323,6 +389,7 @@ function syncBrandSelection(brandConfig) {
         selectedBrand = existing;
         presetCreateMode = false;
         el("brandSelect").value = existing.business_id;
+        syncParserBusinessSelect();
         el("editExistingBrandLink")?.classList.remove("hidden");
         el("newBrandFields").classList.add("hidden");
         fillBrandFields(existing, brandConfig);
@@ -330,11 +397,7 @@ function syncBrandSelection(brandConfig) {
         applyBusinessSourceType(existing);
         updatePresetBrandPanel(brandConfig, true);
       } else {
-        selectedBrand = null;
-        el("brandSelect").value = "__create_new__";
-        el("newBrandFields").classList.toggle("hidden", Boolean(activeCsvPresetConfig));
-        fillBrandFields({}, brandConfig);
-        lockBrandFields(false);
+        openPrefilledBrandCreateForm(brandConfig);
         updatePresetBrandPanel(brandConfig, false);
       }
     }
@@ -396,12 +459,20 @@ function setDemoPeBrandFeedback(message, type = "") {
       target.textContent = message;
     }
 async function applyDemoPeBrandFunction() {
+      activeCsvPresetConfig = {
+        mode: "demo_pe_brand",
+        brand: { name: "Demo PE Brand", slug: "demo-pe-brand", description: "Greater Los Angeles restaurant demo from Overpass.", websiteUrl: "https://www.openstreetmap.org/", status: "active", metaTitle: "Demo PE Brand", metaDescription: "Demo Python source for restaurant locations.", countryOfOrigin: "United States" },
+        url: "",
+        sourceName: "demo_pe_brand_osm_restaurants",
+        status: "Demo source loaded. Click Parse.",
+        statusType: "ok"
+      };
       el("sourceType").value = "python_editor";
       el("sourceName").value = "demo_pe_brand_osm_restaurants";
       el("recordPath").value = "";
       try {
         await loadDemoPeBrandCode();
-        fillBrandFields({}, { name: "Demo PE Brand", slug: "demo-pe-brand", description: "Greater Los Angeles restaurant demo from Overpass.", websiteUrl: "https://www.openstreetmap.org/", status: "active", metaTitle: "Demo PE Brand", metaDescription: "Demo Python source for restaurant locations.", countryOfOrigin: "United States" });
+        fillBrandFromConfig(activeCsvPresetConfig.brand);
         setStatus("Demo source loaded. Click Parse.", "ok");
         setDemoPeBrandFeedback("Sample loaded into the editor.", "ok");
       } catch (error) {
@@ -652,7 +723,7 @@ function resetCsvDemoLock() {
       resetPresetBrandEditState();
       csvFunctionMode = "new";
       resetSourceInputsForNewMode("csv");
-      setStatus(sourceReadyToParseMessage(), "warn");
+      setStatus("Choose a source and parse it to start mapping in left pane.", "");
     }
 function updateCsvFunctionSelection(value) {
       resetPresetBrandEditState();
@@ -703,7 +774,14 @@ function setDemoRestaurantExcelMappings() {
 function applyDemoRestaurantExcel() {
       resetPresetBrandEditState();
       excelFunctionMode = "demo_restaurant";
-      activeCsvPresetConfig = null;
+      activeCsvPresetConfig = {
+        mode: "demo_restaurant",
+        brand: window.APP_CONSTANTS.demoRestaurantBrand || {},
+        url: window.APP_CONSTANTS.demoRestaurantExcelUrl || "",
+        sourceName: "demo_restaurant_locations_excel",
+        status: "Demo source ready. Click Parse.",
+        statusType: "ok"
+      };
       presetBrandEditMode = false;
       el("sourceType").value = "excel";
       el("sourceInputMode").value = "url";
@@ -712,7 +790,7 @@ function applyDemoRestaurantExcel() {
       setSourceUrlLocked(true);
       el("sourceName").value = "demo_restaurant_locations_excel";
       el("recordPath").value = "Sheet1";
-      applyBrandToCurrentSelection(firstExistingBrand());
+      fillBrandFromConfig(activeCsvPresetConfig.brand);
       sourceFields = [];
       sourceRows = [];
       sourceParsed = false;
@@ -727,7 +805,7 @@ function resetExcelDemoLock() {
       resetPresetBrandEditState();
       excelFunctionMode = "new";
       resetSourceInputsForNewMode("excel");
-      setStatus(sourceReadyToParseMessage(), "warn");
+      setStatus("Choose a source and parse it to start mapping in left pane.", "");
     }
 function updateExcelFunctionSelection(value) {
       resetPresetBrandEditState();
@@ -792,12 +870,12 @@ function applyLaCityPythonFunction() {
 function resetJsonDemoLock() {
       jsonFunctionMode = "new";
       resetSourceInputsForNewMode("json");
-      setStatus(sourceReadyToParseMessage(), "warn");
+      setStatus("Choose a source and parse it to start mapping in left pane.", "");
     }
 function resetXmlDemoLock() {
       resetPresetBrandEditState();
       resetSourceInputsForNewMode("xml");
-      setStatus(sourceReadyToParseMessage(), "warn");
+      setStatus("Choose a source and parse it to start mapping in left pane.", "");
     }
 function applyDemoXml() {
       resetPresetBrandEditState();
@@ -896,7 +974,7 @@ function resetApiDemoLock() {
       clearPairRows("queryParams");
       clearPairRows("customHeaders");
       resetSourceInputsForNewMode("api_get_json");
-      setStatus(sourceReadyToParseMessage(), "warn");
+      setStatus("Choose a source and parse it to start mapping in left pane.", "");
     }
 function updateApiFunctionSelection(value) {
       if (value === "little_caesars") applyLittleCaesarsApiDemo();
@@ -930,7 +1008,10 @@ function initializeConnectorEditor() {
           insertSpaces: true,
           scrollBeyondLastLine: false
         });
-        connectorEditor.onDidChangeModelContent(() => saveDraft());
+        connectorEditor.onDidChangeModelContent(() => {
+          if (connectorEditor.getValue().trim()) markBusinessRequirementTouched();
+          saveDraft();
+        });
         restoreDraft();
       });
     }
@@ -1293,10 +1374,28 @@ function renderMappings() {
       const componentsPanel = el("templateComponentsPanel");
       const optionalPanel = el("optionalFieldsPanel");
       const previewTabs = el("mappingPreviewTabs");
-      const hasMappingContent = Boolean(sourceParsed || sourceFields.length || activeTemplateId);
+      const hasMappingContent = Boolean(mappingWorkspaceActivated || sourceParsed || sourceFields.length || activeTemplateId);
+      const mapperMain = document.querySelector("#mapperView main");
+      const mapperView = el("mapperView");
+      const defaultBrandPanel = el("defaultBrandModelPanel");
+      mapperMain?.classList.toggle("pre-parse-layout", !hasMappingContent);
+      mapperView?.classList.toggle("pre-parse-active", !hasMappingContent);
+      defaultBrandPanel?.classList.toggle("hidden", hasMappingContent);
+      syncPreParseWorkspace(hasMappingContent);
       componentsPanel?.classList.toggle("hidden", !hasMappingContent);
       optionalPanel?.classList.toggle("hidden", !hasMappingContent);
       previewTabs?.classList.toggle("hidden", !hasMappingContent);
+      const defaultBrandSummary = el("defaultBrandModelSummary");
+      const defaultBrandButton = el("defaultBrandModelBtn");
+      if (defaultBrandSummary && defaultBrandButton) {
+        if (selectedBrand?.name) {
+          defaultBrandSummary.innerHTML = `<strong>${escapeHtml(formatBrandName(selectedBrand.name))}</strong><br>Existing brand selected. You can edit its profile before parsing.`;
+          defaultBrandButton.textContent = "Edit Brand Details";
+        } else {
+          defaultBrandSummary.innerHTML = "<strong>No brand selected</strong><br>Choose an existing brand or create a new one to begin.";
+          defaultBrandButton.textContent = "Create Default Brand";
+        }
+      }
       const grid = el("mappingGrid");
       grid.innerHTML = `
         <div class="mapping-head">Brand Field</div>
@@ -1368,6 +1467,85 @@ function renderMappings() {
       updateOptionalFieldPicker();
       updateDropCustomFieldPicker();
       updateOutput();
+    }
+function syncPreParseWorkspace(hasMappingContent) {
+      const sourcePanel = el("sourceControlsPanel");
+      const brandPanel = el("preParseBrandPanel");
+      const brandHost = el("preParseBrandHost");
+      const parserHost = el("preParseParserHost");
+      const parserBusinessField = el("parserBusinessField");
+      if (!sourcePanel || !brandPanel || !brandHost || !parserHost) return;
+      const brandIds = new Set(["brandSelectLabel", "brandSelect", "editExistingBrandLink", "presetBrandPanel", "newBrandFields"]);
+      if (!hasMappingContent && !preParseRelocatedNodes) {
+        preParseRelocatedNodes = Array.from(sourcePanel.children).map((node, index) => ({ node, index }));
+        preParseRelocatedNodes.forEach(({ node }) => {
+          if (brandIds.has(node.id)) brandHost.appendChild(node);
+          else if (node.tagName === "H2") parserHost.appendChild(node);
+          else parserHost.appendChild(node);
+        });
+        brandPanel.classList.remove("hidden");
+        parserHost.classList.remove("hidden");
+        parserBusinessField?.classList.remove("hidden");
+        syncParserBusinessSelect();
+        const parserTitle = parserHost.querySelector("h2");
+        if (parserTitle) parserTitle.textContent = "Source Parser";
+        updatePreParseBrandMode();
+      } else if (hasMappingContent && preParseRelocatedNodes) {
+        preParseRelocatedNodes.sort((left, right) => left.index - right.index).forEach(({ node }) => sourcePanel.appendChild(node));
+        preParseRelocatedNodes = null;
+        brandPanel.classList.add("hidden");
+        parserHost.classList.add("hidden");
+        parserBusinessField?.classList.add("hidden");
+      }
+      const status = el("status");
+      if (!hasMappingContent && status && status.parentElement !== parserHost) {
+        preParseStatusLocation = { parent: status.parentElement, nextSibling: status.nextSibling };
+        const parserTitle = parserHost.querySelector("h2");
+        parserHost.insertBefore(status, parserTitle?.nextSibling || parserHost.firstChild);
+      } else if (hasMappingContent && status && preParseStatusLocation) {
+        const { parent, nextSibling } = preParseStatusLocation;
+        if (nextSibling && nextSibling.parentElement === parent) parent.insertBefore(status, nextSibling);
+        else parent.insertBefore(status, parent.querySelector("main"));
+        preParseStatusLocation = null;
+      }
+      if (!hasMappingContent) updatePreParseBrandMode();
+    }
+function updatePreParseBrandMode() {
+      const createRadio = el("preParseCreateBrand");
+      const editRadio = el("preParseEditBrand");
+      if (!createRadio || !editRadio) return;
+      const brands = JSON.parse(el("brandSelect")?.dataset.brands || "[]");
+      editRadio.disabled = !brands.some((brand) => brand?.business_id);
+      syncParserBusinessSelect();
+      if (hasSelectedBusiness()) setPreParseBrandValidation("");
+      if (createRadio.checked && !selectedBrand && !el("newBrandFields")?.classList.contains("is-open")) openBrandEditorForm("create");
+    }
+function openBrandEditorForm(mode = "create") {
+      const form = el("newBrandFields");
+      if (!form) return;
+      if (mode === "edit" && !selectedBrand) {
+        form.classList.add("hidden");
+        form.classList.remove("is-open", "editing-brand");
+        return;
+      }
+      brandEditMode = mode === "edit";
+      presetCreateMode = false;
+      if (brandEditMode) {
+        fillBrandFields(selectedBrand, {});
+        el("brandFormHeading").textContent = "Edit brand details";
+        el("createBrandBtn").textContent = "Update Brand";
+      } else {
+        selectedBrand = null;
+        el("brandSelect").value = "__create_new__";
+        fillBrandFields({}, {});
+        el("brandFormHeading").textContent = "Create new brand";
+        el("createBrandBtn").textContent = "Save Brand";
+      }
+      form.classList.remove("hidden");
+      form.classList.add("is-open");
+      form.classList.toggle("editing-brand", brandEditMode);
+      el("createBrandBtn").classList.remove("hidden");
+      updatePreParseBrandMode();
     }
 function applyMappingSelection(key, nextValue, selectElement) {
       const previousOwner = Object.entries(mappingSelections).find(([otherKey, value]) => otherKey !== key && value === nextValue);
@@ -1649,6 +1827,7 @@ async function loadBrands(search = "") {
         el("brandSelect").innerHTML = '<option value="">Select an existing brand</option><option class="create-new-option" value="__create_new__">+ Create New Brand</option>' + brands.map((brand) => `<option value="${escapeHtml(brand.business_id)}">${escapeHtml(formatBrandName(brand.name))}</option>`).join("");
         el("brandSelect").dataset.brands = JSON.stringify(brands);
         if (selectedBrand) el("brandSelect").value = selectedBrand.business_id;
+        syncParserBusinessSelect();
         el("editExistingBrandLink")?.classList.toggle("hidden", !selectedBrand);
         syncCustomFieldBusinessPickers();
       } catch (error) {
@@ -1667,10 +1846,13 @@ async function createNewBrand(brandNameOverride = "", extra = {}) {
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not create brand.");
         selectedBrand = result.brand;
+        setPreParseBrandValidation("");
         el("brandSelect").value = selectedBrand.business_id;
+        syncParserBusinessSelect();
         el("editExistingBrandLink")?.classList.remove("hidden");
         await loadBrands(selectedBrand.name);
         el("brandSelect").value = selectedBrand.business_id;
+        syncParserBusinessSelect();
         el("newBrandFields").classList.add("hidden");
         el("newBrandFields").classList.remove("is-open");
         el("newBrandFields").classList.remove("editing-brand");
@@ -1716,8 +1898,10 @@ async function updateExistingBrand() {
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not update brand.");
         selectedBrand = result.brand;
+        setPreParseBrandValidation("");
         await loadBrands(selectedBrand.name);
         el("brandSelect").value = selectedBrand.business_id;
+        syncParserBusinessSelect();
         fillBrandFields(selectedBrand, activeCsvPresetConfig?.brand || {});
         presetBrandEditMode = false;
         brandEditMode = false;
@@ -1947,6 +2131,14 @@ function buildSaveBatches(rows, mapper, sourceFields) {
       return batches.length ? batches : [{ rowOffset: 0, rows: [] }];
     }
 async function parseSource() {
+      if (el("mapperView")?.classList.contains("pre-parse-active") && !hasSelectedBusiness()) {
+        const message = "Select an existing brand or create a new one before parsing.";
+        businessRequirementTouched = true;
+        setPreParseBrandValidation(message);
+        (el("parserBusinessSelect") || el("brandSelect"))?.focus();
+        return;
+      }
+      setPreParseBrandValidation("");
       const parseBtn = el("parseBtn");
       const runBtn = el("runPythonConnectorBtn");
       const previousParseBtn = setButtonBusy(parseBtn, "Parsing");
@@ -2007,6 +2199,7 @@ async function parseSource() {
         sourceFields = [...new Set((result.fields || []).filter((field) => field !== null && field !== undefined && String(field).trim()))];
         jsonRecordPaths = result.record_paths || [];
         sourceParsed = true;
+        mappingWorkspaceActivated = true;
         templateEditMode = false;
         populateJsonRecordPaths(jsonRecordPaths);
         learnedSuggestions = {};
@@ -2131,9 +2324,11 @@ async function loadExcelSheets() {
     }
 async function loadSampleDataset(reset = false) {
       const button = el("loadSampleDatasetBtn");
+      const headerButton = el("loadSampleDatasetHeaderBtn");
       const reloadLink = el("reloadSampleDatasetLink");
       if (!reset && button?.dataset.sampleLoaded === "true") return;
       const previousButton = setButtonBusy(button, reset ? "Reloading" : "Loading Sample Data");
+      const previousHeaderButton = setButtonBusy(headerButton, reset ? "Reloading" : "Loading Sample Data");
       const previousReload = reloadLink ? setButtonBusy(reloadLink, "Reloading") : "";
       const status = el("reportStatus");
       status.className = "report-status loading";
@@ -2193,6 +2388,7 @@ async function loadSampleDataset(reset = false) {
       } finally {
         window.clearInterval(progressTimer);
         clearButtonBusy(button, previousButton);
+        clearButtonBusy(headerButton, previousHeaderButton);
         if (reloadLink) clearButtonBusy(reloadLink, previousReload);
         if (button && button.dataset.sampleLoaded !== "true") button.disabled = false;
         if (reloadLink) reloadLink.disabled = false;
@@ -2236,15 +2432,18 @@ async function clearSampleDataset() {
     }
 function updateSampleDatasetControls(result = {}) {
       const button = el("loadSampleDatasetBtn");
+      const headerButton = el("loadSampleDatasetHeaderBtn");
       const clearLink = el("clearSampleDatasetLink");
       const reloadLink = el("reloadSampleDatasetLink");
-      if (!button) return;
+      if (!button && !headerButton) return;
       const loaded = Boolean(result.loaded || result.already_loaded || result.locations);
-      button.dataset.sampleLoaded = loaded ? "true" : "false";
-      button.disabled = loaded;
-      button.classList.toggle("ready", loaded);
-      button.title = loaded ? "Sample data already in place." : "";
-      button.textContent = loaded ? "Sample Dataset Loaded" : "Load Sample Dataset";
+      [button, headerButton].filter(Boolean).forEach((sampleButton) => {
+        sampleButton.dataset.sampleLoaded = loaded ? "true" : "false";
+        sampleButton.disabled = loaded;
+        sampleButton.classList.toggle("ready", loaded);
+        sampleButton.title = loaded ? "Sample data already in place." : "";
+        sampleButton.textContent = loaded ? "Sample Dataset Loaded" : "Load Sample Dataset";
+      });
       if (clearLink) clearLink.classList.toggle("hidden", !loaded);
       if (reloadLink) reloadLink.classList.toggle("hidden", !loaded);
     }
@@ -2505,6 +2704,7 @@ function resetMapping() {
       sourceFields = [];
       sourceRecordCount = 0;
       sourceParsed = false;
+      mappingWorkspaceActivated = false;
       lastSourcePreviewPayload = null;
       resolvedRecordPath = "";
       jsonRecordPaths = [];
@@ -2518,8 +2718,13 @@ function resetMapping() {
 
 function restartMapping() {
       sessionStorage.removeItem(draftStorageKey);
-      location.reload();
-    }
+      // Restart is a fresh pre-parse workspace, even when the user clicked it
+      // from Reporting, Review, or a previously restored mapping session.
+      sessionStorage.setItem("activeTab", "mapperView");
+      const restartUrl = new URL(window.location.href);
+      restartUrl.searchParams.set("view", "mapperView");
+      window.location.assign(restartUrl.toString());
+}
 async function addCustomField() {
       const label = el("customFieldLabel").value.trim();
       if (!label) {

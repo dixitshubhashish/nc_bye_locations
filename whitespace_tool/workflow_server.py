@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime, timezone
+from dataclasses import replace
 from functools import lru_cache
 import hashlib
 import json
@@ -511,8 +512,8 @@ def delete_custom_field(data: dict[str, Any]) -> dict[str, Any]:
     return {"deleted": True, "field_key": field_key, "label": row["label"]}
 
 
-REQUIRED_MAPPER_FIELDS = {"name", "address", "city", "state", "postal_code", "country"}
-REQUIRED_LOCATION_VALUES = ("name", "address", "city", "state", "postal_code", "country")
+REQUIRED_MAPPER_FIELDS = {"name", "address", "city", "state", "postal_code"}
+REQUIRED_LOCATION_VALUES = ("name", "address", "city", "state", "postal_code")
 
 
 def validate_mapper(mapper: dict[str, Any], source_fields: list[str], rows: list[dict[str, Any]]) -> list[str]:
@@ -1706,7 +1707,7 @@ def load_sample_dataset(reset: bool = False) -> dict[str, Any]:
         )
         SELECT
           s.business_id, s.name, s.slug, s.source_type_id, s.description, s.logo_url, s.website_url,
-          s.status, s.created_at, s.updated_at, s.meta_title, s.meta_description, s.country_of_origin,
+          s.status, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), s.meta_title, s.meta_description, s.country_of_origin,
           COALESCE(s.is_reference_data, FALSE), s.reference_key, s.default_source_url, s.default_source_name,
           TRUE AS is_sample_data, '{SAMPLE_BATCH_ID}' AS sample_batch_id, s.content_hash, FALSE AS is_deleted, s.deleted_on
         FROM `{source_project_id}.{source_sample_dataset}.businesses` s
@@ -1729,7 +1730,7 @@ def load_sample_dataset(reset: bool = False) -> dict[str, Any]:
         SELECT
           s.listing_id, s.business_id, s.source_type_id, s.location_key, s.name, s.address, s.city_name,
           s.town, s.state_code, s.province, s.zip_code, s.country, s.latitude, s.longitude,
-          COALESCE(s.first_observed_at, CURRENT_TIMESTAMP()), s.last_observed_at, s.template_id, s.ingestion_id, s.mapping_id,
+          CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), s.template_id, s.ingestion_id, s.mapping_id,
           s.validation_status, COALESCE(s.validated, FALSE) AS validated, CAST(NULL AS TIMESTAMP) AS enriched_at, TRUE AS is_sample_data, '{SAMPLE_BATCH_ID}' AS sample_batch_id, s.franchise_name, s.concept_type,
           s.cuisine_type, s.neighborhood, s.district, s.phone_number, s.website_url, s.google_maps_link,
           s.social_media_handles, s.operating_hours, s.seating_capacity, s.service_types, s.opening_date,
@@ -2114,6 +2115,7 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
             LOWER(TRIM(city)) AS normalized_city_name,
             LOWER(TRIM(COALESCE(state_code, state_name))) AS normalized_state,
             LOWER(TRIM(COALESCE(country_code, country_name))) AS normalized_country,
+            ANY_VALUE(state_code) AS state_code,
             ANY_VALUE(zip_code) AS representative_zip,
             ANY_VALUE(city) AS matched_city,
             ANY_VALUE(state_name) AS matched_state,
@@ -2596,6 +2598,14 @@ def _refresh_silver_background(low_priority: bool = True) -> bool:
                 refresh_error_count("")
             except Exception as count_exc:
                 LOGGER.warning("error_count_refresh_after_background_enrichment_failed error=%s", count_exc)
+            try:
+                # Warm Reporting's Data Quality tab after ingestion/sample
+                # load as part of the same background pipeline. This builds
+                # the SQLite quality cache and today's durable trend point
+                # without making the foreground user action wait.
+                reporting_quality_summary({}, _skip_cache=True)
+            except Exception as quality_exc:
+                LOGGER.warning("quality_reporting_refresh_after_background_enrichment_failed error=%s", quality_exc)
         except Exception as exc:
             LOGGER.warning("reporting_background_silver_refresh_failed error=%s", exc)
         finally:
@@ -2653,6 +2663,30 @@ def _ensure_quality_fix_events_table(client: Any, project_id: str, dataset_id: s
         bigquery.SchemaField(field.name, field.field_type, mode="NULLABLE")
         for field in schema if field.name not in existing_names
     ]
+    if missing:
+        existing.schema = list(existing.schema) + missing
+        client.update_table(existing, ["schema"])
+
+
+def _ensure_reporting_quality_snapshots_table(client: Any, project_id: str, dataset_id: str) -> None:
+    """Create the durable daily quality history used by Reporting trends."""
+    from google.cloud import bigquery
+
+    table_ref = f"{project_id}.{dataset_id}.reporting_quality_snapshots"
+    schema = [
+        bigquery.SchemaField(field["name"], field["type"], mode=field["mode"])
+        for field in TABLE_SCHEMAS["reporting_quality_snapshots"]
+    ]
+    table = bigquery.Table(table_ref, schema=schema)
+    try:
+        existing = client.get_table(table_ref)
+    except Exception as exc:
+        if getattr(exc, "code", None) != 404:
+            raise
+        client.create_table(table)
+        return
+    existing_names = {field.name for field in existing.schema}
+    missing = [field for field in schema if field.name not in existing_names]
     if missing:
         existing.schema = list(existing.schema) + missing
         client.update_table(existing, ["schema"])
@@ -3330,10 +3364,24 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
     cache_key = f"reporting_summary:v3:{json.dumps(params, sort_keys=True)}"
     cached_payload = get_cached_query(cache_key)
     if cached_payload:
-        refresh_started = _refresh_silver_background()
-        cached_payload["reporting_cache"] = "hit"
-        cached_payload["refreshing"] = bool(refresh_started or REPORTING_REFRESHING)
-        return cached_payload
+        cached_totals = cached_payload.get("totals") if isinstance(cached_payload.get("totals"), dict) else {}
+        cached_is_setup_empty = (
+            cached_payload.get("reporting_cache") in {"empty", "zip_base"}
+            or (
+                int(cached_totals.get("total_locations") or 0) == 0
+                and int(cached_totals.get("active_market_locations") or 0) == 0
+                and int(cached_totals.get("total_stores") or 0) == 0
+                and int(cached_totals.get("total_brands") or 0) == 0
+                and not cached_payload.get("map_records")
+            )
+        )
+        if cached_is_setup_empty:
+            invalidate_cache(cache_key)
+        else:
+            refresh_started = _refresh_silver_background()
+            cached_payload["reporting_cache"] = "hit"
+            cached_payload["refreshing"] = bool(refresh_started or REPORTING_REFRESHING)
+            return cached_payload
 
     main_brands = _csv_param(params.get("main_brands", [""])[0])
     raw_competitor_brands = _csv_param(params.get("competitor_brands", [""])[0])
@@ -3377,13 +3425,16 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
             source_table = f"{project_id}.{source_table}"
     except (ImportError, Exception) as init_err:
         LOGGER.warning("bigquery_reporting_fallback reason=%s", init_err)
+        refresh_started = _refresh_silver_background()
         err_text = str(init_err)
         # Suppress raw BigQuery 404 traces when warehouse tables do not exist yet so empty warehouse displays cleanly
         if "404" in err_text and ("not found" in err_text.lower() or "notfound" in err_text.lower()):
             warning = ""
         else:
-            warning = f"Reporting setup incomplete: {init_err}"
-        return _empty_reporting_payload("us_zipcodes_baseline", params, warning)
+            warning = "Reporting data is being prepared. Please refresh shortly."
+        payload = _empty_reporting_payload("us_zipcodes_baseline", params, warning)
+        payload["refreshing"] = bool(refresh_started or REPORTING_REFRESHING)
+        return payload
     table_ref = f"`{source_table}`"
     gold_zip_ref = f"`{gold_ref}.vw_zip_brand_activity`"
     # vw_state_summary/vw_city_summary are grouped by brand_name, so summing
@@ -3807,8 +3858,9 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         filter_options = dict(next(iter(client.query(filter_options_query).result())))
     except Exception as exc:
         if getattr(exc, "code", None) == 404:
+            refresh_started = _refresh_silver_background()
             payload = zip_only_payload("Preparing business data.")
-            set_cached_query(cache_key, payload)
+            payload["refreshing"] = bool(refresh_started or REPORTING_REFRESHING)
             return payload
         raise
 
@@ -4439,6 +4491,8 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
     city = str(params.get("city", [""])[0] or "").strip().lower()
     reason = str(params.get("reason", [""])[0] or "").strip().lower()
     status = str(params.get("status", ["all"])[0] or "all").strip().lower()
+    start_date = str(params.get("start_date", [""])[0] or "").strip()
+    end_date = str(params.get("end_date", [""])[0] or "").strip()
 
     # error_listings is the durable review population and already carries the
     # AI/manual distinction.  Read it in one bounded query and aggregate here;
@@ -4451,8 +4505,12 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
       ON b.business_id = e.business_id AND b.is_deleted IS NOT TRUE
     WHERE e.is_deleted IS NOT TRUE
     """
+    query += " AND (@start_date = '' OR DATE(e.observed_at) >= SAFE_CAST(@start_date AS DATE)) AND (@end_date = '' OR DATE(e.observed_at) <= SAFE_CAST(@end_date AS DATE))"
     try:
-        rows = list(client.query(query).result())
+        rows = list(client.query(query, job_config=bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ScalarQueryParameter("start_date", "STRING", start_date),
+            bigquery.ScalarQueryParameter("end_date", "STRING", end_date),
+        ])).result())
     except Exception as exc:
         if getattr(exc, "code", None) == 404:
             rows = []
@@ -4538,6 +4596,107 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
         LOGGER.warning("quality_mirror_write_failed error=%s", exc)
     total = len(filtered)
     needs_review = sum(1 for row in filtered if not row.get("is_ai_enriched"))
+    history: list[dict[str, Any]] = []
+    coverage_metrics = {
+        "total_records": 0, "zip_completeness_pct": 0.0, "coordinate_completeness_pct": 0.0,
+        "duplicate_rate_pct": 0.0, "stale_records": 0, "entity_resolution_attempts": 0,
+        "entity_resolution_success_rate_pct": 0.0,
+    }
+    try:
+        coverage_query = f"""
+        WITH base AS (
+          SELECT listing_id, business_id, zip_code, latitude, longitude, last_observed_at,
+                 COUNT(*) OVER (PARTITION BY business_id, LOWER(TRIM(address)), zip_code) AS identity_count
+          FROM `{project_id}.{dataset_id}.listings`
+          WHERE is_deleted IS NOT TRUE
+        )
+        SELECT COUNT(*) AS total_records,
+          COUNTIF(NULLIF(TRIM(zip_code), '') IS NOT NULL) AS with_zip,
+          COUNTIF(latitude IS NOT NULL AND longitude IS NOT NULL) AS with_coordinates,
+          COUNTIF(last_observed_at < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)) AS stale_records,
+          COUNTIF(identity_count > 1) AS duplicate_records
+        FROM base
+        """
+        coverage_row = next(iter(client.query(coverage_query).result()), {})
+        total_records = int(coverage_row.get("total_records", 0) or 0)
+        coverage_metrics.update({
+            "total_records": total_records,
+            "zip_completeness_pct": round(int(coverage_row.get("with_zip", 0) or 0) * 100 / total_records, 2) if total_records else 0.0,
+            "coordinate_completeness_pct": round(int(coverage_row.get("with_coordinates", 0) or 0) * 100 / total_records, 2) if total_records else 0.0,
+            "duplicate_rate_pct": round(int(coverage_row.get("duplicate_records", 0) or 0) * 100 / total_records, 2) if total_records else 0.0,
+            "stale_records": int(coverage_row.get("stale_records", 0) or 0),
+        })
+        entity_query = f"""
+        SELECT COUNT(*) AS attempts, COUNTIF(improved IS TRUE) AS successes
+        FROM `{project_id}.{dataset_id}.quality_fix_events`
+        WHERE UPPER(fix_type) = 'AI'
+        """
+        entity_row = next(iter(client.query(entity_query).result()), {})
+        attempts = int(entity_row.get("attempts", 0) or 0)
+        coverage_metrics["entity_resolution_attempts"] = attempts
+        coverage_metrics["entity_resolution_success_rate_pct"] = round(int(entity_row.get("successes", 0) or 0) * 100 / attempts, 2) if attempts else 0.0
+    except Exception as exc:
+        LOGGER.warning("quality_coverage_metrics_failed error=%s", exc)
+    # Keep one durable point per day and scope.  The SQLite quality mirror is
+    # still used for the first paint; this history is only the authoritative
+    # source for time comparisons.
+    try:
+        _ensure_reporting_quality_snapshots_table(client, project_id, dataset_id)
+        scope_key = hashlib.sha256(json.dumps({"brand": brand, "state": state, "city": city, "reason": reason, "status": status}, sort_keys=True).encode("utf-8")).hexdigest()
+        duplicate_records = max(total - len({f"{raw_value(row.get('raw_record'), 'brand')}|{raw_value(row.get('raw_record'), 'zip', 'zip_code')}|{raw_value(row.get('raw_record'), 'address')}" for row in filtered}), 0)
+        snapshot_query = f"""
+        MERGE `{project_id}.{dataset_id}.reporting_quality_snapshots` target
+        USING (SELECT CURRENT_DATE() AS snapshot_date, @scope_key AS scope_key) source
+        ON target.snapshot_date = source.snapshot_date AND target.scope_key = source.scope_key
+        WHEN MATCHED THEN UPDATE SET captured_at = CURRENT_TIMESTAMP(), total_records = @total_records,
+          invalid_records = @invalid_records, needs_manual_review = @needs_manual_review,
+          ai_fixed = @ai_fixed, manual_fixed = @manual_fixed, zip_missing = @zip_missing,
+          coordinates_missing = @coordinates_missing, duplicate_records = @duplicate_records,
+          zip_completeness_pct = @zip_completeness_pct, coordinate_completeness_pct = @coordinate_completeness_pct,
+          duplicate_rate_pct = @duplicate_rate_pct, stale_records = @stale_records,
+          entity_resolution_attempts = @entity_resolution_attempts, entity_resolution_success_rate_pct = @entity_resolution_success_rate_pct,
+          content_hash = @content_hash
+        WHEN NOT MATCHED THEN INSERT (snapshot_date, scope_key, captured_at, total_records, invalid_records,
+          needs_manual_review, ai_fixed, manual_fixed, zip_missing, coordinates_missing, duplicate_records,
+          zip_completeness_pct, coordinate_completeness_pct, duplicate_rate_pct, stale_records,
+          entity_resolution_attempts, entity_resolution_success_rate_pct, content_hash)
+        VALUES (CURRENT_DATE(), @scope_key, CURRENT_TIMESTAMP(), @total_records, @invalid_records,
+          @needs_manual_review, @ai_fixed, @manual_fixed, @zip_missing, @coordinates_missing, @duplicate_records,
+          @zip_completeness_pct, @coordinate_completeness_pct, @duplicate_rate_pct, @stale_records,
+          @entity_resolution_attempts, @entity_resolution_success_rate_pct, @content_hash)
+        """
+        job_config = bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ScalarQueryParameter("scope_key", "STRING", scope_key),
+            bigquery.ScalarQueryParameter("total_records", "INT64", total),
+            bigquery.ScalarQueryParameter("invalid_records", "INT64", total),
+            bigquery.ScalarQueryParameter("needs_manual_review", "INT64", needs_review),
+            bigquery.ScalarQueryParameter("ai_fixed", "INT64", ai_fixed),
+            bigquery.ScalarQueryParameter("manual_fixed", "INT64", manual_fixed),
+            bigquery.ScalarQueryParameter("zip_missing", "INT64", sum("zip" in reason for reason in reason_counts for _ in range(reason_counts[reason]))),
+            bigquery.ScalarQueryParameter("coordinates_missing", "INT64", sum("coordinate" in reason for reason in reason_counts for _ in range(reason_counts[reason]))),
+            bigquery.ScalarQueryParameter("duplicate_records", "INT64", duplicate_records),
+            bigquery.ScalarQueryParameter("content_hash", "STRING", hashlib.sha256(json.dumps({"total": total, "invalid": total, "review": needs_review, "ai": ai_fixed, "manual": manual_fixed}, sort_keys=True).encode("utf-8")).hexdigest()),
+            bigquery.ScalarQueryParameter("zip_completeness_pct", "FLOAT64", coverage_metrics["zip_completeness_pct"]),
+            bigquery.ScalarQueryParameter("coordinate_completeness_pct", "FLOAT64", coverage_metrics["coordinate_completeness_pct"]),
+            bigquery.ScalarQueryParameter("duplicate_rate_pct", "FLOAT64", coverage_metrics["duplicate_rate_pct"]),
+            bigquery.ScalarQueryParameter("stale_records", "INT64", coverage_metrics["stale_records"]),
+            bigquery.ScalarQueryParameter("entity_resolution_attempts", "INT64", coverage_metrics["entity_resolution_attempts"]),
+            bigquery.ScalarQueryParameter("entity_resolution_success_rate_pct", "FLOAT64", coverage_metrics["entity_resolution_success_rate_pct"]),
+        ])
+        client.query(snapshot_query, job_config=job_config).result()
+        history_rows = client.query(
+            f"SELECT snapshot_date, captured_at, total_records, invalid_records, needs_manual_review, ai_fixed, manual_fixed, zip_missing, coordinates_missing, duplicate_records FROM `{project_id}.{dataset_id}.reporting_quality_snapshots` WHERE scope_key = @scope_key ORDER BY snapshot_date DESC LIMIT 400",
+            job_config=bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("scope_key", "STRING", scope_key)]),
+        ).result()
+        for history_row in history_rows:
+            point = dict(history_row)
+            for key, value in point.items():
+                if hasattr(value, "isoformat"):
+                    point[key] = value.isoformat()
+            history.append(point)
+        history.reverse()
+    except Exception as exc:
+        LOGGER.warning("quality_snapshot_write_failed error=%s", exc)
     payload = {
         "scope": "invalid_listings",
         "metrics": {
@@ -4546,11 +4705,13 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
             "ai_fixed": ai_fixed,
             "manual_fixed": manual_fixed,
             "unresolved_rate_pct": round(needs_review * 100 / total, 2) if total else 0.0,
+            **coverage_metrics,
         },
         "reasons": [{"reason": key, "count": value} for key, value in sorted(reason_counts.items(), key=lambda pair: (-pair[1], pair[0]))],
         "brands": [{"brand": key, **value} for key, value in sorted(brand_counts.items(), key=lambda pair: (-pair[1]["invalid"], pair[0]))],
         "states": [{"state": key, "count": value} for key, value in sorted(state_counts.items(), key=lambda pair: (-pair[1], pair[0]))[:25]],
         "cities": [{"city": key, "count": value} for key, value in sorted(city_counts.items(), key=lambda pair: (-pair[1], pair[0]))[:25]],
+        "history": history,
         "filters": {
             "brands": sorted({str(row.get("brand") or "Unknown") for row in rows}),
             "states": sorted({raw_value(row.get("raw_record"), "state", "state_code", "state_name").upper() for row in rows if raw_value(row.get("raw_record"), "state", "state_code", "state_name")}),
@@ -5047,6 +5208,11 @@ def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_inval
             location = normalize_location(row, mapper, source_name, source_index)
             if location is not None:
                 observed_at = location.observed_at
+                if sample_meta.get("is_sample_data"):
+                    # Demo loads represent a new ingestion run. Do not carry
+                    # source-file dates into current reporting snapshots.
+                    observed_at = utc_now_iso()
+                    location = replace(location, observed_at=observed_at)
             if location is None:
                 row_errors.append({
                     "field": "required_location",
@@ -5343,13 +5509,15 @@ def make_handler(ui_dir: Path):
                 try:
                     _json_response(self, 200, reporting_quality_summary(parse_qs(urlsplit(self.path).query)))
                 except Exception as exc:
-                    _json_response(self, 400, {"error": str(exc)})
+                    LOGGER.warning("reporting_quality_request_failed error=%s", exc)
+                    _json_response(self, 400, {"error": "Quality metrics are being prepared. Please refresh shortly."})
                 return
             if self.path.startswith("/api/reporting"):
                 try:
                     _json_response(self, 200, reporting_summary(parse_qs(urlsplit(self.path).query)))
                 except Exception as exc:
-                    _json_response(self, 400, {"error": str(exc)})
+                    LOGGER.warning("reporting_request_failed error=%s", exc)
+                    _json_response(self, 400, {"error": "Reporting data is being prepared. Please refresh shortly."})
                 return
             if self.path.startswith("/api/geo/options"):
                 params = parse_qs(urlsplit(self.path).query)

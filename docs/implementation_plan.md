@@ -1,7 +1,7 @@
-# Implementation Plan: Ingest Sample Locations into Bronze Layer with Resilient Fuzzy Enrichment in Silver Layer
+# Implementation Plan: Competitive Whitespace Data Platform
 
 ## Overview
-Connect the **"Load Sample Dataset"** button directly to the pre-populated `sample_locations` dataset (`source_types`, `businesses`, and `listings`), streaming records into the production Bronze layer (`birdeye_bronze_listings`) alongside real data. All ingested sample records are flagged with `is_sample_data = TRUE`. Following ingestion, the data validation and enrichment pipeline is executed in the backend with error containment, fuzzy alignment (resolving state codes, state names, ZIP codes, and geographic coordinates), and a lightweight/low-priority execution model (`QueryPriority.BATCH` and thread yielding) to ensure it never degrades or stalls active user workflows. Validated and healed records persist into Silver `listings_enriched`, while unresolved records land in `listings_invalid`.
+The tool ingests messy brand/location sources, maps them into a shared location model, validates and enriches them, sends invalid rows to review, and powers competitive whitespace reporting. The current architecture uses BigQuery as the authoritative warehouse and persistent SQLite mirrors for fast local reads, startup readiness, reporting payloads, review counters, ZIP/worldwide-city lookups, and background repair state.
 
 ---
 
@@ -9,26 +9,22 @@ Connect the **"Load Sample Dataset"** button directly to the pre-populated `samp
 
 ```
 ┌────────────────────────────────────────┐
-│  sample_locations (Source Sample DB)   │
-│  - source_types                        │
-│  - businesses (1,000 brands)           │
-│  - listings (22,500 records)           │
+│  Source Adapters / Demo Sources        │
+│  CSV, Excel, JSON, XML, GET API, Python│
 └──────────────────┬─────────────────────┘
                    │
-                   ▼ [Load Sample Dataset Button /api/sample/load]
+                   ▼ [Parse <= 50 for mapping, save full source]
 ┌────────────────────────────────────────────────────────┐
-│  birdeye_bronze_listings (Bronze Layer)                │
-│  - Real data (is_sample_data IS NOT TRUE)              │
-│  - Ingested Sample data (is_sample_data = TRUE)        │
+│  Shared Warehouse Tables                               │
+│  businesses, source_types, workflow_templates, listings│
+│  error_listings, us_zipcodes, quality_fix_events       │
 └──────────────────┬─────────────────────────────────────┘
                    │
-                   ▼ [Background Resilient & Low-Priority Fuzzy Enrichment]
+                   ▼ [Validation, enrichment, mirrors, reporting]
 ┌────────────────────────────────────────────────────────┐
-│  birdeye_silver_listings (Silver Layer)                │
-│  - zip_reference (demographics + geo centroids)        │
-│  - listings_enriched (valid & fuzzy-healed records)    │
-│  - listings_invalid (unresolved / bad data with reason)│
-│  - vw_brand_location_top10 & vw_brand_zip_income       │
+│  Reporting + Review                                    │
+│  valid/enriched listings, invalid review rows, gaps,   │
+│  quality metrics, background automatic repair          │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -36,61 +32,46 @@ Connect the **"Load Sample Dataset"** button directly to the pre-populated `samp
 
 ## Implemented Components
 
-### 1. Backend Ingestion Workflow (`whitespace_tool/workflow_server.py`)
-- **`load_sample_dataset(reset: bool = False)`**:
-  - Targets source dataset `sample_locations` (project `keen-device-610`).
-  - **Preserves Real Data**: Existing real records (`is_sample_data IS NOT TRUE`) are never touched. Only sample data is cleaned on reset (`DELETE FROM ... WHERE is_sample_data IS TRUE`).
-  - **Ingests `source_types`**: Copies source types using `SAFE.PARSE_JSON(s.data_format)` preserving relational integrity.
-  - **Ingests `businesses`**: Ingests all 1,000 businesses from `sample_locations.businesses` with `is_sample_data = TRUE` and `sample_batch_id = 'sample_dataset_v1'`.
-  - **Ingests `listings`**: Ingests all 22,500 listings from `sample_locations.listings` across all 38 mapped canonical fields (51 total columns) with `is_sample_data = TRUE`.
-  - **Non-blocking Dispatch**: Initiates background medallion refresh and returns an immediate response with record counts to the UI.
+### 1. Source Mapping Workflow
+- Source-specific parsing lives under `whitespace_tool/source_adapters`.
+- The mapper previews a small sample for field detection and mapping UX, then save reloads and processes the full source.
+- Required fields are always visible and ordered first. Optional fields can be auto-detected or manually added to the mapping.
+- Brands and source formats are independent; a brand can use different formats over its lifetime.
 
 ---
 
-### 2. Validation & Fuzzy Enrichment Engine (`build_silver_layer()`)
-- **Fuzzy Alignment Logic in Silver Staging**:
-  1. **State Code & State Name Alignment**:
-     - Translates full state names ("California" -> "CA", "Texas" -> "TX", etc.) via a standard BigQuery mapping expression.
-     - Automatically falls back to verified ZIP reference state codes if `state_code` is missing or mismatched.
-  2. **ZIP Code Normalization & Fuzzy Resolution**:
-     - Extracts 5-digit postal codes via `REGEXP_EXTRACT(CAST(zip_code AS STRING), r'(\d{5})')`.
-     - For missing/alphanumeric/foreign ZIPs:
-       - Uses `city_geos` to match city and state to representative city centroids.
-  3. **Coordinate Fallback & Healing**:
-     - Level 1: `source_listing` (confidence 1.0)
-     - Level 2: `zip_centroid` (confidence 0.75)
-     - Level 3: `city_state_centroid` (confidence 0.55)
-     - Level 4: `unresolved` (routed to `listings_invalid` with reason `unresolved_coordinates`).
-  4. **Strict Partitioning into Silver Tables**:
-     - `listings_enriched`: Valid records + fuzzy-healed records.
-     - `listings_invalid`: Records failing mandatory criteria with explicit `rejection_reason` (e.g. `missing_brand`, `missing_address`, `unresolved_coordinates`).
-  5. **Backend Error Containment**:
-     - Wrapped in exception guards so errors never surface to the app level as 400/500 failures.
+### 2. Validation & Fuzzy Enrichment
+- Mandatory validation checks brand/business, location name, address, city, state, ZIP, and country.
+- Invalid rows go to Review Error Listings instead of blocking good rows.
+- `whitespace_tool/geo_enrichment.py` normalizes city/state/country text, detects inverted latitude/longitude, realigns ZIPs from city/state when appropriate, and uses nearest cached city/ZIP/worldwide city for coordinate repair.
+- Automatic review repair is intentionally lightweight. It works from a persisted SQLite queue, claims a tiny batch, records AI/manual fix events, and updates review/reporting counters.
 
 ---
 
-### 3. Lightweight & Low-Priority Execution Model
-- **BigQuery Batch Priority**:
-  - DDL/DML queries execute with `bigquery.QueryJobConfig(priority=bigquery.QueryPriority.BATCH)` when `low_priority=True`.
-  - Batch queries do not consume interactive query concurrency slots and queue behind interactive workloads in GCP BigQuery.
-- **Thread Yielding & Resource Throttling**:
-  - Inter-query pauses (`sleep(0.05)`) between query stages in [`build_silver_layer(low_priority=True)`](file:///Users/shubhashish/nc_bye_locations/whitespace_tool/workflow_server.py) allow the background thread to regularly release CPU and GIL to active HTTP requests.
-- **Default Low-Priority Triggers**:
-  - Background refresh triggered by "Load Sample Dataset" and hourly scheduled ticks run with `low_priority=True`.
-  - The `/api/silver/enrich` endpoint accepts an optional `{"low_priority": true}` parameter.
+### 3. Reporting
+- Location Intelligence & Whitespace tab: primary/competitor brands, geography filters, demographics filters, active location KPIs, state/city distributions, ZIP gaps, sample records, and Leaflet map markers.
+- Data Quality & Improvements tab: invalid listings, manual review queue, automatic/manual fixes, unresolved rate, issue categories, impacted brands, impacted states/cities, and reconciliation notes.
+- Data Quality also reports ZIP and coordinate completeness, duplicate rate, stale records, entity-resolution attempts/success, durable daily snapshot history, and period comparisons.
+- Reporting reads SQLite mirrors first where possible, then falls back to live warehouse queries and refreshes mirrors silently.
 
 ---
 
-## Verification & Validation Results
+## Assessment Coverage
 
-### BigQuery Live Dataset Status
-- **Bronze Layer (`birdeye_bronze_listings`)**:
-  - Real Data (`is_sample_data IS NOT TRUE`): **13,925** listings across 5 businesses (unaltered).
-  - Ingested Sample Data (`is_sample_data = TRUE`): **22,500** listings across 1,000 businesses.
-- **Silver Layer (`birdeye_silver_listings`)**:
-  - `listings_enriched`: **22,099** records validated and fuzzy-healed across 54 states/territories.
-  - `listings_invalid`: **9** records routed with explicit rejection reasons.
+| Requirement | Current coverage | Remaining gap |
+| --- | --- | --- |
+| Change brands without rewrite | Brand registry, templates, mapper, reporting filters | Demo metadata needs occasional reconciliation with UI demos |
+| Change geography | State/county/city/ZIP filters and config geography | Metro-area abstraction is not first-class yet |
+| Change metrics | `config/demo.json` controls similarity metrics | Run-over-run metric snapshots not built |
+| Separate source-specific logic | Source adapters and workflow templates | `workflow_server.py` still centralizes too many orchestration concerns |
+| Visible upstream/source failures | Parse errors, review table, quality tab, dismissible warnings | Browser smoke coverage should prove all states |
+| Provenance/observed timestamps | Content hashes, source metadata, observed timestamps | No historical diff/snapshot table yet |
+| Larger-volume behavior | 50-row parse sample, full-source save, mirrors, background repair | Need sustained load test beyond unit coverage |
 
-### Automated Unit Tests
-- Full test suite: **137 unit tests ran in 66.5s, 0 failures, 0 errors**.
-- Dedicated tests in `unit_tests/test_silver_enrichment.py` verify BigQuery batch priority and background low-priority dispatch.
+## Current Risk Register
+
+- `workflow_server.py` is still the main coupling point and should be split after the current stabilization window.
+- Mapping label drift exists: listing `name` is currently labeled `Brand Name` in mapper config, while brand/business is a separate object.
+- The active Python schema is ahead of older SQL files, so generated schemas should be treated as authoritative until SQL artifacts are regenerated.
+- Quality reporting combines current active invalid rows with persisted fix counters; reconciliation must be watched whenever rows are soft-deleted from review.
+- Authenticated browser smoke testing should be the next confidence step before calling the app stable.

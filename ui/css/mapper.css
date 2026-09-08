@@ -1,0 +1,157 @@
+#mapperView #sourceControlsPanel,
+#mapperView #preParseBrandPanel,
+#mapperView #preParseParserHost,
+#mapperView #newBrandFields,
+#mapperView #templateComponentsPanel,
+#mapperView #optionalFieldsPanel {
+  font-size: 16px;
+}
+
+#mapperView #sourceControlsPanel label,
+#mapperView #preParseBrandPanel label,
+#mapperView #preParseParserHost label,
+#mapperView #newBrandFields label,
+#mapperView #templateComponentsPanel label,
+#mapperView #optionalFieldsPanel label {
+  font-size: 14px;
+}
+
+#mapperView #sourceControlsPanel input,
+#mapperView #sourceControlsPanel select,
+#mapperView #sourceControlsPanel textarea,
+#mapperView #preParseBrandPanel input,
+#mapperView #preParseBrandPanel select,
+#mapperView #preParseBrandPanel textarea,
+#mapperView #preParseParserHost input,
+#mapperView #preParseParserHost select,
+#mapperView #preParseParserHost textarea,
+#mapperView #newBrandFields input,
+#mapperView #newBrandFields select,
+#mapperView #newBrandFields textarea,
+#mapperView #templateComponentsPanel select,
+#mapperView #optionalFieldsPanel select {
+  font-size: 16px;
+}
+
+#mapperView #sourceControlsPanel button,
+#mapperView #preParseBrandPanel button,
+#mapperView #preParseParserHost button,
+#mapperView #newBrandFields button,
+#mapperView #templateComponentsPanel button,
+#mapperView #optionalFieldsPanel button {
+  font-size: 14px;
+}
+
+#mapperView .pre-parse-brand-validation {
+  font-size: 14px;
+}
+
+#mapperView #sourceControlsPanel input,
+#mapperView #sourceControlsPanel select,
+#mapperView #sourceControlsPanel textarea,
+#mapperView #preParseBrandPanel input,
+#mapperView #preParseBrandPanel select,
+#mapperView #preParseBrandPanel textarea,
+#mapperView #preParseParserHost input,
+#mapperView #preParseParserHost select,
+#mapperView #preParseParserHost textarea,
+#mapperView #newBrandFields input,
+#mapperView #newBrandFields select,
+#mapperView #newBrandFields textarea {
+  min-height: 38px;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+#mapperView #newBrandDescription,
+#mapperView #newBrandMetaDescription {
+  min-height: 38px;
+  height: 38px;
+  max-height: 140px;
+  overflow-y: hidden;
+  resize: vertical;
+  line-height: 1.35;
+}
+
+#mapperView #newBrandFields.brand-edit-modal.is-open {
+  position: fixed;
+  inset: 50% auto auto 50%;
+  z-index: 1200;
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(720px, calc(100vh - 32px));
+  overflow-y: auto;
+  transform: translate(-50%, -50%);
+  margin: 0;
+  padding: 22px;
+  background: #ffffff;
+  border: 1px solid #b9d1f2;
+  border-top: 4px solid var(--accent);
+  border-radius: 8px;
+  box-shadow: 0 24px 70px rgba(11, 112, 240, 0.18);
+}
+
+#mapperView #newBrandFields.brand-edit-modal.is-open::before {
+  content: "";
+  position: fixed;
+  inset: 50% auto auto 50%;
+  width: 100vw;
+  height: 100vh;
+  transform: translate(-50%, -50%);
+  z-index: -1;
+  background: rgba(239, 246, 255, 0.82);
+}
+
+#mapperView #newBrandFields.brand-edit-modal.is-open .brand-edit-heading {
+  display: block;
+  color: var(--navy);
+}
+
+#mapperView.pre-parse-active #newBrandFields.brand-edit-modal.is-open {
+  position: static;
+  inset: auto;
+  z-index: auto;
+  width: auto;
+  max-height: none;
+  overflow: visible;
+  transform: none;
+  margin: 16px 0 0;
+  padding: 16px;
+  box-shadow: 0 4px 14px rgba(11, 112, 240, 0.08);
+}
+
+#mapperView.pre-parse-active #newBrandFields.brand-edit-modal.is-open::before {
+  display: none;
+}
+
+#mapperView .pre-parse-brand-panel .brand-mode-choice {
+  align-items: center;
+  row-gap: 8px;
+}
+
+#mapperView .pre-parse-brand-panel .brand-mode-choice label,
+#mapperView .python-function-options label {
+  white-space: normal;
+  line-height: 1.35;
+}
+
+#mapperView main.pre-parse-layout > aside,
+#mapperView main.pre-parse-layout > section {
+  min-width: 0;
+}
+
+@media (max-width: 1100px) {
+  #mapperView main.pre-parse-layout {
+    grid-template-columns: minmax(300px, 42%) minmax(0, 58%);
+  }
+}
+
+@media (max-width: 900px) {
+  #mapperView main.pre-parse-layout {
+    grid-template-columns: 1fr;
+  }
+
+  #mapperView #preParseBrandPanel,
+  #mapperView #preParseParserHost {
+    padding: 16px;
+  }
+}

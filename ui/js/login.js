@@ -16,7 +16,10 @@ function setStatus(targetId, message, type = "", options = {}) {
   const target = el(targetId);
   if (!target) return;
   target.className = `status ${type}`.trim();
-  target.textContent = message;
+  const messageNode = document.createElement("span");
+  messageNode.className = "status-message";
+  messageNode.textContent = message;
+  target.replaceChildren(messageNode);
   if (["warn", "warning", "error"].includes(String(type).toLowerCase())) {
     const close = document.createElement("button");
     close.type = "button";
@@ -63,7 +66,11 @@ function setReferenceLoadingMessage() {
   const target = el("loginReadinessStatus");
   if (!target) return;
   target.className = "status";
-  target.innerHTML = `${busyMarkup("Loading US ZIP data for you")} You can still sign in while reference data syncs.`;
+  target.replaceChildren();
+  const messageNode = document.createElement("span");
+  messageNode.className = "status-message";
+  messageNode.innerHTML = `${busyMarkup("Loading US ZIP data for you")} You can still sign in while reference data syncs.`;
+  target.appendChild(messageNode);
 }
 
 function setButtonBusy(button, label = "Loading") {

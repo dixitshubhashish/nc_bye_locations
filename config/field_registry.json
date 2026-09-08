@@ -4,7 +4,7 @@
   {"key":"city","table":"listings","field":"city_name","label":"City","type":"string","required":true,"hints":["city","town"]},
   {"key":"state","table":"listings","field":"state_code","label":"State","type":"string","required":true,"hints":["state","region","province","state_code"]},
   {"key":"postal_code","table":"listings","field":"zip_code","label":"ZIP Code","type":"string","required":true,"hints":["zip","zipcode","zip_code","postalcode","postal_code"]},
-  {"key":"country","table":"listings","field":"country","label":"Country","type":"string","required":true,"hints":["country","countrycode"]},
+  {"key":"country","table":"listings","field":"country","label":"Country","type":"string","required":false,"hints":["country","countrycode"]},
   {"key":"location_id","table":"listings","field":"location_key","label":"Store ID","type":"string","required":false,"hints":["locationid","storeid","store_id","id","number"]},
   {"key":"town","table":"listings","field":"town","label":"Town","type":"string","required":false,"hints":["town","locality"]},
   {"key":"state_code","table":"listings","field":"state_code","label":"State Code","type":"string","required":false,"hints":["state_code","statecode","st","state_abbr","state_abbreviation","short_state"]},

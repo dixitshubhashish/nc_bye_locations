@@ -54,6 +54,14 @@ class SampleDataTests(unittest.TestCase):
         with patch.dict("os.environ", {"APP_ENV": "production", "ENABLE_SAMPLE_DATA_LOADER": "true"}, clear=True):
             self.assertTrue(_sample_loader_enabled())
 
+    def test_sample_ingestion_stamps_current_business_and_listing_dates(self) -> None:
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parents[1] / "whitespace_tool" / "workflow_server.py").read_text()
+        self.assertIn("s.status, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()", source)
+        self.assertIn("CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), s.template_id", source)
+        self.assertIn("location = replace(location, observed_at=observed_at)", source)
+
 
 if __name__ == "__main__":
     unittest.main()

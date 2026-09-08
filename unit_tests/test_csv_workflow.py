@@ -497,30 +497,32 @@ class CsvWorkflowTests(unittest.TestCase):
         self.assertTrue(any(e["field"] == "annual_revenue" for e in errs_rev))
         self.assertIn("negative monetary amount", [e["reason"] for e in errs_rev])
 
-    def test_country_mandatory_field_and_registry_ordering(self) -> None:
-        """Verify country is mandatory, required fields are at the top of field registry, and country_code is optional."""
+    def test_country_optional_field_and_registry_ordering(self) -> None:
+        """Verify country is optional while core location fields remain required."""
         registry = load_field_registry()
         required_fields = [f for f in registry if f.get("required") is True]
         required_keys = [f["key"] for f in required_fields]
         
         # Verify required fields order at the top of registry
-        self.assertEqual(required_keys, ["name", "address", "city", "state", "postal_code", "country"])
+        self.assertEqual(required_keys, ["name", "address", "city", "state", "postal_code"])
         self.assertEqual([registry[i]["key"] for i in range(len(required_keys))], required_keys)
         
-        # Verify country_code is present and optional
+        # Verify country and country_code are present and optional
+        country_def = next(f for f in registry if f["key"] == "country")
+        self.assertFalse(country_def.get("required", False))
         country_code_def = next(f for f in registry if f["key"] == "country_code")
         self.assertFalse(country_code_def.get("required", False))
 
-        # Verify REQUIRED_MAPPER_FIELDS contains country
-        self.assertIn("country", REQUIRED_MAPPER_FIELDS)
+        # Verify REQUIRED_MAPPER_FIELDS does not contain country
+        self.assertNotIn("country", REQUIRED_MAPPER_FIELDS)
 
-        # Verify missing country in location fails validation
+        # Verify missing country in location does not fail field validation
         location = normalize_location(VALID_ROW, VALID_MAPPER, "example_csv", 0)
         self.assertIsNotNone(location)
         import dataclasses
         loc_missing_country = dataclasses.replace(location, country="")
         errors = validate_normalized_location(loc_missing_country, registry)
-        self.assertTrue(any(e["field"] == "country" for e in errors))
+        self.assertFalse(any(e["field"] == "country" for e in errors))
 
 
 if __name__ == "__main__":

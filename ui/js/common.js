@@ -228,8 +228,7 @@ function switchView(viewId) {
       document.querySelectorAll("[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === viewId));
       ["mapperView", "reportingView", "reviewView", "templateLibraryView"].forEach((id) => el(id).classList.toggle("hidden", id !== viewId));
       el("appShell").querySelector("header").classList.toggle("reporting-active", viewId === "reportingView");
-      if (el("restartMappingBtn")) el("restartMappingBtn").classList.toggle("hidden", viewId !== "mapperView");
-      if (el("resetMappingBtn")) el("resetMappingBtn").classList.toggle("hidden", viewId !== "mapperView");
+      if (viewId === "mapperView" && typeof renderMappings === "function") renderMappings();
       if (viewId === "reportingView" && !reportLoaded) loadReporting();
       if (viewId === "templateLibraryView" && !templateLibraryLoaded) loadTemplateFilters().then(loadTemplateLibrary);
       if (viewId === "reviewView") {
@@ -358,6 +357,11 @@ async function loadAppData() {
       // Template records are intentionally fetched only after authentication
       // and app initialization, so the library tab opens instantly later.
       if (typeof loadTemplateLibrary === "function") await loadTemplateLibrary();
+      // Apply the initial mapper layout even when there is no saved draft.
+      // Without this, the pre-parse split workspace remains only in its HTML
+      // fallback state until the first mapping interaction.
+      if (typeof renderMappings === "function") renderMappings();
+      if (typeof updateOutput === "function") updateOutput();
 }
 
 function enableSortableTable(table) {

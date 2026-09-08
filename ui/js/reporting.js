@@ -5,6 +5,7 @@ let reportingBrands = [];
 let competitorDefaultsAppliedForMainBrand = null;
 let enrichmentStatusTimer = null;
 let reportingAutoRefreshTimer = null;
+let reportingWarmupTimer = null;
 
 const canonicalBrandMap = new Map();
 const canonicalToRawMap = new Map();
@@ -70,7 +71,6 @@ function formatBrandList(value) {
     .filter(Boolean)
     .join(" ~ ");
 }
-
 
 function renderEmptyReportingStructure() {
       el("reportContent").classList.remove("hidden");
@@ -140,6 +140,21 @@ function renderEmptyReportingStructure() {
         { key: "country", label: "Country" },
         { key: "last_observed_at", label: "Last Updated" }
       ], []);
+    }
+
+function reportHasBusinessData(totals = {}) {
+      return Number(totals.total_stores || 0) > 0
+        || Number(totals.total_brands || 0) > 0
+        || Number(totals.active_market_locations || 0) > 0;
+    }
+
+function scheduleReportingWarmupPoll(delayMs = 5000) {
+      if (reportingWarmupTimer) return;
+      reportingWarmupTimer = window.setTimeout(() => {
+        reportingWarmupTimer = null;
+        if (document.getElementById("reportingView")?.classList.contains("hidden")) return;
+        loadReporting({ interactive: false });
+      }, delayMs);
     }
 function checkedValues(name) {
       return [...document.querySelectorAll(`input[name="${name}"]:checked`)].map((input) => input.value);
@@ -253,7 +268,9 @@ let cityCirclesLayerGroup = null;
 let pinMarkersLayerGroup = null;
 let gapMarkersLayerGroup = null;
 let staticMapZoom = 1;
-const DEFAULT_US_MAP_VIEW = { center: [39.8283, -98.5795], zoom: 4 };
+// Keep the complete contiguous US in view, with enough scale to read the
+// state-level layer without opening on an overly distant national view.
+const DEFAULT_US_MAP_VIEW = { center: [39.8283, -98.5795], zoom: 5 };
 const DEFAULT_US_BOUNDS = [[24.3963, -125.0], [49.3844, -66.9346]];
 const stateNameToCode = {
       Alabama: "AL", Alaska: "AK", Arizona: "AZ", Arkansas: "AR", California: "CA", Colorado: "CO", Connecticut: "CT", Delaware: "DE",
@@ -1038,6 +1055,7 @@ async function loadGeoOptions() {
       } catch (err) {}
     }
 let zipTypeaheadTimer = null;
+let zipTypeaheadRequestId = 0;
 function setupZipTypeahead() {
       const zipInput = el("reportZipFilter");
       const datalist = el("zipSuggestions");
@@ -1046,7 +1064,11 @@ function setupZipTypeahead() {
       zipInput.addEventListener("input", () => {
         clearTimeout(zipTypeaheadTimer);
         const query = zipInput.value.trim();
-        if (query.length < 2) return;
+        const requestId = ++zipTypeaheadRequestId;
+        if (!query) {
+          datalist.innerHTML = "";
+          return;
+        }
         zipTypeaheadTimer = setTimeout(async () => {
           const state = el("reportStateFilter")?.value || "";
           const county = el("reportCountyFilter")?.value || "";
@@ -1054,6 +1076,7 @@ function setupZipTypeahead() {
           try {
             const resp = await fetch(`/api/zips/search?q=${encodeURIComponent(query)}&state=${encodeURIComponent(state)}&county=${encodeURIComponent(county)}&city=${encodeURIComponent(city)}`);
             const data = await resp.json();
+            if (requestId !== zipTypeaheadRequestId) return;
             if (resp.ok && data.zips) {
               datalist.innerHTML = data.zips.map((z) => `<option value="${escapeHtml(z.zip_code)}">${escapeHtml(z.zip_code)} - ${escapeHtml(z.city_name)}, ${escapeHtml(z.state_name || stateCodeToName[z.state_code] || "")} (Pop: ${formatNumber(z.population)})</option>`).join("");
             }
@@ -1217,11 +1240,24 @@ async function loadReporting({ interactive = false } = {}) {
         syncReportingFilters(result);
         el("reportContent").classList.remove("hidden");
         const totals = result.totals || {};
+        const hasBusinessData = reportHasBusinessData(totals);
         if (result.warning && !result.refreshing) {
           status.className = "report-status";
           status.textContent = result.warning;
+        } else if (result.refreshing && !hasBusinessData) {
+          status.className = "report-status loading";
+          status.innerHTML = '<span class="spinner"></span> Preparing reporting data...';
+          scheduleReportingWarmupPoll(3000);
+        } else if (interactive && result.refreshing) {
+          status.className = "report-status loading";
+          status.innerHTML = '<span class="spinner"></span> Refreshing report in the background...';
+          scheduleReportingWarmupPoll(10000);
         } else {
           status.classList.add("hidden");
+          if (reportingWarmupTimer && hasBusinessData) {
+            clearTimeout(reportingWarmupTimer);
+            reportingWarmupTimer = null;
+          }
         }
 
         // Correct real metrics mapping
@@ -1469,15 +1505,15 @@ async function loadReporting({ interactive = false } = {}) {
           { key: "last_observed_at", label: "Last Updated" }
         ], currentSampleRecords);
 
-        if (interactive) status.classList.add("hidden");
+        if (interactive && !result.refreshing && hasBusinessData) status.classList.add("hidden");
         el("reportContent").classList.remove("hidden");
         reportLoaded = true;
       } catch (error) {
         renderEmptyReportingStructure();
-        if (interactive) {
-          status.className = "report-status";
-          status.textContent = productSafeError(error.message, "Could not load reporting data.");
-        }
+        status.className = "report-status";
+        status.textContent = productSafeError(error.message, "No reporting records found for the current filters.");
+        scheduleReportingWarmupPoll(3000);
+        reportLoaded = false;
       } finally {
         if (interactive) {
           clearButtonBusy(refreshBtn, previousRefreshBtn);
@@ -1489,6 +1525,41 @@ async function loadReporting({ interactive = false } = {}) {
           if (document.getElementById("reportingView")?.classList.contains("hidden")) return;
           loadReporting({ interactive: false });
         }, 60000);
+      }
+}
+
+async function refreshReportingNow() {
+      const status = el("reportStatus");
+      const refreshBtn = el("refreshReportBtn");
+      const previousRefreshBtn = setButtonBusy(refreshBtn, "Starting Refresh");
+      if (status) {
+        status.className = "report-status loading";
+        status.innerHTML = '<span class="spinner"></span> Starting report refresh...';
+      }
+      try {
+        const response = await fetch("/api/reporting/refresh", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ low_priority: true })
+        });
+        let result = {};
+        try { result = await response.json(); } catch (_) {}
+        if (!response.ok) throw new Error(result.error || "Could not start report refresh.");
+        if (status) {
+          status.className = "report-status loading";
+          status.innerHTML = result.started === false
+            ? '<span class="spinner"></span> Report refresh is already running...'
+            : '<span class="spinner"></span> Report refresh started. Updating numbers...';
+        }
+        reportLoaded = false;
+        await loadReporting({ interactive: true });
+      } catch (error) {
+        if (status) {
+          status.className = "report-status";
+          status.textContent = productSafeError(error.message, "Could not refresh the report right now.");
+        }
+      } finally {
+        clearButtonBusy(refreshBtn, previousRefreshBtn);
       }
 }
 

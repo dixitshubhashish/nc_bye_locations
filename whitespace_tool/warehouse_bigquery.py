@@ -319,6 +319,26 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
         {"name": "created_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
     ],
+    "reporting_quality_snapshots": [
+        {"name": "snapshot_date", "type": "DATE", "mode": "REQUIRED"},
+        {"name": "scope_key", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "captured_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
+        {"name": "total_records", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "invalid_records", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "needs_manual_review", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "ai_fixed", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "manual_fixed", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "zip_missing", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "coordinates_missing", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "duplicate_records", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "zip_completeness_pct", "type": "FLOAT", "mode": "REQUIRED"},
+        {"name": "coordinate_completeness_pct", "type": "FLOAT", "mode": "REQUIRED"},
+        {"name": "duplicate_rate_pct", "type": "FLOAT", "mode": "REQUIRED"},
+        {"name": "stale_records", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "entity_resolution_attempts", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "entity_resolution_success_rate_pct", "type": "FLOAT", "mode": "REQUIRED"},
+        {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
+    ],
 }
 
 # Intentionally empty: listings/error_listings were time-partitioned, but
