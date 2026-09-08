@@ -671,18 +671,22 @@
       background: #f8fafc;
     }
     .btn-download-excel {
-      font-size: 12px;
-      padding: 7px 16px;
-      border-radius: 6px;
+      font-size: 14px;
+      padding: 12px 18px;
+      min-height: 44px;
+      border-radius: 7px;
       display: inline-flex;
       align-items: center;
+      justify-content: center;
       gap: 6px;
       cursor: pointer;
       font-weight: 600;
+      white-space: nowrap;
       border: 1px solid var(--line);
       background: #ffffff;
       color: var(--ink);
       transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+      box-sizing: border-box;
     }
     .btn-download-excel:hover {
       background: #f1f5f9;
@@ -2539,8 +2543,11 @@ result = [
             <p>Locations, markets, and gaps.</p>
           </div>
           <div class="report-hero-actions">
-            <div style="display: flex; gap: 10px; align-items: center;">
+            <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
               <button id="refreshReportBtn" type="button">Refresh Report</button>
+              <button id="downloadSampleCsvBtn" class="btn-download-excel hidden" type="button">
+                <span id="downloadSampleCsvIcon">📥</span> <span id="downloadSampleCsvText">Download Excel</span>
+              </button>
               <div class="sample-load-actions">
                 <button class="sample-load-link danger hidden" id="clearSampleDatasetLink" type="button">Clear Sample Data</button>
               </div>
@@ -2726,16 +2733,9 @@ result = [
               </section>
 
               <!-- Full filtered reporting export; available only with a primary brand. -->
-              <section class="report-section" style="max-width: 100%;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
-                  <div>
-                    <h2 style="margin: 0;">Location Records Sample</h2>
-                    <p style="margin: 4px 0 0; color: var(--muted); font-size: 12px;">Browse sample records with horizontal scroll, or download full 2-sheet datasets across brands.</p>
-                  </div>
-                  <button id="downloadSampleCsvBtn" class="btn-download-excel hidden" type="button">
-                    <span id="downloadSampleCsvIcon">📥</span> <span id="downloadSampleCsvText">Download Excel</span>
-                  </button>
-                </div>
+              <section class="report-section" style="max-width: 100%; overflow: visible;">
+                <h2 style="margin: 0 0 4px;">Location Records Sample</h2>
+                <p style="margin: 0 0 12px; color: var(--muted); font-size: 12px;">Browse sample records with horizontal scroll. Use <strong>Download Excel</strong> (top right) for full 2-sheet export across all brands.</p>
                 <div class="table-scroll-container">
                   <div id="reportSampleRecords"></div>
                 </div>

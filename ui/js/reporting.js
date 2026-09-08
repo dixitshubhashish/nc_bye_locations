@@ -1180,41 +1180,67 @@ function setupSampleRecordsDownload() {
   if (!btn || btn.dataset.initialized === "true") return;
   btn.dataset.initialized = "true";
 
-  btn.addEventListener("click", () => {
-    if (!currentSampleRecords || !currentSampleRecords.length) {
-      alert("No sample records available to download for the current filters.");
-      return;
+  btn.addEventListener("click", async () => {
+    const icon = el("downloadSampleCsvIcon");
+    const text = el("downloadSampleCsvText");
+
+    // Guard: already in loading state
+    if (btn.classList.contains("loading")) return;
+
+    // Show red loading state
+    btn.classList.add("loading");
+    btn.disabled = true;
+    if (icon) icon.textContent = "⏳";
+    if (text) text.textContent = "Preparing Excel…";
+
+    try {
+      const queryString = reportingQueryString();
+      const url = `/api/reporting/export-excel${queryString ? `?${queryString}` : ""}`;
+      const response = await fetch(url);
+      if (!response.ok) {
+        const errJson = await response.json().catch(() => ({}));
+        throw new Error(errJson.error || `Export failed (${response.status})`);
+      }
+
+      // Derive filename from Content-Disposition header or fallback
+      let filename = "whitespace_locations.xlsx";
+      const cd = response.headers.get("Content-Disposition");
+      if (cd) {
+        const match = cd.match(/filename\*?=(?:UTF-8'')?["']?([^"';\r\n]+)["']?/i);
+        if (match) filename = decodeURIComponent(match[1].trim());
+      }
+
+      const blob = await response.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(blobUrl);
+
+      // Flip to green "ready" state
+      btn.classList.remove("loading");
+      btn.classList.add("ready");
+      if (icon) icon.textContent = "✅";
+      if (text) text.textContent = "Excel Download is Ready";
+
+      // Reset button after 4 s
+      setTimeout(() => {
+        btn.classList.remove("ready");
+        btn.disabled = false;
+        if (icon) icon.textContent = "📥";
+        if (text) text.textContent = "Download Excel";
+      }, 4000);
+
+    } catch (err) {
+      btn.classList.remove("loading");
+      btn.disabled = false;
+      if (icon) icon.textContent = "📥";
+      if (text) text.textContent = "Download Excel";
+      alert(`Excel export failed: ${err.message}`);
     }
-    const headers = ["Name", "Street", "City", "State", "County", "Zip Code", "Phone", "Latitude", "Longitude", "Country", "Last Updated"];
-    const rows = currentSampleRecords.map((r) => [
-      r.name || "",
-      r.address || "",
-      r.city || "",
-      r.state_name || r.state || "",
-      r.county || "",
-      r.zip_code || "",
-      r.phone_number || "",
-      r.latitude != null ? String(r.latitude) : "",
-      r.longitude != null ? String(r.longitude) : "",
-      r.country || "",
-      r.last_observed_at || ""
-    ]);
-
-    const csvContent = [
-      headers.map((h) => `"${h.replace(/"/g, '""')}"`).join(","),
-      ...rows.map((row) => row.map((val) => `"${String(val).replace(/"/g, '""')}"`).join(","))
-    ].join("\r\n");
-
-    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    const timestamp = new Date().toISOString().slice(0, 10);
-    link.setAttribute("href", url);
-    link.setAttribute("download", `location_records_sample_${timestamp}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
   });
 }
 
