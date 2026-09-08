@@ -80,6 +80,9 @@ class BigQueryBootstrapTests(unittest.TestCase):
             calls.append("quality")
             return {"metrics": {"invalid_listings": 0}}
 
+        for thread in threading.enumerate():
+            if thread.name == "reporting-silver-refresh":
+                thread.join(timeout=5)
         workflow_server.REPORTING_REFRESHING = False
         self.addCleanup(setattr, workflow_server, "REPORTING_REFRESHING", False)
         with patch.object(workflow_server, "_sample_loader_enabled", return_value=True):
@@ -97,7 +100,7 @@ class BigQueryBootstrapTests(unittest.TestCase):
                                                     # rebuild (see _background_medallion_refresh_status) - it kicks
                                                     # that off in a background thread instead, so wait for it here.
                                                     result = workflow_server.load_sample_dataset()
-                                                    for thread in threading.enumerate():
+                                                    for thread in list(threading.enumerate()):
                                                         if thread.name == "reporting-silver-refresh":
                                                             thread.join(timeout=5)
 

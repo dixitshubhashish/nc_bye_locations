@@ -2005,7 +2005,6 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
         # Source hierarchy is authoritative for identity. ZIP/reference data
         # fills gaps or corrects a conflicting postal value; it must not
         # silently replace a supplied town/city/state.
-        nearest_city = "(SELECT AS STRUCT geo.* FROM city_geos geo WHERE geo.latitude IS NOT NULL AND geo.longitude IS NOT NULL AND l.unswapped_latitude IS NOT NULL AND l.unswapped_longitude IS NOT NULL ORDER BY ST_DISTANCE(ST_GEOGPOINT(l.unswapped_longitude, l.unswapped_latitude), ST_GEOGPOINT(geo.longitude, geo.latitude)) LIMIT 1)"
         latitude_expr = """COALESCE(l.latitude, z.latitude, cg.latitude)"""
         longitude_expr = """COALESCE(l.longitude, z.longitude, cg.longitude)"""
         corrected_latitude_expr = f"""
@@ -2016,7 +2015,7 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
               AND NOT (l.unswapped_latitude = 0.0 AND l.unswapped_longitude = 0.0)
               AND (cg.latitude IS NULL OR ST_DISTANCE(ST_GEOGPOINT(l.unswapped_longitude, l.unswapped_latitude), ST_GEOGPOINT(cg.longitude, cg.latitude)) <= 150000)
               THEN l.unswapped_latitude
-            ELSE COALESCE(z.latitude, cg.latitude, ({nearest_city}).latitude)
+            ELSE COALESCE(z.latitude, cg.latitude)
           END
         """
         corrected_longitude_expr = f"""
@@ -2027,12 +2026,12 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
               AND NOT (l.unswapped_latitude = 0.0 AND l.unswapped_longitude = 0.0)
               AND (cg.longitude IS NULL OR ST_DISTANCE(ST_GEOGPOINT(l.unswapped_longitude, l.unswapped_latitude), ST_GEOGPOINT(cg.longitude, cg.latitude)) <= 150000)
               THEN l.unswapped_longitude
-            ELSE COALESCE(z.longitude, cg.longitude, ({nearest_city}).longitude)
+            ELSE COALESCE(z.longitude, cg.longitude)
           END
         """
-        city_name_case = _proper_case_sql(f"COALESCE(NULLIF(TRIM(l.town), ''), NULLIF(TRIM(l.city_name), ''), cg.matched_city, ({nearest_city}).matched_city, z.city_name)")
+        city_name_case = _proper_case_sql(f"COALESCE(NULLIF(TRIM(l.town), ''), NULLIF(TRIM(l.city_name), ''), cg.matched_city, z.city_name)")
         county_case = _proper_case_sql("z.county")
-        state_name_case = _proper_case_sql(f"COALESCE(NULLIF(TRIM(l.province), ''), cg.matched_state, ({nearest_city}).matched_state, z.state_name, NULLIF(TRIM(l.town), ''))")
+        state_name_case = _proper_case_sql(f"COALESCE(NULLIF(TRIM(l.province), ''), cg.matched_state, z.state_name, NULLIF(TRIM(l.town), ''))")
 
         mandatory_check = """
           brand_name IS NOT NULL AND brand_name != ''
@@ -2136,7 +2135,7 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
           l.address,
           {city_name_case} AS city_name,
           {county_case} AS county,
-          COALESCE(l.normalized_state_code, NULLIF(UPPER(TRIM(l.state_code)), ''), cg.state_code, ({nearest_city}).state_code, z.state_code) AS state_code,
+          COALESCE(l.normalized_state_code, NULLIF(UPPER(TRIM(l.state_code)), ''), cg.state_code, z.state_code) AS state_code,
           {state_name_case} AS state_name,
           COALESCE(
             CASE WHEN l.unswapped_latitude IS NOT NULL AND l.unswapped_longitude IS NOT NULL
@@ -2147,11 +2146,10 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
               AND l.unswapped_latitude IS NOT NULL AND l.unswapped_longitude IS NOT NULL
               AND ST_DISTANCE(ST_GEOGPOINT(l.unswapped_longitude, l.unswapped_latitude), ST_GEOGPOINT(cg.longitude, cg.latitude)) <= 100000
               THEN cg.representative_zip END,
-            ({nearest_city}).representative_zip,
             l.normalized_zip_code,
             cg.representative_zip
           ) AS zip_code,
-          COALESCE(NULLIF(TRIM(l.country), ''), cg.matched_country, ({nearest_city}).matched_country, 'United States') AS country,
+          COALESCE(NULLIF(TRIM(l.country), ''), cg.matched_country, 'United States') AS country,
           -- COALESCE(l.latitude, z.latitude, cg.latitude) AS latitude
           {corrected_latitude_expr} AS latitude,
           -- COALESCE(l.longitude, z.longitude, cg.longitude) AS longitude
@@ -2165,7 +2163,6 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
               THEN 'source_listing'
             WHEN z.latitude IS NOT NULL AND z.longitude IS NOT NULL THEN 'zip_centroid'
             WHEN cg.latitude IS NOT NULL AND cg.longitude IS NOT NULL THEN 'worldwide_city_centroid'
-            WHEN ({nearest_city}).latitude IS NOT NULL THEN 'nearest_city_snapped'
             ELSE 'unresolved'
           END AS coordinate_source,
           CASE
@@ -2177,7 +2174,6 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
               THEN 1.0
             WHEN z.latitude IS NOT NULL AND z.longitude IS NOT NULL THEN 0.85
             WHEN cg.latitude IS NOT NULL AND cg.longitude IS NOT NULL THEN 0.70
-            WHEN ({nearest_city}).latitude IS NOT NULL THEN 0.60
             ELSE 0.0
           END AS coordinate_confidence,
           ARRAY_TO_STRING(

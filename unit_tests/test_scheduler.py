@@ -81,13 +81,14 @@ class SchedulerTests(unittest.TestCase):
                 with patch.object(workflow_server, "build_gold_layer", side_effect=fake_gold):
                     with patch.object(workflow_server, "sync_gold_mirror", return_value={"zip_brand_rows": 0, "location_rows": 0, "business_rows": 0}):
                         with patch.object(workflow_server, "refresh_error_count", return_value=0):
-                            started = workflow_server._refresh_silver_background()
-                            self.assertTrue(started)
-                            for thread in threading.enumerate():
-                                if thread.name == "reporting-silver-refresh":
-                                    thread.join(timeout=5)
-                            self.assertEqual(calls, ["silver", "gold"])
-                            self.assertFalse(workflow_server.REPORTING_REFRESHING)
+                            with patch.object(workflow_server, "reporting_quality_summary", return_value={"metrics": {}}):
+                                started = workflow_server._refresh_silver_background()
+                                self.assertTrue(started)
+                                for thread in threading.enumerate():
+                                    if thread.name == "reporting-silver-refresh":
+                                        thread.join(timeout=5)
+                                self.assertEqual(calls, ["silver", "gold"])
+                                self.assertFalse(workflow_server.REPORTING_REFRESHING)
 
     def test_save_mapper_triggers_background_refresh_unless_skipped(self) -> None:
         with patch.object(workflow_server, "_refresh_silver_background") as fake_refresh:
