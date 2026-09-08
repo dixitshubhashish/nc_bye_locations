@@ -3,4 +3,6 @@ google-auth
 pandas
 pyarrow
 xlrd
+openpyxl>=3.1.0
 pytest
+

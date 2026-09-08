@@ -22,9 +22,9 @@ Responsive dashboard with primary/competitor filters, state/city distributions, 
 The demonstration definition lives in `config/demo.json`: Domino's is the subject brand, Pizza Hut and Little Caesars are competitors, and similar ZIPs are scored from configured demographic metrics such as population and median age. Median household income is carried as an additional business-useful output for whitespace prioritization.
 
 ## Reliability
-Sample reference data is immutable. ZIP readiness uses SQLite first and BigQuery fallback. Session failures and 401/403/404 responses return to login. Login is not blocked by ZIP loading; `Sync US ZIPs` is available inside the app.
+Sample reference data is immutable. ZIP readiness uses SQLite first and BigQuery fallback. Session failures and 401/403/404 responses return to login. Login is not blocked by ZIP loading; `Sync US ZIPs` is available inside the app. Background review and auto-repair pipelines use targeted key queries, bounded batching (10 records/cycle), and reused client connection pools to prevent memory growth and socket leaks.
 
-SQLite is WAL-backed and persistent at `.cache/whitespace_cache.db`. It mirrors ZIP geography, worldwide cities, reporting locations, ZIP-brand activity, businesses, query payloads, and review counters. Reporting and ZIP readiness use the local mirror first, then refresh from the warehouse when needed. Display limits on maps and tables do not limit the mirrored source rows.
+SQLite is WAL-backed and persistent at `.cache/whitespace_cache.db`. It mirrors ZIP geography, worldwide cities, reporting locations, ZIP-brand activity, businesses, query payloads, and review counters. Reporting and ZIP readiness use the local mirror first, then refresh from the warehouse when needed. Display limits on maps and tables do not limit the mirrored source rows. Automated tests (192 passing) include unit tests, mapping layout contracts, geo-enrichment, and memory-leak verification.
 
 ## Smoke And Presentation Reference
 Use [docs/smoke_test_and_presentation.md](docs/smoke_test_and_presentation.md) for the smoke matrix, fresh-upload checklist, five-minute presentation flow, and current assessment gaps.

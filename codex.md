@@ -50,9 +50,14 @@ git diff --check
 The short operational smoke checklist, fresh-upload fixture requirements, HTTP evidence, and presentation walkthrough are maintained in `docs/smoke_test_and_presentation.md`.
 
 ## Current Audit
-- Architecture: `workflow_server.py` remains the largest risk because it owns routing, auth, parsing, BigQuery orchestration, sample load/clear, review repair, reporting, and background jobs. The UI has been split into modules (`mapper.js`, `review.js`, `templates.js`, `reporting.js`, `reporting-tabs.js`, `common.js`), which is good, but the backend still needs more module boundaries.
+- Architecture: `workflow_server.py` owns routing, auth, parsing, BigQuery orchestration, sample load/clear, review repair, reporting, and background jobs. The UI is modularized (`mapper.js`, `review.js`, `templates.js`, `reporting.js`, `reporting-tabs.js`, `common.js`).
 - Assessment fit: source adapters are separated, brand/source format independence exists, demo config is present, invalid rows are visible, provenance timestamps/content hashes exist, and reporting covers whitespace plus quality. Run-over-run diffing remains an explicit gap.
-- Latest commit delta: `44e4492` added cached worldwide geo enrichment, mandatory country mapping, hierarchy resolution, quality/reporting UI refinements, and tests. Previous `8f4fe43` focused on master delete/cache cleanup, error counter sync, and bootstrap 404 handling.
+- Latest delta & memory optimizations:
+  - Fixed Render web service OOM memory leak: replaced unbounded 50,000-row fetches in `auto_repair_error_batch()` with targeted BigQuery queries filtered directly by claimed `(event_id, row_number)` keys via `_fetch_rejected_by_keys()`.
+  - Reused a single `bigquery.Client` lifecycle instance throughout the entire `start_auto_repair()` background worker, eliminating leaking gRPC transport sockets and thread pools.
+  - Increased repair batch size to 10 records per iteration (cutting loop iterations and overhead by 10x).
+  - Added dedicated memory leak and heap stability test suite (`unit_tests/test_memory_leak.py`) tracking `tracemalloc` allocations and single-client assertions (192 total tests passing).
+  - Refactored BigQuery silver SQL view to remove Cartesian $O(N \times M)$ `nearest_city` spatial subqueries, delegating coordinate repairs to indexed SQLite lookups in `whitespace_tool/geo_enrichment.py`.
 - Watch item: mapping labels currently call listing `name` "Brand Name" in `config/field_registry.json` and `ui/js/mapper.js`, while the data model also has a separate business/brand. This can confuse users and should be reviewed before further mapper changes.
 - Watch item: `config/predefined_brand_templates.json` still describes Little Caesars as JSON, while the interactive UI has GET JSON API demo behavior. Keep demo metadata and UI behavior aligned.
 - Watch item: docs and generated Python schema are ahead of older SQL files. Treat `warehouse_bigquery.TABLE_SCHEMAS` as the live schema source unless the SQL files are regenerated.

@@ -1448,11 +1448,12 @@ def learn_mappings(data: dict[str, Any]) -> dict[str, Any]:
     return {"suggestions": suggest_from_templates(templates, source_fields, source_type)}
 
 
-def list_templates(search: str = "", business_id: str = "", source_type_id: str = "", limit: int = 500, offset: int = 0) -> dict[str, Any]:
+def list_templates(search: str = "", business_id: str = "", source_type_id: str = "", limit: int = 500, offset: int = 0, *, client: Any = None) -> dict[str, Any]:
     from google.cloud import bigquery
 
     project_id, dataset_id, credentials_json = _warehouse_settings()
-    client = _bigquery_client(project_id, credentials_json)
+    if client is None:
+        client = _bigquery_client(project_id, credentials_json)
     _ensure_workflow_templates_table(client, project_id, dataset_id)
     safe_limit = max(1, min(int(limit or 500), 5000))
     safe_offset = max(0, int(offset or 0))
@@ -4200,6 +4201,238 @@ def _finish_reporting_summary(
     return result_payload
 
 
+def export_reporting_excel(params: dict[str, list[str]] | None = None, *, client: Any = None) -> tuple[bytes, str]:
+    """Export complete, un-truncated location records directly from BigQuery for
+    the primary brand (Sheet 1) and selected competitor brands (Sheet 2) into a
+    formatted multi-sheet .xlsx workbook."""
+    import io
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    params = params or {}
+    main_brands = _csv_param(params.get("main_brands", [""])[0] or params.get("primary_brand", [""])[0] or params.get("brand", [""])[0])
+    raw_competitor_brands = _csv_param(params.get("competitor_brands", [""])[0] or params.get("competitors", [""])[0])
+    competitor_brands = [b for b in raw_competitor_brands if b not in main_brands]
+
+    state_filter = str(params.get("state", [""])[0]).strip().upper()
+    county_filter = str(params.get("county", [""])[0]).strip()
+    city_filter = str(params.get("city", [""])[0]).strip()
+    zip_filter = str(params.get("zip", [""])[0]).strip()
+
+    primary_brand_label = main_brands[0] if main_brands else "All Brands"
+
+    # Fetch rows directly from BigQuery view vw_reporting_locations
+    primary_records = []
+    competitor_records = []
+
+    try:
+        project_id, bronze_dataset_id, silver_dataset_id, gold_dataset_id, credentials_json = _medallion_settings()
+        if client is None:
+            client = _bigquery_client(project_id, credentials_json)
+        gold_location_ref = f"`{project_id}.{gold_dataset_id}.vw_reporting_locations`"
+
+        from google.cloud import bigquery
+
+        base_sql = f"""
+        SELECT
+          brand,
+          name,
+          address,
+          city_name,
+          state_code,
+          state_name,
+          county,
+          zip_code,
+          country,
+          phone_number,
+          latitude,
+          longitude,
+          coordinate_confidence,
+          coordinate_source,
+          population,
+          median_household_income,
+          median_age,
+          last_observed_at
+        FROM {gold_location_ref}
+        WHERE (@state = '' OR UPPER(state_code) = @state)
+          AND (@county = '' OR LOWER(COALESCE(county, '')) = LOWER(@county))
+          AND (@city = '' OR LOWER(COALESCE(city_name, '')) = LOWER(@city))
+          AND (@zip = '' OR zip_code = @zip)
+        """
+
+        # 1. Fetch Primary Brand records
+        primary_sql = base_sql + """
+          AND (ARRAY_LENGTH(@main_brands) = 0 OR brand IN UNNEST(@main_brands))
+        ORDER BY state_code, city_name, address
+        """
+        primary_config = bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ArrayQueryParameter("main_brands", "STRING", main_brands),
+            bigquery.ScalarQueryParameter("state", "STRING", state_filter),
+            bigquery.ScalarQueryParameter("county", "STRING", county_filter),
+            bigquery.ScalarQueryParameter("city", "STRING", city_filter),
+            bigquery.ScalarQueryParameter("zip", "STRING", zip_filter),
+        ])
+        for row in client.query(primary_sql, job_config=primary_config).result():
+            primary_records.append(dict(row))
+
+        # 2. Fetch Competitor records (if any competitors specified)
+        if competitor_brands:
+            comp_sql = base_sql + """
+              AND brand IN UNNEST(@competitor_brands)
+            ORDER BY brand, state_code, city_name, address
+            """
+            comp_config = bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ArrayQueryParameter("competitor_brands", "STRING", competitor_brands),
+                bigquery.ScalarQueryParameter("state", "STRING", state_filter),
+                bigquery.ScalarQueryParameter("county", "STRING", county_filter),
+                bigquery.ScalarQueryParameter("city", "STRING", city_filter),
+                bigquery.ScalarQueryParameter("zip", "STRING", zip_filter),
+            ])
+            for row in client.query(comp_sql, job_config=comp_config).result():
+                competitor_records.append(dict(row))
+
+    except Exception as exc:
+        LOGGER.warning("direct_bigquery_excel_fetch_fallback error=%s", exc)
+        # Fallback to local SQLite mirror if BigQuery is in offline/mock mode
+        from whitespace_tool.sqlite_cache import fetch_mirror_reporting_locations
+        all_mirror_rows = fetch_mirror_reporting_locations(state_filter, county_filter, city_filter, zip_filter)
+        for r in all_mirror_rows:
+            brand_name = r.get("brand") or ""
+            if not main_brands or brand_name in main_brands:
+                primary_records.append(r)
+            elif brand_name in competitor_brands:
+                competitor_records.append(r)
+
+    wb = openpyxl.Workbook()
+    # Sheet 1: Primary Brand
+    ws_primary = wb.active
+    clean_primary_title = re.sub(r'[\[\]\\/*?:]', '', f"Primary - {primary_brand_label}")[:31]
+    ws_primary.title = clean_primary_title
+
+    # Sheet 2: Competitor Brands
+    ws_comp = wb.create_sheet(title="Competitor Locations")
+
+    columns = [
+        ("brand", "Brand"),
+        ("name", "Store / Location Name"),
+        ("address", "Street Address"),
+        ("city_name", "City"),
+        ("state_name", "State"),
+        ("state_code", "State Code"),
+        ("county", "County"),
+        ("zip_code", "ZIP Code"),
+        ("country", "Country"),
+        ("phone_number", "Phone"),
+        ("latitude", "Latitude"),
+        ("longitude", "Longitude"),
+        ("coordinate_confidence", "Coord Confidence"),
+        ("coordinate_source", "Coord Source"),
+        ("population", "Census Population"),
+        ("median_household_income", "Median Income ($)"),
+        ("median_age", "Median Age"),
+        ("last_observed_at", "Last Observed"),
+    ]
+
+    header_fill = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
+    header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    data_font = Font(name="Calibri", size=10)
+    data_align_left = Alignment(horizontal="left", vertical="center")
+    data_align_right = Alignment(horizontal="right", vertical="center")
+    data_align_center = Alignment(horizontal="center", vertical="center")
+
+    thin_border = Border(
+        left=Side(style="thin", color="E2E8F0"),
+        right=Side(style="thin", color="E2E8F0"),
+        top=Side(style="thin", color="E2E8F0"),
+        bottom=Side(style="thin", color="E2E8F0"),
+    )
+    alt_fill = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid")
+
+    def populate_sheet(ws: Any, records: list[dict[str, Any]], empty_message: str = "No records found.") -> None:
+        ws.freeze_panes = "A2"
+        ws.row_dimensions[1].height = 28
+
+        # Write header
+        for col_idx, (_, col_label) in enumerate(columns, start=1):
+            cell = ws.cell(row=1, column=col_idx, value=col_label)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = header_align
+
+        if not records:
+            ws.row_dimensions[2].height = 22
+            for col_idx in range(1, len(columns) + 1):
+                cell = ws.cell(row=2, column=col_idx)
+                if col_idx == 1:
+                    cell.value = empty_message
+                    cell.font = Font(name="Calibri", size=10, italic=True, color="64748B")
+                cell.border = thin_border
+            return
+
+        for row_idx, record in enumerate(records, start=2):
+            ws.row_dimensions[row_idx].height = 20
+            is_alt = (row_idx % 2 == 0)
+            for col_idx, (col_key, _) in enumerate(columns, start=1):
+                val = record.get(col_key)
+                if hasattr(val, "isoformat"):
+                    val = val.isoformat()
+                elif isinstance(val, (int, float)) and val is not None:
+                    pass
+                elif val is not None:
+                    val = str(val)
+                else:
+                    val = ""
+
+                cell = ws.cell(row=row_idx, column=col_idx, value=val)
+                cell.font = data_font
+                cell.border = thin_border
+                if is_alt:
+                    cell.fill = alt_fill
+
+                if col_key in ("latitude", "longitude"):
+                    cell.alignment = data_align_right
+                    if isinstance(val, (int, float)):
+                        cell.number_format = "0.000000"
+                elif col_key in ("population", "median_household_income"):
+                    cell.alignment = data_align_right
+                    if isinstance(val, (int, float)):
+                        cell.number_format = "$#,##0" if col_key == "median_household_income" else "#,##0"
+                elif col_key in ("median_age", "coordinate_confidence"):
+                    cell.alignment = data_align_right
+                    if isinstance(val, (int, float)):
+                        cell.number_format = "0.0"
+                elif col_key in ("state_code", "zip_code", "country"):
+                    cell.alignment = data_align_center
+                else:
+                    cell.alignment = data_align_left
+
+        # Auto-fit column widths
+        for col_idx, (_, col_label) in enumerate(columns, start=1):
+            col_letter = get_column_letter(col_idx)
+            max_len = len(col_label)
+            for r_idx in range(2, min(len(records) + 2, 100)):
+                cell_val = str(ws.cell(row=r_idx, column=col_idx).value or "")
+                if len(cell_val) > max_len:
+                    max_len = len(cell_val)
+            ws.column_dimensions[col_letter].width = max(12, min(max_len + 4, 45))
+
+    populate_sheet(ws_primary, primary_records, f"No locations found for primary brand '{primary_brand_label}'.")
+    comp_label = " ~ ".join(competitor_brands) if competitor_brands else "No competitors selected"
+    populate_sheet(ws_comp, competitor_records, f"No competitor locations found ({comp_label}).")
+
+    output_stream = io.BytesIO()
+    wb.save(output_stream)
+    excel_bytes = output_stream.getvalue()
+
+    safe_brand_slug = re.sub(r'[^a-zA-Z0-9]+', '_', primary_brand_label.lower()).strip('_') or "all_brands"
+    timestamp = utc_now_iso()[:10]
+    filename = f"{safe_brand_slug}_whitespace_locations_{timestamp}.xlsx"
+    return excel_bytes, filename
+
+
 def geo_options(state: str = "", county: str = "") -> dict[str, Any]:
     cache_key = f"geo_options:{state.strip().upper()}:{county.strip().lower()}"
     cached = get_cached_query(cache_key)
@@ -4334,11 +4567,12 @@ def save_template_version(data: dict[str, Any]) -> dict[str, Any]:
     return {"workflow_template_id": template_id, "updated": True}
 
 
-def list_rejected(event_id: str = "", business_id: str = "", limit: int = 50, offset: int = 0, ai_pending_only: bool = False) -> dict[str, Any]:
+def list_rejected(event_id: str = "", business_id: str = "", limit: int = 50, offset: int = 0, ai_pending_only: bool = False, *, client: Any = None) -> dict[str, Any]:
     from google.cloud import bigquery
 
     project_id, dataset_id, credentials_json = _warehouse_settings()
-    client = _bigquery_client(project_id, credentials_json)
+    if client is None:
+        client = _bigquery_client(project_id, credentials_json)
     safe_limit = max(1, min(int(limit or 50), 50000))
     safe_offset = max(0, int(offset or 0))
     ai_clause = "AND is_ai_enriched IS NOT TRUE" if ai_pending_only else ""
@@ -4374,12 +4608,13 @@ def list_rejected(event_id: str = "", business_id: str = "", limit: int = 50, of
     return {"records": records[:safe_limit], "offset": safe_offset, "limit": safe_limit, "has_more": has_more}
 
 
-def _count_error_listings_live(business_id: str = "") -> int:
+def _count_error_listings_live(business_id: str = "", *, client: Any = None) -> int:
     """Live BigQuery count of non-deleted error listings for a business
     (empty string = all businesses). The one source of truth; every SQLite
     value is a copy of a number this returned."""
     project_id, dataset_id, credentials_json = _warehouse_settings()
-    client = _bigquery_client(project_id, credentials_json)
+    if client is None:
+        client = _bigquery_client(project_id, credentials_json)
     query = f"SELECT COUNT(*) AS total FROM `{project_id}.{dataset_id}.error_listings` WHERE is_deleted IS NOT TRUE AND (@business_id = '' OR business_id = @business_id)"
     from google.cloud import bigquery
     config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("business_id", "STRING", business_id)])
@@ -4392,11 +4627,11 @@ def _count_error_listings_live(business_id: str = "") -> int:
         raise
 
 
-def refresh_error_count(business_id: str = "") -> int:
+def refresh_error_count(business_id: str = "", *, client: Any = None) -> int:
     """Re-count from BigQuery and write the result back to SQLite. Call this
     right after anything that changes error_listings (a reprocess move, a
     fresh mapper save) so the cached counter converges on the warehouse."""
-    total = _count_error_listings_live(business_id)
+    total = _count_error_listings_live(business_id, client=client)
     try:
         set_error_count(business_id, total)
     except Exception as exc:
@@ -4722,7 +4957,63 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
     return payload
 
 
-def auto_repair_error_batch(limit: int = 10, offset: int = 0) -> dict[str, int]:
+def _fetch_rejected_by_keys(claimed_ids: list[str], *, client: Any = None) -> list[dict[str, Any]]:
+    if not claimed_ids:
+        return []
+    from google.cloud import bigquery
+
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    if client is None:
+        client = _bigquery_client(project_id, credentials_json)
+
+    conditions = []
+    params = []
+    param_cls = getattr(bigquery, "ScalarQueryParameter", None)
+    for idx, cid in enumerate(claimed_ids):
+        if ":" in cid:
+            parts = cid.split(":", 1)
+            e_param = f"e_{idx}"
+            r_param = f"r_{idx}"
+            conditions.append(f"(event_id = @{e_param} AND row_number = @{r_param})")
+            if param_cls:
+                params.append(param_cls(e_param, "STRING", parts[0]))
+                params.append(param_cls(r_param, "INT64", int(parts[1]) if parts[1].isdigit() else 0))
+        else:
+            l_param = f"l_{idx}"
+            conditions.append(f"listing_id = @{l_param}")
+            if param_cls:
+                params.append(param_cls(l_param, "STRING", cid))
+
+    if not conditions:
+        return []
+
+    where_clause = " OR ".join(conditions)
+    query = f"""SELECT event_id, business_id, source_type_id, row_number, errors, raw_record, template_id, mapping_id, is_ai_enriched
+    FROM `{project_id}.{dataset_id}.error_listings`
+    WHERE is_deleted IS NOT TRUE AND ({where_clause})"""
+
+    cfg_cls = getattr(bigquery, "QueryJobConfig", None)
+    job_config = cfg_cls(query_parameters=params) if (cfg_cls and params) else None
+    try:
+        result_rows = client.query(query, job_config=job_config).result()
+    except Exception as exc:
+        if getattr(exc, "code", None) == 404:
+            return []
+        raise
+    records = []
+    for row in result_rows:
+        item = dict(row)
+        for key in ("errors", "raw_record"):
+            if isinstance(item.get(key), str):
+                try:
+                    item[key] = json.loads(item[key])
+                except ValueError:
+                    pass
+        records.append(item)
+    return records
+
+
+def auto_repair_error_batch(limit: int = 10, offset: int = 0, *, client: Any = None) -> dict[str, int]:
     """Retry review batches through the set-swap queue with progressive advancement.
     Candidate IDs enter a source set; repaired rows graduate to listings and delete
     from review; failed rows enter the failed set. Once the source set is empty,
@@ -4734,28 +5025,35 @@ def auto_repair_error_batch(limit: int = 10, offset: int = 0) -> dict[str, int]:
         complete_enrichment_claim,
         get_db_connection,
     )
+    from google.cloud import bigquery
 
-    all_rejected = list_rejected(limit=50000).get("records", [])
-    if not all_rejected:
-        return {"attempted": 0, "resolved": 0, "remaining": 0}
-
-    record_lookup = {}
-    for r in all_rejected:
-        rec_id = str(r.get("listing_id") or f"{r.get('event_id')}:{r.get('row_number')}")
-        record_lookup[rec_id] = r
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    if client is None:
+        client = _bigquery_client(project_id, credentials_json)
 
     batch_limit = max(1, min(int(limit), 10))
-    cycle_id, pending_count = seed_or_swap_enrichment_cycle(list(record_lookup.keys()))
+    cycle_id, pending_count = seed_or_swap_enrichment_cycle()
     claimed_ids = claim_enrichment_batch(cycle_id, limit=batch_limit)
     if not claimed_ids and pending_count == 0:
         cycle_id, pending_count = seed_or_swap_enrichment_cycle()
         claimed_ids = claim_enrichment_batch(cycle_id, limit=batch_limit)
 
-    records = [record_lookup[cid] for cid in claimed_ids if cid in record_lookup]
-    if not records:
-        records = all_rejected[:batch_limit]
+    records = []
+    if claimed_ids:
+        records = _fetch_rejected_by_keys(claimed_ids, client=client)
 
-    templates = {item.get("workflow_template_id"): item for item in list_templates().get("templates", [])}
+    if not records:
+        pending_result = list_rejected(limit=batch_limit, ai_pending_only=True, client=client)
+        records = pending_result.get("records", [])
+        if records:
+            seed_ids = [str(r.get("listing_id") or f"{r.get('event_id')}:{r.get('row_number')}") for r in records]
+            cycle_id, _ = seed_or_swap_enrichment_cycle(seed_ids)
+            claimed_ids = claim_enrichment_batch(cycle_id, limit=batch_limit)
+
+    if not records:
+        return {"attempted": 0, "resolved": 0, "remaining": 0}
+
+    templates = {item.get("workflow_template_id"): item for item in list_templates(client=client).get("templates", [])}
     resolved = 0
     processed_keys = []
     for record in records:
@@ -4808,7 +5106,7 @@ def auto_repair_error_batch(limit: int = 10, offset: int = 0) -> dict[str, int]:
             }
             if reprocess_rows is not None:
                 reprocess_payload["rows"] = reprocess_rows
-            result = reprocess_rejected(reprocess_payload)
+            result = reprocess_rejected(reprocess_payload, client=client)
             if (
                 result.get("mapped_rows", 0) > 0
                 and result.get("error_listings_cleanup", {}).get("ok")
@@ -4832,9 +5130,6 @@ def auto_repair_error_batch(limit: int = 10, offset: int = 0) -> dict[str, int]:
             except Exception as event_exc:
                 LOGGER.warning("quality_fix_event_write_failed type=AI event_id=%s row=%s error=%s", record.get("event_id"), record.get("row_number"), event_exc)
     if processed_keys:
-        project_id, dataset_id, credentials_json = _warehouse_settings()
-        client = _bigquery_client(project_id, credentials_json)
-        from google.cloud import bigquery
         for event_id, row_number in processed_keys:
             client.query(
                 f"""UPDATE `{project_id}.{dataset_id}.error_listings`
@@ -4863,18 +5158,20 @@ def start_auto_repair() -> dict[str, Any]:
             ENRICHMENT_STATUS.update({"state": "running", "processed": 0, "current_id": "", "updated_at": utc_now_iso()})
             offset = 0
             fixed = 0
+            project_id, dataset_id, credentials_json = _warehouse_settings()
+            client = _bigquery_client(project_id, credentials_json)
             try:
                 _schedule_quality_fix_metrics_refresh(force=True)
                 current_stats = get_auto_repair_stats()
                 base_fixed = int(current_stats.get("fixed", 0) or 0)
                 base_processed = int(current_stats.get("processed", 0) or 0)
                 base_manual = int(current_stats.get("manual_fixed", 0) or 0)
-                total = len(list_rejected(limit=50000, ai_pending_only=True)["records"])
+                total = _count_error_listings_live(client=client)
                 AUTO_REPAIR_STATS.update({"fixed": base_fixed, "processed": base_processed, "remaining": total})
                 set_auto_repair_stats(base_fixed, base_processed, total, base_manual)
                 while offset < total:
                     _enrichment_checkpoint()
-                    batch = auto_repair_error_batch(1)
+                    batch = auto_repair_error_batch(10, client=client)
                     if not batch["attempted"]:
                         break
                     fixed += batch["resolved"]
@@ -4891,7 +5188,7 @@ def start_auto_repair() -> dict[str, Any]:
                 ENRICHMENT_STATUS.update({"state": "idle", "current_id": "", "updated_at": utc_now_iso()})
                 AUTO_REPAIR_STATS["remaining"] = max(total - fixed, 0)
                 set_auto_repair_stats(base_fixed + fixed, base_processed + offset, max(total - fixed, 0), base_manual)
-                refresh_error_count("")
+                refresh_error_count("", client=client)
                 _schedule_quality_fix_metrics_refresh(force=True)
                 if fixed > 0:
                     invalidate_cache()
@@ -4905,12 +5202,15 @@ def start_auto_repair() -> dict[str, Any]:
         return {"status": "started", "batch_size": 10}
 
 
-def reprocess_rejected(data: dict[str, Any]) -> dict[str, Any]:
+def reprocess_rejected(data: dict[str, Any], *, client: Any = None) -> dict[str, Any]:
     event_id = str(data.get("event_id", "")).strip()
     mapper = data.get("mapper")
     if not event_id or not isinstance(mapper, dict):
         raise ValueError("event_id and mapper are required")
-    records = list_rejected(event_id)["records"]
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    if client is None:
+        client = _bigquery_client(project_id, credentials_json)
+    records = list_rejected(event_id, client=client)["records"]
     if data.get("rows") and isinstance(data["rows"], list):
         rows = data["rows"]
     else:
@@ -4952,7 +5252,7 @@ def reprocess_rejected(data: dict[str, Any]) -> dict[str, Any]:
     # replacement (which would otherwise make a still-invalid retry silently
     # vanish from the review queue).
     cleanup_cutoff = utc_now_iso()
-
+    skip_refresh = bool(data.get("skip_cache_invalidation") or data.get("is_ai_enriched", False))
     result = save_mapper({
         "mapper": mapper,
         "rows": rows,
@@ -4961,7 +5261,7 @@ def reprocess_rejected(data: dict[str, Any]) -> dict[str, Any]:
         "event_id": event_id,
         "row_offset": (reprocessed_row_numbers[0] - 1) if len(reprocessed_row_numbers) == 1 else 0,
         "is_ai_enriched": bool(data.get("is_ai_enriched", False)),
-    })
+    }, client=client, skip_cache_invalidation=skip_refresh)
 
     # Handle soft-deleting old error records:
     # 1) If mapped successfully into listings, delete from error_listings.
@@ -4978,8 +5278,6 @@ def reprocess_rejected(data: dict[str, Any]) -> dict[str, Any]:
     affected_business_id = str(mapper.get("business_id") or "").strip()
     if records and reprocessed_row_numbers:
         try:
-            project_id, dataset_id, credentials_json = _warehouse_settings()
-            client = _bigquery_client(project_id, credentials_json)
             from google.cloud import bigquery
             update_query = f"""
             UPDATE `{project_id}.{dataset_id}.error_listings`
@@ -5029,7 +5327,7 @@ def reprocess_rejected(data: dict[str, Any]) -> dict[str, Any]:
                     )
                 except Exception as event_exc:
                     LOGGER.warning("quality_fix_event_write_failed type=MANUAL event_id=%s row=%s error=%s", event_id, row_number, event_exc)
-        result["error_count_total"] = refresh_error_count("")
+        result["error_count_total"] = refresh_error_count("", client=client)
         if affected_business_id:
             result["error_count"] = refresh_error_count(affected_business_id)
         _schedule_quality_fix_metrics_refresh(force=True)
@@ -5507,6 +5805,20 @@ def make_handler(ui_dir: Path):
                 except Exception as exc:
                     LOGGER.warning("reporting_quality_request_failed error=%s", exc)
                     _json_response(self, 400, {"error": "Quality metrics are being prepared. Please refresh shortly."})
+                return
+            if self.path.startswith("/api/reporting/export-excel"):
+                try:
+                    params = parse_qs(urlsplit(self.path).query)
+                    excel_bytes, filename = export_reporting_excel(params)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                    self.send_header("Content-Length", str(len(excel_bytes)))
+                    self.end_headers()
+                    self.wfile.write(excel_bytes)
+                except Exception as exc:
+                    LOGGER.exception("reporting_excel_export_failed error=%s", exc)
+                    _json_response(self, 400, {"error": f"Failed to generate Excel export: {str(exc)}"})
                 return
             if self.path.startswith("/api/reporting"):
                 try:

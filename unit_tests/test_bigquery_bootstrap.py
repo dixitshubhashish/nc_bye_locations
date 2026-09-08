@@ -80,8 +80,8 @@ class BigQueryBootstrapTests(unittest.TestCase):
             calls.append("quality")
             return {"metrics": {"invalid_listings": 0}}
 
-        for thread in threading.enumerate():
-            if thread.name == "reporting-silver-refresh":
+        for thread in list(threading.enumerate()):
+            if thread.name in ("reporting-silver-refresh", "automatic-review-repair"):
                 thread.join(timeout=5)
         workflow_server.REPORTING_REFRESHING = False
         self.addCleanup(setattr, workflow_server, "REPORTING_REFRESHING", False)
@@ -96,13 +96,14 @@ class BigQueryBootstrapTests(unittest.TestCase):
                                         with patch.object(workflow_server, "build_silver_layer", side_effect=fake_silver):
                                             with patch.object(workflow_server, "build_gold_layer", side_effect=fake_gold):
                                                 with patch.object(workflow_server, "reporting_quality_summary", side_effect=fake_quality):
-                                                    # Sample loading no longer blocks the response on the silver/gold
-                                                    # rebuild (see _background_medallion_refresh_status) - it kicks
-                                                    # that off in a background thread instead, so wait for it here.
-                                                    result = workflow_server.load_sample_dataset()
-                                                    for thread in list(threading.enumerate()):
-                                                        if thread.name == "reporting-silver-refresh":
-                                                            thread.join(timeout=5)
+                                                    with patch.object(workflow_server, "auto_repair_error_batch", return_value={"attempted": 0, "resolved": 0, "remaining": 0}):
+                                                        # Sample loading no longer blocks the response on the silver/gold
+                                                        # rebuild (see _background_medallion_refresh_status) - it kicks
+                                                        # that off in a background thread instead, so wait for it here.
+                                                        result = workflow_server.load_sample_dataset()
+                                                        for thread in list(threading.enumerate()):
+                                                            if thread.name in ("reporting-silver-refresh", "automatic-review-repair"):
+                                                                thread.join(timeout=5)
 
         self.assertEqual(calls, ["prepare_zips", "sample_status", "silver", "gold", "quality"])
         self.assertTrue(result["already_loaded"])

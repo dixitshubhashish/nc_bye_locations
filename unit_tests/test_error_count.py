@@ -82,5 +82,44 @@ class CountErrorListingsCachingTests(unittest.TestCase):
         self.assertEqual(sqlite_cache.get_error_count("biz-2"), 6)
 
 
+class AutoRepairBatchOptimizationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._db_path_patch = patch.object(sqlite_cache, "DB_PATH", Path(self._tmpdir) / "test.db")
+        self._db_path_patch.start()
+
+    def tearDown(self) -> None:
+        self._db_path_patch.stop()
+
+    def test_auto_repair_error_batch_accepts_client_and_limits_fetch(self) -> None:
+        fake_client = object()
+        with patch.object(workflow_server, "list_rejected", return_value={"records": []}) as mock_list:
+            res = workflow_server.auto_repair_error_batch(10, client=fake_client)
+            self.assertEqual(res, {"attempted": 0, "resolved": 0, "remaining": 0})
+            mock_list.assert_called_once_with(limit=10, ai_pending_only=True, client=fake_client)
+
+    def test_fetch_rejected_by_keys_constructs_targeted_query(self) -> None:
+        class FakeQueryJob:
+            def result(self) -> list:
+                return []
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.queries = []
+            def query(self, q: str, job_config: Any = None) -> Any:
+                self.queries.append((q, job_config))
+                return FakeQueryJob()
+
+        client = FakeClient()
+        claimed = ["event_1:5", "listing_abc"]
+        res = workflow_server._fetch_rejected_by_keys(claimed, client=client)
+        self.assertEqual(res, [])
+        self.assertEqual(len(client.queries), 1)
+        query_text, config = client.queries[0]
+        self.assertIn("error_listings", query_text)
+        self.assertIn("event_id = @e_0 AND row_number = @r_0", query_text)
+        self.assertIn("listing_id = @l_1", query_text)
+
+
 if __name__ == "__main__":
     unittest.main()
