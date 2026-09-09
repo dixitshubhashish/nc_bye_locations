@@ -516,3 +516,37 @@ class MetricExportFilterTests(unittest.TestCase):
         # No scalar comparison may survive, or that filter silently matches
         # only the first selected value.
         self.assertEqual(re.findall(r"@(?:brand|state) = ''", source), [])
+
+
+class EmptyArrayParameterTests(unittest.TestCase):
+    """BigQuery converts an EMPTY array parameter to NULL, so
+    `ARRAY_LENGTH(@brands) = 0` evaluates to NULL rather than TRUE - the whole
+    WHERE clause becomes NULL and EVERY row is filtered out.
+
+    Live-caught: an export with no filters at all returned 0 rows instead of
+    37,208. Verified against real BigQuery:
+        ARRAY_LENGTH(<empty param>) -> None,  (... = 0) -> None,  IS NULL -> True
+    """
+
+    def test_every_array_length_guard_in_the_export_is_null_safe(self) -> None:
+        import inspect
+        import re
+
+        source = inspect.getsource(ws.reporting_metric_export)
+        unguarded = re.findall(r"(?<!COALESCE\()ARRAY_LENGTH\(@(\w+)\) = 0", source)
+        # Every occurrence must be wrapped in COALESCE(..., 0).
+        bare = [name for name in unguarded
+                if f"COALESCE(ARRAY_LENGTH(@{name}), 0) = 0" not in source]
+        self.assertEqual(bare, [], f"unguarded empty-array checks: {bare}")
+        self.assertIn("COALESCE(ARRAY_LENGTH(@brands), 0) = 0", source)
+        self.assertIn("COALESCE(ARRAY_LENGTH(@states), 0) = 0", source)
+
+    def test_no_bare_array_length_equals_zero_remains(self) -> None:
+        import inspect
+        import re
+
+        source = inspect.getsource(ws.reporting_metric_export)
+        # Strip the COALESCE-wrapped ones, then nothing may be left.
+        stripped = source.replace("COALESCE(ARRAY_LENGTH(@brands), 0) = 0", "")
+        stripped = stripped.replace("COALESCE(ARRAY_LENGTH(@states), 0) = 0", "")
+        self.assertEqual(re.findall(r"ARRAY_LENGTH\(@\w+\) = 0", stripped), [])

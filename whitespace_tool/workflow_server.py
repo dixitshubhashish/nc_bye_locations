@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from dataclasses import replace
 from functools import lru_cache
 import hashlib
+import hmac
 import json
 import http.server
 import io
@@ -121,13 +122,78 @@ SERVER_LAUNCH_ID = uuid4().hex
 load_dotenv()
 
 
-def _json_response(handler: http.server.BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
+def _json_response(handler: http.server.BaseHTTPRequestHandler, status: int, payload: dict[str, Any],
+                   extra_headers: list[tuple[str, str]] | None = None) -> None:
     body = json.dumps(payload).encode("utf-8")
     handler.send_response(status)
     handler.send_header("content-type", "application/json")
     handler.send_header("content-length", str(len(body)))
+    for name, value in (extra_headers or []):
+        handler.send_header(name, value)
     handler.end_headers()
     handler.wfile.write(body)
+
+
+# ---------------------------------------------------------------------------
+# Session enforcement
+# ---------------------------------------------------------------------------
+# Login used to be a CLIENT-SIDE gate only: authenticate() validated the
+# credentials, returned {"authenticated": True}, and issued nothing. No
+# endpoint ever checked anything, so every /api/* route - brands, reporting,
+# quality, and the full listing exports - answered 200 to an unauthenticated
+# caller. The UI redirected to /login, but nothing stopped a direct request.
+#
+# The secret is per-process on purpose: a restart invalidates outstanding
+# sessions, which is the behaviour the UI already copes with (it tracks
+# SERVER_LAUNCH_ID and re-authenticates), and it avoids inventing a
+# persistent secret-management story this app does not otherwise have.
+SESSION_COOKIE_NAME = "ws_session"
+_SESSION_SECRET = os.urandom(32)
+SESSION_TTL_SECONDS = 12 * 60 * 60
+
+# Paths that must stay reachable without a session: the login page and the
+# assets it needs, plus the probes the UI calls before authenticating.
+PUBLIC_API_PATHS: frozenset[str] = frozenset({
+    "/api/login", "/api/session", "/api/ping",
+})
+
+
+def _issue_session_token() -> str:
+    issued = str(int(wall_clock_time()))
+    signature = hmac.new(_SESSION_SECRET, issued.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{issued}.{signature}"
+
+
+def _session_token_is_valid(token: str) -> bool:
+    try:
+        issued, signature = str(token or "").split(".", 1)
+    except ValueError:
+        return False
+    expected = hmac.new(_SESSION_SECRET, issued.encode("utf-8"), hashlib.sha256).hexdigest()
+    # compare_digest, not ==, so a wrong token cannot be recovered by timing.
+    if not hmac.compare_digest(expected, signature):
+        return False
+    try:
+        return (wall_clock_time() - int(issued)) < SESSION_TTL_SECONDS
+    except (TypeError, ValueError):
+        return False
+
+
+def _request_has_session(handler: Any) -> bool:
+    raw = handler.headers.get("Cookie", "") or ""
+    for part in raw.split(";"):
+        name, _, value = part.strip().partition("=")
+        if name == SESSION_COOKIE_NAME:
+            return _session_token_is_valid(value)
+    return False
+
+
+def _requires_session(path: str) -> bool:
+    """Only /api/* is gated here. UI files stay public - the login page and
+    its assets have to load before anyone can authenticate, and they carry
+    no data on their own."""
+    base = path.split("?", 1)[0]
+    return base.startswith("/api/") and base not in PUBLIC_API_PATHS
 
 
 def authenticate(data: dict[str, Any]) -> dict[str, bool]:
@@ -6190,7 +6256,7 @@ def reporting_metric_export(params: dict[str, list[str]] | None = None) -> tuple
         LEFT JOIN `{project_id}.{dataset_id}.businesses` b
           ON b.business_id = e.business_id AND b.is_deleted IS NOT TRUE
         WHERE UPPER(qf.fix_type) = '{fix_type}' AND qf.processed AND qf.improved
-          AND (ARRAY_LENGTH(@brands) = 0 OR COALESCE(b.name, e.business_id) IN UNNEST(@brands))
+          AND (COALESCE(ARRAY_LENGTH(@brands), 0) = 0 OR COALESCE(b.name, e.business_id) IN UNNEST(@brands))
           AND (@start_date = '' OR DATE(qf.created_at) >= SAFE_CAST(@start_date AS DATE))
           AND (@end_date = '' OR DATE(qf.created_at) <= SAFE_CAST(@end_date AS DATE))
         ORDER BY qf.created_at DESC
@@ -6212,7 +6278,7 @@ def reporting_metric_export(params: dict[str, list[str]] | None = None) -> tuple
           ON b.business_id = e.business_id AND b.is_deleted IS NOT TRUE
         WHERE e.is_deleted IS NOT TRUE
           AND ({predicate})
-          AND (ARRAY_LENGTH(@brands) = 0 OR COALESCE(b.name, e.business_id) IN UNNEST(@brands))
+          AND (COALESCE(ARRAY_LENGTH(@brands), 0) = 0 OR COALESCE(b.name, e.business_id) IN UNNEST(@brands))
           AND (@start_date = '' OR DATE(e.observed_at) >= SAFE_CAST(@start_date AS DATE))
           AND (@end_date = '' OR DATE(e.observed_at) <= SAFE_CAST(@end_date AS DATE))
         ORDER BY e.observed_at DESC
@@ -6250,8 +6316,8 @@ def reporting_metric_export(params: dict[str, list[str]] | None = None) -> tuple
           LEFT JOIN `{project_id}.{dataset_id}.businesses` b
             ON b.business_id = l.business_id AND b.is_deleted IS NOT TRUE
           WHERE l.is_deleted IS NOT TRUE
-            AND (ARRAY_LENGTH(@brands) = 0 OR COALESCE(b.name, l.business_id) IN UNNEST(@brands))
-            AND (ARRAY_LENGTH(@states) = 0 OR UPPER(COALESCE(l.state_code,'')) IN UNNEST(@states))
+            AND (COALESCE(ARRAY_LENGTH(@brands), 0) = 0 OR COALESCE(b.name, l.business_id) IN UNNEST(@brands))
+            AND (COALESCE(ARRAY_LENGTH(@states), 0) = 0 OR UPPER(COALESCE(l.state_code,'')) IN UNNEST(@states))
         )
         SELECT *, duplicate_group_count > 1 AS is_duplicate
         FROM base
@@ -6268,8 +6334,8 @@ def reporting_metric_export(params: dict[str, list[str]] | None = None) -> tuple
           coordinate_confidence, coordinate_source,
           population, median_household_income, median_age, last_observed_at
         FROM `{gold_ref}.vw_reporting_locations`
-        WHERE (ARRAY_LENGTH(@brands) = 0 OR brand IN UNNEST(@brands))
-          AND (ARRAY_LENGTH(@states) = 0 OR UPPER(COALESCE(state_code,'')) IN UNNEST(@states))
+        WHERE (COALESCE(ARRAY_LENGTH(@brands), 0) = 0 OR brand IN UNNEST(@brands))
+          AND (COALESCE(ARRAY_LENGTH(@states), 0) = 0 OR UPPER(COALESCE(state_code,'')) IN UNNEST(@states))
         ORDER BY state_code, city_name, address
         LIMIT {METRIC_EXPORT_ROW_LIMIT}
         """
@@ -6298,10 +6364,10 @@ def reporting_metric_export(params: dict[str, list[str]] | None = None) -> tuple
             ANY_VALUE(median_household_income) AS median_household_income,
             ANY_VALUE(latitude) AS latitude,
             ANY_VALUE(longitude) AS longitude,
-            SUM(CASE WHEN ARRAY_LENGTH(@brands) = 0 OR brand_name IN UNNEST(@brands) THEN COALESCE(location_count, 0) ELSE 0 END) AS location_count,
+            SUM(CASE WHEN COALESCE(ARRAY_LENGTH(@brands), 0) = 0 OR brand_name IN UNNEST(@brands) THEN COALESCE(location_count, 0) ELSE 0 END) AS location_count,
             STRING_AGG(DISTINCT CASE WHEN COALESCE(location_count, 0) > 0 THEN brand_name END, '; ') AS brands_present
           FROM `{gold_ref}.vw_reporting_gap_base`
-          WHERE (ARRAY_LENGTH(@states) = 0 OR UPPER(COALESCE(state_code,'')) IN UNNEST(@states))
+          WHERE (COALESCE(ARRAY_LENGTH(@states), 0) = 0 OR UPPER(COALESCE(state_code,'')) IN UNNEST(@states))
           GROUP BY zip_code
         ),
         flagged AS (
@@ -6328,9 +6394,9 @@ def reporting_metric_export(params: dict[str, list[str]] | None = None) -> tuple
         FROM `{project_id}.{dataset_id}.businesses` b
         LEFT JOIN `{project_id}.{dataset_id}.listings` l
           ON l.business_id = b.business_id AND l.is_deleted IS NOT TRUE
-          AND (ARRAY_LENGTH(@states) = 0 OR UPPER(COALESCE(l.state_code,'')) IN UNNEST(@states))
+          AND (COALESCE(ARRAY_LENGTH(@states), 0) = 0 OR UPPER(COALESCE(l.state_code,'')) IN UNNEST(@states))
         WHERE b.is_deleted IS NOT TRUE AND COALESCE(b.status, 'active') = 'active'
-          AND (ARRAY_LENGTH(@brands) = 0 OR b.name IN UNNEST(@brands))
+          AND (COALESCE(ARRAY_LENGTH(@brands), 0) = 0 OR b.name IN UNNEST(@brands))
         GROUP BY b.business_id, b.name, b.slug, b.status, b.created_at, b.updated_at, b.country_of_origin
         ORDER BY listing_count DESC
         LIMIT {METRIC_EXPORT_ROW_LIMIT}
@@ -7464,6 +7530,12 @@ def make_handler(ui_dir: Path):
         def do_GET(self) -> None:
             if self._route_clean_ui_path():
                 return
+            if _requires_session(self.path) and not _request_has_session(self):
+                # 401 (not a redirect) so the UI's existing 401 handling
+                # sends the user to /login instead of a fetch parsing an
+                # HTML login page as JSON.
+                _json_response(self, 401, {"error": "Sign in to continue."})
+                return
             if self.path == "/api/session":
                 _json_response(self, 200, {"server_launch_id": SERVER_LAUNCH_ID})
                 return
@@ -7680,6 +7752,9 @@ def make_handler(ui_dir: Path):
             super().do_GET()
 
         def do_POST(self) -> None:
+            if _requires_session(self.path) and not _request_has_session(self):
+                _json_response(self, 401, {"error": "Sign in to continue."})
+                return
             if self.path not in {"/api/login", "/api/preview", "/api/source-url", "/api/sheets", "/api/save", "/api/clear", "/api/master-delete", "/api/brands", "/api/brands/update", "/api/brands/merge", "/api/learning", "/api/reprocess", "/api/review/auto-repair", "/api/field-alias", "/api/custom-field", "/api/custom-field/delete", "/api/templates/save", "/api/silver/enrich", "/api/reporting/refresh", "/api/enrichment/stop", "/api/sample/load", "/api/sample/clear", "/api/settings"}:
                 _json_response(self, 404, {"error": "Not found"})
                 return
@@ -7697,7 +7772,13 @@ def make_handler(ui_dir: Path):
                     payload["event_id"] = request_id
                 LOGGER.info("request_started request_id=%s endpoint=%s content_length=%d", request_id, self.path, length)
                 if self.path == "/api/login":
-                    _json_response(self, 200, authenticate(payload))
+                    result = authenticate(payload)
+                    # authenticate() raises on bad credentials, so reaching
+                    # here means the session is earned.
+                    _json_response(self, 200, result, extra_headers=[(
+                        "Set-Cookie",
+                        f"{SESSION_COOKIE_NAME}={_issue_session_token()}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL_SECONDS}",
+                    )])
                 elif self.path == "/api/source-url":
                     _json_response(self, 200, fetch_public_source(payload))
                 elif self.path == "/api/sheets":

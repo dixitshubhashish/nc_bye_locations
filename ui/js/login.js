@@ -35,7 +35,7 @@ function setStatus(targetId, message, type = "", options = {}) {
       const retry = document.createElement("button");
       retry.type = "button";
       retry.className = "status-retry";
-      retry.textContent = "Reload reference data";
+      retry.textContent = "Reload ZIPs";
       retry.addEventListener("click", () => prepareReferenceData());
       target.insertBefore(retry, close);
     }
