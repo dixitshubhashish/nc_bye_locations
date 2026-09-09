@@ -134,6 +134,7 @@
       sessionStorage.setItem(LOGIN_SESSION_KEY, "true");
       sessionStorage.setItem(MAPPING_SESSION_KEY, newSessionId());
       sessionStorage.removeItem(DRAFT_KEY);
+      sessionStorage.removeItem("activeTab");
       setLoginStatus("Signed in successfully.", "ok");
       showAuthenticatedApp();
     } catch (error) {

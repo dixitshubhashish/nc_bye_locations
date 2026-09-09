@@ -8,6 +8,7 @@ from unittest.mock import patch
 import whitespace_tool.sqlite_cache as sqlite_cache
 from whitespace_tool.geo_enrichment import (
     detect_and_fix_inverted_coords,
+    detect_hierarchy_conflict,
     enrich_raw_listing_row,
     find_nearest_city_and_zip,
     find_nearest_worldwide_city,
@@ -155,13 +156,24 @@ class GeoEnrichmentTests(unittest.TestCase):
         self.assertTrue(4000 < dist < 4300)
 
     def test_ocean_coordinate_snapping_to_nearest_city(self) -> None:
-        # Point offshore SF in Pacific Ocean: lat 37.7, lon -123.0
+        # Point offshore SF in Pacific Ocean, within the 50km snap cap:
+        # lat 37.75, lon -122.9 (~43km from the seeded San Francisco fixture)
         with sqlite_cache.get_db_connection() as conn:
-            nearest = find_nearest_city_and_zip(37.7, -123.0, conn)
+            nearest = find_nearest_city_and_zip(37.75, -122.9, conn)
         self.assertIsNotNone(nearest)
         self.assertEqual(nearest["city_name"], "San Francisco city")
         self.assertEqual(nearest["zip_code"], "94103")
-        self.assertLess(nearest["distance_km"], 60.0)
+        self.assertLess(nearest["distance_km"], 50.0)
+
+    def test_far_offshore_coordinate_does_not_snap_beyond_50km(self) -> None:
+        # A coordinate reliably nearer than 50km should snap (tested above);
+        # one further out must not - snapping to a "nearest" match hundreds
+        # of km away is not a reliable repair, just whatever was closest
+        # among an unrelated set. lat 37.7, lon -123.0 is ~52km from the
+        # seeded San Francisco fixture - just over the cap.
+        with sqlite_cache.get_db_connection() as conn:
+            nearest = find_nearest_city_and_zip(37.7, -123.0, conn)
+        self.assertIsNone(nearest)
 
     def test_lookup_zip_and_coords_by_city_state(self) -> None:
         with sqlite_cache.get_db_connection() as conn:
@@ -211,14 +223,22 @@ class GeoEnrichmentTests(unittest.TestCase):
         self.assertEqual(enriched.get("__coordinate_fix"), "inversion_corrected")
 
     def test_find_nearest_worldwide_city(self) -> None:
-        # Offshore English Channel point near London: lat 51.0, lon 0.1
+        # Offshore point near London, within the 50km snap cap: lat 51.45,
+        # lon -0.05 (~8km from the seeded London fixture)
         with sqlite_cache.get_db_connection() as conn:
-            nearest = find_nearest_worldwide_city(51.0, 0.1, conn, country="United Kingdom")
+            nearest = find_nearest_worldwide_city(51.45, -0.05, conn, country="United Kingdom")
         self.assertIsNotNone(nearest)
         self.assertEqual(nearest["city"], "London")
         self.assertEqual(nearest["country_code"], "GB")
         self.assertEqual(nearest["zip_code"], "SW1A 1AA")
-        self.assertLess(nearest["distance_km"], 100.0)
+        self.assertLess(nearest["distance_km"], 50.0)
+
+    def test_far_offshore_worldwide_coordinate_does_not_snap_beyond_50km(self) -> None:
+        # lat 51.0, lon 0.1 is ~58km from the seeded London fixture - just
+        # over the cap, so it must not snap.
+        with sqlite_cache.get_db_connection() as conn:
+            nearest = find_nearest_worldwide_city(51.0, 0.1, conn, country="United Kingdom")
+        self.assertIsNone(nearest)
 
     def test_lookup_worldwide_city_from_cache(self) -> None:
         with sqlite_cache.get_db_connection() as conn:
@@ -284,3 +304,78 @@ class GeoEnrichmentTests(unittest.TestCase):
         self.assertEqual(new_cycle, 2)
         # 2 failed items from cycle 1 + 1 new item ("list_4") = 3
         self.assertEqual(new_count, 3)
+
+
+    def test_claim_enrichment_batch_does_not_always_pick_the_same_sorted_first_ids(self) -> None:
+        # "Fix with AI" was always working the lexicographically-first ids,
+        # which concentrated every cycle on whichever brand sorted first.
+        # Claiming is randomised now, so across several fresh cycles the
+        # first claimed id must not always be the smallest one.
+        listing_ids = [f"listing_{index:03d}" for index in range(40)]
+        smallest = min(listing_ids)
+        first_claims = []
+        for _ in range(8):
+            cycle_id, _count = sqlite_cache.seed_or_swap_enrichment_cycle(listing_ids)
+            batch = sqlite_cache.claim_enrichment_batch(cycle_id, limit=2)
+            first_claims.append(batch[0])
+            for claimed in batch:
+                sqlite_cache.complete_enrichment_claim(claimed, cycle_id, improved=True)
+        self.assertTrue(any(claim != smallest for claim in first_claims))
+
+
+class HierarchyConflictTests(unittest.TestCase):
+    """detect_hierarchy_conflict() - a record can carry a ZIP/city/state AND
+    lat/lon that disagree with each other (e.g. ZIP says San Francisco but
+    the coordinates land near open ocean 50+km away). It must offer both
+    readings rather than silently picking or accepting either."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._db_path_patch = patch.object(sqlite_cache, "DB_PATH", Path(self._tmpdir) / "test_hierarchy.db")
+        self._db_path_patch.start()
+        sqlite_cache.init_sqlite_cache()
+        sqlite_cache.cache_zipcodes([{
+            "zip_code": "94103",
+            "city_name": "San Francisco city",
+            "county": "San Francisco County",
+            "state_code": "CA",
+            "state_name": "California",
+            "latitude": 37.773,
+            "longitude": -122.411,
+            "population": 28000,
+        }])
+
+    def tearDown(self) -> None:
+        self._db_path_patch.stop()
+
+    def test_agreeing_zip_and_coordinates_report_no_conflict(self) -> None:
+        with sqlite_cache.get_db_connection() as conn:
+            conflict = detect_hierarchy_conflict("94103", "United States", 37.773, -122.411, conn)
+        self.assertIsNone(conflict)
+
+    def test_disagreeing_zip_and_coordinates_offer_both_readings(self) -> None:
+        # lat 37.7, lon -123.0 is ~52km from the seeded 94103 ZIP - just
+        # over the 50km cap, so it's a genuine conflict, not measurement
+        # noise.
+        with sqlite_cache.get_db_connection() as conn:
+            conflict = detect_hierarchy_conflict("94103", "United States", 37.7, -123.0, conn)
+        self.assertIsNotNone(conflict)
+        self.assertGreater(conflict["distance_km"], 50)
+        self.assertEqual(conflict["zip_based"]["city"], "San Francisco city")
+        self.assertEqual(conflict["zip_based"]["zip_code"], "94103")
+        # coordinate_based comes from find_nearest_city_and_zip() on the
+        # row's own lat/lon - with only one seeded ZIP and a >50km gap, no
+        # nearest match exists either, so this side is correctly None
+        # rather than a fabricated guess.
+        self.assertIsNone(conflict["coordinate_based"])
+
+    def test_missing_zip_or_coordinates_is_not_a_conflict(self) -> None:
+        with sqlite_cache.get_db_connection() as conn:
+            self.assertIsNone(detect_hierarchy_conflict("", "United States", 37.7, -123.0, conn))
+            self.assertIsNone(detect_hierarchy_conflict("94103", "United States", None, None, conn))
+
+    def test_unknown_zip_is_not_a_conflict(self) -> None:
+        # A ZIP with no reference data can't be compared against anything -
+        # absence of evidence isn't evidence of a conflict.
+        with sqlite_cache.get_db_connection() as conn:
+            self.assertIsNone(detect_hierarchy_conflict("00000", "United States", 37.7, -123.0, conn))

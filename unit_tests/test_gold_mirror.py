@@ -277,15 +277,19 @@ class SyncGoldMirrorTests(unittest.TestCase):
             calls.append("gold")
             return {"views": ["a"]}
 
-        def fake_sync():
-            calls.append("mirror")
+        # force is passed through so the deliberate clear paths can swap in
+        # an empty mirror (see sync_gold_mirror's empty-swap guard).
+        def fake_sync(force: bool = False):
+            calls.append(f"mirror(force={force})")
             return {"zip_brand_rows": 0, "location_rows": 0, "business_rows": 0}
 
         with patch.object(workflow_server, "build_gold_layer", side_effect=fake_gold):
             with patch.object(workflow_server, "sync_gold_mirror", side_effect=fake_sync):
                 result = workflow_server._rebuild_gold_and_mirror()
+                forced = workflow_server._rebuild_gold_and_mirror(force_mirror=True)
 
-        self.assertEqual(calls, ["gold", "mirror"])
+        self.assertEqual(calls, ["gold", "mirror(force=False)", "gold", "mirror(force=True)"])
+        self.assertIn("mirror", forced)
         self.assertEqual(result["gold"]["views"], ["a"])
 
     def test_rebuild_gold_and_mirror_survives_a_mirror_sync_failure(self) -> None:

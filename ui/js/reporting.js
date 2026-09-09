@@ -2,9 +2,9 @@
 
 let reportLoaded = false;
 let reportingBrands = [];
-let competitorDefaultsAppliedForMainBrand = null;
 let enrichmentStatusTimer = null;
-let reportingAutoRefreshTimer = null;
+let reportingCountdownTimer = null;
+let reportingCountdownSeconds = 300;
 let reportingWarmupTimer = null;
 
 const canonicalBrandMap = new Map();
@@ -100,12 +100,16 @@ function renderEmptyReportingStructure() {
         { key: "pct", label: "Listing Share" },
         { key: "state_population", label: "State Population", format: formatNumber },
         { key: "pop_per_store", label: "Population Per Listing", format: formatNumber },
+        { key: "median_household_income", label: "Median Income", format: formatNumber },
         { key: "cities", label: "Cities Covered", format: formatNumber }
       ], []);
       renderSimpleTable("reportTopCities", [
         { key: "city", label: "City" },
         { key: "state_name", label: "State / Territory" },
-        { key: "locations", label: "Listings", format: formatNumber }
+        { key: "locations", label: "Listings", format: formatNumber },
+        { key: "city_population", label: "Population", format: formatNumber },
+        { key: "pop_per_listing", label: "Population Per Listing", format: formatNumber },
+        { key: "median_household_income", label: "Median Income", format: formatNumber }
       ], []);
       renderSimpleTable("reportBrandsTable", [
         { key: "brand", label: "Brand" },
@@ -189,6 +193,7 @@ function renderBrandChecksWithSelectAll(containerId, name, brands, checkedBrands
             <button type="button" data-action="deselect-all" style="background: none; border: 0; color: #64748b; font-weight: 600; cursor: pointer; padding: 0;">None</button>
           </div>
         </div>
+        <input type="search" class="competitor-brand-search" autocomplete="off" aria-label="Search competitor brands" placeholder="Type 2+ letters to search brands" style="width: 100%; box-sizing: border-box; padding: 5px 8px; margin-bottom: 6px; border: 1px solid var(--line); border-radius: 6px; font-size: 11px; font-family: inherit;">
         <div class="competitor-brand-items" style="display: grid; gap: 4px;">
       `;
 
@@ -205,6 +210,22 @@ function renderBrandChecksWithSelectAll(containerId, name, brands, checkedBrands
       const selectAllCheckbox = container.querySelector(`input[name="${name}_selectAll"]`);
       const selectAllLabel = container.querySelector(".select-all-label");
       const checkBoxes = container.querySelectorAll(`input[name="${name}"]`);
+
+      const brandSearch = container.querySelector(".competitor-brand-search");
+      if (brandSearch) {
+        brandSearch.addEventListener("input", () => {
+          const query = brandSearch.value.trim().toLowerCase();
+          // Rows are hidden, never removed - a brand that is checked but
+          // filtered out of view must still count as selected, so its
+          // checkbox has to stay in the DOM.
+          checkBoxes.forEach((checkbox) => {
+            const row = checkbox.closest("label");
+            if (!row) return;
+            const matches = query.length < 2 || String(checkbox.value || "").toLowerCase().includes(query) || row.textContent.toLowerCase().includes(query);
+            row.style.display = matches ? "" : "none";
+          });
+        });
+      }
 
       function syncSelectAllState() {
         const total = checkBoxes.length;
@@ -674,9 +695,6 @@ function syncReportingFilters(result) {
         } else if (mainSel) {
           mainSel.innerHTML = '<option value="">All Brands</option>';
         }
-        if (!uniqueBrands.length) {
-          competitorDefaultsAppliedForMainBrand = null;
-        }
         updateCompetitorOptions();
         brandDropdownsInitialized = true;
       }
@@ -688,14 +706,11 @@ function updateCompetitorOptions() {
       const competitorChoices = selectedMain ? reportingBrands.filter((b) => b !== selectedMain) : [];
       const currentlyChecked = new Set(checkedValues("competitorBrand"));
 
-      // Picking a primary brand should default to comparing against every other
-      // brand, same as the primary brand selector defaulting to "All Brands" -
-      // the user can still narrow it down manually afterward.
-      const isFreshMainBrandSelection = selectedMain && selectedMain !== competitorDefaultsAppliedForMainBrand;
-      const defaultCompetitors = isFreshMainBrandSelection
-        ? competitorChoices
-        : competitorChoices.filter((b) => currentlyChecked.has(b));
-      competitorDefaultsAppliedForMainBrand = selectedMain || null;
+      // Picking a primary brand used to default to comparing against every
+      // other brand automatically - per explicit user request, competitor
+      // selection now starts empty and the user opts in to whichever
+      // brands they actually want to compare against.
+      const defaultCompetitors = competitorChoices.filter((b) => currentlyChecked.has(b));
 
       // Distinguish "you haven't picked a primary brand yet" from "the data
       // genuinely has no other brands" - the old fixed "No brands available."
@@ -1052,7 +1067,61 @@ async function loadGeoOptions() {
           citySel.innerHTML = '<option value="">All Cities</option>' + cityList.map((ct) => `<option value="${escapeHtml(ct)}">${escapeHtml(ct)}</option>`).join("");
           citySel.value = cityList.includes(currentCity) ? currentCity : "";
         }
+        // Cache the full option set first, then re-narrow it - otherwise a
+        // repopulate would silently discard whatever the user had typed.
+        GEO_SEARCHABLE_FILTERS.forEach(([selectId]) => {
+          cacheGeoOptions(selectId);
+          applyGeoOptionSearch(selectId);
+        });
       } catch (err) {}
+    }
+
+const GEO_SEARCHABLE_FILTERS = [
+  ["reportStateFilter", "states"],
+  ["reportCountyFilter", "counties"],
+  ["reportCityFilter", "cities"],
+];
+const geoOptionCache = {};
+
+function setupGeoFilterSearch() {
+      GEO_SEARCHABLE_FILTERS.forEach(([selectId, label]) => {
+        const select = el(selectId);
+        if (!select || document.getElementById(`${selectId}Search`)) return;
+        const search = document.createElement("input");
+        search.id = `${selectId}Search`;
+        search.type = "search";
+        search.className = "report-filter-control report-filter-search";
+        search.placeholder = `Type 2+ letters to search ${label}`;
+        search.setAttribute("aria-label", `Search ${label}`);
+        search.autocomplete = "off";
+        select.parentNode.insertBefore(search, select);
+        search.addEventListener("input", () => applyGeoOptionSearch(selectId));
+        cacheGeoOptions(selectId);
+      });
+    }
+
+function cacheGeoOptions(selectId) {
+      const select = el(selectId);
+      if (!select || select.options.length <= 1) return;
+      geoOptionCache[selectId] = Array.from(select.options).map((option) => ({ value: option.value, text: option.textContent }));
+    }
+
+function applyGeoOptionSearch(selectId) {
+      const select = el(selectId);
+      const search = document.getElementById(`${selectId}Search`);
+      const allOptions = geoOptionCache[selectId];
+      if (!select || !search || !allOptions || !allOptions.length) return;
+      const query = search.value.trim().toLowerCase();
+      const selected = select.value;
+      // Under 2 characters there is nothing worth narrowing by, so show the
+      // full list. The blank "All X" option and whatever is currently
+      // selected always survive the filter, so a search can never strip the
+      // active selection out of the control.
+      const matches = query.length < 2
+        ? allOptions
+        : allOptions.filter((option) => !option.value || option.value === selected || option.text.toLowerCase().includes(query));
+      select.innerHTML = matches.map((option) => `<option value="${escapeHtml(option.value)}">${escapeHtml(option.text)}</option>`).join("");
+      select.value = selected;
     }
 let zipTypeaheadTimer = null;
 let zipTypeaheadRequestId = 0;
@@ -1249,7 +1318,7 @@ async function loadReporting({ interactive = false } = {}) {
       const refreshBtn = el("refreshReportBtn");
       const applyBtn = el("applyReportFiltersBtn");
       startEnrichmentStatusPolling();
-      const previousRefreshBtn = interactive ? setButtonBusy(refreshBtn, "Refreshing Report") : "";
+      const previousRefreshBtn = interactive ? setButtonBusy(refreshBtn, "Refreshing Reports") : "";
       const previousApplyBtn = interactive && applyBtn ? setButtonBusy(applyBtn, "Applying Filters") : "";
       if (interactive) {
         status.className = "report-status loading";
@@ -1275,8 +1344,10 @@ async function loadReporting({ interactive = false } = {}) {
           status.innerHTML = '<span class="spinner"></span> Preparing reporting data...';
           scheduleReportingWarmupPoll(3000);
         } else if (interactive && result.refreshing) {
-          status.className = "report-status loading";
-          status.innerHTML = '<span class="spinner"></span> Refreshing report in the background...';
+          // The Refresh Report button itself already shows "Refreshing
+          // Reports" with a spinner while this is in flight - no need for a
+          // second, redundant status line saying the same thing.
+          status.classList.add("hidden");
           scheduleReportingWarmupPoll(10000);
         } else {
           status.classList.add("hidden");
@@ -1301,6 +1372,11 @@ async function loadReporting({ interactive = false } = {}) {
         renderReportingMap(result.map_records || [], result.gaps || [], result.top_states || [], result.filters || {});
 
         const totalLocs = totals.total_locations || 1;
+        // "if filter applicable": only show a Subject vs Competitor listing
+        // split once the user has actually picked both a subject brand and
+        // at least one competitor - otherwise every row's split is
+        // meaningless zeros for both columns.
+        const hasBrandVsCompetitorFilter = Boolean((result.filters?.main_brands || []).length && (result.filters?.competitor_brands || []).length);
 
         const rawPrimary = selectedPrimaryBrand(result.filters || "");
         const primaryBrandName = resolveCanonicalBrand(rawPrimary);
@@ -1366,13 +1442,33 @@ async function loadReporting({ interactive = false } = {}) {
               return ratio >= 1e3 ? (ratio / 1e3).toFixed(1) + "K" : ratio;
             }
           },
-          { key: "cities", label: "Cities Covered", format: formatNumber }
+          { key: "median_household_income", label: "Median Income", format: (v) => v ? `$${formatNumber(Math.round(v))}` : "N/A" },
+          { key: "cities", label: "Cities Covered", format: formatNumber },
+          ...(hasBrandVsCompetitorFilter ? [
+            { key: "main_brand_locations", label: "Subject Brand Listings", format: formatNumber },
+            { key: "competitor_brand_locations", label: "Competitor Listings", format: formatNumber }
+          ] : [])
         ], result.top_states || []);
 
         renderSimpleTable("reportTopCities", [
           { key: "city", label: "City" },
           { key: "state_name", label: "State / Territory" },
-          { key: "locations", label: "Listings", format: formatNumber }
+          { key: "locations", label: "Listings", format: formatNumber },
+          { key: "city_population", label: "Population", format: (v) => v ? formatNumber(v) : "N/A" },
+          {
+            key: "pop_per_listing",
+            label: "Population Per Listing",
+            format: (v, row) => {
+              if (!row.city_population || !row.locations) return "N/A";
+              const ratio = Math.round(row.city_population / row.locations);
+              return ratio >= 1e3 ? (ratio / 1e3).toFixed(1) + "K" : ratio;
+            }
+          },
+          { key: "median_household_income", label: "Median Income", format: (v) => v ? `$${formatNumber(Math.round(v))}` : "N/A" },
+          ...(hasBrandVsCompetitorFilter ? [
+            { key: "main_brand_locations", label: "Subject Brand Listings", format: formatNumber },
+            { key: "competitor_brand_locations", label: "Competitor Listings", format: formatNumber }
+          ] : [])
         ], result.top_cities || []);
 
         const aggregatedBrandMap = new Map();
@@ -1546,18 +1642,37 @@ async function loadReporting({ interactive = false } = {}) {
           if (applyBtn) clearButtonBusy(applyBtn, previousApplyBtn);
         }
       }
-      if (!reportingAutoRefreshTimer) {
-        reportingAutoRefreshTimer = window.setInterval(() => {
-          if (document.getElementById("reportingView")?.classList.contains("hidden")) return;
-          loadReporting({ interactive: false });
-        }, 60000);
-      }
+      startReportingAutoRefreshCountdown();
 }
+
+function renderReportingCountdown() {
+      const countdownEl = el("reportAutoRefreshCountdown");
+      if (!countdownEl) return;
+      const minutes = Math.floor(reportingCountdownSeconds / 60);
+      const seconds = reportingCountdownSeconds % 60;
+      countdownEl.textContent = `Next auto refresh in ${minutes}:${String(seconds).padStart(2, "0")}`;
+    }
+
+function startReportingAutoRefreshCountdown() {
+      renderReportingCountdown();
+      if (reportingCountdownTimer) return;
+      reportingCountdownTimer = window.setInterval(() => {
+        if (document.getElementById("reportingView")?.classList.contains("hidden")) return;
+        reportingCountdownSeconds -= 1;
+        if (reportingCountdownSeconds <= 0) {
+          reportingCountdownSeconds = 300;
+          loadReporting({ interactive: false });
+        }
+        renderReportingCountdown();
+      }, 1000);
+    }
 
 async function refreshReportingNow() {
       const status = el("reportStatus");
       const refreshBtn = el("refreshReportBtn");
       const previousRefreshBtn = setButtonBusy(refreshBtn, "Starting Refresh");
+      reportingCountdownSeconds = 300;
+      renderReportingCountdown();
       if (status) {
         status.className = "report-status loading";
         status.innerHTML = '<span class="spinner"></span> Starting report refresh...';
@@ -1579,6 +1694,7 @@ async function refreshReportingNow() {
         }
         reportLoaded = false;
         await loadReporting({ interactive: true });
+        if (typeof window.reportingRefreshQuality === "function") window.reportingRefreshQuality();
       } catch (error) {
         if (status) {
           status.className = "report-status";
@@ -1589,8 +1705,16 @@ async function refreshReportingNow() {
       }
 }
 
+function stopEnrichmentStatusPolling() {
+      if (enrichmentStatusTimer) {
+        window.clearInterval(enrichmentStatusTimer);
+        enrichmentStatusTimer = null;
+      }
+    }
+
 function startEnrichmentStatusPolling() {
       if (enrichmentStatusTimer) return;
+      let sawRunning = false;
       const poll = async () => {
         try {
           const response = await fetch("/api/enrichment/status", { cache: "no-store" });
@@ -1598,8 +1722,10 @@ function startEnrichmentStatusPolling() {
           const state = await response.json();
           const target = el("reportingDataRefreshStatus");
           const stopButton = el("stopEnrichmentBtn");
+          const running = state.refreshing || state.state === "running";
+          if (running) sawRunning = true;
           if (!target) return;
-          if (state.refreshing || state.state === "running") {
+          if (running) {
             target.className = "action-feedback";
             target.innerHTML = `${busyMarkup("Enriching in progress")} <small>Processed ${Number(state.processed || 0)} records${state.current_id ? `; current ${escapeHtml(state.current_id)}` : ""}.</small>`;
             stopButton?.classList.remove("hidden");
@@ -1614,6 +1740,10 @@ function startEnrichmentStatusPolling() {
           } else {
             stopButton?.classList.add("hidden");
           }
+          // Stop polling once a run we were watching has reached a terminal
+          // state - otherwise this timer runs every 3s for the rest of the
+          // session (leak risk on a 512MB deployment).
+          if (sawRunning && !running) stopEnrichmentStatusPolling();
         } catch (_) {}
       };
       poll();

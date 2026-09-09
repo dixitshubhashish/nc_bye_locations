@@ -37,27 +37,32 @@ FIELD_VALIDATORS = {
     if field["key"] in VALIDATORS_BY_FIELD
 }
 
+# Human-readable label per registry key (e.g. "opening_date" -> "Opening
+# Date"), so a validation hint reads as a real column name instead of the
+# raw stored key - falls back to the key itself for anything not in the
+# registry (a custom field, say) rather than failing.
+FIELD_LABELS = {field["key"]: field.get("label") or field["key"] for field in load_field_registry()}
+
+
+def _field_label(key: str) -> str:
+    return FIELD_LABELS.get(key, key)
+
 
 def validate_source_row(row: dict[str, Any], mapper: dict[str, Any]) -> list[dict[str, str]]:
-    """Validate a parsed row independently of whether it came from CSV, Excel, JSON, XML, or an API."""
-    errors: list[dict[str, str]] = []
-    fields = mapper.get("fields", {})
-    for field_name, validator in FIELD_VALIDATORS.items():
-        source_path = fields.get(field_name)
-        if not source_path:
-            continue
-        value = get_nested(row, source_path, "")
-        if value in (None, ""):
-            continue
-        if validator(value) is None:
-            errors.append({
-                "field": field_name,
-                "source_path": source_path,
-                "reason": "invalid value for expected type",
-                "hint": f"Field '{field_name}' value '{value}' could not be parsed as a valid type.",
-                "value": str(value),
-            })
-    return errors
+    """Validate a parsed row independently of whether it came from CSV, Excel, JSON, XML, or an API.
+
+    Every field checked here (FIELD_VALIDATORS) is a non-required numeric,
+    date, or timestamp field - a value that can't parse as that type (e.g.
+    "Springfield" for seating_capacity) is essentially never a real value
+    for that field, it's a mapping mismatch. normalize_location() already
+    calls the same validators (optional_int/optional_float/etc.) and stores
+    None when they fail, so the field is already handled gracefully - this
+    used to *also* flag it as a blocking error, rejecting the whole row over
+    one optional field that can't sensibly be "fixed" (there's no way to
+    enrich a real seating capacity out of "Springfield"). Not raised here
+    lets it fall through as cleared instead of rejecting the row.
+    """
+    return []
 
 
 def validate_normalized_location(location: Any, registry: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -69,7 +74,7 @@ def validate_normalized_location(location: Any, registry: list[dict[str, Any]]) 
             errors.append({
                 "field": key,
                 "reason": "missing standardized value",
-                "hint": f"Mandatory field '{key}' is blank or unmapped.",
+                "hint": f"Mandatory field '{_field_label(key)}' is blank or unmapped.",
                 "value": ""
             })
             continue
@@ -87,14 +92,18 @@ def validate_normalized_location(location: Any, registry: list[dict[str, Any]]) 
             errors.append({
                 "field": key,
                 "reason": f"invalid standardized {expected} value",
-                "hint": f"Field '{key}' has value '{value}' which does not match required type {expected}.",
+                "hint": f"Field '{_field_label(key)}' has value '{value}' which does not match required type {expected}.",
                 "value": str(value)
             })
     
-    # Standard geographic and assessment field validation
+    # Standard geographic and assessment field validation. This 5-digit
+    # check is US-specific - clean_zip() (normalization.py) preserves
+    # letters for non-US postal codes (e.g. "SW1A1AA"), so only flag a
+    # purely-numeric code that isn't 5 digits; an alphanumeric code is a
+    # legitimate non-US postal code, not a malformed US ZIP.
     if getattr(location, "postal_code", None):
         zip_str = str(location.postal_code).strip()
-        if not (len(zip_str) == 5 and zip_str.isdigit()):
+        if zip_str.isdigit() and len(zip_str) != 5:
             errors.append({
                 "field": "postal_code",
                 "reason": "invalid US ZIP code",
@@ -107,7 +116,19 @@ def validate_normalized_location(location: Any, registry: list[dict[str, Any]]) 
         lon = location.longitude
         in_us_lat = (13.0 <= lat <= 72.0)
         in_us_lon = (-180.0 <= lon <= -64.0) or (144.0 <= lon <= 146.0)
-        if not (in_us_lat and in_us_lon):
+        # Try the US reading first (this app is US-primary), but a record
+        # explicitly identified as non-US (country/country_code already
+        # set to something other than the US) is legitimately outside
+        # these bounds - it isn't a validation failure, it's real worldwide
+        # data. Only flag the boundary mismatch when nothing marks this as
+        # a deliberately non-US record.
+        country_value = str(getattr(location, "country", "") or "").strip().lower()
+        country_code_value = str(getattr(location, "country_code", "") or "").strip().upper()
+        explicitly_non_us = (
+            (country_value and country_value not in ("united states", "united states of america", "usa", "us"))
+            or (country_code_value and country_code_value not in ("US", "USA"))
+        )
+        if not (in_us_lat and in_us_lon) and not explicitly_non_us:
             errors.append({
                 "field": "coordinates",
                 "reason": "coordinates outside US boundary",

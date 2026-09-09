@@ -54,6 +54,13 @@ class LocationRecord:
     country: str | None = None
     country_code: str | None = None
     email: str | None = None
+    # Source columns this parse carried that no typed column above covers.
+    # Every source has a different column list, so a fixed schema can never
+    # anticipate them all - without this they were silently dropped at the
+    # bronze write (rows_to_dataframe() reindexes onto the static schema).
+    # Populated by normalize_location(), which is the only place that knows
+    # which source paths the mapper actually consumed.
+    extras: dict[str, Any] | None = None
 
     @property
     def zip5(self) -> str:

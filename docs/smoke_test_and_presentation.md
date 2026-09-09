@@ -60,7 +60,7 @@ Minimum fixtures: a CSV with one missing ZIP and one malformed coordinate; a two
 - A clean system-Python startup does not have BigQuery dependencies even though `requirements.txt` declares them. Setup must install requirements before CLI/warehouse workflows are considered runnable.
 - Browser-level authenticated smoke automation is still missing.
 - Run-over-run snapshots and change reporting are not built.
-- Full filtered multi-sheet Excel export needs final end-to-end verification.
+- ~~Full filtered multi-sheet Excel export needs final end-to-end verification.~~ Done: `/api/reporting/export-excel` now produces a real 2-sheet workbook (primary brand / selected competitors) with a red→green button state; see `codex.md`.
 - Cross-source store identity resolution remains weaker when IDs differ.
 - Brand coverage is visible but not benchmarked against an external expected-store count.
 - True metro-area geography is not yet a first-class filter.

@@ -6,6 +6,12 @@ let reviewBrandNames = {};
 let autoRepairPollTimer = null;
 let aiFixedAnimationTimer = null;
 let reviewPage = 0;
+// Delegated click handler for the review table's action buttons. Must be
+// MODULE scope: it is written by loadRejectedRecords() and read on the
+// next load to detach the previous listener. Declared inside another
+// function it threw "reviewActionHandler is not defined" on every
+// review-queue render, including the empty-queue path.
+let reviewActionHandler = null;
 const REVIEW_PAGE_SIZE = 50;
 
 async function reviewFetch(url, options = {}, timeoutMs = 120000) {
@@ -83,26 +89,53 @@ async function autoRepairReviewBatch() {
         if (button?.dataset.autoRepairing !== "true") clearButtonBusy(button, previousButton);
       }
 
+function renderFixCounters(state) {
+  // RPT-13 follow-up: `state.auto_repair?.x || 0` meant ANY status response
+  // that omitted auto_repair (an early poll, a partial/errored payload, a
+  // response shape without it) rendered all four counters as 0 - wiping
+  // correct, durable numbers off the screen and making it look like the
+  // fixes had been lost. They never were: BigQuery quality_fix_events and
+  // the SQLite mirror both hold them. Absent data must leave the existing
+  // numbers alone; only a real payload may update them.
+  const stats = state && typeof state.auto_repair === "object" && state.auto_repair ? state.auto_repair : null;
+  if (!stats) return;
+  const fixedCount = el("reviewAiFixedCount");
+  if (fixedCount) animateAiFixedCount(Number(stats.fixed) || 0);
+  const manualFixedCount = el("reviewManualFixedCount");
+  if (manualFixedCount) manualFixedCount.textContent = formatAiFixedCount(Number(stats.manual_fixed) || 0, true);
+  const aiPercent = el("reviewAiFixedPercent");
+  if (aiPercent) {
+    const ai = Number(stats.fixed || 0);
+    const manual = Number(stats.manual_fixed || 0);
+    const pending = Number(stats.remaining || 0);
+    const total = ai + manual + pending;
+    aiPercent.textContent = `${total ? (ai / total * 100).toFixed(2) : "0.00"}%`;
+    const manualPercent = el("reviewManualFixedPercent");
+    if (manualPercent) manualPercent.textContent = `${total ? (manual / total * 100).toFixed(2) : "0.00"}%`;
+  }
+}
+async function refreshFixCountersOnce() {
+  // These counters only ever updated while an active auto-repair run was
+  // polling - a fresh page load (including right after logging back in)
+  // left them frozen at their static HTML default of "0" until the user
+  // happened to start a new run, even though the real, persisted count
+  // (reconciled from the durable quality_fix_events BigQuery log) was
+  // available the whole time. One fetch on load/tab-open is enough; no
+  // interval needed outside of an active run.
+  if (!el("reviewAiFixedCount")) return;
+  try {
+    const response = await fetch("/api/enrichment/status", { cache: "no-store" });
+    const state = await response.json();
+    if (response.ok) renderFixCounters(state);
+  } catch (_) {}
+}
 async function pollAutoRepairStatus() {
   const button = el("autoRepairReviewBtn");
   const target = el("reviewAutoRepairStatus") || el("reviewResults");
   try {
     const response = await fetch("/api/enrichment/status", { cache: "no-store" });
     const state = await response.json();
-    const fixedCount = el("reviewAiFixedCount");
-    if (fixedCount) animateAiFixedCount(state.auto_repair?.fixed || 0);
-    const manualFixedCount = el("reviewManualFixedCount");
-    if (manualFixedCount) manualFixedCount.textContent = formatAiFixedCount(state.auto_repair?.manual_fixed || 0, true);
-    const aiPercent = el("reviewAiFixedPercent");
-    if (aiPercent) {
-      const ai = Number(state.auto_repair?.fixed || 0);
-      const manual = Number(state.auto_repair?.manual_fixed || 0);
-      const pending = Number(state.auto_repair?.remaining || 0);
-      const total = ai + manual + pending;
-      aiPercent.textContent = `${total ? (ai / total * 100).toFixed(2) : "0.00"}%`;
-      const manualPercent = el("reviewManualFixedPercent");
-      if (manualPercent) manualPercent.textContent = `${total ? (manual / total * 100).toFixed(2) : "0.00"}%`;
-    }
+    renderFixCounters(state);
     if (state.state === "running") {
       if (target) target.innerHTML = `${busyMarkup("Auto-Fixing review records")} ${Number(state.processed || 0)} records processed. The next record will continue automatically. ${Number(state.auto_repair?.remaining || 0).toLocaleString()} need manual review.`;
       const manualCount = el("reviewManualCount");
@@ -174,7 +207,24 @@ async function _loadRejectedRecordsOnce() {
         const response = await reviewFetch(`/api/rejected?event_id=${encodeURIComponent(eventId)}&business_id=${encodeURIComponent(brandFilter)}&limit=${REVIEW_PAGE_SIZE}&offset=${reviewPage * REVIEW_PAGE_SIZE}`);
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not load review records.");
+        // Client-side, on this page's already-fetched batch - the same
+        // heuristic that colors each row's action button, so "AI Suggested
+        // Fix" here always matches what the filter picked.
+        const fixTypeFilter = el("reviewFixTypeFilter")?.value || "";
+        if (fixTypeFilter) {
+          result.records = result.records.filter((record) => {
+            const isSuggested = recordHasSuggestionAvailable(record);
+            return fixTypeFilter === "ai_suggested" ? isSuggested : !isSuggested;
+          });
+        }
         if (!result.records.length) {
+          // Detach before the early return: the queue going from N records to
+          // 0 would otherwise leave the previous delegated listener attached,
+          // holding the old records array alive in its closure.
+          if (reviewActionHandler) {
+            target.removeEventListener("click", reviewActionHandler);
+            reviewActionHandler = null;
+          }
           target.textContent = "No error listings found.";
           return;
         }
@@ -186,12 +236,21 @@ async function _loadRejectedRecordsOnce() {
           }
           const hintsHtml = Array.isArray(errs) ? errs.map(e => `
             <div style="background: #fff1f0; border: 1px solid #ffa39e; border-radius: 4px; padding: 4px 8px; margin-bottom: 4px; font-size: 12px; color: #cf1322;">
-              <strong>⚠️ ${escapeHtml(e.field || 'Field')}</strong>: ${escapeHtml(e.hint || e.reason || 'Invalid value')} <em>(${escapeHtml(e.value || 'empty')})</em>
+              <strong>⚠️ ${escapeHtml(formatFieldLabel(e.field) || 'Field')}</strong>: ${escapeHtml(e.hint || e.reason || 'Invalid value')} <em>(${escapeHtml(e.value || 'empty')})</em>
             </div>
           `).join('') : escapeHtml(JSON.stringify(record.errors));
 
           const rawBrand = record.raw_record && typeof record.raw_record === "object" ? (record.raw_record.brand || record.raw_record.Brand || "") : "";
           const brandDisplayName = reviewBrandNames[record.business_id] || formatBrandName(rawBrand || record.business_id || "—");
+
+          const hasSuggestionAvailable = recordHasSuggestionAvailable(record);
+          const attemptCount = Number(record.attempt_count || 0);
+          const attemptBadge = attemptCount > 0
+            ? `<span title="Reviewed ${attemptCount} time${attemptCount === 1 ? "" : "s"} already" style="display:inline-block; margin-left:6px; padding:1px 7px; border-radius:999px; background:#fff1f0; color:#cf1322; font-size:11px; font-weight:700;">Attempt ${attemptCount}</span>`
+            : "";
+          const actionButtonHtml = hasSuggestionAvailable
+            ? `<button type="button" class="review-fix-suggested" data-open-edit="${escapeHtml(record.row_number)}" data-event="${escapeHtml(record.event_id)}" style="background:#1677ee; border-color:#1677ee; color:#fff;">🤖 AI Suggested Fix</button>`
+            : `<button type="button" class="review-fix-manual" data-open-edit="${escapeHtml(record.row_number)}" data-event="${escapeHtml(record.event_id)}" style="background:#fff; border-color:#d97706; color:#b45309;">🛠️ Manual Review</button>`;
 
           return `<tr>
             <td data-sort-value="${escapeHtml(record.event_id)}" style="font-family: monospace; font-size: 11px;">${escapeHtml(record.event_id)}</td>
@@ -200,7 +259,7 @@ async function _loadRejectedRecordsOnce() {
             <td style="max-width: 320px;">${hintsHtml}</td>
             <td style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: monospace; font-size: 11px;">${escapeHtml(JSON.stringify(record.raw_record))}</td>
             <td class="review-row-actions">
-              <button type="button" data-open-edit="${escapeHtml(record.row_number)}" data-event="${escapeHtml(record.event_id)}">✏️ Edit &amp; Retry Fix</button>
+              ${actionButtonHtml}${attemptBadge}
             </td>
           </tr>`;
         }).join("")}</tbody></table>`;
@@ -208,12 +267,21 @@ async function _loadRejectedRecordsOnce() {
         target.insertAdjacentHTML("beforeend", `<div class="review-pagination" style="display:flex; justify-content:center; gap:8px; margin-top:12px;"><button type="button" class="secondary" data-review-page="prev" ${reviewPage === 0 ? "disabled" : ""}>Previous</button><span style="padding:8px 4px; color:var(--muted);">Page ${reviewPage + 1}</span><button type="button" class="secondary" data-review-page="next" ${result.has_more ? "" : "disabled"}>Next</button></div>`);
         target.querySelector('[data-review-page="prev"]')?.addEventListener("click", () => { reviewPage -= 1; loadRejectedRecords(); });
         target.querySelector('[data-review-page="next"]')?.addEventListener("click", () => { reviewPage += 1; loadRejectedRecords(); });
-        target.querySelectorAll("button[data-open-edit]").forEach((button) => {
-          button.addEventListener("click", () => {
-            const rec = result.records.find(r => r.event_id === button.dataset.event && String(r.row_number) === button.dataset.openEdit);
-            if (rec) openEditRecordModal(rec);
-          });
-        });
+        // Delegated, not per-button: enableSortableTable() rebuilds the tbody
+        // when a column is sorted, which detached the per-button listeners
+        // bound here and left "AI Suggested Fix" / "Manual Review" doing
+        // nothing on click. One listener on the container survives any
+        // re-render or re-sort. Re-bound per load, so the previous one is
+        // removed first rather than stacking up.
+        if (reviewActionHandler) target.removeEventListener("click", reviewActionHandler);
+        reviewActionHandler = (event) => {
+          const button = event.target.closest("button[data-open-edit]");
+          if (!button || !target.contains(button)) return;
+          event.preventDefault();
+          const rec = result.records.find(r => r.event_id === button.dataset.event && String(r.row_number) === button.dataset.openEdit);
+          if (rec) openEditRecordModal(rec);
+        };
+        target.addEventListener("click", reviewActionHandler);
       } catch (error) {
         target.className = "status error";
         target.textContent = error.name === "AbortError"
@@ -235,7 +303,128 @@ function getNestedRawValue(row, path) {
       }
       return current !== null && current !== undefined ? current : "";
     }
+// A rough, list-view approximation of the edit dialog's own needsZip/
+// needsLatLon check (openEditRecordModal's suggestion box) - good enough to
+// decide whether a record routes to "AI Suggested Fix" or "Manual Review"
+// (both the button color/label and the review-queue filter dropdown use
+// this same function, so they never disagree) without loading full mapper
+// field config per row. When a city is known but the ZIP looks incomplete,
+// the same quick-fill suggestion the dialog offers will very likely have
+// something to offer.
+function recordHasSuggestionAvailable(record) {
+      const raw = record.raw_record && typeof record.raw_record === "object" ? record.raw_record : {};
+      const cityGuess = raw.city || raw.City || raw.city_name || "";
+      const zipGuess = String(raw.zip || raw.postal_code || raw.Zip || raw.PostalCode || "");
+      return Boolean(cityGuess) && zipGuess.length < 5;
+    }
+
+// Set true when the user one-click-adopts a system suggestion (the
+// "Suggested ZIP + coordinates" quick-fill) rather than typing a manual
+// correction - the submit handler reads this to attribute the fix to AI
+// Fixed instead of Fixed Manually, matching the decision that an adopted
+// suggestion counts as an automatic fix even though a human clicked it.
+let suggestionAdopted = false;
+
+// Renders the two-option hierarchy-conflict picker (ZIP-derived vs
+// coordinate-derived location) inside the edit form when reprocess_rejected()
+// detects the record's ZIP and lat/lon disagree by more than the 50km snap
+// cap. Picking either option fills the form fields and marks the fix as
+// AI-resolved (via suggestionAdopted) rather than silently guessing one side.
+// When a record's coordinates genuinely fall outside the US (not a
+// mismatch to resolve, but real worldwide data), the backend already
+// looked up what's actually at that lat/lon via the worldwide cities
+// reference. Offer it as an explicit "accept as non-US" choice rather than
+// silently rejecting the record or guessing - picking it fills country/
+// state/city/ZIP and marks the fix AI-resolved (via suggestionAdopted),
+// and setting country here is what lets validate_normalized_location()
+// exempt the record from the US-boundary check on the next attempt instead
+// of asking the same question again.
+function renderNonUsSuggestion(suggestion) {
+      const formEl = el("editRecordForm");
+      if (!formEl || !suggestion || (!suggestion.city && !suggestion.country)) return;
+      const existing = document.getElementById("nonUsSuggestionBox");
+      if (existing) existing.remove();
+
+      const box = document.createElement("div");
+      box.id = "nonUsSuggestionBox";
+      box.style.gridColumn = "1 / -1";
+      box.style.background = "#eff6ff";
+      box.style.border = "1px solid #93c5fd";
+      box.style.borderRadius = "6px";
+      box.style.padding = "10px 12px";
+      box.style.fontSize = "12px";
+      box.style.color = "#1e40af";
+      box.style.marginBottom = "8px";
+      const distanceNote = suggestion.distance_km ? ` (~${escapeHtml(suggestion.distance_km)} km away)` : "";
+      box.innerHTML = `<strong>🌍 These coordinates look like real data outside the US${distanceNote}: ${escapeHtml(suggestion.city || "—")}, ${escapeHtml(suggestion.state || "—")}, ${escapeHtml(suggestion.country || "—")}${suggestion.zip_code ? ` · ${escapeHtml(suggestion.zip_code)}` : ""}.</strong>
+        <button type="button" id="saveAsNonUsBtn" class="secondary" style="display:block; width:100%; text-align:left; margin-top:6px; padding:6px 10px; border:1px solid #93c5fd; background:#fff; cursor:pointer; color:#1e40af;">Save as Non-US Data</button>`;
+      formEl.insertBefore(box, formEl.firstChild);
+
+      box.querySelector("#saveAsNonUsBtn")?.addEventListener("click", () => {
+        suggestionAdopted = true;
+        const setField = (type, value) => {
+          const input = formEl.querySelector(`[data-field-type='${type}']`);
+          if (input && value !== null && value !== undefined) input.value = value;
+        };
+        setField("city", suggestion.city);
+        setField("state", suggestion.state);
+        setField("country", suggestion.country);
+        if (suggestion.zip_code) setField("postal_code", suggestion.zip_code);
+        box.remove();
+      });
+    }
+
+function renderHierarchyConflictPicker(conflict) {
+      const formEl = el("editRecordForm");
+      if (!formEl || !conflict) return;
+      const existing = document.getElementById("hierarchyConflictBox");
+      if (existing) existing.remove();
+
+      const renderOption = (key, label, option) => {
+        if (!option) return "";
+        return `<button type="button" class="secondary" data-hierarchy-option="${key}" style="display:block; width:100%; text-align:left; margin-top:6px; padding:6px 10px; border:1px solid #fcd34d; background:#fff; cursor:pointer;">
+          <strong>${escapeHtml(label)}</strong><br>
+          <span style="font-size:11px; color:#78350f;">${escapeHtml(option.city || "—")}, ${escapeHtml(option.state || "—")}, ${escapeHtml(option.country || "—")} &middot; ZIP ${escapeHtml(option.zip_code || "—")} &middot; (${option.latitude}, ${option.longitude})</span>
+        </button>`;
+      };
+
+      const box = document.createElement("div");
+      box.id = "hierarchyConflictBox";
+      box.style.gridColumn = "1 / -1";
+      box.style.background = "#fffbeb";
+      box.style.border = "1px solid #fcd34d";
+      box.style.borderRadius = "6px";
+      box.style.padding = "10px 12px";
+      box.style.fontSize = "12px";
+      box.style.color = "#92400e";
+      box.style.marginBottom = "8px";
+      box.innerHTML = `<strong>⚠️ ZIP and coordinates disagree (~${escapeHtml(conflict.distance_km)} km apart). Pick which one is right:</strong>
+        ${renderOption("zip_based", "Use the ZIP's location", conflict.zip_based)}
+        ${renderOption("coordinate_based", "Use the coordinates' location", conflict.coordinate_based)}`;
+      formEl.insertBefore(box, formEl.firstChild);
+
+      box.querySelectorAll("[data-hierarchy-option]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const option = conflict[button.dataset.hierarchyOption];
+          if (!option) return;
+          suggestionAdopted = true;
+          const setField = (type, value) => {
+            const input = formEl.querySelector(`[data-field-type='${type}']`);
+            if (input && value !== null && value !== undefined) input.value = value;
+          };
+          setField("city", option.city);
+          setField("state", option.state);
+          setField("country", option.country);
+          setField("postal_code", option.zip_code);
+          setField("latitude", option.latitude);
+          setField("longitude", option.longitude);
+          box.remove();
+        });
+      });
+    }
+
 async function openEditRecordModal(record) {
+      suggestionAdopted = false;
       currentEditingRecord = record;
       let rawObj = record.raw_record;
       if (typeof rawObj === 'string') {
@@ -271,8 +460,46 @@ async function openEditRecordModal(record) {
         }
       }
 
-      const activeMapper = typeof getMapper === "function" ? getMapper() : { fields: {} };
-      const mapperFields = activeMapper.fields || {};
+      // Use this record's OWN saved template mapping, not whatever happens
+      // to be loaded in the Mapper tab's live UI state right now
+      // (getMapper()) - those can easily disagree (a different brand open,
+      // or nothing parsed this session at all), which is why fields the
+      // error text names (e.g. "Seating Capacity") often never showed up
+      // as an editable box: getMapper().fields was empty/unrelated, so
+      // that field fell through to the raw-key fallback loop below under
+      // its raw source column name instead of a recognizable label.
+      let mapperFields = {};
+      try {
+        // template_id is frequently null (only set when a save explicitly
+        // created/updated a template) - business_id is the reliable key,
+        // so look up by that and only use template_id to pick the exact
+        // match out of several candidates when both are present.
+        // list_templates() already orders by updated_at DESC, so the first
+        // result is the most recent one for this business - a reasonable
+        // default when there's no exact template_id to match.
+        if (record.business_id) {
+          const templatesRes = await fetch(`/api/templates?business_id=${encodeURIComponent(record.business_id)}`);
+          const templatesData = await templatesRes.json();
+          const templates = Array.isArray(templatesData.templates) ? templatesData.templates : [];
+          const matched = (record.template_id && templates.find((t) => t.workflow_template_id === record.template_id)) || templates[0];
+          const components = matched?.components?.mapper || matched?.components || {};
+          if (components && typeof components.fields === "object" && !Array.isArray(components.fields)) {
+            mapperFields = components.fields;
+          }
+        }
+      } catch (_) {}
+      if (!Object.keys(mapperFields).length) {
+        const activeMapper = typeof getMapper === "function" ? getMapper() : { fields: {} };
+        mapperFields = activeMapper.fields || {};
+      }
+      // Raw source column -> target field key, so a raw JSON key that IS
+      // part of this brand's real mapping (e.g. "seats" mapped to
+      // seating_capacity) renders under its human field label instead of
+      // its raw source name - matching what the flagged error actually calls it.
+      const sourceKeyToTargetKey = {};
+      Object.entries(mapperFields).forEach(([targetKey, sourcePath]) => {
+        if (sourcePath) sourceKeyToTargetKey[sourcePath] = targetKey;
+      });
 
       // Match similar brand from existing data:
       // Check record.business_id, rawObj business_id/brand, active mapper brand, or name matching
@@ -296,8 +523,8 @@ async function openEditRecordModal(record) {
         state: { label: "State", path: mapperFields.state || "state", note: "Required (2-letter code or state name).", required: true },
         postal_code: { label: "ZIP Code", path: mapperFields.postal_code || "postal_code", note: "Required (5-digit US ZIP code).", required: true },
         country: { label: "Country", path: mapperFields.country || "country", note: "Optional. Validation can infer it when enough location data is available.", required: false },
-        latitude: { label: "Latitude", path: mapperFields.latitude || "latitude", note: "Decimal latitude coordinate (e.g. 40.7128).", required: false },
-        longitude: { label: "Longitude", path: mapperFields.longitude || "longitude", note: "Decimal longitude coordinate (e.g. -74.0060).", required: false },
+        latitude: { label: "Latitude", path: mapperFields.latitude || "latitude", note: `Decimal latitude coordinate (e.g. ${(Math.random() * 180 - 90).toFixed(4)}).`, required: false },
+        longitude: { label: "Longitude", path: mapperFields.longitude || "longitude", note: `Decimal longitude coordinate (e.g. ${(Math.random() * 360 - 180).toFixed(4)}).`, required: false },
       };
       const renderedPaths = new Set();
 
@@ -306,6 +533,26 @@ async function openEditRecordModal(record) {
           const { label, path, note, required } = LOCATION_FIELD_SPECS[key];
           renderedPaths.add(path);
           if (key === "brand") {
+            // A record's brand is fixed by its event_id -> business_id
+            // relation (see reprocess_rejected(), which now always
+            // re-resolves brand from business_id server-side regardless of
+            // what's submitted) - so once this record already belongs to a
+            // known business, brand can't be changed here. Re-mapping a
+            // record to a different brand means moving it to a different
+            // business_id, which this dialog doesn't do.
+            const brandLocked = Boolean(targetBusinessId);
+            if (brandLocked) {
+              const lockedLabel = formatBrandName(matchedBrand ? matchedBrand.name : rawBrandVal);
+              return `
+        <div style="display: flex; flex-direction: column;">
+          <label style="font-size: 12px; font-weight: 700; color: var(--ink); margin-bottom: 4px;">${escapeHtml(label)} <span style="font-weight: 400; color: var(--muted);">(${escapeHtml(path)})</span></label>
+          <select id="editRecordBrandSelect" data-raw-key="${escapeHtml(path)}" data-field-type="brand" disabled style="padding: 6px; border: 1px solid var(--line); border-radius: 4px; font-size: 13px; background: #f4f6f8; color: var(--muted);">
+            <option value="${escapeHtml(matchedBrand ? matchedBrand.name : rawBrandVal)}" selected>${escapeHtml(lockedLabel || 'Unknown brand')}</option>
+          </select>
+          <span style="font-size: 11px; color: var(--muted, #6b7280); margin-top: 2px;">Brand is fixed by this record's business and can't be changed here.</span>
+        </div>
+      `;
+            }
             const optionsHtml = ['<option value="">Select a saved brand</option>']
               .concat(savedBrandsList.map(b => {
                 const isSelected = matchedBrand ? b.business_id === matchedBrand.business_id : (b.name.toLowerCase() === rawBrandVal.toLowerCase());
@@ -340,15 +587,33 @@ async function openEditRecordModal(record) {
         const isZip = key.toLowerCase().includes("zip") || key.toLowerCase().includes("postal");
         if ((isLat && renderedPaths.has("latitude")) || (isLon && renderedPaths.has("longitude")) || (isZip && renderedPaths.has("postal_code"))) return false;
         return true;
+      }).sort(([keyA], [keyB]) => {
+        // Flagged (the field the error text names) first, then anything
+        // else that's part of this brand's real mapping, then the rest -
+        // so the box the user actually needs isn't buried in raw JSON key order.
+        const rank = (key) => {
+          const targetKey = sourceKeyToTargetKey[key];
+          if (targetKey && Array.isArray(errs) && errs.some((e) => e.field === targetKey)) return 0;
+          if (targetKey) return 1;
+          return 2;
+        };
+        return rank(keyA) - rank(keyB);
       }).map(([key, val]) => {
         const isLat = key.toLowerCase().includes("lat");
         const isLon = key.toLowerCase().includes("lon") || key.toLowerCase().includes("lng");
         const isZip = key.toLowerCase().includes("zip") || key.toLowerCase().includes("postal");
         const fieldType = isLat ? "latitude" : (isLon ? "longitude" : (isZip ? "postal_code" : ""));
+        // A raw column that IS part of this brand's real mapping shows
+        // under its human field label (matching what the flagged error
+        // calls it) instead of its raw source name, and is flagged if it's
+        // the actual field the error text named.
+        const mappedTargetKey = sourceKeyToTargetKey[key];
+        const displayLabel = mappedTargetKey && typeof formatFieldLabel === "function" ? formatFieldLabel(mappedTargetKey) : key;
+        const isFlagged = mappedTargetKey && Array.isArray(errs) && errs.some((e) => e.field === mappedTargetKey);
         return `
         <div style="display: flex; flex-direction: column;">
-          <label style="font-size: 12px; font-weight: 700; color: var(--ink); margin-bottom: 4px;">${escapeHtml(key)}${isLat || isLon || isZip ? ` <span style="font-weight: 400; color: var(--muted); font-size: 11px;">(${fieldType})</span>` : ''}</label>
-          <input type="text" data-raw-key="${escapeHtml(key)}" data-field-type="${escapeHtml(fieldType)}" value="${escapeHtml(val !== null && val !== undefined ? String(val) : '')}" style="padding: 6px; border: 1px solid var(--line); border-radius: 4px; font-size: 13px;">
+          <label style="font-size: 12px; font-weight: 700; color: ${isFlagged ? '#cf1322' : 'var(--ink)'}; margin-bottom: 4px;">${isFlagged ? '⚠️ ' : ''}${escapeHtml(displayLabel)} <span style="font-weight: 400; color: var(--muted); font-size: 11px;">(${escapeHtml(key)})</span></label>
+          <input type="text" data-raw-key="${escapeHtml(key)}" data-field-type="${escapeHtml(fieldType)}" value="${escapeHtml(val !== null && val !== undefined ? String(val) : '')}" style="padding: 6px; border: 1px solid ${isFlagged ? '#ffa39e' : 'var(--line)'}; border-radius: 4px; font-size: 13px;">
         </div>
       `;
       }).join('');
@@ -379,6 +644,18 @@ async function openEditRecordModal(record) {
             .then(res => res.json())
             .then(data => {
               if (data && Array.isArray(data.zips) && data.zips.length > 0) {
+                // A city can legitimately have several ZIPs, but showing
+                // multiple near-identical "(city, state)" buttons that only
+                // differ by ZIP reads as duplicated noise - the (city, state)
+                // combination is what the user is actually choosing between,
+                // so keep only the first (best-ranked) ZIP per combination.
+                const seenCityState = new Set();
+                data.zips = data.zips.filter((z) => {
+                  const key = `${(z.city_name || "").toLowerCase()}|${(z.state_code || "").toLowerCase()}`;
+                  if (seenCityState.has(key)) return false;
+                  seenCityState.add(key);
+                  return true;
+                });
                 const suggestionBox = document.createElement("div");
                 suggestionBox.id = "zipSuggestionsBox";
                 suggestionBox.style.gridColumn = "1 / -1";
@@ -393,6 +670,7 @@ async function openEditRecordModal(record) {
                 const zipsListHtml = data.zips.slice(0, 4).map(z => `
                   <button type="button" class="secondary" style="padding: 2px 8px; font-size: 11px; margin: 2px 4px 2px 0; border: 1px solid #91d5ff; background: #fff; cursor: pointer;"
                     onclick="(function(){
+                      suggestionAdopted = true;
                       const zipInput = document.querySelector('input[data-field-type=\\'postal_code\\']');
                       if (zipInput) zipInput.value = '${escapeHtml(z.zip_code)}';
                       const cityInput = document.querySelector('input[data-field-type=\\'city\\']');
@@ -513,7 +791,7 @@ el("submitEditRecordBtn")?.addEventListener("click", async () => {
         brand: finalBrandName,
         source_name: activeMapper.source_name || "error_listings_review",
         source_type: activeMapper.source_type || "csv",
-        fields: activeMapper.fields && Object.keys(activeMapper.fields).length ? activeMapper.fields : {
+        fields: activeMapper.fields && typeof activeMapper.fields === "object" && !Array.isArray(activeMapper.fields) && Object.keys(activeMapper.fields).length ? activeMapper.fields : {
           name: "name",
           address: "address",
           city: "city",
@@ -553,7 +831,13 @@ el("submitEditRecordBtn")?.addEventListener("click", async () => {
             event_id: currentEditingRecord.event_id,
             row_numbers: [currentEditingRecord.row_number],
             mapper: retryMapper,
-            rows: [updatedRaw]
+            rows: [updatedRaw],
+            // An adopted system suggestion counts as an automatic fix (AI
+            // Fixed), not a manual one, even though a person clicked
+            // Retry - reprocess_rejected() branches its fix-count
+            // attribution on this same flag it already uses for the
+            // background auto-repair worker.
+            is_ai_enriched: suggestionAdopted
           })
         });
         const result = await response.json();
@@ -583,6 +867,7 @@ el("submitEditRecordBtn")?.addEventListener("click", async () => {
           }
           await loadErrorBrandBreakdown();
           setStatus(`Record #${currentEditingRecord.row_number} reprocessed successfully and moved to listings.`, "ok");
+          if (typeof loadJobHistory === "function") loadJobHistory();
         } else {
           // Still invalid: the queue didn't shrink, but a fresh error row may
           // have replaced the old one - re-count from source and refresh the
@@ -593,7 +878,14 @@ el("submitEditRecordBtn")?.addEventListener("click", async () => {
             await refreshReviewCount(true);
           }
           await loadErrorBrandBreakdown();
-          showDialogError("Record validation failed again. Please review required fields, valid ZIP Code, and coordinates.");
+          const attemptCount = Number(result.attempt_count || 0);
+          const suggestion = result.suggested_fix && typeof result.suggested_fix === "object" ? result.suggested_fix : null;
+          const suggestionText = suggestion && Object.keys(suggestion).length
+            ? ` The enricher suggests: ${Object.entries(suggestion).map(([field, value]) => `${escapeHtml(field)} = "${escapeHtml(value)}"`).join(", ")}.`
+            : "";
+          showDialogError(`Review Again (attempt ${attemptCount || 1}): this record still doesn't validate. Please check required fields, ZIP Code, and coordinates.${suggestionText}`);
+          if (result.hierarchy_conflict) renderHierarchyConflictPicker(result.hierarchy_conflict);
+          if (result.non_us_suggestion) renderNonUsSuggestion(result.non_us_suggestion);
         }
       } catch (error) {
         showDialogError(productSafeError(error.message, "Could not reprocess this record."));

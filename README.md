@@ -24,13 +24,16 @@ The demonstration definition lives in `config/demo.json`: Domino's is the subjec
 ## Reliability
 Sample reference data is immutable. ZIP readiness uses SQLite first and BigQuery fallback. Session failures and 401/403/404 responses return to login. Login is not blocked by ZIP loading; `Sync US ZIPs` is available inside the app. Background review and auto-repair pipelines use targeted key queries, bounded batching (10 records/cycle), and reused client connection pools to prevent memory growth and socket leaks.
 
-SQLite is WAL-backed and persistent at `.cache/whitespace_cache.db`. It mirrors ZIP geography, worldwide cities, reporting locations, ZIP-brand activity, businesses, query payloads, and review counters. Reporting and ZIP readiness use the local mirror first, then refresh from the warehouse when needed. Display limits on maps and tables do not limit the mirrored source rows. Automated tests (192 passing) include unit tests, mapping layout contracts, geo-enrichment, and memory-leak verification.
+SQLite is WAL-backed and persistent at `.cache/whitespace_cache.db`. It mirrors ZIP geography, worldwide cities, reporting locations, ZIP-brand activity, businesses, query payloads, and review counters. Reporting and ZIP readiness use the local mirror first, then refresh from the warehouse when needed. Display limits on maps and tables do not limit the mirrored source rows. Automated tests (215 collected as of 2026-09-09) include unit tests, mapping layout contracts, geo-enrichment, and memory-leak verification; one pre-existing test is a known failure unrelated to feature work — see `codex.md` Remaining Gaps.
 
 ## Smoke And Presentation Reference
 Use [docs/smoke_test_and_presentation.md](docs/smoke_test_and_presentation.md) for the smoke matrix, fresh-upload checklist, five-minute presentation flow, and current assessment gaps.
 
+## Data Model Rules
+Only `brand` is mandatory to accept a record, at every layer — field config, mapper validation, row acceptance, and the BigQuery schema itself. A record's brand is fixed by its `event_id -> business_id` relation once created; it cannot be changed by re-submitting a different brand string. Global (non-US) postal codes are preserved and upper-cased rather than digit-stripped; reverse-geocoding a coordinate to a reference city is capped at 50km so a "nearest match" is never a false positive from far away.
+
 ## Current Gaps
-Cold-start source-type bootstrap still needs a fast local fallback when the warehouse is slow or unavailable. Authenticated browser-level smoke tests, run-over-run snapshots, external source coverage benchmarking, true metro definitions, cross-source identity matching, and final multi-sheet Excel export verification remain open.
+Cold-start source-type bootstrap still needs a fast local fallback when the warehouse is slow or unavailable. Authenticated browser-level smoke tests, run-over-run snapshots, external source coverage benchmarking, true metro definitions, cross-source identity matching, and final multi-sheet Excel export verification remain open. A hierarchy-resolution picker for conflicting city/state/country vs. lat/lon values, a save-job history panel, deferred single-row re-validation, and duplicate-detection messaging on save are scoped but not yet built — see `codex.md` for the current detailed backlog.
 
 ## Start
 ```bash

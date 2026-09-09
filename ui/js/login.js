@@ -69,7 +69,11 @@ function setReferenceLoadingMessage() {
   target.replaceChildren();
   const messageNode = document.createElement("span");
   messageNode.className = "status-message";
-  messageNode.innerHTML = `${busyMarkup("Loading US ZIP data for you")} You can still sign in while reference data syncs.`;
+  messageNode.innerHTML = `
+    ${busyMarkup("Preparing location reference data")}
+    <span class="status-point">You can sign in now — this finishes in the background.</span>
+    <span class="status-point">Maps and filters will sharpen as reference data finishes syncing.</span>
+  `;
   target.appendChild(messageNode);
 }
 
@@ -116,18 +120,18 @@ async function prepareReferenceData() {
   try {
     const response = await fetch("/api/prepare");
     const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "ZIP reference data could not be prepared.");
+    if (!response.ok) throw new Error(result.error || "Location reference data could not be prepared.");
     referenceDataReady = result.status === "ready" || result.loaded === true;
     setStatus(
       "loginReadinessStatus",
-      referenceDataReady ? "ZIP reference data ready." : "Loading US ZIP data for you.",
+      referenceDataReady ? "Location reference data is ready." : "You can sign in now — maps and filters will sharpen as reference data finishes syncing.",
       referenceDataReady ? "ok" : "warn",
       referenceDataReady ? {} : { retry: true },
     );
     return referenceDataReady;
   } catch (error) {
     referenceDataReady = false;
-    setStatus("loginReadinessStatus", productSafeError(error.message, "ZIP reference data needs attention."), "error", { retry: true });
+    setStatus("loginReadinessStatus", productSafeError(error.message, "Location reference data needs attention."), "error", { retry: true });
     return false;
   } finally {
     if (loginButton) loginButton.disabled = false;
@@ -155,11 +159,8 @@ async function login() {
     sessionStorage.setItem(LOGIN_SESSION_KEY, "true");
     sessionStorage.setItem(MAPPING_SESSION_KEY, newSessionId());
     sessionStorage.removeItem(DRAFT_KEY);
-    const urlParams = new URLSearchParams(window.location.search);
-    const viewParam = urlParams.get("view");
-    const validViews = ["mapperView", "reportingView", "reviewView", "templateLibraryView"];
-    const target = (viewParam && validViews.includes(viewParam)) ? `/app?view=${encodeURIComponent(viewParam)}` : "/app";
-    window.location.replace(target);
+    sessionStorage.removeItem("activeTab");
+    window.location.replace("/app?view=mapperView");
   } catch (error) {
     setStatus("loginStatus", productSafeError(error.message, "Invalid username or password."), "error");
   } finally {
@@ -199,7 +200,7 @@ async function init() {
   await syncServerLaunch();
   if (sessionStorage.getItem(LOGIN_SESSION_KEY) === "true") {
     const urlParams = new URLSearchParams(window.location.search);
-    const viewParam = urlParams.get("view");
+    const viewParam = urlParams.get("view") || sessionStorage.getItem("activeTab");
     const validViews = ["mapperView", "reportingView", "reviewView", "templateLibraryView"];
     const target = (viewParam && validViews.includes(viewParam)) ? `/app?view=${encodeURIComponent(viewParam)}` : "/app";
     window.location.replace(target);

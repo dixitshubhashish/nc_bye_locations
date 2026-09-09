@@ -71,8 +71,62 @@ function formatNumber(value) {
       const number = Number(value || 0);
       return Number.isFinite(number) ? number.toLocaleString() : "0";
     }
+// Every created_at/updated_at display (Template Library, brand list, etc.)
+// should read down to the second, not a bare ISO string with fractional
+// seconds and a "T" separator, and not date-only either - shared so every
+// such timestamp is formatted identically instead of drifting per call site.
+// Shared searchable-select behavior (FLT-02/FLT-03/FLT-05 all use this same
+// component, per the explicit "build once, not three implementations"
+// instruction). Rebuilds the real <option> list on input instead of hiding
+// options with CSS, since a native <select>'s open dropdown does not
+// reliably respect display:none on options across browsers - removing them
+// from the DOM does. Call again (e.g. after reloading the option list) to
+// refresh the cached options; it reuses the existing search input rather
+// than creating a duplicate.
+function attachSearchableSelect(selectId, { threshold = 15, minChars = 2 } = {}) {
+      const select = document.getElementById(selectId);
+      if (!select) return;
+      const liveOptions = Array.from(select.options).map((option) => ({ value: option.value, text: option.textContent, className: option.className }));
+      if (liveOptions.length <= threshold) return;
+      let search = document.getElementById(`${selectId}Search`);
+      if (!search) {
+        search = document.createElement("input");
+        search.type = "search";
+        search.id = `${selectId}Search`;
+        search.className = "report-filter-control";
+        search.autocomplete = "off";
+        search.placeholder = `Type ${minChars}+ character${minChars > 1 ? "s" : ""} to search`;
+        search.setAttribute("aria-label", "Search this list");
+        select.parentNode.insertBefore(search, select);
+      }
+      search.dataset.allOptions = JSON.stringify(liveOptions);
+      search.oninput = () => {
+        const allOptions = JSON.parse(search.dataset.allOptions || "[]");
+        const query = search.value.trim().toLowerCase();
+        const selected = select.value;
+        const matches = query.length < minChars
+          ? allOptions
+          : allOptions.filter((option) => !option.value || option.value === selected || option.text.toLowerCase().includes(query));
+        select.innerHTML = matches.map((option) => `<option value="${escapeHtml(option.value)}"${option.className ? ` class="${escapeHtml(option.className)}"` : ""}>${escapeHtml(option.text)}</option>`).join("");
+        select.value = matches.some((option) => option.value === selected) ? selected : "";
+      };
+    }
+function formatTimestamp(value) {
+      if (!value) return "";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return String(value);
+      const pad = (n) => String(n).padStart(2, "0");
+      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+    }
 function formatBrandName(value) {
       return String(value ?? "").trim().replace(/_/g, " ").replace(/[^A-Za-z0-9\s#'\-.]/g, "").replace(/\s+/g, " ").replace(/[A-Za-z][^\s-]*/g, (word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase());
+    }
+// Turns a raw db/backend field key (e.g. "opening_date") into a readable
+// column name ("Opening Date") for any validation-error/hint display -
+// shared so every such listing (Review Error Listings, Data Quality) shows
+// the same formatted name instead of the literal stored key.
+function formatFieldLabel(value) {
+      return String(value || "").replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
     }
 function renderSimpleTable(targetId, columns, rows) {
       const target = el(targetId);
@@ -156,7 +210,7 @@ function addStatusClose(target) {
       target.appendChild(close);
     }
 
-function showLoadingOverlay(message, onCancel) {
+function showLoadingOverlay(message, onCancel, onHide) {
       if (activeAbortController) {
         try { activeAbortController.abort(); } catch (_) {}
       }
@@ -175,6 +229,14 @@ function showLoadingOverlay(message, onCancel) {
         if (typeof onCancel === "function") onCancel();
         setStatus("Cancelled. No changes.", "warn");
       };
+      // Distinct from Cancel - this doesn't abort anything, it just lets the
+      // caller (setProgress(), for a save already in flight) suppress
+      // further redraws until the operation finishes on its own.
+      el("loadingHideBtn").classList.toggle("hidden", typeof onHide !== "function");
+      el("loadingHideBtn").onclick = () => {
+        hideLoadingOverlay();
+        if (typeof onHide === "function") onHide();
+      };
     }
 function updateLoadingOverlay(message, detail = "") {
       el("loadingOverlayMessage").textContent = message || "Working...";
@@ -183,21 +245,42 @@ function updateLoadingOverlay(message, detail = "") {
 function hideLoadingOverlay() {
       el("loadingOverlay").classList.add("hidden");
       el("loadingCancelBtn").classList.remove("hidden");
+      el("loadingHideBtn").classList.add("hidden");
       activeAbortController = null;
     }
+// Set by the save flow (mapper.js) when the user clicks "Hide - notify me
+// when done" on the loading overlay - suppresses further progress redraws
+// (the save keeps running regardless; this only stops re-showing UI the
+// user explicitly dismissed) until the next fresh save resets it.
+let saveProgressHiddenByUser = false;
 function setProgress(percent, message) {
+      if (saveProgressHiddenByUser) return;
       const boundedPercent = Math.max(0, Math.min(100, percent));
       el("saveProgress").classList.remove("hidden");
       el("saveProgress").setAttribute("aria-busy", "true");
       el("progressFill").style.width = `${boundedPercent}%`;
       el("progressValue").textContent = `${boundedPercent}%`;
       el("progressMessage").textContent = message;
-      showLoadingOverlay(`${message} (${boundedPercent}%)`);
+      showLoadingOverlay(`${message} (${boundedPercent}%)`, undefined, () => {
+        saveProgressHiddenByUser = true;
+        el("saveProgress").classList.add("hidden");
+        el("saveProgress").setAttribute("aria-busy", "false");
+        if (typeof showBackgroundSaveNotice === "function") showBackgroundSaveNotice();
+        // Hiding the progress means "let this finish in the background and
+        // give me my workspace back" - so return the mapper to the pre-parse
+        // 40/60 layout, ready for a new parse. Without this the dismissed
+        // save left the post-parse mapping workspace on screen with no way
+        // to start another source. The save itself keeps running: it works
+        // from data captured before this point, not from mapper state.
+        if (typeof resetMapping === "function") resetMapping();
+      });
     }
 function hideProgress() {
+      saveProgressHiddenByUser = false;
       el("saveProgress").classList.add("hidden");
       el("saveProgress").setAttribute("aria-busy", "false");
       hideLoadingOverlay();
+      if (typeof clearBackgroundSaveNotice === "function") clearBackgroundSaveNotice();
     }
 function busyMarkup(label = "Loading") {
       const cleanLabel = String(label).replace(/\.\.\.+$/, "").trim();
@@ -216,7 +299,7 @@ function clearButtonBusy(button, previousHtml) {
       if (previousHtml !== undefined) button.innerHTML = previousHtml;
     }
 
-function switchView(viewId) {
+function switchView(viewId, isBootRestore = false) {
       if (!viewId) viewId = "mapperView";
       try {
         sessionStorage.setItem("activeTab", viewId);
@@ -225,16 +308,41 @@ function switchView(viewId) {
         const nextUrl = `${window.location.pathname}?${urlParams.toString()}`;
         history.replaceState(null, "", nextUrl);
       } catch (e) {}
-      document.querySelectorAll("[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === viewId));
+      // The mapper is reused as the template EDITOR. When it was opened from
+      // Template Library > Review, the work is still "template library" work,
+      // so the top nav must keep showing Template Library rather than jumping
+      // the highlight to Mapping.
+      const highlightViewId = (viewId === "mapperView" && el("mapperView")?.classList.contains("template-edit-mode"))
+        ? "templateLibraryView"
+        : viewId;
+      document.querySelectorAll("[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === highlightViewId));
       ["mapperView", "reportingView", "reviewView", "templateLibraryView"].forEach((id) => el(id).classList.toggle("hidden", id !== viewId));
       el("appShell").querySelector("header").classList.toggle("reporting-active", viewId === "reportingView");
+      // Reset Fields Mapping only makes sense while actually on the Mapper
+      // tab - it was previously kept visible everywhere as a deliberate
+      // simplification, but the user explicitly asked for it to be
+      // scoped back to Mapper only.
+      el("resetMappingBtn")?.classList.toggle("hidden", viewId !== "mapperView");
+      // Reset Fields Mapping's grid slot must not stay reserved as an
+      // empty gap once the button itself is hidden outside Mapper - see
+      // .header-data-actions.reset-mapping-hidden.
+      document.querySelector(".header-data-actions")?.classList.toggle("reset-mapping-hidden", viewId !== "mapperView");
       if (viewId === "mapperView" && typeof renderMappings === "function") renderMappings();
       if (viewId === "reportingView" && !reportLoaded) loadReporting();
+      // A genuine nav click into Reporting always lands on the first inner
+      // tab; a page refresh while already on Reporting (isBootRestore) must
+      // keep whatever inner tab was active - reporting-tabs.js's own init()
+      // already restores that from sessionStorage in that case.
+      if (viewId === "reportingView" && !isBootRestore) {
+        try { sessionStorage.setItem("reportingInnerTab", "location"); } catch (_) {}
+        if (typeof window.reportingResetToLocationTab === "function") window.reportingResetToLocationTab();
+      }
       if (viewId === "templateLibraryView" && !templateLibraryLoaded) loadTemplateFilters().then(loadTemplateLibrary);
       if (viewId === "reviewView") {
         loadRejectedRecords();
         refreshReviewCount();
         if (typeof loadErrorBrandBreakdown === "function") loadErrorBrandBreakdown();
+        if (typeof refreshFixCountersOnce === "function") refreshFixCountersOnce();
       }
     }
 
@@ -341,10 +449,8 @@ async function login() {
         sessionStorage.setItem(loginSessionStorageKey, "true");
         sessionStorage.setItem(mappingSessionStorageKey, newSessionId());
         sessionStorage.removeItem(draftStorageKey);
-
-        const urlParams = new URLSearchParams(window.location.search);
-        const nextUrl = urlParams.size > 0 ? `/app?${urlParams.toString()}` : "/app";
-        window.location.replace(nextUrl);
+        sessionStorage.removeItem("activeTab");
+        window.location.replace("/app?view=mapperView");
       } catch (error) {
         status.className = "status error";
         status.textContent = productSafeError(error.message, "Invalid username or password.");
@@ -354,14 +460,16 @@ async function loadAppData() {
       if (appDataLoaded) return;
       appDataLoaded = true;
       await Promise.allSettled([loadFieldRegistry(), loadBrands(), loadTemplateFilters()]);
+      // Apply the initial mapper layout (and enable the brand-dependent
+      // "Edit a brand" radio/buttons) as soon as brands are in, rather than
+      // queuing it behind the unrelated Template Library fetch below - that
+      // queuing was why "Edit a brand" could take a visibly long time to
+      // become available even though loadBrands() itself was already done.
+      if (typeof renderMappings === "function") renderMappings();
+      if (typeof updateOutput === "function") updateOutput();
       // Template records are intentionally fetched only after authentication
       // and app initialization, so the library tab opens instantly later.
       if (typeof loadTemplateLibrary === "function") await loadTemplateLibrary();
-      // Apply the initial mapper layout even when there is no saved draft.
-      // Without this, the pre-parse split workspace remains only in its HTML
-      // fallback state until the first mapping interaction.
-      if (typeof renderMappings === "function") renderMappings();
-      if (typeof updateOutput === "function") updateOutput();
 }
 
 function enableSortableTable(table) {

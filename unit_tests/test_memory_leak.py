@@ -137,5 +137,87 @@ class MemoryLeakAndResourceTests(unittest.TestCase):
             self.assertLess(total_growth_bytes, 500 * 1024, f"Memory growth too high: {total_growth_bytes} bytes")
 
 
+class AutoRepairYieldsToForegroundActivityTests(unittest.TestCase):
+    """Background auto-repair must back off while a real user action (a
+    do_POST request other than the worker's own start/stop calls) was
+    recent, per the explicit "should be paused if other threads take
+    priority" ask - it competes with foreground requests for the same
+    BigQuery client / SQLite connections otherwise."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._db_path_patch = patch.object(sqlite_cache, "DB_PATH", Path(self._tmpdir) / "test.db")
+        self._db_path_patch.start()
+        self._original_activity = workflow_server.LAST_FOREGROUND_ACTIVITY_AT
+
+    def tearDown(self) -> None:
+        self._db_path_patch.stop()
+        workflow_server.LAST_FOREGROUND_ACTIVITY_AT = self._original_activity
+
+    def test_worker_sleeps_out_the_grace_period_when_activity_was_just_seen(self) -> None:
+        fake_client = FakeBigQueryClient()
+        sleep_calls: list[float] = []
+
+        def fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+
+        def fake_batch(limit: int = 10, offset: int = 0, *, client: Any = None) -> dict[str, int]:
+            return {"attempted": 10, "resolved": 10, "remaining": 0}
+
+        workflow_server.LAST_FOREGROUND_ACTIVITY_AT = workflow_server.wall_clock_time()
+        with patch.object(workflow_server, "_warehouse_settings", return_value=("test-proj", "test-dataset", None)), \
+             patch.object(workflow_server, "_bigquery_client", return_value=fake_client), \
+             patch.object(workflow_server, "_count_error_listings_live", return_value=10), \
+             patch.object(workflow_server, "auto_repair_error_batch", side_effect=fake_batch), \
+             patch.object(workflow_server, "AUTO_REPAIR_BATCH_PAUSE_SECONDS", 0.0), \
+             patch.object(workflow_server, "FOREGROUND_IDLE_GRACE_SECONDS", 5.0), \
+             patch.object(workflow_server, "sleep", side_effect=fake_sleep), \
+             patch.object(workflow_server, "_schedule_quality_fix_metrics_refresh"), \
+             patch.object(workflow_server, "refresh_error_count"), \
+             patch.object(workflow_server, "invalidate_cache"), \
+             patch.object(workflow_server, "_refresh_silver_background"):
+            workflow_server.AUTO_REPAIR_THREAD = None
+            workflow_server.start_auto_repair()
+            for thread in list(threading.enumerate()):
+                if thread.name == "automatic-review-repair":
+                    thread.join(timeout=5)
+
+        self.assertTrue(sleep_calls, "Expected the worker to sleep out the foreground activity grace period")
+        self.assertGreater(sleep_calls[0], 4.0)
+
+    def test_worker_does_not_wait_when_the_app_has_been_idle(self) -> None:
+        fake_client = FakeBigQueryClient()
+        sleep_calls: list[float] = []
+
+        def fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+
+        def fake_batch(limit: int = 10, offset: int = 0, *, client: Any = None) -> dict[str, int]:
+            return {"attempted": 10, "resolved": 10, "remaining": 0}
+
+        workflow_server.LAST_FOREGROUND_ACTIVITY_AT = 0.0  # long ago
+        with patch.object(workflow_server, "_warehouse_settings", return_value=("test-proj", "test-dataset", None)), \
+             patch.object(workflow_server, "_bigquery_client", return_value=fake_client), \
+             patch.object(workflow_server, "_count_error_listings_live", return_value=10), \
+             patch.object(workflow_server, "auto_repair_error_batch", side_effect=fake_batch), \
+             patch.object(workflow_server, "AUTO_REPAIR_BATCH_PAUSE_SECONDS", 0.0), \
+             patch.object(workflow_server, "FOREGROUND_IDLE_GRACE_SECONDS", 5.0), \
+             patch.object(workflow_server, "sleep", side_effect=fake_sleep), \
+             patch.object(workflow_server, "_schedule_quality_fix_metrics_refresh"), \
+             patch.object(workflow_server, "refresh_error_count"), \
+             patch.object(workflow_server, "invalidate_cache"), \
+             patch.object(workflow_server, "_refresh_silver_background"):
+            workflow_server.AUTO_REPAIR_THREAD = None
+            workflow_server.start_auto_repair()
+            for thread in list(threading.enumerate()):
+                if thread.name == "automatic-review-repair":
+                    thread.join(timeout=5)
+
+        # AUTO_REPAIR_BATCH_PAUSE_SECONDS (patched to 0.0) still sleeps once
+        # per batch regardless - only the idle-grace wait (>= a few seconds)
+        # must be absent when the app was already idle.
+        self.assertTrue(all(seconds < 1.0 for seconds in sleep_calls), f"Unexpected idle-grace sleep: {sleep_calls}")
+
+
 if __name__ == "__main__":
     unittest.main()

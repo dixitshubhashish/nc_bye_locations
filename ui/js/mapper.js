@@ -60,8 +60,19 @@ let resolvedRecordPath = "";
 let mappingSelections = {};
 let jsonRecordPaths = [];
 let autoMappedKeys = new Set();
+// Immutable snapshot of {target_key: source_field} taken right after
+// auto-mapping settles post-parse - unlike autoMappedKeys (which loses
+// entries as soon as the user touches them), this is never mutated, so at
+// save time it can be diffed against the final mapping to score each
+// auto-suggestion as kept/switched/removed - the raw signal the field-
+// mapping confidence system learns from.
+let originalAutoMapping = {};
 let learnedSuggestions = {};
 let sourceParsed = false;
+// True from a successful parse until the next successful save (or the
+// workspace is reset) - drives the "you have unsaved changes" nav guard so
+// navigating away right after a parse doesn't silently discard it.
+let pendingUnsavedParse = false;
 let mappingWorkspaceActivated = false;
 let preParseRelocatedNodes = null;
 let preParseStatusLocation = null;
@@ -71,6 +82,10 @@ let preParseStatusLocation = null;
 // so this flag stands in for sourceParsed wherever the mapper only needs the
 // column list, not actual row data.
 let templateEditMode = false;
+// Above this many source columns the Data Model gets a search box and its
+// own scroll region - below it, a plain list is easier to scan than one
+// wrapped in chrome.
+const DATA_MODEL_SEARCH_THRESHOLD = 100;
 let selectedBrand = null;
 let csvFunctionMode = "new";
 // Batch size limits to prevent memory/network issues with large files
@@ -190,15 +205,60 @@ async function fallbackDisplayBusinessId(brand = {}) {
 function similarBusinessKey(name = "") {
       return normalizeName(name).replace(/\b(inc|llc|ltd|usa|us|global|stores|locations)\b/g, "");
     }
-function duplicateBusinessGroups(brands = []) {
-      const groups = new Map();
+// Dice coefficient over character bigrams: 1.0 identical, 0.0 nothing in
+// common. Chosen over exact-key matching because that only caught brands
+// whose normalized names were byte-identical - "Dominos Pizza" vs "Domino's
+// Pizza Inc" scored nothing and stayed unmerged, which is why duplicates
+// kept surviving in the dropdown.
+const BRAND_SIMILARITY_THRESHOLD = 0.75;
+
+function nameBigrams(value = "") {
+      const text = String(value || "");
+      const grams = new Set();
+      for (let i = 0; i < text.length - 1; i += 1) grams.add(text.slice(i, i + 2));
+      return grams;
+    }
+function brandNameSimilarity(a = "", b = "") {
+      const left = similarBusinessKey(a);
+      const right = similarBusinessKey(b);
+      if (!left || !right) return 0;
+      if (left === right) return 1;
+      const first = nameBigrams(left);
+      const second = nameBigrams(right);
+      if (!first.size || !second.size) return 0;
+      let shared = 0;
+      first.forEach((gram) => { if (second.has(gram)) shared += 1; });
+      return (2 * shared) / (first.size + second.size);
+    }
+// Group brands whose names are >=75% similar. Single-link clustering: a
+// brand joins the first group it is similar enough to, so a chain of near
+// matches lands in one group rather than several overlapping pairs.
+function duplicateBusinessGroups(brands = [], threshold = BRAND_SIMILARITY_THRESHOLD) {
+      const groups = [];
       brands.forEach((brand) => {
-        const key = similarBusinessKey(brand.name || "");
-        if (!key) return;
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key).push(brand);
+        if (!similarBusinessKey(brand.name || "")) return;
+        const match = groups.find((group) =>
+          group.some((member) => brandNameSimilarity(member.name || "", brand.name || "") >= threshold));
+        if (match) match.push(brand);
+        else groups.push([brand]);
       });
-      return [...groups.values()].filter((group) => group.length > 1);
+      return groups.filter((group) => group.length > 1);
+    }
+// Listings that carry the same content_hash are the same physical record
+// saved twice. content_hash already has business_id baked in
+// (CONTENT_HASH_FIELDS), so a collision across two brand records is strong
+// evidence those brand records are the same brand.
+function duplicateContentHashGroups(listings = []) {
+      const byHash = new Map();
+      listings.forEach((row) => {
+        const hash = String(row.content_hash || "").trim();
+        if (!hash) return;
+        if (!byHash.has(hash)) byHash.set(hash, []);
+        byHash.get(hash).push(row);
+      });
+      return [...byHash.entries()]
+        .filter(([, rows]) => rows.length > 1)
+        .map(([hash, rows]) => ({ hash, rows }));
     }
 function businessCreatedTime(brand = {}) {
       const value = Date.parse(brand.created_at || "");
@@ -206,11 +266,87 @@ function businessCreatedTime(brand = {}) {
     }
 function businessOptionLabel(brand = {}, newestCreatedAt = 0) {
       const newest = newestCreatedAt && businessCreatedTime(brand) === newestCreatedAt ? "Newest, " : "";
-      return `${formatBrandName(brand.name || "Unnamed")} (${brand.display_business_id || "BID --------"}, ${formatNumber(brand.listing_count || 0)} listings, ${newest}created ${brand.created_at ? new Date(brand.created_at).toLocaleDateString() : "unknown"})`;
+      return `${formatBrandName(brand.name || "Unnamed")} (${brand.display_business_id || "BID --------"}, ${formatNumber(brand.listing_count || 0)} listings, ${newest}created ${brand.created_at ? formatTimestamp(brand.created_at) : "unknown"})`;
     }
 function businessOptionLabelShort(brand = {}) {
       return `${formatBrandName(brand.name || "Unnamed")} (${brand.display_business_id || "BID --------"})`;
     }
+// Label for the merge picker specifically. Unlike the brand dropdown - where
+// inline detail was clutter - this is a DECISION, so which record is newest
+// vs oldest and how many listings each holds has to be visible, not hidden
+// behind a hover the user may never trigger.
+function businessMergeChoiceLabel(brand = {}, newestCreatedAt = 0, oldestCreatedAt = 0) {
+      const created = businessCreatedTime(brand);
+      let age = "";
+      if (newestCreatedAt && oldestCreatedAt && newestCreatedAt !== oldestCreatedAt) {
+        if (created === newestCreatedAt) age = " - Newest";
+        else if (created === oldestCreatedAt) age = " - Oldest";
+      }
+      const listings = formatNumber(brand.listing_count || 0);
+      const when = brand.created_at ? formatTimestamp(brand.created_at) : "unknown date";
+      return `${formatBrandName(brand.name || "Unnamed")} (${brand.display_business_id || "BID --------"}) - ${listings} listings${age} - created ${when}`;
+    }
+// DAT-04: render the duplicate groups into the left rail, one at a time.
+// Detail (business id, listing count, newest/oldest created_at) is hover
+// text on each option rather than inline, per the explicit ask.
+function renderDuplicateBrandRail(groups = []) {
+      const panel = el("duplicateBrandPanel");
+      const list = el("duplicateBrandList");
+      if (!panel || !list) return;
+      if (!groups.length) {
+        panel.classList.add("hidden");
+        list.innerHTML = "";
+        return;
+      }
+      panel.classList.remove("hidden");
+      // One at a time: only the first unresolved group is actionable, so the
+      // rail never becomes a wall of merge forms.
+      const group = groups[0];
+      const newestCreatedAt = Math.max(...group.map(businessCreatedTime));
+      const oldestCreatedAt = Math.min(...group.map(businessCreatedTime).filter(Boolean));
+      const ranked = [...group].sort((a, b) =>
+        (Number(b.listing_count || 0) - Number(a.listing_count || 0))
+        || (businessCreatedTime(a) - businessCreatedTime(b)));
+      const remaining = groups.length - 1;
+      list.innerHTML = `
+        <div data-duplicate-group style="border: 1px solid #e5cfaa; border-left: 4px solid #f59e0b; border-radius: 6px; padding: 10px; background: #fff9ed;">
+          <div style="font-weight: 700; margin-bottom: 6px;">${escapeHtml(formatBrandName(group[0].name || "Similar brand"))} <span style="font-weight: 400; color: var(--muted);">&times;${group.length}</span></div>
+          <label style="font-size: 12px; font-weight: 700;" for="duplicateBrandKeep">Keep</label>
+          <select id="duplicateBrandKeep" style="width: 100%; margin: 4px 0 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px;">
+            ${ranked.map((brand) => `<option value="${escapeHtml(brand.business_id)}" title="${escapeHtml(businessOptionLabel(brand, newestCreatedAt))}">${escapeHtml(businessMergeChoiceLabel(brand, newestCreatedAt, oldestCreatedAt))}</option>`).join("")}
+          </select>
+          <div style="font-size: 11px; color: var(--muted); margin: -4px 0 8px;">Suggested: the record with the most listings, then the oldest — other records already point at it.</div>
+          <button type="button" class="secondary" id="duplicateBrandMergeBtn">Merge Others Into Keep</button>
+          ${remaining > 0 ? `<div style="font-size: 11px; color: var(--muted); margin-top: 6px;">${remaining} more duplicate ${remaining === 1 ? "group" : "groups"} after this one.</div>` : ""}
+        </div>`;
+      el("duplicateBrandMergeBtn")?.addEventListener("click", async () => {
+        const button = el("duplicateBrandMergeBtn");
+        const status = el("duplicateBrandStatus");
+        const targetId = el("duplicateBrandKeep")?.value || "";
+        const sourceIds = group.map((brand) => brand.business_id).filter((id) => id && id !== targetId);
+        if (!targetId || !sourceIds.length) return;
+        const previous = setButtonBusy(button, "Merging");
+        if (status) { status.className = "action-feedback"; status.textContent = ""; }
+        try {
+          await mergeDuplicateBusinesses(targetId, sourceIds);
+          if (status) {
+            status.className = "action-feedback ok";
+            status.textContent = `Merged ${sourceIds.length} duplicate ${sourceIds.length === 1 ? "brand" : "brands"} into the kept record.`;
+          }
+          // Reload so the merged-away ids disappear from every picker and the
+          // next unresolved group takes this one's place.
+          await loadBrands();
+        } catch (error) {
+          if (status) {
+            status.className = "action-feedback error";
+            status.textContent = productSafeError(error.message, "Could not merge these brands.");
+          }
+        } finally {
+          clearButtonBusy(button, previous);
+        }
+      });
+    }
+
 async function mergeDuplicateBusinesses(targetId, sourceIds) {
       const response = await fetch("/api/brands/merge", {
         method: "POST",
@@ -627,6 +763,10 @@ function resetSourceInputsForNewMode(sourceType = el("sourceType").value) {
       resolvedRecordPath = "";
       sourceParsed = false;
       templateEditMode = false;
+      el("mapperView")?.classList.remove("template-edit-mode");
+      // Release the business lock taken while editing a saved template,
+      // or the mapper stays stuck with an un-selectable brand.
+      if (typeof setTemplateEditBrandLock === "function") setTemplateEditBrandLock(false);
       mappingSelections = {};
       autoMappedKeys = new Set();
       optionalMappingKeys = new Set();
@@ -690,6 +830,23 @@ function applyPizzaHutCsvDemo() {
         statusType: "ok"
       });
       setPizzaHutLocked(false);
+    }
+function pruneMappingSelectionsToParsedFields() {
+      // Preset auto-mappings (Domino's/Pizza Hut/Global Hotels/Little
+      // Caesars demos) hardcode field names by convention (e.g.
+      // "Latitude") that don't always exist in the real parsed source -
+      // saving with one of those still mapped fails backend validation
+      // ("unknown source fields"). Only keep a preset mapping when the
+      // value is a field the parser actually found; only parsed fields
+      // should ever end up selected.
+      const parsedSet = new Set(sourceFields);
+      Object.keys(mappingSelections).forEach((key) => {
+        const value = mappingSelections[key];
+        if (value && !parsedSet.has(value)) {
+          delete mappingSelections[key];
+          autoMappedKeys.delete(key);
+        }
+      });
     }
 function setGlobalHotelsMappings() {
       mappingSelections = {
@@ -1518,6 +1675,11 @@ function updatePreParseBrandMode() {
       editRadio.disabled = !brands.some((brand) => brand?.business_id);
       syncParserBusinessSelect();
       if (hasSelectedBusiness()) setPreParseBrandValidation("");
+      // loadAppData() (common.js) calls renderMappings() -> here on every
+      // view's initial load, not just the Mapper's - without this guard,
+      // opening Template Library (or any other tab) on a fresh session
+      // would silently open the "Create Brand" form underneath it.
+      if (el("mapperView")?.classList.contains("hidden")) return;
       if (createRadio.checked && !selectedBrand && !el("newBrandFields")?.classList.contains("is-open")) openBrandEditorForm("create");
     }
 function openBrandEditorForm(mode = "create") {
@@ -1773,6 +1935,34 @@ function setDropCustomFieldFeedback(message, type = "") {
       target.className = `action-feedback ${type}`;
       target.textContent = message;
     }
+function computeMappingConfidenceEvents() {
+      // Diffs the immutable post-parse auto-mapping snapshot against the
+      // final mapping the user is actually saving, scoring each
+      // auto-suggestion (or fresh manual pairing) so the confidence layer
+      // can learn which (target field, source column name) pairings are
+      // reliable over time: kept as suggested = +1, switched to a
+      // different mapped field = +0.5 (partial credit - it wasn't the
+      // suggestion, but something was clearly relevant here), switched to
+      // unmapped = -0.5 (a real negative signal), and a brand-new manual
+      // pairing that had no prior suggestion at all = +1 (how a newer
+      // field like "cuisine type" first builds confidence).
+      const events = [];
+      const keys = new Set([...Object.keys(originalAutoMapping), ...Object.keys(mappingSelections)]);
+      keys.forEach((key) => {
+        const originalSource = originalAutoMapping[key] || "";
+        const finalSource = mappingSelections[key] || "";
+        if (!originalSource && finalSource) {
+          events.push({ target_key: key, source_field: finalSource, delta: 1 });
+        } else if (originalSource && finalSource === originalSource) {
+          events.push({ target_key: key, source_field: originalSource, delta: 1 });
+        } else if (originalSource && finalSource) {
+          events.push({ target_key: key, source_field: originalSource, delta: 0.5 });
+        } else if (originalSource && !finalSource) {
+          events.push({ target_key: key, source_field: originalSource, delta: -0.5 });
+        }
+      });
+      return events;
+    }
 function getMapper() {
       const fields = {};
       mappingTargets.forEach((target) => {
@@ -1824,9 +2014,38 @@ async function loadBrands(search = "") {
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not load brands.");
         const brands = result.brands || [];
-        el("brandSelect").innerHTML = '<option value="">Select an existing brand</option><option class="create-new-option" value="__create_new__">+ Create New Brand</option>' + brands.map((brand) => `<option value="${escapeHtml(brand.business_id)}">${escapeHtml(formatBrandName(brand.name))}</option>`).join("");
+        // DAT-04: a brand loaded twice produced two identical-looking rows in
+        // this dropdown ("Domino's Pizza" listed twice), with no way to tell
+        // them apart or merge them. Duplicates must NEVER reach the dropdown:
+        // only the survivor of each similar-name group is offered, and the
+        // rest are surfaced in the left rail to be merged one by one.
+        const duplicateGroups = duplicateBusinessGroups(brands);
+        const survivorIds = new Set();
+        const hiddenDuplicateIds = new Set();
+        duplicateGroups.forEach((group) => {
+          // Keep the richest row - most listings, then oldest (the original
+          // the later load duplicated), so the id other records already
+          // point at is the one that stays selectable.
+          const ranked = [...group].sort((a, b) =>
+            (Number(b.listing_count || 0) - Number(a.listing_count || 0))
+            || (businessCreatedTime(a) - businessCreatedTime(b)));
+          survivorIds.add(ranked[0].business_id);
+          ranked.slice(1).forEach((brand) => hiddenDuplicateIds.add(brand.business_id));
+        });
+        // A duplicate that is currently selected stays visible, or the
+        // dropdown would silently blank out the user's own selection.
+        if (selectedBrand?.business_id) hiddenDuplicateIds.delete(selectedBrand.business_id);
+        const selectableBrands = brands.filter((brand) => !hiddenDuplicateIds.has(brand.business_id));
+        // Name/ID/created_at ride along as hover detail, never in the option
+        // text - an explicit ask, since inline detail made the list unreadable.
+        el("brandSelect").innerHTML = '<option value="">Select an existing brand</option><option class="create-new-option" value="__create_new__">+ Create New Brand</option>' + selectableBrands.map((brand) => `<option value="${escapeHtml(brand.business_id)}" title="${escapeHtml(businessOptionLabel(brand))}">${escapeHtml(formatBrandName(brand.name))}</option>`).join("");
         el("brandSelect").dataset.brands = JSON.stringify(brands);
+        renderDuplicateBrandRail(duplicateGroups);
         if (selectedBrand) el("brandSelect").value = selectedBrand.business_id;
+        // FLT-05: only a plain list below the threshold, so a short list
+        // doesn't gain unnecessary search chrome - explicit 1-character
+        // threshold for this dropdown (FLT-02/FLT-03 use 2).
+        if (typeof attachSearchableSelect === "function") attachSearchableSelect("brandSelect", { threshold: 15, minChars: 1 });
         syncParserBusinessSelect();
         el("editExistingBrandLink")?.classList.toggle("hidden", !selectedBrand);
         syncCustomFieldBusinessPickers();
@@ -1984,7 +2203,12 @@ function validateMapper(mapper) {
     }
 function updateOutput() {
       const mapper = getMapper();
-      const mappedSourceFields = new Set(Object.values(mapper.fields).filter(Boolean));
+      // Only count a mapped value if it's actually still a real parsed
+      // source column - a re-parse (or source-type change) that shrinks
+      // sourceFields can leave mappingSelections holding a stale value no
+      // longer present, which used to inflate this count past
+      // sourceFields.length (e.g. "105% - 21 of 20 columns mapped").
+      const mappedSourceFields = new Set(Object.values(mapper.fields).filter((value) => value && sourceFields.includes(value)));
       const coverage = sourceFields.length ? Math.round(mappedSourceFields.size / sourceFields.length * 100) : 0;
       const percentage = el("mappingPercentage");
       percentage.textContent = `${coverage}%`;
@@ -2017,8 +2241,11 @@ function renderEntityMap() {
       const sourceItems = sourceFields.map((field) => {
         const mappedTarget = Object.entries(mappingSelections).find(([, source]) => source === field);
         const targetDefinition = mappedTarget && mappingTargets.find((item) => item.key === mappedTarget[0]);
+        // Searchable on the raw column name AND its mapped target label, so
+        // "zip" finds address.postcode through its "ZIP Code" mapping.
+        const searchKey = `${field} ${targetDefinition?.label || ""}`.toLowerCase();
         return `
-          <div class="entity-field source-row-item">
+          <div class="entity-field source-row-item" data-field-search="${escapeHtml(searchKey)}">
             <div class="entity-field-name">${escapeHtml(field)}</div>
             <div class="entity-field-source ${mappedSourceFields.has(field) ? "mapped" : "unmapped"}">${targetDefinition ? `&#10003; ${escapeHtml(targetDefinition.label)}` : "Unmapped"}</div>
             <select class="source-map-select" data-source-field="${escapeHtml(field)}" aria-label="Map ${escapeHtml(field)}">${targetOptionsForSourceField(field)}</select>
@@ -2032,7 +2259,7 @@ function renderEntityMap() {
           <div class="entity-fields">${fields.map((item) => {
             const source = mappingSelections[item.key] || "";
             return `
-              <div class="entity-field">
+              <div class="entity-field" data-entity-search="${escapeHtml(`${item.label} ${source}`.toLowerCase())}">
                 <div class="entity-field-name">${item.required ? '<span class="required">*</span> ' : ''}${escapeHtml(item.label)}</div>
                 <div class="entity-field-source ${source ? "mapped" : "unmapped"}">${source ? `&#8592; ${escapeHtml(source)}` : "Unmapped"}</div>
               </div>
@@ -2040,16 +2267,27 @@ function renderEntityMap() {
           }).join("")}</div>
         </div>
       `).join("");
+      // A wide source (this one has 71 columns; OSM-style sources run past
+      // 100) made this an unusable wall of fields - no way to scroll one
+      // side independently, and no way to find a field without eyeballing
+      // every row. Search + independent scrolling only appear once the list
+      // is actually long enough to need them.
+      const needsFieldSearch = sourceFields.length >= DATA_MODEL_SEARCH_THRESHOLD;
+      const searchHtml = needsFieldSearch
+        ? `<input type="search" id="dataModelFieldSearch" class="entity-field-search" placeholder="Search ${sourceFields.length} fields to map..." aria-label="Search source fields" autocomplete="off">`
+        : "";
       target.innerHTML = `
-        <div class="entity-map">
+        <div class="entity-map${needsFieldSearch ? " entity-map-scrollable" : ""}">
           <div class="entity-column">
             <div class="entity-box">
               <div class="entity-title">Source Fields</div>
               <div class="entity-subtitle">Available fields from the parsed source</div>
-              <div class="entity-fields">${sourceItems || '<div class="entity-field-source unmapped">Parse a source to view fields.</div>'}</div>
+              ${searchHtml}
+              <div class="entity-fields" id="dataModelSourceFields">${sourceItems || '<div class="entity-field-source unmapped">Parse a source to view fields.</div>'}</div>
+              <div id="dataModelNoMatches" class="entity-field-source unmapped hidden">No field matches that search.</div>
             </div>
           </div>
-          <div class="entity-column">${entityItems || '<div class="status">Parse a source to view the data model.</div>'}</div>
+          <div class="entity-column" id="dataModelEntityColumn">${entityItems || '<div class="status">Parse a source to view the data model.</div>'}</div>
         </div>
       `;
       target.querySelectorAll(".source-map-select").forEach((select) => {
@@ -2057,6 +2295,26 @@ function renderEntityMap() {
           handleSourceFieldTargetSelection(select.dataset.sourceField, select.value, select);
         });
       });
+      const searchInput = el("dataModelFieldSearch");
+      if (searchInput) {
+        searchInput.addEventListener("input", () => {
+          const term = searchInput.value.trim().toLowerCase();
+          let visible = 0;
+          // Match the source column name AND the mapped target label, so
+          // "zip" finds address.postcode via its "ZIP Code" mapping.
+          target.querySelectorAll("#dataModelSourceFields [data-field-search]").forEach((rowNode) => {
+            const hit = !term || rowNode.dataset.fieldSearch.includes(term);
+            rowNode.classList.toggle("hidden", !hit);
+            if (hit) visible += 1;
+          });
+          el("dataModelNoMatches")?.classList.toggle("hidden", visible > 0);
+          // Filtering the source side and leaving the target side untouched
+          // breaks the visual pairing, so hide unmatched targets too.
+          target.querySelectorAll("#dataModelEntityColumn [data-entity-search]").forEach((rowNode) => {
+            rowNode.classList.toggle("hidden", Boolean(term) && !rowNode.dataset.entitySearch.includes(term));
+          });
+        });
+      }
     }
 function renderTable(targetId, rows) {
       const target = el(targetId);
@@ -2199,8 +2457,13 @@ async function parseSource() {
         sourceFields = [...new Set((result.fields || []).filter((field) => field !== null && field !== undefined && String(field).trim()))];
         jsonRecordPaths = result.record_paths || [];
         sourceParsed = true;
+        pendingUnsavedParse = true;
         mappingWorkspaceActivated = true;
         templateEditMode = false;
+        el("mapperView")?.classList.remove("template-edit-mode");
+      // Release the business lock taken while editing a saved template,
+      // or the mapper stays stuck with an un-selectable brand.
+      if (typeof setTemplateEditBrandLock === "function") setTemplateEditBrandLock(false);
         populateJsonRecordPaths(jsonRecordPaths);
         learnedSuggestions = {};
         try {
@@ -2223,7 +2486,9 @@ async function parseSource() {
         else if (jsonFunctionMode === "dominos") setDominosMappings();
         else if (apiFunctionMode === "little_caesars") setLittleCaesarsApiMappings();
         else if (document.querySelector("input[name='pythonFunction']:checked")?.value === "la_city") setLaCityDemoMappings();
+        pruneMappingSelectionsToParsedFields();
         autoAddDetectedOptionalFields();
+        originalAutoMapping = { ...mappingSelections };
         sessionStorage.removeItem(draftStorageKey);
         if (resolvedRecordPath && recordExtractionMode === "custom" && !el("recordPath").value.trim()) el("recordPath").value = resolvedRecordPath;
         if (sourceType === "excel" && resolvedRecordPath) el("sheetName").value = resolvedRecordPath;
@@ -2330,6 +2595,8 @@ async function loadSampleDataset(reset = false) {
       const previousButton = setButtonBusy(button, reset ? "Reloading" : "Loading Sample Data");
       const previousHeaderButton = setButtonBusy(headerButton, reset ? "Reloading" : "Loading Sample Data");
       const previousReload = reloadLink ? setButtonBusy(reloadLink, "Reloading") : "";
+      headerButton?.classList.remove("sample-state-idle", "sample-state-ready");
+      headerButton?.classList.add("sample-state-loading");
       const status = el("reportStatus");
       status.className = "report-status loading";
       status.classList.remove("hidden");
@@ -2343,14 +2610,23 @@ async function loadSampleDataset(reset = false) {
       const estimatedSeconds = reset ? 25 : 15;
       const startedAt = Date.now();
       const progressLabel = reset ? "Clearing and reloading sample dataset" : "Loading sample dataset";
-      const renderProgress = (percent) => {
-        status.innerHTML = `<span class="spinner"></span> ${progressLabel} (${percent}%)...`;
+      // The percentage here was never a measurement: it was
+      // elapsed/estimate capped at Math.min(94, ...), so any load slower
+      // than the 15/25s guess parked on "94%" indefinitely and looked
+      // hung - reported repeatedly as "why does it always stop at 94%".
+      // Nothing was stuck; the bar had simply run out of guess. Show the
+      // estimate only while it is still an estimate, then switch to an
+      // honest elapsed-time readout rather than inventing a number.
+      const renderProgress = (elapsed) => {
+        const percent = Math.round(elapsed / estimatedSeconds * 100);
+        const detail = percent < 95
+          ? `about ${percent}%`
+          : `${elapsed}s elapsed - larger batches take longer, this keeps running`;
+        status.innerHTML = `<span class="spinner"></span> ${progressLabel} (${detail})`;
       };
       renderProgress(0);
       const progressTimer = window.setInterval(() => {
-        const elapsed = Math.floor((Date.now() - startedAt) / 1000);
-        const percent = Math.min(94, Math.round(elapsed / estimatedSeconds * 100));
-        renderProgress(percent);
+        renderProgress(Math.floor((Date.now() - startedAt) / 1000));
       }, 1000);
       try {
         const response = await fetch("/api/sample/load", {
@@ -2361,7 +2637,7 @@ async function loadSampleDataset(reset = false) {
         });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not load sample dataset.");
-        status.textContent = `${progressLabel} (100%)...`;
+        status.textContent = `${progressLabel} (100%)`;
         await loadBrands();
         await loadTemplateFilters();
         reportLoaded = false;
@@ -2374,11 +2650,19 @@ async function loadSampleDataset(reset = false) {
         const message = result.already_loaded
           ? `Sample dataset already loaded${reportingStatusSuffix}.`
           : `Sample dataset loaded: ${formatNumber(result.locations)} records, ${formatNumber(result.errors)} in review${reportingStatusSuffix}${sourceTypesSummary ? ` (${sourceTypesSummary})` : ""}.`;
-        status.className = "report-status";
-        status.textContent = message;
-        status.classList.remove("hidden");
-        setStatus(message, "ok");
+        // The confirmation dialog below is the single acknowledgement for
+        // this action now - a second, persistent bordered status card
+        // repeating the same text underneath the button just lingered on
+        // screen with nothing to dismiss it. Keep the status area hidden.
+        status.className = "report-status hidden";
+        status.textContent = "";
         updateSampleDatasetControls(result);
+        const dialog = el("sampleLoadedDialog");
+        if (dialog) {
+          const dialogText = el("sampleLoadedDialogText");
+          if (dialogText) dialogText.textContent = message;
+          dialog.showModal();
+        }
       } catch (error) {
         status.className = "report-status";
         const message = error.name === "AbortError" ? "Cancelled. No changes." : productSafeError(error.message, "Could not load sample dataset.");
@@ -2392,15 +2676,18 @@ async function loadSampleDataset(reset = false) {
         if (reloadLink) clearButtonBusy(reloadLink, previousReload);
         if (button && button.dataset.sampleLoaded !== "true") button.disabled = false;
         if (reloadLink) reloadLink.disabled = false;
+        headerButton?.classList.remove("sample-state-loading");
+        if (headerButton && headerButton.dataset.sampleLoaded !== "true") headerButton.classList.add("sample-state-idle");
       }
     }
 async function clearSampleDataset() {
       const clearLink = el("clearSampleDatasetLink");
+      // The button's own busy state (verb-ing label + spinner) already
+      // shows this is in progress - a second, separate long-text loading
+      // bar underneath it is redundant and was the thing flagged as
+      // unwanted "keeps going and coming" text, not a real status update.
       const previousClear = clearLink ? setButtonBusy(clearLink, "Clearing") : "";
       const status = el("reportStatus");
-      status.className = "report-status loading";
-      status.innerHTML = '<span class="spinner"></span> Clearing sample dataset...';
-      status.classList.remove("hidden");
       try {
         const response = await fetch("/api/sample/clear", {
           method: "POST",
@@ -2440,12 +2727,93 @@ function updateSampleDatasetControls(result = {}) {
       [button, headerButton].filter(Boolean).forEach((sampleButton) => {
         sampleButton.dataset.sampleLoaded = loaded ? "true" : "false";
         sampleButton.disabled = loaded;
-        sampleButton.classList.toggle("ready", loaded);
+        sampleButton.classList.remove("sample-state-loading");
+        sampleButton.classList.toggle('sample-state-ready', loaded);
+        sampleButton.classList.toggle('sample-state-idle', !loaded);
         sampleButton.title = loaded ? "Sample data already in place." : "";
-        sampleButton.textContent = loaded ? "Sample Dataset Loaded" : "Load Sample Dataset";
+        sampleButton.textContent = loaded ? "Sample Dataset Already Loaded" : "Load Sample Dataset";
       });
       if (clearLink) clearLink.classList.toggle("hidden", !loaded);
       if (reloadLink) reloadLink.classList.toggle("hidden", !loaded);
+    }
+const JOB_HISTORY_STATUS_STYLE = {
+  OK: "background:#dcfce7;color:#15803d;",
+  NEEDS_REVIEW: "background:#fef3c7;color:#a16207;",
+  FAILED: "background:#fee2e2;color:#b91c1c;",
+};
+function renderJobHistoryRow(job) {
+      const style = JOB_HISTORY_STATUS_STYLE[job.status] || "background:#f1f5f9;color:#64748b;";
+      const brandLabel = job.brand ? formatBrandName(job.brand) : "Unknown brand";
+      return `<div style="border:1px solid var(--line); border-radius:6px; padding:8px 10px; font-size:12px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+          <strong style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(brandLabel)}</strong>
+          <span style="display:inline-block; padding:1px 8px; border-radius:999px; font-weight:700; font-size:11px; ${style}">${escapeHtml(job.status)}</span>
+        </div>
+        <div style="color:var(--muted); margin-top:3px;">${formatNumber(job.total_rows)} total &middot; ${formatNumber(job.mapped_rows)} valid &middot; ${formatNumber(job.error_listings)} in review${job.duplicate_listings_skipped ? ` &middot; ${formatNumber(job.duplicate_listings_skipped)} duplicate` : ""}</div>
+      </div>`;
+    }
+const JOB_HISTORY_PANEL_LIMIT = 10;
+async function loadJobHistory() {
+      const target = el("jobHistoryList");
+      if (!target) return;
+      try {
+        const response = await fetch(`/api/jobs/recent?limit=${JOB_HISTORY_PANEL_LIMIT}`);
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not load job history.");
+        const jobs = Array.isArray(result.jobs) ? result.jobs : [];
+        if (!jobs.length) {
+          target.innerHTML = '<div class="report-status" style="padding: 8px 0; font-size: 12px;">No jobs yet this session.</div>';
+          el("jobHistoryShowMoreBtn")?.classList.add("hidden");
+          return;
+        }
+        target.innerHTML = jobs.map(renderJobHistoryRow).join("");
+        // "Show More" only matters once there could be more than the panel
+        // already shows - total comes straight from the same response so
+        // there's no separate count round-trip just to decide visibility.
+        const total = Number(result.total || 0);
+        el("jobHistoryShowMoreBtn")?.classList.toggle("hidden", total <= jobs.length);
+      } catch (error) {
+        target.innerHTML = `<div class="report-status" style="padding: 8px 0; font-size: 12px;">${escapeHtml(productSafeError(error.message, "Job history is temporarily unavailable."))}</div>`;
+        el("jobHistoryShowMoreBtn")?.classList.add("hidden");
+      }
+    }
+const JOB_HISTORY_DIALOG_PAGE_SIZE = 20;
+let jobHistoryDialogPage = 0;
+let jobHistoryDialogTotal = 0;
+async function loadJobHistoryDialogPage() {
+      const listEl = el("jobHistoryDialogList");
+      const pageInfoEl = el("jobHistoryDialogPageInfo");
+      if (!listEl) return;
+      listEl.innerHTML = '<div class="report-status" style="padding: 8px 0; font-size: 12px;">Loading…</div>';
+      try {
+        const offset = jobHistoryDialogPage * JOB_HISTORY_DIALOG_PAGE_SIZE;
+        const response = await fetch(`/api/jobs/recent?limit=${JOB_HISTORY_DIALOG_PAGE_SIZE}&offset=${offset}`);
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not load job history.");
+        const jobs = Array.isArray(result.jobs) ? result.jobs : [];
+        jobHistoryDialogTotal = Number(result.total || 0);
+        listEl.innerHTML = jobs.length
+          ? jobs.map(renderJobHistoryRow).join("")
+          : '<div class="report-status" style="padding: 8px 0; font-size: 12px;">No jobs on this page.</div>';
+        const lastPage = jobHistoryDialogTotal > 0 ? Math.ceil(jobHistoryDialogTotal / JOB_HISTORY_DIALOG_PAGE_SIZE) - 1 : 0;
+        if (pageInfoEl) pageInfoEl.textContent = `Page ${jobHistoryDialogPage + 1} of ${lastPage + 1} (${formatNumber(jobHistoryDialogTotal)} total)`;
+        el("jobHistoryDialogPrevBtn")?.toggleAttribute("disabled", jobHistoryDialogPage <= 0);
+        el("jobHistoryDialogNextBtn")?.toggleAttribute("disabled", jobHistoryDialogPage >= lastPage);
+      } catch (error) {
+        listEl.innerHTML = `<div class="report-status" style="padding: 8px 0; font-size: 12px;">${escapeHtml(productSafeError(error.message, "Job history is temporarily unavailable."))}</div>`;
+      }
+    }
+function openJobHistoryDialog() {
+      jobHistoryDialogPage = 0;
+      el("jobHistoryDialog")?.showModal();
+      loadJobHistoryDialogPage();
+    }
+function jobHistoryDialogPrev() {
+      if (jobHistoryDialogPage > 0) { jobHistoryDialogPage -= 1; loadJobHistoryDialogPage(); }
+    }
+function jobHistoryDialogNext() {
+      const lastPage = jobHistoryDialogTotal > 0 ? Math.ceil(jobHistoryDialogTotal / JOB_HISTORY_DIALOG_PAGE_SIZE) - 1 : 0;
+      if (jobHistoryDialogPage < lastPage) { jobHistoryDialogPage += 1; loadJobHistoryDialogPage(); }
     }
 async function refreshSampleDatasetStatus() {
       try {
@@ -2504,60 +2872,85 @@ async function saveMapper() {
           return;
         }
 
-        const coverage = sourceFields.length ? Math.round(new Set(Object.values(mapper.fields).filter(Boolean)).size / sourceFields.length * 100) : 0;
+        const coverage = sourceFields.length ? Math.round(new Set(Object.values(mapper.fields).filter((value) => value && sourceFields.includes(value))).size / sourceFields.length * 100) : 0;
         if (coverage < 50) {
           setStatus("Mapping coverage must reach 50% before saving.", "warn");
           return;
         }
-        setStatus("Preparing your records...", "");
+        // setStatus() writes plain textContent - it can't host the spinner
+        // element the rest of the app uses for in-progress states, and a
+        // trailing "..." string is against that same convention (busyMarkup()
+        // strips it and adds a real spinner instead). Match that here rather
+        // than a bare ellipsis with no visible spinner.
+        const statusEl = el("status");
+        if (statusEl) {
+          statusEl.className = "status";
+          statusEl.innerHTML = '<span class="spinner"></span> Preparing your records';
+        }
         setProgress(10, "Preparing your records");
         try {
           const batches = buildSaveBatches(sourceRows, mapper, sourceFields);
           const batchEventId = newSessionId();
           let mappedRows = 0;
           let errorListings = 0;
+          let duplicateListings = 0;
           let processedRows = 0;
           let eventId = "";
           const startTime = Date.now();
           for (let index = 0; index < batches.length; index += 1) {
             const batch = batches[index];
             const totalToProcess = sourceRows.length;
-            const progress = Math.min(90, 20 + Math.round(processedRows / Math.max(totalToProcess, 1) * 65));
-
-            // Estimate remaining time based on pace so far
-            let etaSeconds = "...";
-            if (processedRows > 0 && index > 0) {
-              const elapsedMs = Date.now() - startTime;
-              const msPerRow = elapsedMs / processedRows;
-              const remainingRows = totalToProcess - processedRows;
-              etaSeconds = Math.max(0, Math.round(remainingRows * msPerRow / 1000));
+            const batchStartProcessed = processedRows;
+            // Before any batch has finished there's no real pace yet, so
+            // assume a conservative rows/ms rate; once at least one batch
+            // has completed, use its actual measured pace instead. Either
+            // way this keeps climbing every tick instead of freezing at a
+            // single static "Starting batch..." message for the whole
+            // (often single-batch) save.
+            const priorMsPerRow = processedRows > 0 ? (Date.now() - startTime) / processedRows : 20;
+            const batchEstimatedMs = Math.max(600, batch.rows.length * priorMsPerRow);
+            const batchStartedAt = Date.now();
+            const renderBatchProgress = () => {
+              const elapsed = Date.now() - batchStartedAt;
+              const withinBatchFraction = Math.min(0.98, elapsed / batchEstimatedMs);
+              const rowsEstimate = Math.min(totalToProcess, batchStartProcessed + Math.round(withinBatchFraction * batch.rows.length));
+              const progress = Math.min(90, 20 + Math.round(rowsEstimate / Math.max(totalToProcess, 1) * 65));
+              const remainingMs = Math.max(0, batchEstimatedMs - elapsed) + (batches.length - 1 - index) * batchEstimatedMs;
+              const etaSeconds = Math.round(remainingMs / 1000);
+              setProgress(progress, `${rowsEstimate} of ${totalToProcess} records processed, about ${etaSeconds}s remaining`);
+            };
+            renderBatchProgress();
+            const batchProgressTimer = window.setInterval(renderBatchProgress, 400);
+            let response;
+            try {
+              response = await fetch("/api/save", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                  mapper,
+                  rows: batch.rows,
+                  source_fields: sourceFields,
+                  batch_event_id: batchEventId,
+                  row_offset: batch.rowOffset,
+                  // A loaded template's row is already kept in sync above -
+                  // never mint a second, duplicate template row for it here.
+                  save_template: !activeTemplateId && index === 0,
+                  // Same mapping applies to every batch of one save - only
+                  // record the confidence signal once, not once per batch.
+                  mapping_confidence_events: index === 0 ? computeMappingConfidenceEvents() : []
+                })
+              });
+            } finally {
+              window.clearInterval(batchProgressTimer);
             }
-
-            const progressDetail = processedRows
-              ? `${processedRows} of ${totalToProcess} records processed`
-              : `Starting batch ${index + 1} of ${batches.length}`;
-            const etaDetail = etaSeconds !== "..." ? `, about ${etaSeconds}s remaining` : "";
-            setProgress(progress, `${progressDetail}${etaDetail}`);
-            const response = await fetch("/api/save", {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({
-                mapper,
-                rows: batch.rows,
-                source_fields: sourceFields,
-                batch_event_id: batchEventId,
-                row_offset: batch.rowOffset,
-                // A loaded template's row is already kept in sync above -
-                // never mint a second, duplicate template row for it here.
-                save_template: !activeTemplateId && index === 0
-              })
-            });
             const result = await response.json();
             if (!response.ok) throw new Error(result.error || "Could not save template.");
             eventId = result.event_id || batchEventId;
             mappedRows += result.mapped_rows || 0;
             errorListings += result.error_listings || 0;
+            duplicateListings += result.duplicate_listings_skipped || 0;
             processedRows += batch.rows.length;
+            setProgress(Math.min(90, 20 + Math.round(processedRows / Math.max(totalToProcess, 1) * 65)), `${processedRows} of ${totalToProcess} records processed`);
           }
           lastSaveEventId = eventId || batchEventId;
           el("reviewEventId").value = lastSaveEventId;
@@ -2566,8 +2959,27 @@ async function saveMapper() {
           await refreshReviewCount(true);
           if (typeof loadErrorBrandBreakdown === "function") loadErrorBrandBreakdown();
           hideProgress();
+          // The completion dialog below is now the single acknowledgement
+          // for a finished save - the "Preparing your records" spinner
+          // status (set at the very start of this function) must not keep
+          // showing underneath it once there's something to actually read.
+          const statusEl = el("status");
+          if (statusEl) {
+            statusEl.className = "status hidden";
+            statusEl.textContent = "";
+          }
           const prefix = activeTemplateId ? "Template updated. " : "";
-          showSaveCompletion(`${prefix}${processedRows} records processed. ${errorListings} need review.`);
+          const insertedCount = Math.max(0, mappedRows - duplicateListings);
+          const duplicateNote = duplicateListings ? `, ${duplicateListings} duplicate${duplicateListings === 1 ? "" : "s"} found` : "";
+          // Compact one-line summary naming the brand and source type, not
+          // just bare counts, so this reads clearly even if the user only
+          // sees it after the save finished in the background.
+          const brandLabel = mapper.brand ? formatBrandName(mapper.brand) : "This brand";
+          const sourceLabel = String(mapper.source_type || "source").replace(/_/g, " ");
+          const reviewNote = errorListings ? ` (AI will attempt the best fixes)` : "";
+          showSaveCompletion(`${prefix}${brandLabel} ${sourceLabel}: ${sourceRows.length} read, ${insertedCount} saved${duplicateNote}, ${errorListings} need${errorListings === 1 ? "s" : ""} review${reviewNote}.`);
+          pendingUnsavedParse = false;
+          loadJobHistory();
         } catch (error) {
           hideProgress();
           setStatus(productSafeError(error.message, "Could not save template."), "error");
@@ -2577,17 +2989,30 @@ async function saveMapper() {
       }
     }
 
+function showBackgroundSaveNotice() {
+      const target = el("jobHistoryList");
+      if (!target || document.getElementById("jobHistoryRunningRow")) return;
+      const row = document.createElement("div");
+      row.id = "jobHistoryRunningRow";
+      row.style.cssText = "border:1px solid #93c5fd; border-radius:6px; padding:8px 10px; font-size:12px; background:#eff6ff; color:#1e40af;";
+      row.innerHTML = `<span class="spinner"></span> Saving in the background — you'll see a summary here and a popup once it's done.`;
+      target.insertBefore(row, target.firstChild);
+    }
+function clearBackgroundSaveNotice() {
+      document.getElementById("jobHistoryRunningRow")?.remove();
+    }
 function showSaveCompletion(message) {
-      let dialog = document.getElementById("saveCompletionDialog");
+      // saveCompletionDialog is now a static <dialog class="app-help-dialog">
+      // in integrations.html (same theme as appHelpDialog/sampleLoadedDialog),
+      // with a centered OK button - previously built ad hoc in JS with its
+      // own inline styles and a right-aligned button, out of step with
+      // every other confirmation popup in the app.
+      const dialog = el("saveCompletionDialog");
       if (!dialog) {
-        dialog = document.createElement("dialog");
-        dialog.id = "saveCompletionDialog";
-        dialog.style.cssText = "border:1px solid var(--line);border-radius:10px;padding:24px;max-width:420px;color:var(--ink);box-shadow:0 24px 70px rgba(15,23,42,.28);";
-        dialog.innerHTML = `<p id="saveCompletionMessage" style="margin:0 0 20px;font-size:16px;font-weight:650;line-height:1.45"></p><div style="display:flex;justify-content:flex-end"><button id="saveCompletionOk" type="button">OK</button></div>`;
-        document.body.appendChild(dialog);
-        dialog.querySelector("#saveCompletionOk").addEventListener("click", () => dialog.close());
+        window.alert(message);
+        return;
       }
-      dialog.querySelector("#saveCompletionMessage").textContent = message;
+      el("saveCompletionMessage").textContent = message;
       if (typeof dialog.showModal === "function") dialog.showModal();
       else window.alert(message);
     }
@@ -2667,12 +3092,12 @@ async function performMasterDeleteData() {
           body: JSON.stringify(payload)
         });
         const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "Master deletion failed.");
+        if (!response.ok) throw new Error(result.error || "Workspace reset failed.");
         el("masterDeleteConfirmDialog").close();
         status.className = "action-feedback ok";
-        status.textContent = `Master deletion complete. Dropped ${result.dropped_count || 0} tables.`;
-        setStatus("Master data deletion complete. Warehouse is back to no-tables state.", "ok");
-        window.alert(`Master data deletion complete. Dropped ${result.dropped_count || 0} warehouse objects across all layers. You will be logged out now.`);
+        status.textContent = "Workspace reset complete.";
+        setStatus("Workspace reset complete. You will be signed out so the app can reload cleanly.", "ok");
+        window.alert("Workspace reset complete. You will be signed out so the app can reload cleanly.");
         sourceRows = [];
         sourceFields = [];
         sourceParsed = false;
@@ -2685,7 +3110,7 @@ async function performMasterDeleteData() {
         prepareReferenceData();
       } catch (error) {
         status.className = "action-feedback error";
-        status.textContent = productSafeError(error.message, "Master deletion failed.");
+        status.textContent = productSafeError(error.message, "Workspace reset failed.");
       } finally {
         button.disabled = false;
         clearButtonBusy(confirmButton, previousConfirmButton);
@@ -2695,6 +3120,10 @@ async function performMasterDeleteData() {
 function resetMapping() {
       activeTemplateId = "";
       templateEditMode = false;
+      el("mapperView")?.classList.remove("template-edit-mode");
+      // Release the business lock taken while editing a saved template,
+      // or the mapper stays stuck with an un-selectable brand.
+      if (typeof setTemplateEditBrandLock === "function") setTemplateEditBrandLock(false);
       mappingSelections = {};
       autoMappedKeys = new Set();
       optionalMappingKeys = new Set();
@@ -2704,6 +3133,7 @@ function resetMapping() {
       sourceFields = [];
       sourceRecordCount = 0;
       sourceParsed = false;
+      pendingUnsavedParse = false;
       mappingWorkspaceActivated = false;
       lastSourcePreviewPayload = null;
       resolvedRecordPath = "";
@@ -2797,25 +3227,9 @@ async function toggleShowExistingBrands() {
           ...brand,
           display_business_id: brand.display_business_id || await fallbackDisplayBusinessId(brand)
         })));
-        const optionsHtml = '<option value="">Select an active brand</option>' + brandsWithDisplayIds.map(b => `<option value="${escapeHtml(b.business_id)}">${escapeHtml(businessOptionLabelShort(b))}</option>`).join('');
-        const duplicateGroups = duplicateBusinessGroups(brandsWithDisplayIds);
-        const mergeHtml = duplicateGroups.length ? `
-          <div style="border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px;">
-            <strong style="display: block; margin-bottom: 6px; color: var(--navy);">Similar Brands</strong>
-            ${duplicateGroups.map((group, index) => {
-              const newestCreatedAt = Math.max(...group.map(businessCreatedTime));
-              return `
-              <div data-merge-group="${index}" style="border: 1px solid #e5cfaa; border-left: 4px solid #f59e0b; border-radius: 6px; padding: 8px; margin-top: 8px; background: #fff9ed;">
-                <div style="font-weight: 700; margin-bottom: 6px;">${escapeHtml(group[0].name || "Similar brand")}</div>
-                <label style="font-size: 12px;">Keep</label>
-                <select data-merge-target="${index}" style="width: 100%; margin: 4px 0 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px;">
-                  ${group.map((brand) => `<option value="${escapeHtml(brand.business_id)}">${escapeHtml(businessOptionLabel(brand, newestCreatedAt))}</option>`).join("")}
-                </select>
-                <button type="button" class="secondary" data-merge-action="${index}">Merge Others Into Keep</button>
-              </div>
-            `}).join("")}
-          </div>
-        ` : "";
+        // Detail (ID / listing count / created_at) lives on hover, never in
+        // the option text - an explicit ask, since it made the list unreadable.
+        const optionsHtml = '<option value="">Select an active brand</option>' + brandsWithDisplayIds.map(b => `<option value="${escapeHtml(b.business_id)}" title="${escapeHtml(businessOptionLabel(b))}">${escapeHtml(businessOptionLabelShort(b))}</option>`).join('');
         box.innerHTML = `
           <label style="display: block; font-weight: 700; margin-bottom: 4px; color: var(--navy);" for="activeBusinessesDropdown">
             Active Brands (${brands.length})
@@ -2823,32 +3237,12 @@ async function toggleShowExistingBrands() {
           <select id="activeBusinessesDropdown" style="width: 100%; padding: 6px 8px; border-radius: 4px; border: 1px solid var(--line); background: #ffffff;">
             ${optionsHtml}
           </select>
-          ${mergeHtml}
         `;
         el("activeBusinessesDropdown").addEventListener("change", (event) => {
           if (!event.target.value) return;
           el("brandSelect").value = event.target.value;
           el("brandSelect").dispatchEvent(new Event("change"));
           box.style.display = "none";
-        });
-        box.querySelectorAll("[data-merge-action]").forEach((button) => {
-          button.addEventListener("click", async () => {
-            const index = Number(button.dataset.mergeAction);
-            const group = duplicateGroups[index] || [];
-            const targetId = box.querySelector(`[data-merge-target="${index}"]`)?.value || "";
-            const sourceIds = group.map((brand) => brand.business_id).filter((id) => id && id !== targetId);
-            if (!targetId || !sourceIds.length) return;
-            const previousButton = setButtonBusy(button, "Merging");
-            try {
-              const result = await mergeDuplicateBusinesses(targetId, sourceIds);
-              await loadBrands("");
-              setStatus(`Merged ${result.merged_count} business record${result.merged_count === 1 ? "" : "s"}.`, "ok");
-              box.style.display = "none";
-            } catch (err) {
-              clearButtonBusy(button, previousButton);
-              setStatus(productSafeError(err.message, "Could not merge businesses."), "error");
-            }
-          });
         });
       } catch (err) {
         box.innerHTML = `<div style="color: var(--error);">${escapeHtml(err.message)}</div>`;

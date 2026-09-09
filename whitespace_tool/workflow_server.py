@@ -1,21 +1,24 @@
 from __future__ import annotations
 
 import base64
+import csv
 from datetime import datetime, timezone
 from dataclasses import replace
 from functools import lru_cache
 import hashlib
 import json
 import http.server
+import io
 import logging
 import os
 from pathlib import Path
 import socketserver
 import threading
-from time import perf_counter, sleep
+from time import perf_counter, sleep, time as wall_clock_time
 from types import SimpleNamespace
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 import urllib.request
+import zipfile
 from typing import Any
 from uuid import uuid4
 import re
@@ -36,13 +39,17 @@ from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, TABLE_CLUSTER_SPEC
 from whitespace_tool.storage_config import load_dotenv, load_storage_config
 from whitespace_tool.sqlite_cache import (
     get_cached_query, set_cached_query, invalidate_cache, clear_local_cache_db,
-    get_cached_zipcode_count, cache_zipcodes, get_auto_repair_stats, set_auto_repair_stats, increment_manual_fixed_count,
+    get_cached_zipcode_count, cache_zipcodes, cache_missing_zipcodes, get_auto_repair_stats, set_auto_repair_stats, increment_manual_fixed_count,
     replace_gold_mirror, get_mirror_status, fetch_mirror_zip_brand_activity,
     fetch_mirror_reporting_locations, fetch_mirror_reporting_locations_by_brand, fetch_mirror_businesses,
     get_error_count, set_error_count, replace_quality_mirror, clear_sample_reporting_mirror,
     get_zip_reference_status, set_zip_reference_status,
     seed_enrichment_cycle, claim_enrichment_batch, complete_enrichment_claim, enrichment_cycle_counts,
     get_cached_worldwide_city_count, cache_worldwide_cities,
+    record_save_event, get_recent_save_events, count_save_events,
+    get_app_setting, set_app_setting, get_stale_after_days, invalidate_quality_cache, DEFAULT_STALE_AFTER_DAYS,
+    record_field_discovery_gap,
+    record_mapping_confidence_events, get_mapping_confidence,
 )
 from whitespace_tool.sample_data import SAMPLE_BATCH_ID, SAMPLE_BRANDS, generate_source_rows, mapper_for, source_configuration, source_label, stable_business_id, stable_template_id
 
@@ -96,6 +103,14 @@ ENRICHMENT_STATUS: dict[str, Any] = {"state": "idle", "current_id": "", "process
 AUTO_REPAIR_THREAD: threading.Thread | None = None
 AUTO_REPAIR_LOCK = threading.Lock()
 AUTO_REPAIR_STATS: dict[str, int] = {"fixed": 0, "processed": 0, "remaining": 0}
+
+# Set once per real user action (do_POST - parse/save/reprocess/etc, never
+# background polling) so the auto-repair loop can tell "the app is idle" from
+# "someone is actively working" and back off instead of competing for the
+# same BigQuery client/connection pool. A plain float write is safe without a
+# lock here - it's a soft, best-effort signal, not a correctness-critical one.
+LAST_FOREGROUND_ACTIVITY_AT: float = 0.0
+FOREGROUND_IDLE_GRACE_SECONDS = 10.0
 
 
 def _enrichment_checkpoint(current_id: str = "") -> None:
@@ -291,11 +306,25 @@ def field_catalog() -> list[dict[str, Any]]:
         client.create_table(bigquery.Table(table_ref, schema=schema))
         created = True
     else:
+        # Generalized from the two hardcoded business_id/content_hash ALTERs
+        # this used to carry: reconcile against TABLE_SCHEMAS so any column
+        # added later (is_archived/archived_at) reaches a deployed table
+        # automatically. Hardcoding one column at a time is exactly how
+        # error_listings ended up missing has_ai_suggestion in production.
         existing_names = {field.name for field in existing_table.schema}
-        if "business_id" not in existing_names:
-            client.query(f"ALTER TABLE `{table_ref}` ADD COLUMN IF NOT EXISTS business_id STRING").result()
-        if "content_hash" not in existing_names:
-            client.query(f"ALTER TABLE `{table_ref}` ADD COLUMN IF NOT EXISTS content_hash STRING").result()
+        # Built from TABLE_SCHEMAS rather than from the constructed schema
+        # objects: a column added to an existing table must always be
+        # NULLABLE (BigQuery rejects adding a REQUIRED column), and the
+        # source dicts are what carry that intent.
+        missing_fields = [
+            bigquery.SchemaField(field["name"], field["type"], mode="NULLABLE",
+                                 default_value_expression=field.get("default"))
+            for field in TABLE_SCHEMAS["field_catalogs"] if field["name"] not in existing_names
+        ]
+        if missing_fields:
+            existing_table.schema = list(existing_table.schema) + missing_fields
+            client.update_table(existing_table, ["schema"])
+            LOGGER.info("field_catalogs_schema_extended columns=%s", [f.name for f in missing_fields])
     if created:
         legacy_ref = f"{project_id}.{dataset_id}.field_catalog"
         try:
@@ -313,7 +342,8 @@ def field_catalog() -> list[dict[str, Any]]:
             "aliases": json.dumps([]), "is_custom": False, "created_at": now, "updated_at": now,
         }
 
-    rows = [dict(row) for row in client.query(f"SELECT * FROM `{table_ref}` ORDER BY is_custom, label").result()]
+    catalog_select = f"SELECT * FROM `{table_ref}` WHERE is_archived IS NOT TRUE ORDER BY is_custom, label"
+    rows = [dict(row) for row in client.query(catalog_select).result()]
     load_kwargs: dict[str, Any] = {"schema": schema}
     if hasattr(bigquery, "SchemaUpdateOption") and hasattr(bigquery.SchemaUpdateOption, "ALLOW_FIELD_ADDITION"):
         load_kwargs["schema_update_options"] = [bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION]
@@ -326,7 +356,7 @@ def field_catalog() -> list[dict[str, Any]]:
             job_config=bigquery.LoadJobConfig(**load_kwargs)
         )
         load_job.result()
-        rows = [dict(row) for row in client.query(f"SELECT * FROM `{table_ref}` ORDER BY is_custom, label").result()]
+        rows = [dict(row) for row in client.query(catalog_select).result()]
     else:
         # A project seeded before a new standard field (e.g. "ratings") was
         # added to the registry won't have it yet - top up any missing
@@ -342,7 +372,7 @@ def field_catalog() -> list[dict[str, Any]]:
                 job_config=bigquery.LoadJobConfig(**load_kwargs)
             )
             load_job.result()
-            rows = [dict(row) for row in client.query(f"SELECT * FROM `{table_ref}` ORDER BY is_custom, label").result()]
+            rows = [dict(row) for row in client.query(catalog_select).result()]
     standard_registry_map = {f["key"]: f.get("required", False) for f in load_field_registry()}
     for row in rows:
         for key in ("created_at", "updated_at"):
@@ -458,6 +488,36 @@ def create_custom_field(data: dict[str, Any]) -> dict[str, Any]:
                 )
     table_ref = f"{project_id}.{dataset_id}.field_catalogs"
     now = utc_now_iso()
+    # Re-creating a previously archived field restores that row rather than
+    # inserting a duplicate slug - the archived definition already matches
+    # the values sitting in listings.custom_fields for this business.
+    revive_query = f"""
+    UPDATE `{table_ref}`
+    SET is_archived = FALSE, archived_at = NULL, label = @label,
+        data_type = @data_type, updated_at = @now
+    WHERE business_id = @business_id AND LOWER(slug) = LOWER(@slug) AND is_archived IS TRUE
+    """
+    revive_job = client.query(revive_query, job_config=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("business_id", "STRING", business_id),
+        bigquery.ScalarQueryParameter("slug", "STRING", slug),
+        bigquery.ScalarQueryParameter("label", "STRING", label),
+        bigquery.ScalarQueryParameter("data_type", "STRING", str(data.get("type", "string"))),
+        bigquery.ScalarQueryParameter("now", "TIMESTAMP", now),
+    ]))
+    revive_job.result()
+    if int(getattr(revive_job, "num_dml_affected_rows", 0) or 0) > 0:
+        invalidate_cache()
+        LOGGER.info("custom_field_unarchived slug=%s business_id=%s", slug, business_id)
+        return {"field": {"key": slug, "label": label, "table": "listings", "field": slug,
+                          "type": str(data.get("type", "string")), "required": False,
+                          "hints": [slug], "is_custom": True}, "restored": True}
+    # The column that physically stores custom values must exist before the
+    # catalog advertises the field - otherwise the catalog promises somewhere
+    # for the data to go that the warehouse does not actually have.
+    try:
+        _ensure_listings_table(client, project_id, dataset_id)
+    except Exception as exc:
+        LOGGER.warning("custom_field_listings_ensure_failed error=%s", exc)
     field = {"field_id": str(uuid4()), "business_id": business_id, "slug": slug, "label": label, "table_name": "listings", "field_name": slug, "data_type": data.get("type", "string"), "required": False, "hints": json.dumps([slug]), "aliases": json.dumps([]), "is_custom": True, "created_at": now, "updated_at": now}
     schema = [bigquery.SchemaField(f["name"], f["type"], mode=f["mode"], default_value_expression=f.get("default")) for f in TABLE_SCHEMAS["field_catalogs"]]
     load_kwargs: dict[str, Any] = {"schema": schema}
@@ -505,15 +565,29 @@ def delete_custom_field(data: dict[str, Any]) -> dict[str, Any]:
     if not row["is_custom"]:
         raise ValueError("Standard fields are built into the platform and cannot be removed")
 
-    delete_query = f"DELETE FROM `{table_ref}` WHERE field_id = @field_id"
-    delete_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("field_id", "STRING", row["field_id"])])
-    client.query(delete_query, job_config=delete_config).result()
+    # ARCHIVE, never DELETE. Listings already saved carry this field's values
+    # inside listings.custom_fields; dropping the catalog row would strand
+    # them with no label, type, or provenance to read them by. Archiving
+    # hides the field from the mapper and every field picker (field_catalog()
+    # filters is_archived) while leaving both the stored values and their
+    # definition intact and recoverable.
+    archive_query = f"""
+    UPDATE `{table_ref}`
+    SET is_archived = TRUE, archived_at = @now, updated_at = @now
+    WHERE field_id = @field_id
+    """
+    archive_config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("field_id", "STRING", row["field_id"]),
+        bigquery.ScalarQueryParameter("now", "TIMESTAMP", utc_now_iso()),
+    ])
+    client.query(archive_query, job_config=archive_config).result()
     invalidate_cache()
-    return {"deleted": True, "field_key": field_key, "label": row["label"]}
+    LOGGER.info("custom_field_archived field_id=%s slug=%s business_id=%s", row["field_id"], field_key, business_id)
+    return {"deleted": True, "archived": True, "field_key": field_key, "label": row["label"]}
 
 
-REQUIRED_MAPPER_FIELDS = {"name", "address", "city", "state", "postal_code"}
-REQUIRED_LOCATION_VALUES = ("name", "address", "city", "state", "postal_code")
+REQUIRED_MAPPER_FIELDS: set[str] = set()  # brand is enforced separately in validate_mapper() below
+REQUIRED_LOCATION_VALUES: tuple[str, ...] = ()  # brand is the only mandatory field now; see normalize_location()
 
 
 def validate_mapper(mapper: dict[str, Any], source_fields: list[str], rows: list[dict[str, Any]]) -> list[str]:
@@ -786,7 +860,7 @@ def _load_worldwide_reference_sync(project_id: str, credentials_json: str | None
       NULLIF(TRIM(CAST(DISTRICT AS STRING)), '') AS district,
       NULLIF(TRIM(CAST(CITY AS STRING)), '') AS city,
       NULLIF(TRIM(CAST(TOWN AS STRING)), '') AS town,
-      NULLIF(TRIM(CAST(ZIP_CODE AS STRING)), '') AS zip_code,
+      NULLIF(UPPER(TRIM(CAST(ZIP_CODE AS STRING))), '') AS zip_code,
       LATITUDE AS latitude,
       LONGITUDE AS longitude
     FROM `{project_id}.sample_locations.worldwide_cities`
@@ -798,11 +872,82 @@ def _load_worldwide_reference_sync(project_id: str, credentials_json: str | None
         rows = [dict(r) for r in client.query(q).result()]
         if rows:
             cache_worldwide_cities(rows)
+            _augment_us_zip_reference_from_worldwide(rows, project_id=project_id, credentials_json=credentials_json)
             LOGGER.info("worldwide_cities_cached_to_sqlite count=%d", len(rows))
             return len(rows)
     except Exception as exc:
         LOGGER.warning("worldwide_reference_load_failed error=%s", exc)
     return get_cached_worldwide_city_count()
+
+
+def _augment_us_zip_reference_from_worldwide(rows: list[dict[str, Any]], *, project_id: str, credentials_json: str | None) -> int:
+    """Fill missing US ZIP reference rows from the worldwide city source."""
+    us_rows: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if str(row.get("country_code") or "").strip().upper() != "US":
+            continue
+        raw_zip = str(row.get("zip_code") or "").strip()
+        match = re.search(r"\d{5}", raw_zip)
+        if not match:
+            continue
+        zip_code = match.group(0)
+        us_rows.setdefault(zip_code, {
+            "zip_code": zip_code,
+            "city_name": row.get("city") or row.get("town") or row.get("district"),
+            "county": row.get("district"),
+            "state_code": row.get("state_code"),
+            "state_name": row.get("state_name"),
+            "latitude": row.get("latitude"),
+            "longitude": row.get("longitude"),
+            "population": None,
+            "median_household_income": None,
+            "median_age": None,
+        })
+    if not us_rows:
+        return 0
+    inserted = cache_missing_zipcodes(list(us_rows.values()))
+    try:
+        _, dataset_id, _ = _warehouse_settings()
+        client = _bigquery_client(project_id, credentials_json)
+        table_ref = f"{project_id}.{dataset_id}.us_zipcodes"
+        client.get_table(table_ref)
+        query = f"""
+        MERGE `{table_ref}` target
+        USING (
+          SELECT
+            UPPER(LPAD(SUBSTR(CAST(ZIP_CODE AS STRING), 1, 5), 5, '0')) AS zip_code,
+            COALESCE(NULLIF(TRIM(CAST(CITY AS STRING)), ''), NULLIF(TRIM(CAST(TOWN AS STRING)), ''), NULLIF(TRIM(CAST(DISTRICT AS STRING)), '')) AS city_name,
+            NULLIF(TRIM(CAST(DISTRICT AS STRING)), '') AS county,
+            NULLIF(UPPER(TRIM(CAST(STATE_CODE AS STRING))), '') AS state_code,
+            NULLIF(TRIM(CAST(STATE AS STRING)), '') AS state_name,
+            SAFE_CAST(LATITUDE AS FLOAT64) AS latitude,
+            SAFE_CAST(LONGITUDE AS FLOAT64) AS longitude
+          FROM `{project_id}.sample_locations.worldwide_cities`
+          WHERE COUNTRY_CODE = 'US'
+            AND ZIP_CODE IS NOT NULL
+          QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY LPAD(SUBSTR(CAST(ZIP_CODE AS STRING), 1, 5), 5, '0')
+            ORDER BY CITY IS NULL, TOWN IS NULL, DISTRICT IS NULL
+          ) = 1
+        ) source
+        ON target.zip_code = source.zip_code
+        WHEN NOT MATCHED BY TARGET THEN
+          INSERT (
+            zip_code, city_name, county, state_code, state_name, latitude, longitude,
+            population, median_household_income, median_age, households, income_per_capita,
+            poverty, employed_population, unemployed_population, housing_units, source, content_hash
+          )
+          VALUES (
+            source.zip_code, source.city_name, source.county, source.state_code, source.state_name,
+            source.latitude, source.longitude, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+            'worldwide_cities_us_supplement',
+            TO_HEX(SHA256(TO_JSON_STRING(STRUCT(source.zip_code, source.city_name, source.county, source.state_code, source.state_name, source.latitude, source.longitude))))
+          )
+        """
+        client.query(query).result()
+    except Exception as exc:
+        LOGGER.warning("us_zip_worldwide_bq_augment_failed count=%d error=%s", len(us_rows), exc)
+    return inserted
 
 
 def _start_worldwide_reference_background(project_id: str, credentials_json: str | None) -> bool:
@@ -1084,9 +1229,69 @@ def _ensure_listings_table(client: Any, project_id: str, dataset_id: str) -> Non
         for field in TABLE_SCHEMAS["listings"]
         if field["name"] not in existing_names
     ]
+    # Relax any already-deployed column that TABLE_SCHEMAS now marks
+    # NULLABLE but the live table still has as REQUIRED - e.g. only "brand"
+    # (business_id) stays mandatory now, so name/address/city_name/
+    # state_code/zip_code/country must no longer reject a row for being
+    # blank. BigQuery allows REQUIRED -> NULLABLE in place; adding new
+    # columns above never touches existing ones, so this needs its own pass.
+    target_modes = {field["name"]: field["mode"] for field in TABLE_SCHEMAS["listings"]}
+    updated_schema = []
+    schema_changed = bool(missing_fields)
+    for field in existing_schema:
+        target_mode = target_modes.get(field.name)
+        if target_mode == "NULLABLE" and field.mode == "REQUIRED":
+            updated_schema.append(bigquery.SchemaField(
+                field.name, field.field_type, mode="NULLABLE",
+                default_value_expression=getattr(field, "default_value_expression", None),
+            ))
+            schema_changed = True
+        else:
+            updated_schema.append(field)
+    if schema_changed:
+        existing.schema = updated_schema + missing_fields
+        client.update_table(existing, ["schema"])
+
+
+def _ensure_error_listings_table(client: Any, project_id: str, dataset_id: str) -> None:
+    """Create error_listings, or add any column TABLE_SCHEMAS has gained.
+
+    This was missing entirely: unlike listings/businesses, error_listings had
+    no ensure-pass, so a column added to TABLE_SCHEMAS never reached an
+    already-deployed table. `has_ai_suggestion` (added for the AI/manual
+    review-pending split) was therefore absent live, and every query
+    selecting it failed with "Name has_ai_suggestion not found inside e" -
+    taking the whole quality tab and its exports down with it.
+    """
+    from google.cloud import bigquery
+
+    table_ref = f"{project_id}.{dataset_id}.error_listings"
+    _ensure_dataset(client, project_id, dataset_id)
+    schema_fields = [
+        bigquery.SchemaField(field["name"], field["type"], mode=field["mode"],
+                             default_value_expression=field.get("default"))
+        for field in TABLE_SCHEMAS["error_listings"]
+    ]
+    try:
+        existing = client.get_table(table_ref)
+    except Exception as exc:
+        if getattr(exc, "code", None) != 404:
+            raise
+        table = bigquery.Table(table_ref, schema=schema_fields)
+        cluster_fields = TABLE_CLUSTER_SPECS.get("error_listings")
+        if cluster_fields:
+            table.clustering_fields = cluster_fields
+        client.create_table(table)
+        return
+    existing_schema = getattr(existing, "schema", None)
+    if existing_schema is None:
+        return
+    existing_names = {field.name for field in existing_schema}
+    missing_fields = [field for field in schema_fields if field.name not in existing_names]
     if missing_fields:
         existing.schema = list(existing_schema) + missing_fields
         client.update_table(existing, ["schema"])
+        LOGGER.info("error_listings_schema_extended columns=%s", [f.name for f in missing_fields])
 
 
 def list_brands(search: str = "") -> dict[str, Any]:
@@ -1431,21 +1636,67 @@ def _sync_gold_mirror_best_effort() -> None:
     threading.Thread(target=_run, name="brand-mirror-sync", daemon=True).start()
 
 
+LEARNING_TEMPLATES_CACHE_KEY = "learning_templates:v1"
+
+
 def learn_mappings(data: dict[str, Any]) -> dict[str, Any]:
     source_type = str(data.get("source_type", ""))
     source_fields = data.get("source_fields", [])
     if not source_type or not isinstance(source_fields, list):
         raise ValueError("source_type and source_fields are required")
-    project_id, dataset_id, credentials_json = _warehouse_settings()
-    client = _bigquery_client(project_id, credentials_json)
-    table_ref = f"{project_id}.{dataset_id}.workflow_templates"
+    # The underlying query is the same for every source_type (filtering by
+    # source_type happens client-side in suggest_from_templates()), so one
+    # SQLite-cached copy of the raw template rows serves every mapping-
+    # workspace open instead of re-querying BigQuery's workflow_templates
+    # every time - invalidate_cache() (already called broadly after any
+    # save) clears this like every other cached query, so a freshly saved
+    # template becomes visible to learning on the next uncached read.
+    cached = get_cached_query(LEARNING_TEMPLATES_CACHE_KEY)
+    if cached is not None:
+        templates = cached.get("templates", [])
+    else:
+        project_id, dataset_id, credentials_json = _warehouse_settings()
+        client = _bigquery_client(project_id, credentials_json)
+        table_ref = f"{project_id}.{dataset_id}.workflow_templates"
+        try:
+            templates = [dict(row) for row in client.query(f"SELECT components FROM `{table_ref}` ORDER BY updated_at DESC LIMIT 500").result()]
+        except Exception as exc:
+            if getattr(exc, "code", None) == 404:
+                templates = []
+            else:
+                raise
+        set_cached_query(LEARNING_TEMPLATES_CACHE_KEY, {"templates": templates})
+    suggestions = suggest_from_templates(templates, source_fields, source_type)
+    # Layer the field-mapping confidence score on top of the template-vote
+    # suggestions: a target field with no template-vote suggestion yet, but
+    # a real accumulated positive-confidence pairing (kept/manually chosen
+    # across enough past saves) whose normalized name matches one of THIS
+    # source's actual parsed fields, gets suggested too - this is how a
+    # newer field (no template history at all) starts getting auto-mapped
+    # once its confidence has actually earned it, rather than needing a
+    # hardcoded hint or a first historical template to exist.
     try:
-        templates = [dict(row) for row in client.query(f"SELECT components FROM `{table_ref}` ORDER BY updated_at DESC LIMIT 500").result()]
+        _normalize = lambda value: "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+        normalized_available = {_normalize(field): field for field in source_fields if str(field).strip()}
+        confidence_rows = get_mapping_confidence()
+        best_by_target: dict[str, dict[str, Any]] = {}
+        for row in confidence_rows:
+            target_key = row["target_key"]
+            if target_key in suggestions:
+                continue
+            if row["score"] <= 0 or row["sample_count"] < 2:
+                continue
+            matched_field = normalized_available.get(row["source_field_normalized"])
+            if not matched_field:
+                continue
+            current_best = best_by_target.get(target_key)
+            if current_best is None or row["score"] > current_best["score"]:
+                best_by_target[target_key] = {"source": matched_field, "uses": row["sample_count"], "score": row["score"]}
+        for target_key, suggestion in best_by_target.items():
+            suggestions[target_key] = {"source": suggestion["source"], "uses": suggestion["uses"], "confidence_score": suggestion["score"]}
     except Exception as exc:
-        if getattr(exc, "code", None) == 404:
-            return {"suggestions": {}}
-        raise
-    return {"suggestions": suggest_from_templates(templates, source_fields, source_type)}
+        LOGGER.warning("mapping_confidence_suggestion_merge_failed error=%s", exc)
+    return {"suggestions": suggestions}
 
 
 def list_templates(search: str = "", business_id: str = "", source_type_id: str = "", limit: int = 500, offset: int = 0, *, client: Any = None) -> dict[str, Any]:
@@ -1590,6 +1841,22 @@ def clear_sample_dataset() -> dict[str, Any]:
         global _SAMPLE_CLEAR_RUNNING
         try:
             invalidate_cache()
+            # invalidate_cache() deliberately spares reporting_quality:* keys
+            # (they self-refresh on read), but a clear changes the underlying
+            # population, so those must go too.
+            invalidate_quality_cache()
+            # Rebuild silver/gold and re-sync the SQLite mirror, or reporting
+            # keeps serving the rows that were just cleared - the mirror is
+            # read before BigQuery. force_mirror because an empty result is
+            # the correct new truth here, not a transient failure.
+            try:
+                _invoke_silver_layer(low_priority=True)
+                _rebuild_gold_and_mirror(force_mirror=True)
+                # Same RULE as clear_saved_data: the persisted fix counters
+                # must be recounted, or they keep showing fixes for cleared rows.
+                _schedule_quality_fix_metrics_refresh(force=True)
+            except Exception as mirror_exc:
+                LOGGER.warning("mirror_resync_after_sample_clear_failed error=%s", mirror_exc)
             try:
                 refresh_error_count("")
             except Exception as count_exc:
@@ -1803,26 +2070,34 @@ def load_sample_dataset(reset: bool = False) -> dict[str, Any]:
             "zips": zip_result,
         }
         for brand in brands_to_load:
-            business_id = stable_business_id(brand.key)
-            source_type_id = source_type_ids[brand.source_type]
-            mapper = mapper_for(brand, business_id, source_type_id)
-            rows = generate_source_rows(brand, source_type_id, SAMPLE_BATCH_ID)
-            config = source_configuration(brand)
-            result = save_mapper({
-                "mapper": mapper,
-                "rows": rows,
-                "source_fields": collect_fields(rows),
-                "batch_event_id": f"sample_event_{brand.key}_{SAMPLE_BATCH_ID}",
-                "save_template": True,
-                "sample_meta": {
-                    "is_sample_data": True,
-                    "sample_batch_id": SAMPLE_BATCH_ID,
-                    "template_id": stable_template_id(brand.key),
-                    "ingestion_id": f"sample_ingestion_{brand.key}_{SAMPLE_BATCH_ID}",
-                    "mapping_id": f"sample_mapping_{brand.key}",
-                    "source_configuration": config,
-                },
-            }, client=client, skip_cache_invalidation=True, assume_tables_exist=True)
+            try:
+                business_id = stable_business_id(brand.key)
+                source_type_id = source_type_ids[brand.source_type]
+                mapper = mapper_for(brand, business_id, source_type_id)
+                rows = generate_source_rows(brand, source_type_id, SAMPLE_BATCH_ID)
+                config = source_configuration(brand)
+                result = save_mapper({
+                    "mapper": mapper,
+                    "rows": rows,
+                    "source_fields": collect_fields(rows),
+                    "batch_event_id": f"sample_event_{brand.key}_{SAMPLE_BATCH_ID}",
+                    "save_template": True,
+                    "sample_meta": {
+                        "is_sample_data": True,
+                        "sample_batch_id": SAMPLE_BATCH_ID,
+                        "template_id": stable_template_id(brand.key),
+                        "ingestion_id": f"sample_ingestion_{brand.key}_{SAMPLE_BATCH_ID}",
+                        "mapping_id": f"sample_mapping_{brand.key}",
+                        "source_configuration": config,
+                    },
+                }, client=client, skip_cache_invalidation=True, assume_tables_exist=True)
+            except Exception as exc:
+                # One brand's sample data failing to load (a bad row shape,
+                # a transient BigQuery hiccup) must not abort the whole
+                # sample load - skip it and keep going with the rest, same
+                # as a real multi-brand upload would tolerate a bad batch.
+                LOGGER.warning("sample_brand_load_failed brand=%s error=%s", brand.key, exc)
+                continue
             summary["locations"] += result["total_rows"]
             summary["valid"] += result["mapped_rows"]
             summary["errors"] += result["error_listings"]
@@ -1945,12 +2220,74 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
         zip_county_case = _proper_case_sql("county")
         zip_state_name_case = _proper_case_sql("state_name")
 
-        # Keep the existing US ZIP reference for reporting metrics and load the
-        # worldwide city reference separately for global matching.
+        # Build one silver ZIP reference for enrichment/reporting by unioning
+        # canonical US ZIP data with US rows from worldwide cities, then dedupe
+        # by ZIP. Canonical rows win because they carry demographic fields.
         _safe_query(client, f"""
         CREATE OR REPLACE TABLE `{zip_reference_table}`
         CLUSTER BY state_code, zip_code
         AS
+        WITH canonical_us_zips AS (
+          SELECT
+            LPAD(SUBSTR(CAST(zip_code AS STRING), 1, 5), 5, '0') AS zip_code,
+            CAST(city_name AS STRING) AS city_name,
+            CAST(county AS STRING) AS county,
+            UPPER(TRIM(CAST(state_code AS STRING))) AS state_code,
+            CAST(state_name AS STRING) AS state_name,
+            SAFE_CAST(latitude AS FLOAT64) AS latitude,
+            SAFE_CAST(longitude AS FLOAT64) AS longitude,
+            SAFE_CAST(population AS FLOAT64) AS population,
+            SAFE_CAST(median_household_income AS FLOAT64) AS median_household_income,
+            SAFE_CAST(median_age AS FLOAT64) AS median_age,
+            SAFE_CAST(income_per_capita AS FLOAT64) AS income_per_capita,
+            SAFE_CAST(households AS FLOAT64) AS households,
+            SAFE_CAST(poverty AS FLOAT64) AS poverty,
+            SAFE_CAST(employed_population AS FLOAT64) AS employed_population,
+            SAFE_CAST(unemployed_population AS FLOAT64) AS unemployed_population,
+            SAFE_CAST(housing_units AS FLOAT64) AS housing_units,
+            COALESCE(source, 'us_zipcodes') AS source,
+            1 AS source_priority
+          FROM `{bronze_ref}.us_zipcodes`
+          WHERE zip_code IS NOT NULL
+        ),
+        worldwide_us_zips AS (
+          SELECT
+            UPPER(LPAD(SUBSTR(CAST(ZIP_CODE AS STRING), 1, 5), 5, '0')) AS zip_code,
+            COALESCE(NULLIF(TRIM(CAST(CITY AS STRING)), ''), NULLIF(TRIM(CAST(TOWN AS STRING)), ''), NULLIF(TRIM(CAST(DISTRICT AS STRING)), '')) AS city_name,
+            NULLIF(TRIM(CAST(DISTRICT AS STRING)), '') AS county,
+            NULLIF(UPPER(TRIM(CAST(STATE_CODE AS STRING))), '') AS state_code,
+            NULLIF(TRIM(CAST(STATE AS STRING)), '') AS state_name,
+            SAFE_CAST(LATITUDE AS FLOAT64) AS latitude,
+            SAFE_CAST(LONGITUDE AS FLOAT64) AS longitude,
+            NULL AS population,
+            NULL AS median_household_income,
+            NULL AS median_age,
+            NULL AS income_per_capita,
+            NULL AS households,
+            NULL AS poverty,
+            NULL AS employed_population,
+            NULL AS unemployed_population,
+            NULL AS housing_units,
+            'worldwide_cities_us_supplement' AS source,
+            2 AS source_priority
+          FROM `{project_id}.sample_locations.worldwide_cities`
+          WHERE COUNTRY_CODE = 'US'
+            AND ZIP_CODE IS NOT NULL
+            AND REGEXP_CONTAINS(CAST(ZIP_CODE AS STRING), r'\\d{{5}}')
+        ),
+        unioned AS (
+          SELECT * FROM canonical_us_zips
+          UNION ALL
+          SELECT * FROM worldwide_us_zips
+        ),
+        deduped AS (
+          SELECT *
+          FROM unioned
+          QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY zip_code
+            ORDER BY source_priority, population DESC NULLS LAST, city_name IS NULL
+          ) = 1
+        )
         SELECT
           zip_code,
           {zip_city_case} AS city_name,
@@ -1970,8 +2307,7 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
           housing_units,
           source,
           CURRENT_TIMESTAMP() AS silver_updated_at
-        FROM `{bronze_ref}.us_zipcodes`
-        QUALIFY ROW_NUMBER() OVER (PARTITION BY zip_code ORDER BY population DESC NULLS LAST) = 1
+        FROM deduped
         """, low_priority=low_priority).result()
         _enrichment_checkpoint()
         if low_priority:
@@ -2132,6 +2468,12 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
           {brand_name_case} AS brand_name,
           l.source_type_id,
           l.location_key,
+          -- Source columns no typed field covers. Silver and gold must carry
+          -- this through or a custom field is invisible to everything
+          -- downstream (reporting, quality, exports) even though bronze
+          -- stored it. listings_enriched/listings_invalid are SELECT * off
+          -- this staging table, so adding it here reaches both.
+          l.custom_fields,
           {location_name_case} AS name,
           l.address,
           {city_name_case} AS city_name,
@@ -2330,6 +2672,15 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
         }
 
 
+# Bumped whenever a gold view's SELECT list changes. _ensure_gold_reporting_views()
+# used to return early whenever the views merely EXISTED, so an edited view
+# definition never reached an already-deployed environment - only a brand new
+# one got the new SQL. That is the same drift class as error_listings missing
+# has_ai_suggestion. The version is stamped on each view's description at
+# build time and compared on every ensure.
+GOLD_VIEW_DEFINITION_VERSION = "2026-09-09.custom-fields"
+
+
 def build_gold_layer() -> dict[str, Any]:
     """Pre-aggregated reporting views over the silver listings_enriched table.
 
@@ -2422,6 +2773,7 @@ def build_gold_layer() -> dict[str, Any]:
       l.coordinate_confidence,
       l.country,
       l.last_observed_at,
+      l.custom_fields,
       z.population,
       z.median_household_income,
       z.median_age
@@ -2488,6 +2840,15 @@ def build_gold_layer() -> dict[str, Any]:
 
     invalidate_cache()
     views = [zip_brand_view, brand_view, location_view, filters_view, gap_base_view]
+    # Stamp the definition version so _ensure_gold_reporting_views() can tell
+    # a current view from a stale one that merely exists.
+    for view_ref in views:
+        try:
+            view_table = client.get_table(view_ref)
+            view_table.description = f"birdeye_gold_view_version={GOLD_VIEW_DEFINITION_VERSION}"
+            client.update_table(view_table, ["description"])
+        except Exception as exc:
+            LOGGER.warning("gold_view_version_stamp_failed view=%s error=%s", view_ref, exc)
     return {
         "bronze_dataset": bronze_ref,
         "silver_dataset": silver_ref,
@@ -2496,7 +2857,7 @@ def build_gold_layer() -> dict[str, Any]:
     }
 
 
-def sync_gold_mirror() -> dict[str, Any]:
+def sync_gold_mirror(force: bool = False) -> dict[str, Any]:
     """Pull the two gold master views plus active businesses into local
     SQLite, so reporting_summary()
     can filter/aggregate locally instead of a live BigQuery round trip per
@@ -2518,7 +2879,7 @@ def sync_gold_mirror() -> dict[str, Any]:
         SELECT listing_id, business_id, brand, name, address, city_name, state_code,
           state_name, county, zip_code, phone_number, latitude, longitude,
           coordinate_source, coordinate_confidence, country, last_observed_at,
-          population, median_household_income, median_age
+          population, median_household_income, median_age, custom_fields
         FROM `{gold_ref}.vw_reporting_locations`
     """).result()]
     business_rows = [dict(row) for row in client.query(f"""
@@ -2538,6 +2899,32 @@ def sync_gold_mirror() -> dict[str, Any]:
     for business in business_rows:
         business["display_business_id"] = _display_business_id(business)
 
+    # A gold-view query can succeed (no exception) yet still return zero
+    # rows if it lands during a silver rebuild's drop-then-recreate window
+    # (build_silver_layer() does DROP TABLE IF EXISTS before repopulating)
+    # or any other transient warehouse hiccup. Without this guard, that
+    # "successful" empty result would be swapped in as the new mirror
+    # truth via replace_gold_mirror(), wiping every reporting number
+    # (including warehouse-wide facts like the 50-state count) down to
+    # zero until the next refresh happens to land cleanly. Once the mirror
+    # has ever held real data, a sync that comes back empty is treated as
+    # suspicious and skipped - the previous good mirror is left in place.
+    previous_status = get_mirror_status()
+    had_real_data = bool(previous_status and (
+        (previous_status.get("zip_brand_rows") or 0) > 0
+        or (previous_status.get("location_rows") or 0) > 0
+    ))
+    # force=True is used by the deliberate clear paths, where an empty gold
+    # result is the correct new truth rather than a transient hiccup - without
+    # it the guard below keeps the just-deleted rows in the mirror and
+    # reporting keeps showing data the user has cleared.
+    if had_real_data and not force and not zip_brand_rows and not location_rows:
+        LOGGER.warning(
+            "gold_mirror_sync_suspicious_empty_result skipped=True previous_zip_brand_rows=%s previous_location_rows=%s",
+            previous_status.get("zip_brand_rows"), previous_status.get("location_rows"),
+        )
+        return {"zip_brand_rows": 0, "location_rows": 0, "business_rows": len(business_rows), "skipped_empty_swap": True}
+
     replace_gold_mirror(zip_brand_rows, location_rows, business_rows)
     result = {"zip_brand_rows": len(zip_brand_rows), "location_rows": len(location_rows), "business_rows": len(business_rows)}
     LOGGER.info("gold_mirror_synced zip_brand_rows=%d location_rows=%d business_rows=%d",
@@ -2545,7 +2932,7 @@ def sync_gold_mirror() -> dict[str, Any]:
     return result
 
 
-def _rebuild_gold_and_mirror() -> dict[str, Any]:
+def _rebuild_gold_and_mirror(force_mirror: bool = False) -> dict[str, Any]:
     """Rebuild gold, then immediately sync the local SQLite mirror from it -
     the single choke point every silver/gold refresh path routes through
     (hourly tick, on-demand background refresh, sample load), so the
@@ -2553,7 +2940,7 @@ def _rebuild_gold_and_mirror() -> dict[str, Any]:
     independently-timed sync loop to keep correct."""
     gold_result = build_gold_layer()
     try:
-        mirror_result = sync_gold_mirror()
+        mirror_result = sync_gold_mirror(force=force_mirror)
     except Exception as exc:
         LOGGER.warning("gold_mirror_sync_failed error=%s", exc)
         mirror_result = {"error": str(exc)}
@@ -2869,10 +3256,20 @@ def _ensure_gold_reporting_views(client: Any, gold_ref: str) -> bool:
         "vw_reporting_filter_options",
         "vw_reporting_gap_base",
     )
+    stale_view = False
     try:
         for view_name in required_views:
-            client.get_table(f"{gold_ref}.{view_name}")
-        return False
+            view_table = client.get_table(f"{gold_ref}.{view_name}")
+            # Existing is not the same as current: a view whose SELECT list
+            # changed in code still exists with its OLD definition, and would
+            # silently keep serving the old columns forever.
+            description = str(getattr(view_table, "description", "") or "")
+            if f"birdeye_gold_view_version={GOLD_VIEW_DEFINITION_VERSION}" not in description:
+                stale_view = True
+                LOGGER.info("gold_view_definition_stale view=%s rebuilding", view_name)
+                break
+        if not stale_view:
+            return False
     except Exception as exc:
         if getattr(exc, "code", None) != 404:
             raise
@@ -3046,6 +3443,29 @@ def _mirror_state_population_by_state(all_zip_rows: list[dict[str, Any]]) -> dic
     return totals
 
 
+def _mirror_state_median_income_by_state(all_zip_rows: list[dict[str, Any]]) -> dict[str, float]:
+    """Same dedupe-by-zip approach as _mirror_state_population_by_state(),
+    but averaged (not summed) since median household income is a rate, not
+    an additive quantity - matches the AVG() used in the mirrored BigQuery
+    top_states_query."""
+    dedup: dict[str, tuple[str | None, float]] = {}
+    for r in all_zip_rows:
+        zip_code = r.get("zip_code")
+        income = r.get("median_household_income")
+        if zip_code is None or income is None:
+            continue
+        if zip_code not in dedup:
+            dedup[zip_code] = (r.get("state_code"), income)
+    sums: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for state_code, income in dedup.values():
+        if not state_code:
+            continue
+        sums[state_code] = sums.get(state_code, 0) + income
+        counts[state_code] = counts.get(state_code, 0) + 1
+    return {state: sums[state] / counts[state] for state in sums}
+
+
 def _mirror_totals(base_rows: list[dict[str, Any]], global_brand_count: int, zip_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     universe_rows = zip_rows if zip_rows is not None else base_rows
     zip_states = {r["state_code"] if "state_code" in r else r.get("zip_state") for r in universe_rows if r.get("state_code") or r.get("zip_state")}
@@ -3075,22 +3495,35 @@ def _mirror_totals(base_rows: list[dict[str, Any]], global_brand_count: int, zip
     }
 
 
-def _mirror_top_states(base_rows: list[dict[str, Any]], state_population: dict[str, float]) -> list[dict[str, Any]]:
-    groups: dict[tuple[str, str], dict[str, set]] = {}
+def _mirror_top_states(
+    base_rows: list[dict[str, Any]], state_population: dict[str, float], state_median_income: dict[str, float],
+    main_brands: list[str] | None = None, competitor_brands: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    main_set = set(main_brands or [])
+    competitor_set = set(competitor_brands or [])
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
     for r in base_rows:
         key = (r.get("zip_state") or "", r.get("zip_state_name") or r.get("zip_state") or "")
-        group = groups.setdefault(key, {"zips": set(), "cities": set(), "brands": set()})
+        group = groups.setdefault(key, {"zips": set(), "cities": set(), "brands": set(), "main_locations": 0, "competitor_locations": 0})
         if r.get("zip_code"):
             group["zips"].add(r["zip_code"])
         if r.get("zip_city"):
             group["cities"].add(r["zip_city"])
         if r.get("brand"):
             group["brands"].add(r["brand"])
+            location_count = r.get("location_count") or 0
+            if r["brand"] in main_set:
+                group["main_locations"] += location_count
+            elif r["brand"] in competitor_set:
+                group["competitor_locations"] += location_count
     rows = [
         {
             "state": state, "state_name": state_name,
             "locations": len(group["zips"]), "cities": len(group["cities"]), "brands": len(group["brands"]),
             "state_population": state_population.get(state, 0) or 0,
+            "median_household_income": state_median_income.get(state, 0) or 0,
+            "main_brand_locations": group["main_locations"],
+            "competitor_brand_locations": group["competitor_locations"],
         }
         for (state, state_name), group in groups.items()
     ]
@@ -3098,17 +3531,43 @@ def _mirror_top_states(base_rows: list[dict[str, Any]], state_population: dict[s
     return rows[:15]
 
 
-def _mirror_top_cities(base_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    groups: dict[tuple[str, str, str, str], set] = {}
+def _mirror_top_cities(
+    base_rows: list[dict[str, Any]], main_brands: list[str] | None = None, competitor_brands: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    main_set = set(main_brands or [])
+    competitor_set = set(competitor_brands or [])
+    groups: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for r in base_rows:
         key = (r.get("zip_city") or "", r.get("zip_state") or "", r.get("zip_state_name") or r.get("zip_state") or "", r.get("county") or "")
-        groups.setdefault(key, set())
-        if r.get("zip_code"):
-            groups[key].add(r["zip_code"])
-    rows = [
-        {"city": city, "state": state, "state_name": state_name, "county": county, "locations": len(zips)}
-        for (city, state, state_name, county), zips in groups.items()
-    ]
+        group = groups.setdefault(key, {"zips": set(), "zip_population": {}, "zip_income": {}, "main_locations": 0, "competitor_locations": 0})
+        zip_code = r.get("zip_code")
+        if zip_code:
+            group["zips"].add(zip_code)
+            # base_rows repeats population/median_household_income once per
+            # brand fanned out on the same zip - keep one value per zip
+            # (a dict keyed by zip_code naturally dedupes this) before
+            # summing/averaging, same as the state-level helpers above.
+            if r.get("population") is not None:
+                group["zip_population"][zip_code] = r["population"]
+            if r.get("median_household_income") is not None:
+                group["zip_income"][zip_code] = r["median_household_income"]
+        if r.get("brand"):
+            location_count = r.get("location_count") or 0
+            if r["brand"] in main_set:
+                group["main_locations"] += location_count
+            elif r["brand"] in competitor_set:
+                group["competitor_locations"] += location_count
+    rows = []
+    for (city, state, state_name, county), group in groups.items():
+        incomes = list(group["zip_income"].values())
+        rows.append({
+            "city": city, "state": state, "state_name": state_name, "county": county,
+            "locations": len(group["zips"]),
+            "city_population": sum(group["zip_population"].values()),
+            "median_household_income": (sum(incomes) / len(incomes)) if incomes else 0,
+            "main_brand_locations": group["main_locations"],
+            "competitor_brand_locations": group["competitor_locations"],
+        })
     rows.sort(key=lambda r: r["locations"], reverse=True)
     return rows[:10]
 
@@ -3302,12 +3761,13 @@ def _reporting_data_from_mirror(
 
     base_rows = _mirror_base_rows(zip_rows, selected_brands, min_population, min_income, max_median_age)
     state_population = _mirror_state_population_by_state(all_zip_rows)
+    state_median_income = _mirror_state_median_income_by_state(all_zip_rows)
     global_brand_count = len({r["brand_name"] for r in all_zip_rows if r.get("brand_name") and (r.get("location_count") or 0) > 0})
 
     return {
         "totals": _mirror_totals(base_rows, global_brand_count, zip_rows),
-        "top_states": _mirror_top_states(base_rows, state_population),
-        "top_cities": _mirror_top_cities(base_rows),
+        "top_states": _mirror_top_states(base_rows, state_population, state_median_income, main_brands, competitor_brands),
+        "top_cities": _mirror_top_cities(base_rows, main_brands, competitor_brands),
         "brands": _mirror_brand_query(base_rows),
         "filter_options": _mirror_filter_options(all_zip_rows, business_rows),
         "raw_whitespace": _mirror_gap_rows(zip_rows, main_brands, competitor_brands, min_population, min_income, max_median_age, state_filter),
@@ -3556,15 +4016,19 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
       COUNT(DISTINCT b.zip_code) AS locations,
       COUNT(DISTINCT b.zip_city) AS cities,
       COUNT(DISTINCT b.brand) AS brands,
-      COALESCE(MAX(sp.state_pop), 0) AS state_population
+      COALESCE(MAX(sp.state_pop), 0) AS state_population,
+      COALESCE(MAX(sp.state_income), 0) AS median_household_income,
+      SUM(IF(b.brand IN UNNEST(@main_brands), b.location_count, 0)) AS main_brand_locations,
+      SUM(IF(b.brand IN UNNEST(@competitor_brands), b.location_count, 0)) AS competitor_brand_locations
     FROM base b
     LEFT JOIN (
       -- {zip_ref}'s grain is (zip_code, brand_name): a zip with N distinct
       -- brands present appears as N rows carrying the same population value,
       -- so dedupe down to one row per zip before summing or population gets
-      -- multiplied by however many brands operate in each zip.
-      SELECT state_code, SUM(population) AS state_pop
-      FROM (SELECT DISTINCT zip_code, state_code, population FROM {zip_ref} WHERE population IS NOT NULL)
+      -- multiplied by however many brands operate in each zip. Income is
+      -- averaged (not summed) since it's a rate, not an additive quantity.
+      SELECT state_code, SUM(population) AS state_pop, AVG(median_household_income) AS state_income
+      FROM (SELECT DISTINCT zip_code, state_code, population, median_household_income FROM {zip_ref})
       GROUP BY state_code
     ) sp ON b.zip_state = sp.state_code
     GROUP BY state, state_name
@@ -3572,14 +4036,23 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
     LIMIT 15
     """
 
-    top_cities_query = base_cte + """
+    top_cities_query = base_cte + f"""
     SELECT
-      COALESCE(zip_city, '') AS city,
-      COALESCE(zip_state, '') AS state,
-      COALESCE(zip_state_name, zip_state, '') AS state_name,
-      COALESCE(county, '') AS county,
-      COUNT(DISTINCT zip_code) AS locations
-    FROM base
+      COALESCE(b.zip_city, '') AS city,
+      COALESCE(b.zip_state, '') AS state,
+      COALESCE(b.zip_state_name, b.zip_state, '') AS state_name,
+      COALESCE(b.county, '') AS county,
+      COUNT(DISTINCT b.zip_code) AS locations,
+      COALESCE(MAX(cp.city_pop), 0) AS city_population,
+      COALESCE(MAX(cp.city_income), 0) AS median_household_income,
+      SUM(IF(b.brand IN UNNEST(@main_brands), b.location_count, 0)) AS main_brand_locations,
+      SUM(IF(b.brand IN UNNEST(@competitor_brands), b.location_count, 0)) AS competitor_brand_locations
+    FROM base b
+    LEFT JOIN (
+      SELECT city_name, state_code, SUM(population) AS city_pop, AVG(median_household_income) AS city_income
+      FROM (SELECT DISTINCT zip_code, city_name, state_code, population, median_household_income FROM {zip_ref})
+      GROUP BY city_name, state_code
+    ) cp ON b.zip_city = cp.city_name AND b.zip_state = cp.state_code
     GROUP BY city, state, state_name, county
     ORDER BY locations DESC
     LIMIT 10
@@ -3772,7 +4245,7 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
           -- {zip_ref}'s grain is (zip_code, brand_name); collapse the
           -- per-brand fan-out to one row per zip before summing population,
           -- or a zip with N brands present would count its population N times.
-          SELECT DISTINCT zip_code, state_code, state_name, city_name, population
+          SELECT DISTINCT zip_code, state_code, state_name, city_name, population, median_household_income
           FROM {zip_ref}
           {zip_where}
         )
@@ -3782,7 +4255,13 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
           COUNT(DISTINCT zip_code) AS locations,
           COUNT(DISTINCT city_name) AS cities,
           (SELECT COUNT(DISTINCT name) FROM `{project_id}.{bronze_dataset_id}.businesses` WHERE is_deleted IS NOT TRUE AND COALESCE(status, 'active') = 'active') AS brands,
-          COALESCE(SUM(population), 0) AS state_population
+          COALESCE(SUM(population), 0) AS state_population,
+          COALESCE(AVG(median_household_income), 0) AS median_household_income,
+          -- No brand/listing data exists yet at this pre-bootstrap stage
+          -- (that's the whole reason this fallback path is active), so
+          -- there's nothing to split by main vs competitor brand yet.
+          0 AS main_brand_locations,
+          0 AS competitor_brand_locations
         FROM zip_dedup
         GROUP BY state, state_name
         ORDER BY locations DESC
@@ -3794,9 +4273,12 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
           COALESCE(state_code, '') AS state,
           COALESCE(state_name, state_code, '') AS state_name,
           COALESCE(county, '') AS county,
-          COUNT(DISTINCT zip_code) AS locations
-        FROM {zip_ref}
-        {zip_where}
+          COUNT(DISTINCT zip_code) AS locations,
+          COALESCE(SUM(population), 0) AS city_population,
+          COALESCE(AVG(median_household_income), 0) AS median_household_income,
+          0 AS main_brand_locations,
+          0 AS competitor_brand_locations
+        FROM (SELECT DISTINCT zip_code, city_name, state_code, state_name, county, population, median_household_income FROM {zip_ref} {zip_where})
         GROUP BY city, state, state_name, county
         ORDER BY locations DESC
         LIMIT 10
@@ -4517,7 +4999,7 @@ def search_zips(query: str = "", state: str = "", county: str = "", city: str = 
     sql = f"""
     SELECT zip_code, city_name, county, state_code, state_name, latitude, longitude, population, median_household_income, median_age
     FROM {table_ref}
-    WHERE (zip_code LIKE CONCAT(@q, '%') OR LOWER(city_name) LIKE CONCAT(LOWER(@q), '%'))
+    WHERE (zip_code LIKE CONCAT(UPPER(@q), '%') OR LOWER(city_name) LIKE CONCAT(LOWER(@q), '%'))
       AND (@state = '' OR UPPER(state_code) = UPPER(@state))
       AND (@county = '' OR LOWER(county) = LOWER(@county))
       AND (@city = '' OR LOWER(city_name) = LOWER(@city))
@@ -4576,7 +5058,7 @@ def list_rejected(event_id: str = "", business_id: str = "", limit: int = 50, of
     safe_limit = max(1, min(int(limit or 50), 50000))
     safe_offset = max(0, int(offset or 0))
     ai_clause = "AND is_ai_enriched IS NOT TRUE" if ai_pending_only else ""
-    query = f"""SELECT event_id, business_id, source_type_id, row_number, errors, raw_record, template_id, mapping_id, is_ai_enriched
+    query = f"""SELECT event_id, business_id, source_type_id, row_number, errors, raw_record, template_id, mapping_id, is_ai_enriched, attempt_count, has_ai_suggestion
     FROM `{project_id}.{dataset_id}.error_listings`
     WHERE is_deleted IS NOT TRUE
       {ai_clause}
@@ -4702,6 +5184,13 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
         cached_quality["quality_cache"] = "sqlite"
         with _QUALITY_REFRESH_LOCK:
             should_refresh = quality_cache_key not in _QUALITY_REFRESH_KEYS
+            # Tell the client a fresher answer is being computed. Without
+            # this the page rendered the cached payload and never looked
+            # again - the background refresh rewrote SQLite, but nothing
+            # asked for it, so the donut and the fix counters sat on stale
+            # numbers indefinitely (reported: "still outdated after 5
+            # minutes on the page").
+            cached_quality["refreshing"] = bool(should_refresh or quality_cache_key in _QUALITY_REFRESH_KEYS)
             if should_refresh:
                 _QUALITY_REFRESH_KEYS.add(quality_cache_key)
         if should_refresh:
@@ -4715,8 +5204,47 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
                         _QUALITY_REFRESH_KEYS.discard(quality_cache_key)
             threading.Thread(target=refresh_quality, name="quality-mirror-refresh", daemon=True).start()
         return cached_quality
+    if not cached_quality and not _skip_cache and not force_refresh:
+        # A genuinely cold cache (first load, or right after invalidate_cache()
+        # on any save/reprocess) used to block this request on the full live
+        # query below - measured at 30+ seconds against a 21k-row review
+        # queue, since every row's `errors`/`raw_record` JSON has to be
+        # fetched and aggregated in Python. Explicit refreshes (force_refresh)
+        # keep blocking on purpose (the UI already shows progress for those);
+        # this only covers the silent/automatic load path. Warm the cache in
+        # the background exactly like the stale-cache case above, and hand
+        # back an honest "still computing" placeholder immediately instead of
+        # hanging the request.
+        with _QUALITY_REFRESH_LOCK:
+            already_warming = quality_cache_key in _QUALITY_REFRESH_KEYS
+            if not already_warming:
+                _QUALITY_REFRESH_KEYS.add(quality_cache_key)
+        if not already_warming:
+            def warm_cold_quality() -> None:
+                try:
+                    reporting_quality_summary(params, _skip_cache=True)
+                except Exception as exc:
+                    LOGGER.warning("quality_mirror_cold_warm_failed error=%s", exc)
+                finally:
+                    with _QUALITY_REFRESH_LOCK:
+                        _QUALITY_REFRESH_KEYS.discard(quality_cache_key)
+            threading.Thread(target=warm_cold_quality, name="quality-mirror-cold-warm", daemon=True).start()
+        return {
+            "scope": "invalid_listings",
+            "metrics": {"invalid_listings": 0, "needs_manual_review": 0, "ai_fixed": 0, "manual_fixed": 0, "unresolved_rate_pct": 0.0, "invalid_record_rate_pct": 0.0},
+            "reasons": [], "brands": [], "states": [], "cities": [], "history": [],
+            "filters": {"brands": [], "states": [], "reasons": []},
+            "warning": "", "quality_cache": "warming",
+        }
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
+    # The query below selects has_ai_suggestion, which older deployed tables
+    # do not have - without this pass BigQuery raises "Name has_ai_suggestion
+    # not found" and the entire quality tab 400s.
+    try:
+        _ensure_error_listings_table(client, project_id, dataset_id)
+    except Exception as exc:
+        LOGGER.warning("error_listings_schema_ensure_failed error=%s", exc)
     brand = str(params.get("brand", [""])[0] or "").strip()
     state = str(params.get("state", [""])[0] or "").strip().upper()
     city = str(params.get("city", [""])[0] or "").strip().lower()
@@ -4730,7 +5258,7 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
     # this keeps the quality contract independent of the healthy gold views.
     query = f"""
     SELECT e.business_id, e.event_id, e.row_number, e.errors, e.raw_record,
-           e.is_ai_enriched, COALESCE(b.name, e.business_id) AS brand
+           e.is_ai_enriched, e.has_ai_suggestion, COALESCE(b.name, e.business_id) AS brand
     FROM `{project_id}.{dataset_id}.error_listings` e
     LEFT JOIN `{project_id}.{dataset_id}.businesses` b
       ON b.business_id = e.business_id AND b.is_deleted IS NOT TRUE
@@ -4827,36 +5355,233 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
         LOGGER.warning("quality_mirror_write_failed error=%s", exc)
     total = len(filtered)
     needs_review = sum(1 for row in filtered if not row.get("is_ai_enriched"))
+    # RPT-08: four mutually exclusive states, plus a pivot of those states
+    # against the field each row actually failed on. "Pending" is split by
+    # has_ai_suggestion - computed once at write time (see
+    # _row_has_ai_suggestion), so this is a plain read, not a re-probe of
+    # the whole queue on every reporting load.
+    ai_review_pending = sum(1 for row in filtered if row.get("has_ai_suggestion"))
+    manual_review_pending = total - ai_review_pending
+    fix_state_pivot: dict[str, dict[str, int]] = {}
+    for row in filtered:
+        state_key = "ai_review_pending" if row.get("has_ai_suggestion") else "manual_review_pending"
+        for reason_key in (row.get("quality_reasons") or ["unknown"]):
+            bucket = fix_state_pivot.setdefault(reason_key, {
+                "ai_fixed": 0, "ai_review_pending": 0, "manual_fixed": 0, "manual_review_pending": 0,
+            })
+            bucket[state_key] += 1
     history: list[dict[str, Any]] = []
-    coverage_metrics = {
+    coverage_metrics: dict[str, Any] = {
         "total_records": 0, "zip_completeness_pct": 0.0, "coordinate_completeness_pct": 0.0,
         "duplicate_rate_pct": 0.0, "stale_records": 0, "entity_resolution_attempts": 0,
         "entity_resolution_success_rate_pct": 0.0,
+        # Extended quality KPIs
+        "source_coverage_pct": 0.0, "required_field_completeness_pct": 0.0,
+        "geo_enrichment_success_rate_pct": 0.0, "coordinate_accuracy_rate_pct": 0.0,
+        "demographic_enrichment_coverage_pct": 0.0, "provenance_coverage_pct": 0.0,
+        "traceable_record_rate_pct": 0.0, "valid_location_rate_pct": 0.0,
+        "data_accuracy_score": 0.0, "data_consistency_score": 0.0, "data_freshness_score": 0.0,
+        "pipeline_success_rate_pct": 0.0, "avg_pipeline_latency_hours": None,
+        "overall_dq_score": 0.0,
+        "entity_resolution_failure_rate_pct": 0.0,
+        "stale_after_days": DEFAULT_STALE_AFTER_DAYS,
     }
     try:
+        # User-configurable "days without an update = stale" threshold
+        # (persisted in app_settings, was previously hardcoded to 90). A
+        # per-request ?stale_days= override is honoured for previewing a
+        # different window without changing the saved setting.
+        stale_after_days = get_stale_after_days()
+        try:
+            requested_stale = int(str(params.get("stale_days", [""])[0] or "").strip() or 0)
+            if 1 <= requested_stale <= 3650:
+                stale_after_days = requested_stale
+        except (TypeError, ValueError):
+            pass
+        coverage_metrics["stale_after_days"] = stale_after_days
         coverage_query = f"""
         WITH base AS (
-          SELECT listing_id, business_id, zip_code, latitude, longitude, last_observed_at,
-                 COUNT(*) OVER (PARTITION BY business_id, LOWER(TRIM(address)), zip_code) AS identity_count
+          -- Every column here must exist on `listings` (see TABLE_SCHEMAS).
+          -- This query previously selected event_id, coordinate_source,
+          -- coordinate_confidence and state - none of which are columns on
+          -- this table - so it raised "Unrecognized name: event_id" on every
+          -- single run and was swallowed by the except below into a silent
+          -- all-zero coverage_metrics. That is why ZIP/coordinate
+          -- completeness, duplicate rate, stale records and the overall DQ
+          -- score all read 0 regardless of the real data.
+          SELECT
+            listing_id, business_id, zip_code, latitude, longitude,
+            last_observed_at, enriched_at, ingestion_id, content_hash,
+            address, name, state_code, country,
+            -- content_hash is the canonical dedup key (business_id is baked
+            -- into it - see CONTENT_HASH_FIELDS), so duplicates are rows
+            -- sharing one. Fall back to the older business/address/zip
+            -- identity only for rows written before the hash existed.
+            COUNT(*) OVER (
+              PARTITION BY
+                COALESCE(
+                  NULLIF(TRIM(COALESCE(content_hash, '')), ''),
+                  CONCAT(COALESCE(business_id,''), '|', LOWER(TRIM(COALESCE(address,''))), '|', COALESCE(zip_code,''))
+                )
+            ) AS duplicate_group_count
+          FROM `{project_id}.{dataset_id}.listings`
+          WHERE is_deleted IS NOT TRUE
+        ),
+        totals AS (
+          SELECT
+            COUNT(*) AS total_records,
+            -- ZIP completeness counts a *usable* postal code, not merely a
+            -- non-empty string: 5-digit US, or any alphanumeric non-US code.
+            -- NOTE: braces are doubled because this is an f-string - {{5}}
+            -- renders as the literal regex quantifier {5}. Written singly,
+            -- Python interpolates them as format fields and the pattern
+            -- silently becomes '^[0-9]5$', which matches almost nothing.
+            COUNTIF(
+              REGEXP_CONTAINS(TRIM(COALESCE(zip_code,'')), r'^[0-9]{{5}}$')
+              OR REGEXP_CONTAINS(UPPER(TRIM(COALESCE(zip_code,''))), r'^[A-Z0-9][A-Z0-9 -]{{2,9}}$')
+            ) AS with_zip,
+            -- Coordinate completeness means present AND valid - in-range and
+            -- not the 0,0 null-island placeholder.
+            COUNTIF(
+              latitude IS NOT NULL AND longitude IS NOT NULL
+              AND latitude BETWEEN -90 AND 90 AND longitude BETWEEN -180 AND 180
+              AND NOT (latitude = 0 AND longitude = 0)
+            ) AS with_coordinates,
+            COUNTIF(last_observed_at < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {stale_after_days} DAY)) AS stale_records,
+            COUNTIF(duplicate_group_count > 1) AS duplicate_records,
+            -- Required field completeness: name + address + zip + state + country all non-null/non-empty
+            COUNTIF(
+              NULLIF(TRIM(COALESCE(name,'')),'') IS NOT NULL AND
+              NULLIF(TRIM(COALESCE(address,'')),'') IS NOT NULL AND
+              NULLIF(TRIM(COALESCE(zip_code,'')),'') IS NOT NULL AND
+              NULLIF(TRIM(COALESCE(state_code,'')),'') IS NOT NULL AND
+              NULLIF(TRIM(COALESCE(country,'')),'') IS NOT NULL
+            ) AS with_required_fields,
+            -- Geo enrichment: the row has actually been through the
+            -- enrichment pass (there is no coordinate_source column on
+            -- this table - enriched_at is the real signal).
+            COUNTIF(enriched_at IS NOT NULL) AS geo_enriched,
+            -- Coordinate accuracy: no confidence column exists here, so
+            -- this is measured as coordinates that are genuinely usable
+            -- (in range, not null-island) rather than an invented score.
+            COUNTIF(
+              latitude IS NOT NULL AND longitude IS NOT NULL
+              AND latitude BETWEEN -90 AND 90 AND longitude BETWEEN -180 AND 180
+              AND NOT (latitude = 0 AND longitude = 0)
+            ) AS coord_accurate,
+            -- Provenance: content_hash present
+            COUNTIF(content_hash IS NOT NULL AND content_hash != '') AS with_provenance,
+            -- Traceable: tied back to the ingestion run that produced it.
+            COUNTIF(ingestion_id IS NOT NULL AND ingestion_id != '') AS with_event_id,
+            -- Pipeline latency (hours)
+            AVG(CASE WHEN enriched_at IS NOT NULL THEN TIMESTAMP_DIFF(enriched_at, last_observed_at, HOUR) END) AS avg_latency_hours
+          FROM base
+        ),
+        brands_active AS (
+          SELECT COUNT(DISTINCT b.business_id) AS active_brands
+          FROM `{project_id}.{dataset_id}.businesses` b
+          WHERE b.is_deleted IS NOT TRUE AND COALESCE(b.status, 'active') = 'active'
+        ),
+        brands_with_listings AS (
+          SELECT COUNT(DISTINCT business_id) AS brands_with_data
           FROM `{project_id}.{dataset_id}.listings`
           WHERE is_deleted IS NOT TRUE
         )
-        SELECT COUNT(*) AS total_records,
-          COUNTIF(NULLIF(TRIM(zip_code), '') IS NOT NULL) AS with_zip,
-          COUNTIF(latitude IS NOT NULL AND longitude IS NOT NULL) AS with_coordinates,
-          COUNTIF(last_observed_at < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)) AS stale_records,
-          COUNTIF(identity_count > 1) AS duplicate_records
-        FROM base
+        SELECT t.*, ba.active_brands, bl.brands_with_data
+        FROM totals t, brands_active ba, brands_with_listings bl
         """
         coverage_row = next(iter(client.query(coverage_query).result()), {})
-        total_records = int(coverage_row.get("total_records", 0) or 0)
+        tr = int(coverage_row.get("total_records", 0) or 0)
+        with_zip = int(coverage_row.get("with_zip", 0) or 0)
+        with_coords = int(coverage_row.get("with_coordinates", 0) or 0)
+        stale = int(coverage_row.get("stale_records", 0) or 0)
+        dup = int(coverage_row.get("duplicate_records", 0) or 0)
+        req_fields = int(coverage_row.get("with_required_fields", 0) or 0)
+        geo_enriched = int(coverage_row.get("geo_enriched", 0) or 0)
+        coord_acc = int(coverage_row.get("coord_accurate", 0) or 0)
+        prov = int(coverage_row.get("with_provenance", 0) or 0)
+        traceable = int(coverage_row.get("with_event_id", 0) or 0)
+        avg_lat = coverage_row.get("avg_latency_hours")
+        active_brands = int(coverage_row.get("active_brands", 0) or 0)
+        brands_with_data = int(coverage_row.get("brands_with_data", 0) or 0)
+        pct = lambda n, d: round(n * 100 / d, 2) if d else 0.0
+        # Derived rates
+        invalid_count = len([r for r in rows if not r.get("is_ai_enriched") is None])  # all error rows
+        invalid_total = len(rows)
+        zip_pct = pct(with_zip, tr)
+        coord_pct = pct(with_coords, tr)
+        dup_pct = pct(dup, tr)
+        freshness = pct(tr - stale, tr)
+        req_pct = pct(req_fields, tr)
+        geo_pct = pct(geo_enriched, tr)
+        coord_acc_pct = pct(coord_acc, tr)
+        prov_pct = pct(prov, tr)
+        trace_pct = pct(traceable, tr)
+        # Valid listings and invalid (error_listings) rows are two separate
+        # populations, so the denominator is everything ingested, not the
+        # valid table alone - otherwise invalid_total > tr made this fall
+        # into a bogus 100.0 ("perfect") and inflated the overall DQ score.
+        ingested_total = tr + invalid_total
+        valid_pct = pct(tr, ingested_total)
+        source_cov = pct(brands_with_data, active_brands)
+        # Weighted Overall DQ Score (sum of weights = 1.0)
+        overall_dq = round(
+            req_pct      * 0.20 +
+            valid_pct    * 0.20 +
+            geo_pct      * 0.15 +
+            freshness    * 0.15 +
+            (100 - dup_pct) * 0.10 +
+            coord_acc_pct   * 0.10 +
+            pct(0, 1)       * 0.05 +  # demographic (separate query below)
+            prov_pct        * 0.05,
+            2
+        )
         coverage_metrics.update({
-            "total_records": total_records,
-            "zip_completeness_pct": round(int(coverage_row.get("with_zip", 0) or 0) * 100 / total_records, 2) if total_records else 0.0,
-            "coordinate_completeness_pct": round(int(coverage_row.get("with_coordinates", 0) or 0) * 100 / total_records, 2) if total_records else 0.0,
-            "duplicate_rate_pct": round(int(coverage_row.get("duplicate_records", 0) or 0) * 100 / total_records, 2) if total_records else 0.0,
-            "stale_records": int(coverage_row.get("stale_records", 0) or 0),
+            "total_records": tr,
+            "zip_completeness_pct": zip_pct,
+            "coordinate_completeness_pct": coord_pct,
+            "duplicate_rate_pct": dup_pct,
+            "stale_records": stale,
+            "required_field_completeness_pct": req_pct,
+            "geo_enrichment_success_rate_pct": geo_pct,
+            "coordinate_accuracy_rate_pct": coord_acc_pct,
+            "provenance_coverage_pct": prov_pct,
+            "traceable_record_rate_pct": trace_pct,
+            "valid_location_rate_pct": valid_pct,
+            "data_accuracy_score": valid_pct,
+            "data_consistency_score": round(100 - dup_pct, 2),
+            "data_freshness_score": freshness,
+            "pipeline_success_rate_pct": valid_pct,
+            "source_coverage_pct": source_cov,
+            "avg_pipeline_latency_hours": round(float(avg_lat), 2) if avg_lat is not None else None,
         })
+        # Demographic coverage — from gold view (may not exist yet)
+        try:
+            demo_query = f"""
+            SELECT COUNT(*) AS total,
+              COUNTIF(population IS NOT NULL AND median_household_income IS NOT NULL) AS with_demo
+            FROM `{project_id}.{dataset_id}.listings`
+            WHERE is_deleted IS NOT TRUE
+            """
+            demo_row = next(iter(client.query(demo_query).result()), {})
+            demo_total = int(demo_row.get("total", 0) or 0)
+            demo_cov = pct(int(demo_row.get("with_demo", 0) or 0), demo_total)
+            coverage_metrics["demographic_enrichment_coverage_pct"] = demo_cov
+            # Recompute DQ score with real demographic coverage
+            overall_dq = round(
+                req_pct      * 0.20 +
+                valid_pct    * 0.20 +
+                geo_pct      * 0.15 +
+                freshness    * 0.15 +
+                (100 - dup_pct) * 0.10 +
+                coord_acc_pct   * 0.10 +
+                demo_cov        * 0.05 +
+                prov_pct        * 0.05,
+                2
+            )
+        except Exception:
+            pass
+        coverage_metrics["overall_dq_score"] = overall_dq
         entity_query = f"""
         SELECT COUNT(*) AS attempts, COUNTIF(improved IS TRUE) AS successes
         FROM `{project_id}.{dataset_id}.quality_fix_events`
@@ -4864,8 +5589,12 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
         """
         entity_row = next(iter(client.query(entity_query).result()), {})
         attempts = int(entity_row.get("attempts", 0) or 0)
+        successes = int(entity_row.get("successes", 0) or 0)
         coverage_metrics["entity_resolution_attempts"] = attempts
-        coverage_metrics["entity_resolution_success_rate_pct"] = round(int(entity_row.get("successes", 0) or 0) * 100 / attempts, 2) if attempts else 0.0
+        coverage_metrics["entity_resolution_success_rate_pct"] = pct(successes, attempts)
+        # Both halves, so the failure side doesn't have to be inferred by
+        # the caller (and can't drift from the success figure).
+        coverage_metrics["entity_resolution_failure_rate_pct"] = pct(max(attempts - successes, 0), attempts)
     except Exception as exc:
         LOGGER.warning("quality_coverage_metrics_failed error=%s", exc)
     # Keep one durable point per day and scope.  The SQLite quality mirror is
@@ -4935,10 +5664,34 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
             "needs_manual_review": needs_review,
             "ai_fixed": ai_fixed,
             "manual_fixed": manual_fixed,
+            # RPT-08's four states. ai_fixed/manual_fixed are the cumulative
+            # counters; the two pending figures split the currently-open
+            # queue by whether a suggestion was found at write time.
+            "ai_review_pending": ai_review_pending,
+            "manual_review_pending": manual_review_pending,
+            "ai_fixed_share_pct": round(ai_fixed * 100 / (ai_fixed + manual_fixed + total), 2) if (ai_fixed + manual_fixed + total) else 0.0,
+            "manual_fixed_share_pct": round(manual_fixed * 100 / (ai_fixed + manual_fixed + total), 2) if (ai_fixed + manual_fixed + total) else 0.0,
+            "ai_review_pending_share_pct": round(ai_review_pending * 100 / (ai_fixed + manual_fixed + total), 2) if (ai_fixed + manual_fixed + total) else 0.0,
+            "manual_review_pending_share_pct": round(manual_review_pending * 100 / (ai_fixed + manual_fixed + total), 2) if (ai_fixed + manual_fixed + total) else 0.0,
             "unresolved_rate_pct": round(needs_review * 100 / total, 2) if total else 0.0,
+            # coverage_metrics["total_records"] can legitimately be 0 (its
+            # own BigQuery query failed and fell back to the zeroed default,
+            # logged separately as quality_snapshot_write_failed/a similar
+            # warning) - dividing by max(0, 1) = 1 in that case produced a
+            # nonsensical rate like 2,866,500% instead of an honest "unknown".
+            # Invalid rows live in error_listings, valid rows in listings -
+            # dividing one population by the other produced rates over 100%
+            # (e.g. 280%). The denominator is everything ingested.
+            "invalid_record_rate_pct": round(total * 100 / (coverage_metrics["total_records"] + total), 2) if (coverage_metrics.get("total_records") or total) else 0.0,
             **coverage_metrics,
         },
         "reasons": [{"reason": key, "count": value} for key, value in sorted(reason_counts.items(), key=lambda pair: (-pair[1], pair[0]))],
+        # RPT-08's pivot: the four fix states against the field each row
+        # failed on (ZIP / Address / Coordinates / ...), replacing the pie.
+        "fix_state_pivot": [
+            {"reason": key, **value, "total": sum(value.values())}
+            for key, value in sorted(fix_state_pivot.items(), key=lambda pair: (-sum(pair[1].values()), pair[0]))
+        ],
         "brands": [{"brand": key, **value} for key, value in sorted(brand_counts.items(), key=lambda pair: (-pair[1]["invalid"], pair[0]))],
         "states": [{"state": key, "count": value} for key, value in sorted(state_counts.items(), key=lambda pair: (-pair[1], pair[0]))[:25]],
         "cities": [{"city": key, "count": value} for key, value in sorted(city_counts.items(), key=lambda pair: (-pair[1], pair[0]))[:25]],
@@ -4950,14 +5703,810 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
         },
         "warning": "",
     }
-    # query_cache is a durable SQLite mirror. Store the complete quality
-    # summary so the second reporting tab paints without rereading 12k rows.
     payload["quality_cache"] = "live"
     set_cached_query(quality_cache_key, payload)
     return payload
 
 
+# ---------------------------------------------------------------------------
+# Metric CSV export (entity/listing level)
+# ---------------------------------------------------------------------------
+# Every number card on both reporting tabs is downloadable, and the download
+# must hand over the *entities the number was computed from* - one row per
+# listing / error listing / ZIP - not a one-line restatement of the figure.
+# The exported rows also carry the boolean flag columns the metric is defined
+# by (has_valid_zip, is_duplicate, is_stale, ...), so the reader can recompute
+# the headline number from the CSV itself rather than taking it on trust.
+# A real analyst filter ("20 states, up to 200k listings") must actually come
+# back, not be silently clipped. openpyxl writes this many rows comfortably
+# within the 512MB budget because the workbook is built once and streamed.
+# Excel's own hard ceiling is 1,048,576 rows, so this stays well inside it.
+METRIC_EXPORT_ROW_LIMIT = 200000
+
+# Metric slug -> the family that owns it. Slugs are the same kebab-case form
+# the UI derives from a card's label, so a card needs no wiring beyond having
+# a label. Each family exports the entity grain the metric is actually
+# counted at, so the CSV's row count reconciles with the card's number.
+
+# Fix counts are counted from quality_fix_events (the same source the Trends
+# chart uses), NOT from error_listings.is_ai_enriched - exporting the latter
+# would hand back a different population than the card displays.
+# fix_type is normalised to upper case at write time (see
+# record_quality_fix_event) - 'AI' / 'MANUAL'. BigQuery string equality is
+# case sensitive, so comparing against 'Manual' silently matches nothing.
+_FIX_EVENT_METRIC_TYPES: dict[str, str] = {
+    "fixed-with-ai": "AI",
+    "listings-fixed-automatically": "AI",
+    "manually-fixed": "MANUAL",
+    "listings-fixed-manually": "MANUAL",
+}
+
+# The open review population lives in error_listings.
+_ERROR_METRIC_PREDICATES: dict[str, str] = {
+    "ai-review-pending": "e.is_ai_enriched IS NOT TRUE AND e.has_ai_suggestion IS TRUE",
+    "manual-review-pending": "e.is_ai_enriched IS NOT TRUE AND e.has_ai_suggestion IS NOT TRUE",
+    "needs-manual-review": "e.is_ai_enriched IS NOT TRUE",
+    "invalid-listings": "TRUE",
+    "unresolved-rate": "TRUE",
+    "active-issue-types": "TRUE",
+    "entity-resolution-attempts": "COALESCE(e.attempt_count, 0) > 0",
+    "entity-resolution-success": "COALESCE(e.attempt_count, 0) > 0",
+}
+
+# Coverage metrics are defined over `listings`; each exports the full entity
+# population plus the boolean flag column its rate is defined by, so the
+# headline percentage is reproducible from the file itself.
+_LISTING_METRIC_SLUGS: frozenset[str] = frozenset({
+    "zip-completeness", "coordinate-completeness", "duplicate-rate",
+    "stale-records",
+})
+
+# "Total Stores" is a location-tab metric, so it exports the enriched
+# location view (county, state_name, demographics, coordinate provenance)
+# rather than the raw bronze listing columns - the location export should
+# carry the richest location fields available, not the thinnest.
+_LOCATION_VIEW_METRIC_SLUGS: frozenset[str] = frozenset({"total-stores"})
+
+# Market-coverage metrics are counted over the ZIP universe, not over
+# listings - exporting listing rows for "Uncovered ZIPs" would be nonsense,
+# since an uncovered ZIP has no listing by definition. Grain is one ZIP.
+_ZIP_METRIC_SLUGS: frozenset[str] = frozenset({
+    "total-states", "market-zips", "covered-markets-zips",
+    "covered-states", "covered-cities", "uncovered-zips",
+})
+
+_BRAND_METRIC_SLUGS: frozenset[str] = frozenset({"active-brands"})
+
+
+# Human labels for the export columns. Anything not listed falls back to a
+# title-cased version of the column name, so a new column never breaks the
+# export - it just gets a plain label.
+_METRIC_EXPORT_COLUMN_LABELS: dict[str, str] = {
+    "business_id": "Brand ID", "brand": "Brand", "name": "Store / Location Name",
+    "address": "Street Address", "city_name": "City", "county": "County",
+    "state_code": "State Code", "state_name": "State", "zip_code": "ZIP Code",
+    "country": "Country", "phone_number": "Phone",
+    "latitude": "Latitude", "longitude": "Longitude",
+    "coordinate_confidence": "Coord Confidence", "coordinate_source": "Coord Source",
+    "population": "Census Population", "median_household_income": "Median Income ($)",
+    "median_age": "Median Age", "last_observed_at": "Last Observed",
+    "enriched_at": "Enriched At", "ingestion_id": "Ingestion ID",
+    "content_hash": "Content Hash", "listing_id": "Listing ID",
+    "custom_fields": "Additional Source Fields",
+    "has_valid_zip": "Has Valid ZIP", "has_valid_coordinates": "Has Valid Coordinates",
+    "is_stale": "Is Stale", "is_duplicate": "Is Duplicate",
+    "duplicate_group_count": "Duplicate Group Size", "is_covered": "Is Covered",
+    "location_count": "Locations In ZIP", "brands_present": "Brands Present",
+    "event_id": "Event ID", "row_number": "Source Row #",
+    "validation_error_type": "Validation Error Type", "errors": "Validation Errors",
+    "raw_record": "Raw Source Record", "observed_at": "Observed At",
+    "template_id": "Template ID", "enrichment_attempts": "Enrichment Attempts",
+    "fixed_with_ai": "Fixed With AI", "has_ai_suggestion": "Has AI Suggestion",
+    "fix_id": "Fix ID", "fix_type": "Fix Type", "fixed_at": "Fixed At",
+    "processed": "Processed", "improved": "Improved",
+    "listing_count": "Listing Count", "zip_count": "ZIP Count",
+    "state_count": "State Count", "created_at": "Created At", "updated_at": "Updated At",
+}
+
+# What each metric measures, restated on the workbook's metrics sheet so the
+# file explains its own arithmetic rather than relying on the reader to
+# remember the card's definition.
+_METRIC_EXPORT_DEFINITIONS: dict[str, str] = {
+    "fixed-with-ai": "Fix events of type AI that were processed and improved the record.",
+    "listings-fixed-automatically": "Fix events of type AI that were processed and improved the record.",
+    "manually-fixed": "Fix events of type MANUAL that were processed and improved the record.",
+    "listings-fixed-manually": "Fix events of type MANUAL that were processed and improved the record.",
+    "ai-review-pending": "Invalid listings not yet fixed, for which AI has produced a suggestion awaiting review.",
+    "manual-review-pending": "Invalid listings not yet fixed, with no AI suggestion - these need a human.",
+    "needs-manual-review": "Invalid listings that have not been AI-enriched.",
+    "invalid-listings": "All listings that failed validation and are in the review population.",
+    "unresolved-rate": "Share of the invalid population still awaiting resolution.",
+    "active-issue-types": "Distinct validation failure reasons present in the invalid population.",
+    "entity-resolution-attempts": "Invalid listings that entity resolution has attempted at least once.",
+    "entity-resolution-success": "Attempted rows, with the success flag per row; the rate is successes over attempts.",
+    "zip-completeness": "Share of listings carrying a usable postal code (5-digit US, or alphanumeric non-US).",
+    "coordinate-completeness": "Share of listings with in-range coordinates that are not the 0,0 placeholder.",
+    "duplicate-rate": "Share of listings sharing a content_hash (or business/address/ZIP identity) with another.",
+    "stale-records": "Listings not observed within the configured staleness window.",
+    "total-stores": "Every individual store/location record - can be more than one per ZIP.",
+    "total-states": "All states present in the ZIP market universe.",
+    "market-zips": "All ZIPs in the addressable market universe.",
+    "covered-markets-zips": "Distinct ZIPs where the selected brand(s) have at least one store.",
+    "covered-states": "States where the selected brand(s) have at least one store.",
+    "covered-cities": "Cities where the selected brand(s) have at least one store.",
+    "uncovered-zips": "Market ZIPs with no store for the selected brand(s) - the whitespace.",
+    "active-brands": "Brands in the registry with active status, and their listing footprint.",
+}
+
+
+def _metric_export_label(column: str) -> str:
+    return _METRIC_EXPORT_COLUMN_LABELS.get(column, column.replace("_", " ").title())
+
+
+def _metric_export_summary(metric: str, rows: list[dict[str, Any]], unavailable_reason: str = "") -> list[dict[str, Any]]:
+    """Derive the metrics sheet from the exported rows themselves.
+
+    Computing these from the sheet-1 rows (rather than re-querying) is
+    deliberate: the two sheets can never disagree, and a reader can check
+    every figure by hand against the data sitting next to it.
+    """
+    total = len(rows)
+    summary: list[dict[str, Any]] = [
+        {"metric": "Metric", "value": _metric_export_label(metric.replace("-", "_")), "basis": ""},
+        {"metric": "Definition", "value": _METRIC_EXPORT_DEFINITIONS.get(metric, ""), "basis": ""},
+        {"metric": "Rows in this export", "value": total, "basis": "Sheet 1 row count"},
+        {"metric": "Generated at (UTC)", "value": datetime.now(timezone.utc).isoformat(timespec="seconds"), "basis": ""},
+    ]
+    if unavailable_reason:
+        label = "PARTIAL RESULT" if "ceiling" in unavailable_reason else "DATA UNAVAILABLE"
+        summary.insert(2, {"metric": label, "value": unavailable_reason, "basis": ""})
+    if not rows:
+        return summary
+
+    columns = list(rows[0].keys())
+
+    # Boolean flag columns are the arithmetic behind every rate card, so
+    # report each one's count and share against this export's own row count.
+    for column in columns:
+        values = [row.get(column) for row in rows]
+        non_null = [v for v in values if v not in (None, "")]
+        if non_null and all(isinstance(v, bool) for v in non_null):
+            true_count = sum(1 for v in non_null if v)
+            summary.append({
+                "metric": f"{_metric_export_label(column)} = TRUE",
+                "value": true_count,
+                "basis": f"{round(true_count * 100 / len(non_null), 2)}% of {len(non_null)} rows with a value",
+            })
+            summary.append({
+                "metric": f"{_metric_export_label(column)} = FALSE",
+                "value": len(non_null) - true_count,
+                "basis": f"{round((len(non_null) - true_count) * 100 / len(non_null), 2)}% of {len(non_null)} rows with a value",
+            })
+
+    # Distinct-entity counts for the dimensions these metrics are sliced by.
+    for column in ("brand", "business_id", "state_code", "state_name", "city_name", "zip_code", "validation_error_type", "fix_type"):
+        if column in columns:
+            distinct = {str(row.get(column)) for row in rows if row.get(column) not in (None, "")}
+            summary.append({
+                "metric": f"Distinct {_metric_export_label(column)}",
+                "value": len(distinct),
+                "basis": f"over {total} rows",
+            })
+
+    # Sums for the columns where a total is the meaningful figure.
+    for column in ("location_count", "listing_count", "population"):
+        if column in columns:
+            numeric = [row.get(column) for row in rows if isinstance(row.get(column), (int, float)) and not isinstance(row.get(column), bool)]
+            if numeric:
+                summary.append({
+                    "metric": f"Total {_metric_export_label(column)}",
+                    "value": sum(numeric),
+                    "basis": f"summed over {len(numeric)} rows",
+                })
+    return summary
+
+
+def _metric_export_workbook(metric: str, rows: list[dict[str, Any]], unavailable_reason: str = "") -> bytes:
+    """Build the two-sheet workbook: the entity rows, then the metrics over them."""
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    header_fill = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
+    header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    data_font = Font(name="Calibri", size=10)
+    alt_fill = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid")
+    thin_border = Border(
+        left=Side(style="thin", color="E2E8F0"), right=Side(style="thin", color="E2E8F0"),
+        top=Side(style="thin", color="E2E8F0"), bottom=Side(style="thin", color="E2E8F0"),
+    )
+
+    def write_sheet(ws: Any, records: list[dict[str, Any]], columns: list[str], labels: list[str], empty_message: str) -> None:
+        ws.freeze_panes = "A2"
+        ws.row_dimensions[1].height = 28
+        for col_idx, label in enumerate(labels, start=1):
+            cell = ws.cell(row=1, column=col_idx, value=label)
+            cell.fill, cell.font, cell.alignment = header_fill, header_font, header_align
+        if not records:
+            cell = ws.cell(row=2, column=1, value=empty_message)
+            cell.font = Font(name="Calibri", size=10, italic=True, color="64748B")
+            for col_idx in range(1, len(columns) + 1):
+                ws.cell(row=2, column=col_idx).border = thin_border
+            widths = [max(len(label) + 2, 14) for label in labels]
+        else:
+            widths = [len(label) + 2 for label in labels]
+            for row_idx, record in enumerate(records, start=2):
+                for col_idx, column in enumerate(columns, start=1):
+                    value = record.get(column)
+                    if isinstance(value, bool):
+                        value = "TRUE" if value else "FALSE"
+                    elif hasattr(value, "isoformat"):
+                        value = value.isoformat()
+                    elif isinstance(value, (dict, list)):
+                        value = json.dumps(value, default=str)
+                    elif value is None:
+                        value = ""
+                    # Excel refuses cells over 32,767 chars - raw_record JSON
+                    # can exceed that, and a hard failure there would lose the
+                    # whole export rather than one field.
+                    if isinstance(value, str) and len(value) > 32000:
+                        value = value[:32000] + "...[truncated]"
+                    cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                    cell.font = data_font
+                    cell.border = thin_border
+                    if row_idx % 2 == 0:
+                        cell.fill = alt_fill
+                    widths[col_idx - 1] = max(widths[col_idx - 1], min(len(str(value)) + 2, 60))
+        for col_idx, width in enumerate(widths, start=1):
+            ws.column_dimensions[get_column_letter(col_idx)].width = min(max(width, 12), 60)
+
+    wb = openpyxl.Workbook()
+    ws_data = wb.active
+    ws_data.title = "Listing Data"
+    data_columns: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in data_columns:
+                data_columns.append(key)
+    empty_message = unavailable_reason or "No records matched this metric under the current filters."
+    write_sheet(ws_data, rows, data_columns, [_metric_export_label(c) for c in data_columns], empty_message)
+
+    ws_metrics = wb.create_sheet(title="Metrics")
+    summary = _metric_export_summary(metric, rows, unavailable_reason)
+    write_sheet(ws_metrics, summary, ["metric", "value", "basis"], ["Metric", "Value", "Basis"], "No metrics to report.")
+
+    # Competitor view: the same rows pivoted by brand, so the export answers
+    # "how do we compare" and not only "what do we have". Whitespace analysis
+    # is a competitive question - a per-brand breakdown is the point, and it
+    # is derived from the sheet-1 rows so it always reconciles with them.
+    ws_competitors = wb.create_sheet(title="Competitors")
+    competitor_rows = _metric_export_competitors(rows)
+    write_sheet(
+        ws_competitors, competitor_rows,
+        ["brand", "listings", "share_pct", "states", "cities", "zips", "with_coordinates", "with_valid_zip"],
+        ["Brand", "Listings", "Share %", "States", "Cities", "ZIPs", "With Coordinates", "With Valid ZIP"],
+        "This metric's rows carry no brand dimension, so there is nothing to compare.")
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+def _metric_export_competitors(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Per-brand breakdown of the exported rows, biggest first.
+
+    Derived from the same rows as sheet 1 (not a second query), so the two
+    can never disagree. Returns [] when the rows carry no brand column -
+    better an explicit "nothing to compare" than a sheet of blanks.
+    """
+    if not rows or not any("brand" in row for row in rows):
+        return []
+    total = len(rows)
+    buckets: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        brand = str(row.get("brand") or "Unknown").strip() or "Unknown"
+        bucket = buckets.setdefault(brand, {
+            "brand": brand, "listings": 0,
+            "_states": set(), "_cities": set(), "_zips": set(),
+            "with_coordinates": 0, "with_valid_zip": 0,
+        })
+        bucket["listings"] += 1
+        for key, target in (("state_code", "_states"), ("city_name", "_cities"), ("zip_code", "_zips")):
+            value = row.get(key)
+            if value not in (None, ""):
+                bucket[target].add(str(value))
+        if row.get("has_valid_coordinates") is True or (
+            row.get("latitude") not in (None, "") and row.get("longitude") not in (None, "")
+        ):
+            bucket["with_coordinates"] += 1
+        if row.get("has_valid_zip") is True or (
+            "has_valid_zip" not in row and row.get("zip_code") not in (None, "")
+        ):
+            bucket["with_valid_zip"] += 1
+    out: list[dict[str, Any]] = []
+    for bucket in buckets.values():
+        out.append({
+            "brand": bucket["brand"],
+            "listings": bucket["listings"],
+            "share_pct": round(bucket["listings"] * 100 / total, 2) if total else 0.0,
+            "states": len(bucket["_states"]),
+            "cities": len(bucket["_cities"]),
+            "zips": len(bucket["_zips"]),
+            "with_coordinates": bucket["with_coordinates"],
+            "with_valid_zip": bucket["with_valid_zip"],
+        })
+    out.sort(key=lambda item: item["listings"], reverse=True)
+    return out
+
+
+def _metric_export_csv(rows: list[dict[str, Any]]) -> str:
+    """Render rows as CSV. Columns are the union of every row's keys, so a
+    value is never dropped just because the first row lacked that column."""
+    if not rows:
+        return ""
+    headers: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in headers:
+                headers.append(key)
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=headers, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({key: ("" if row.get(key) is None else row.get(key)) for key in headers})
+    return buffer.getvalue()
+
+
+def _metric_export_bundle(metric: str, rows: list[dict[str, Any]], unavailable_reason: str = "",
+                          applied_filters: dict[str, Any] | None = None) -> bytes:
+    """Package one metric export as a ZIP.
+
+    A ZIP rather than a bare .xlsx because a single click should hand over
+    everything needed to work with the number, in the form each consumer
+    wants it:
+      <metric>.xlsx  - the 2-sheet workbook (entities + the metrics over them)
+      listings.csv   - the same entity rows, normalized, for loading into
+                       anything that is not Excel
+      metrics.csv    - the metrics sheet as plain CSV
+      README.txt     - what the metric means, the filters that produced this
+                       file, the row count, and any truncation
+    Excel alone could not carry the normalized copy or the provenance note.
+    """
+    summary = _metric_export_summary(metric, rows, unavailable_reason)
+    readme_lines = [
+        f"Metric: {_metric_export_label(metric.replace('-', '_'))}",
+        f"Definition: {_METRIC_EXPORT_DEFINITIONS.get(metric, '(not documented)')}",
+        f"Generated (UTC): {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
+        f"Rows in this export: {len(rows):,}",
+        "",
+        "Filters applied:",
+    ]
+    filters = applied_filters or {}
+    if any(filters.values()):
+        for key, value in filters.items():
+            if value:
+                shown = ", ".join(value) if isinstance(value, list) else str(value)
+                readme_lines.append(f"  - {key}: {shown}")
+    else:
+        readme_lines.append("  - none (full population)")
+    if unavailable_reason:
+        readme_lines += ["", "IMPORTANT:", f"  {unavailable_reason}"]
+    readme_lines += [
+        "",
+        "Files:",
+        f"  {metric}.xlsx  - workbook: 'Listing Data' + 'Metrics'",
+        "  listings.csv    - the entity rows behind the number",
+        "  metrics.csv     - the arithmetic, computed from those same rows",
+        "  competitors.csv - per-brand breakdown (omitted when the rows carry no brand)",
+        "",
+        "Every figure on the Metrics sheet is computed from the rows in this",
+        "file, so the headline number can be recomputed by hand from them.",
+    ]
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
+        bundle.writestr(f"{metric}.xlsx", _metric_export_workbook(metric, rows, unavailable_reason))
+        bundle.writestr("listings.csv", _metric_export_csv(rows))
+        bundle.writestr("metrics.csv", _metric_export_csv(summary))
+        competitors = _metric_export_competitors(rows)
+        if competitors:
+            bundle.writestr("competitors.csv", _metric_export_csv(competitors))
+        bundle.writestr("README.txt", "\n".join(readme_lines))
+    return buffer.getvalue()
+
+
+def reporting_metric_export(params: dict[str, list[str]] | None = None) -> tuple[bytes, str]:
+    """Return (xlsx_bytes, filename) for one metric card's download.
+
+    Sheet 1 is the entity rows the number was computed from (listing / error
+    listing / ZIP / brand grain, whichever the metric is actually counted at).
+    Sheet 2 restates the metric's definition and the arithmetic over exactly
+    those rows, so the workbook explains and proves its own headline figure.
+
+    Raises ValueError for an unknown metric so the caller can answer 400
+    rather than silently handing back an empty or invented file (INV-15).
+    """
+    from google.cloud import bigquery
+
+    params = params or {}
+    metric = str(params.get("metric", [""])[0] or "").strip().lower()
+    if not metric:
+        raise ValueError("metric is required")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    filename = f"{metric}-{stamp}.zip"
+
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    # Both tables are queried by column name below, including columns added
+    # in later releases (has_ai_suggestion, custom_fields). Without these
+    # passes the deployed table can lack them and BigQuery answers "Name X
+    # not found" - the exact failure that took the quality tab down.
+    try:
+        _ensure_error_listings_table(client, project_id, dataset_id)
+        _ensure_listings_table(client, project_id, dataset_id)
+    except Exception as exc:
+        LOGGER.warning("export_schema_ensure_failed error=%s", exc)
+
+    # Filters accept a list, not a single value: selecting 20 states used to
+    # collapse to one scalar compared with `=`, so the export came back
+    # empty/unavailable instead of covering the selection. Repeated params
+    # (?state=TX&state=CA) and comma-separated ones both work.
+    def _multi(name: str, upper: bool = False) -> list[str]:
+        values: list[str] = []
+        for raw in params.get(name, []) or []:
+            for piece in str(raw or "").split(","):
+                cleaned = piece.strip()
+                if upper:
+                    cleaned = cleaned.upper()
+                if cleaned and cleaned not in values:
+                    values.append(cleaned)
+        return values
+
+    brands = _multi("brand")
+    states = _multi("state", upper=True)
+    start_date = str(params.get("start_date", [""])[0] or "").strip()
+    end_date = str(params.get("end_date", [""])[0] or "").strip()
+    query_params = [
+        bigquery.ArrayQueryParameter("brands", "STRING", brands),
+        bigquery.ArrayQueryParameter("states", "STRING", states),
+        bigquery.ScalarQueryParameter("start_date", "STRING", start_date),
+        bigquery.ScalarQueryParameter("end_date", "STRING", end_date),
+    ]
+
+    if metric in _FIX_EVENT_METRIC_TYPES:
+        fix_type = _FIX_EVENT_METRIC_TYPES[metric]
+        query = f"""
+        SELECT
+          qf.fix_id, qf.fix_type, qf.created_at AS fixed_at,
+          qf.listing_id, qf.event_id, qf.row_number,
+          qf.processed, qf.improved, qf.content_hash,
+          e.business_id,
+          COALESCE(b.name, e.business_id) AS brand,
+          e.validation_error_type, e.errors, e.raw_record
+        FROM `{project_id}.{dataset_id}.quality_fix_events` qf
+        LEFT JOIN `{project_id}.{dataset_id}.error_listings` e
+          ON e.event_id = qf.event_id AND e.row_number = qf.row_number
+        LEFT JOIN `{project_id}.{dataset_id}.businesses` b
+          ON b.business_id = e.business_id AND b.is_deleted IS NOT TRUE
+        WHERE UPPER(qf.fix_type) = '{fix_type}' AND qf.processed AND qf.improved
+          AND (ARRAY_LENGTH(@brands) = 0 OR COALESCE(b.name, e.business_id) IN UNNEST(@brands))
+          AND (@start_date = '' OR DATE(qf.created_at) >= SAFE_CAST(@start_date AS DATE))
+          AND (@end_date = '' OR DATE(qf.created_at) <= SAFE_CAST(@end_date AS DATE))
+        ORDER BY qf.created_at DESC
+        LIMIT {METRIC_EXPORT_ROW_LIMIT}
+        """
+    elif metric in _ERROR_METRIC_PREDICATES:
+        predicate = _ERROR_METRIC_PREDICATES[metric]
+        query = f"""
+        SELECT
+          e.event_id, e.row_number, e.business_id,
+          COALESCE(b.name, e.business_id) AS brand,
+          e.validation_error_type, e.errors, e.raw_record, e.country,
+          e.observed_at, e.template_id, e.ingestion_id, e.content_hash,
+          COALESCE(e.attempt_count, 0) AS enrichment_attempts,
+          e.is_ai_enriched AS fixed_with_ai,
+          e.has_ai_suggestion AS has_ai_suggestion
+        FROM `{project_id}.{dataset_id}.error_listings` e
+        LEFT JOIN `{project_id}.{dataset_id}.businesses` b
+          ON b.business_id = e.business_id AND b.is_deleted IS NOT TRUE
+        WHERE e.is_deleted IS NOT TRUE
+          AND ({predicate})
+          AND (ARRAY_LENGTH(@brands) = 0 OR COALESCE(b.name, e.business_id) IN UNNEST(@brands))
+          AND (@start_date = '' OR DATE(e.observed_at) >= SAFE_CAST(@start_date AS DATE))
+          AND (@end_date = '' OR DATE(e.observed_at) <= SAFE_CAST(@end_date AS DATE))
+        ORDER BY e.observed_at DESC
+        LIMIT {METRIC_EXPORT_ROW_LIMIT}
+        """
+    elif metric in _LISTING_METRIC_SLUGS:
+        stale_after_days = get_stale_after_days()
+        # Braces in the regexes are doubled: this is an f-string, and a bare
+        # {5} is consumed as a format field (the bug that once silently made
+        # ZIP completeness read 0%).
+        query = f"""
+        WITH base AS (
+          SELECT
+            l.listing_id, l.business_id,
+            COALESCE(b.name, l.business_id) AS brand,
+            l.name, l.address, l.city_name, l.state_code, l.zip_code,
+            l.country, l.latitude, l.longitude,
+            l.last_observed_at, l.enriched_at, l.ingestion_id, l.content_hash,
+            -- Source columns no typed field covers, preserved per row. A
+            -- listing export must carry them or it is not the full record.
+            l.custom_fields,
+            REGEXP_CONTAINS(TRIM(COALESCE(l.zip_code,'')), r'^[0-9]{{5}}$')
+              OR REGEXP_CONTAINS(UPPER(TRIM(COALESCE(l.zip_code,''))), r'^[A-Z0-9][A-Z0-9 -]{{2,9}}$') AS has_valid_zip,
+            (l.latitude IS NOT NULL AND l.longitude IS NOT NULL
+             AND l.latitude BETWEEN -90 AND 90 AND l.longitude BETWEEN -180 AND 180
+             AND NOT (l.latitude = 0 AND l.longitude = 0)) AS has_valid_coordinates,
+            l.last_observed_at < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {stale_after_days} DAY) AS is_stale,
+            COUNT(*) OVER (
+              PARTITION BY COALESCE(
+                NULLIF(TRIM(COALESCE(l.content_hash, '')), ''),
+                CONCAT(COALESCE(l.business_id,''), '|', LOWER(TRIM(COALESCE(l.address,''))), '|', COALESCE(l.zip_code,''))
+              )
+            ) AS duplicate_group_count
+          FROM `{project_id}.{dataset_id}.listings` l
+          LEFT JOIN `{project_id}.{dataset_id}.businesses` b
+            ON b.business_id = l.business_id AND b.is_deleted IS NOT TRUE
+          WHERE l.is_deleted IS NOT TRUE
+            AND (ARRAY_LENGTH(@brands) = 0 OR COALESCE(b.name, l.business_id) IN UNNEST(@brands))
+            AND (ARRAY_LENGTH(@states) = 0 OR UPPER(COALESCE(l.state_code,'')) IN UNNEST(@states))
+        )
+        SELECT *, duplicate_group_count > 1 AS is_duplicate
+        FROM base
+        ORDER BY last_observed_at DESC
+        LIMIT {METRIC_EXPORT_ROW_LIMIT}
+        """
+    elif metric in _LOCATION_VIEW_METRIC_SLUGS:
+        _, _, _, gold_dataset_id, _ = _medallion_settings()
+        gold_ref = f"{project_id}.{gold_dataset_id}"
+        query = f"""
+        SELECT
+          brand, name, address, city_name, county, state_code, state_name,
+          zip_code, country, phone_number, latitude, longitude,
+          coordinate_confidence, coordinate_source,
+          population, median_household_income, median_age, last_observed_at
+        FROM `{gold_ref}.vw_reporting_locations`
+        WHERE (ARRAY_LENGTH(@brands) = 0 OR brand IN UNNEST(@brands))
+          AND (ARRAY_LENGTH(@states) = 0 OR UPPER(COALESCE(state_code,'')) IN UNNEST(@states))
+        ORDER BY state_code, city_name, address
+        LIMIT {METRIC_EXPORT_ROW_LIMIT}
+        """
+    elif metric in _ZIP_METRIC_SLUGS:
+        _, _, _, gold_dataset_id, _ = _medallion_settings()
+        gold_ref = f"{project_id}.{gold_dataset_id}"
+        # One row per ZIP in the market universe, carrying the coverage flag
+        # the card counts. "Uncovered ZIPs" restricts to is_covered = FALSE;
+        # the covered-* cards restrict to TRUE; the universe cards export the
+        # lot so both sides of the ratio are visible.
+        if metric == "uncovered-zips":
+            coverage_filter = "WHERE NOT is_covered"
+        elif metric in {"covered-markets-zips", "covered-states", "covered-cities"}:
+            coverage_filter = "WHERE is_covered"
+        else:
+            coverage_filter = ""
+        query = f"""
+        WITH zips AS (
+          SELECT
+            zip_code,
+            ANY_VALUE(state_code) AS state_code,
+            ANY_VALUE(state_name) AS state_name,
+            ANY_VALUE(county) AS county,
+            ANY_VALUE(city_name) AS city_name,
+            ANY_VALUE(population) AS population,
+            ANY_VALUE(median_household_income) AS median_household_income,
+            ANY_VALUE(latitude) AS latitude,
+            ANY_VALUE(longitude) AS longitude,
+            SUM(CASE WHEN ARRAY_LENGTH(@brands) = 0 OR brand_name IN UNNEST(@brands) THEN COALESCE(location_count, 0) ELSE 0 END) AS location_count,
+            STRING_AGG(DISTINCT CASE WHEN COALESCE(location_count, 0) > 0 THEN brand_name END, '; ') AS brands_present
+          FROM `{gold_ref}.vw_reporting_gap_base`
+          WHERE (ARRAY_LENGTH(@states) = 0 OR UPPER(COALESCE(state_code,'')) IN UNNEST(@states))
+          GROUP BY zip_code
+        ),
+        flagged AS (
+          SELECT *, location_count > 0 AS is_covered FROM zips
+        )
+        -- is_covered must be computed in its own CTE: BigQuery cannot
+        -- reference a SELECT-list alias from the WHERE of the same query
+        -- ("Unrecognized name: is_covered").
+        SELECT * FROM flagged
+        {coverage_filter}
+        ORDER BY population DESC
+        LIMIT {METRIC_EXPORT_ROW_LIMIT}
+        """
+    elif metric in _BRAND_METRIC_SLUGS:
+        # "Active Brands" is counted over the brand registry, so the export
+        # is one row per brand with its listing footprint.
+        query = f"""
+        SELECT
+          b.business_id, b.name AS brand, b.slug, b.status,
+          b.created_at, b.updated_at, b.country_of_origin,
+          COUNT(l.listing_id) AS listing_count,
+          COUNT(DISTINCT l.zip_code) AS zip_count,
+          COUNT(DISTINCT l.state_code) AS state_count
+        FROM `{project_id}.{dataset_id}.businesses` b
+        LEFT JOIN `{project_id}.{dataset_id}.listings` l
+          ON l.business_id = b.business_id AND l.is_deleted IS NOT TRUE
+          AND (ARRAY_LENGTH(@states) = 0 OR UPPER(COALESCE(l.state_code,'')) IN UNNEST(@states))
+        WHERE b.is_deleted IS NOT TRUE AND COALESCE(b.status, 'active') = 'active'
+          AND (ARRAY_LENGTH(@brands) = 0 OR b.name IN UNNEST(@brands))
+        GROUP BY b.business_id, b.name, b.slug, b.status, b.created_at, b.updated_at, b.country_of_origin
+        ORDER BY listing_count DESC
+        LIMIT {METRIC_EXPORT_ROW_LIMIT}
+        """
+    else:
+        raise ValueError(f"unknown metric: {metric}")
+
+    # A missing table/view is an honest empty result (the warehouse layer has
+    # not been built yet), but the workbook must SAY so - an empty sheet that
+    # looks identical to a real zero is the same silent-zero trap that once
+    # made every coverage metric read 0%. Any other failure propagates to a
+    # 400 rather than being dressed up as "no records".
+    unavailable_reason = ""
+    try:
+        rows = list(client.query(query, job_config=bigquery.QueryJobConfig(query_parameters=query_params)).result())
+    except Exception as exc:
+        if getattr(exc, "code", None) == 404 or "not found" in str(exc).lower():
+            rows = []
+            unavailable_reason = (
+                "The warehouse table or view backing this metric does not exist yet, "
+                "so this export is empty because the data is unavailable - not because "
+                "the metric is genuinely zero."
+            )
+            LOGGER.warning("metric_export_source_missing metric=%s error=%s", metric, str(exc)[:200])
+        else:
+            raise
+
+    def scalar(value: Any) -> Any:
+        # Booleans pass through untouched: the metrics sheet detects flag
+        # columns by type to compute each rate, so stringifying them here
+        # would silently drop that arithmetic.
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, default=str)
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+        return value
+
+    export_rows = [{key: scalar(value) for key, value in dict(row).items()} for row in rows]
+    # Hitting the ceiling means the file is a partial answer. Saying so beats
+    # handing over a truncated sheet that looks complete.
+    if len(export_rows) >= METRIC_EXPORT_ROW_LIMIT and not unavailable_reason:
+        unavailable_reason = (
+            f"This export reached the {METRIC_EXPORT_ROW_LIMIT:,}-row ceiling, so it is a "
+            "partial result. Narrow the filters (fewer states, a shorter date range) to "
+            "get a complete file."
+        )
+    return _metric_export_bundle(metric, export_rows, unavailable_reason,
+                                {"brand": brands, "state": states,
+                                 "start_date": start_date, "end_date": end_date}), filename
+
+
+def reporting_timeseries(params: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    """Return timeseries counts for the reporting Trends Over Time chart.
+
+    Per RPT-05, the legend is never brands - it's the metric dimension
+    itself (Locations / Errors / AI Fixed / Manual Fixed), aggregated across
+    whichever brands are selected in the sidebar filter (a filter, not a
+    grouping key). Always returns all four series regardless of the old
+    single-`metric` selector, which used to pick exactly one dimension and
+    then (incorrectly) split *that* into one line per brand.
+
+    Query params:
+      brands   – comma-separated brand names (primary + competitors) - a filter, not a series split
+      period   – 1D | 1W | 1M | 1Q | 1Y  (default 1M)
+    """
+    from google.cloud import bigquery
+
+    params = params or {}
+    period = str(params.get("period", ["1M"])[0] or "1M").upper().strip()
+    brands_raw = str(params.get("brands", [""])[0] or "").strip()
+    brands = [b.strip() for b in brands_raw.split(",") if b.strip()] if brands_raw else []
+
+    # Never finer than a day (explicit ask: "granularity till day level
+    # only"), rolling up to week/month/quarter as the period widens.
+    PERIOD_CONFIG: dict[str, tuple[str, str]] = {
+        "1D": ("DAY",   "1 DAY"),
+        "1W": ("DAY",   "7 DAY"),
+        "1M": ("DAY",   "30 DAY"),
+        "1Q": ("WEEK",  "90 DAY"),
+        "1Y": ("MONTH", "365 DAY"),
+    }
+    granularity, interval = PERIOD_CONFIG.get(period, ("DAY", "30 DAY"))
+    force_refresh = str(params.get("refresh", [""])[0] or "").lower() in {"1", "true", "yes"}
+    timeseries_cache_key = f"reporting_timeseries:v2:{period}:{','.join(sorted(brands))}"
+    if not force_refresh:
+        cached_series = get_cached_query(timeseries_cache_key)
+        if cached_series:
+            cached_series["timeseries_cache"] = "sqlite"
+            return cached_series
+
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ArrayQueryParameter("brands", "STRING", brands)]
+    ) if brands else bigquery.QueryJobConfig()
+    brand_filter_loc = "AND COALESCE(b.name, l.business_id) IN UNNEST(@brands)" if brands else ""
+    brand_filter_err = "AND COALESCE(b.name, e.business_id) IN UNNEST(@brands)" if brands else ""
+    # quality_fix_events carries no business_id of its own - only
+    # event_id/row_number, tying back to the error_listings row it fixed.
+    brand_filter_fix = "AND COALESCE(b.name, e.business_id) IN UNNEST(@brands)" if brands else ""
+
+    def _collect(query: str, label: str) -> dict[str, Any] | None:
+        try:
+            rows = list(client.query(query, job_config=job_config).result())
+            points = []
+            for row in rows:
+                ts = row.get("bucket")
+                date_str = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+                points.append({"date": date_str, "count": int(row.get("cnt", 0) or 0)})
+            return {"label": label, "points": points}
+        except Exception as exc:
+            LOGGER.warning("timeseries_query_failed metric=%s error=%s", label, exc)
+            return None
+
+    # listings has no brand_name column of its own (only business_id) - brand
+    # comes from a join to businesses, same pattern the errors/fixes queries
+    # below already use correctly.
+    locations_series = _collect(f"""
+        SELECT TIMESTAMP_TRUNC(l.last_observed_at, {granularity}) AS bucket, COUNT(*) AS cnt
+        FROM `{project_id}.{dataset_id}.listings` l
+        LEFT JOIN `{project_id}.{dataset_id}.businesses` b
+          ON b.business_id = l.business_id AND b.is_deleted IS NOT TRUE
+        WHERE l.is_deleted IS NOT TRUE
+          AND l.last_observed_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {interval})
+          {brand_filter_loc}
+        GROUP BY bucket ORDER BY bucket
+    """, "Locations")
+    errors_series = _collect(f"""
+        SELECT TIMESTAMP_TRUNC(e.observed_at, {granularity}) AS bucket, COUNT(*) AS cnt
+        FROM `{project_id}.{dataset_id}.error_listings` e
+        LEFT JOIN `{project_id}.{dataset_id}.businesses` b
+          ON b.business_id = e.business_id AND b.is_deleted IS NOT TRUE
+        WHERE e.is_deleted IS NOT TRUE
+          AND e.observed_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {interval})
+          {brand_filter_err}
+        GROUP BY bucket ORDER BY bucket
+    """, "Errors")
+    # quality_fix_events has no business_id column - join through
+    # error_listings (event_id + row_number) to reach the brand, same as
+    # _refresh_quality_fix_metrics_from_bigquery()'s own join pattern.
+    ai_fixed_series = _collect(f"""
+        SELECT TIMESTAMP_TRUNC(qf.created_at, {granularity}) AS bucket, COUNT(*) AS cnt
+        FROM `{project_id}.{dataset_id}.quality_fix_events` qf
+        LEFT JOIN `{project_id}.{dataset_id}.error_listings` e
+          ON e.event_id = qf.event_id AND e.row_number = qf.row_number
+        LEFT JOIN `{project_id}.{dataset_id}.businesses` b
+          ON b.business_id = e.business_id AND b.is_deleted IS NOT TRUE
+        WHERE qf.created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {interval})
+          AND qf.fix_type = 'AI' AND qf.processed AND qf.improved
+          {brand_filter_fix}
+        GROUP BY bucket ORDER BY bucket
+    """, "AI Fixed")
+    manual_fixed_series = _collect(f"""
+        SELECT TIMESTAMP_TRUNC(qf.created_at, {granularity}) AS bucket, COUNT(*) AS cnt
+        FROM `{project_id}.{dataset_id}.quality_fix_events` qf
+        LEFT JOIN `{project_id}.{dataset_id}.error_listings` e
+          ON e.event_id = qf.event_id AND e.row_number = qf.row_number
+        LEFT JOIN `{project_id}.{dataset_id}.businesses` b
+          ON b.business_id = e.business_id AND b.is_deleted IS NOT TRUE
+        WHERE qf.created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {interval})
+          AND qf.fix_type = 'MANUAL' AND qf.processed AND qf.improved
+          {brand_filter_fix}
+        GROUP BY bucket ORDER BY bucket
+    """, "Manual Fixed")
+
+    series = [s for s in (locations_series, errors_series, ai_fixed_series, manual_fixed_series) if s is not None]
+    payload = {"period": period, "granularity": granularity, "series": series, "timeseries_cache": "live"}
+    if series:
+        set_cached_query(timeseries_cache_key, payload)
+    return payload
+
+
 def _fetch_rejected_by_keys(claimed_ids: list[str], *, client: Any = None) -> list[dict[str, Any]]:
+
     if not claimed_ids:
         return []
     from google.cloud import bigquery
@@ -4988,7 +6537,7 @@ def _fetch_rejected_by_keys(claimed_ids: list[str], *, client: Any = None) -> li
         return []
 
     where_clause = " OR ".join(conditions)
-    query = f"""SELECT event_id, business_id, source_type_id, row_number, errors, raw_record, template_id, mapping_id, is_ai_enriched
+    query = f"""SELECT event_id, business_id, source_type_id, row_number, errors, raw_record, template_id, mapping_id, is_ai_enriched, attempt_count, has_ai_suggestion
     FROM `{project_id}.{dataset_id}.error_listings`
     WHERE is_deleted IS NOT TRUE AND ({where_clause})"""
 
@@ -5171,6 +6720,15 @@ def start_auto_repair() -> dict[str, Any]:
                 set_auto_repair_stats(base_fixed, base_processed, total, base_manual)
                 while offset < total:
                     _enrichment_checkpoint()
+                    # Yield to whatever the user is actively doing (parsing,
+                    # saving, reviewing) rather than competing with it for
+                    # the same BigQuery client/SQLite connections - this is
+                    # explicitly best-effort background work, so it can
+                    # always afford to wait a little longer.
+                    idle_seconds = wall_clock_time() - LAST_FOREGROUND_ACTIVITY_AT
+                    if idle_seconds < FOREGROUND_IDLE_GRACE_SECONDS:
+                        sleep(FOREGROUND_IDLE_GRACE_SECONDS - idle_seconds)
+                        _enrichment_checkpoint()
                     batch = auto_repair_error_batch(10, client=client)
                     if not batch["attempted"]:
                         break
@@ -5203,6 +6761,18 @@ def start_auto_repair() -> dict[str, Any]:
 
 
 def reprocess_rejected(data: dict[str, Any], *, client: Any = None) -> dict[str, Any]:
+    def normalize_reprocess_row(row: Any) -> dict[str, Any]:
+        if isinstance(row, dict):
+            return row
+        if isinstance(row, str):
+            try:
+                decoded = json.loads(row)
+            except ValueError as exc:
+                raise ValueError("Row data is not valid JSON. Please review the edited record values and try again.") from exc
+            if isinstance(decoded, dict):
+                return decoded
+        raise ValueError("Row data must be a field/value object. Please reopen the record, update the highlighted fields, and retry.")
+
     event_id = str(data.get("event_id", "")).strip()
     mapper = data.get("mapper")
     if not event_id or not isinstance(mapper, dict):
@@ -5212,10 +6782,10 @@ def reprocess_rejected(data: dict[str, Any], *, client: Any = None) -> dict[str,
         client = _bigquery_client(project_id, credentials_json)
     records = list_rejected(event_id, client=client)["records"]
     if data.get("rows") and isinstance(data["rows"], list):
-        rows = data["rows"]
+        rows = [normalize_reprocess_row(row) for row in data["rows"]]
     else:
         selected_numbers = {int(value) for value in data.get("row_numbers", [])}
-        rows = [record["raw_record"] for record in records if not selected_numbers or record["row_number"] in selected_numbers]
+        rows = [normalize_reprocess_row(record["raw_record"]) for record in records if not selected_numbers or record["row_number"] in selected_numbers]
     if not rows:
         raise ValueError("No rejected records were found for reprocessing")
 
@@ -5226,16 +6796,25 @@ def reprocess_rejected(data: dict[str, Any], *, client: Any = None) -> dict[str,
             mapper["business_id"] = first_rec["business_id"]
         if not mapper.get("source_type_id") and first_rec.get("source_type_id"):
             mapper["source_type_id"] = first_rec["source_type_id"]
-        if not mapper.get("brand") and mapper.get("business_id"):
+        # Brand is always resolved from business_id via the businesses
+        # table, never trusted from the client submission - a record's
+        # brand is fixed by its event_id -> business_id relation and can't
+        # be changed by sending a different brand string in the edit
+        # payload. Only reassigning the record to a different business_id
+        # (a real business) can change what brand it maps to.
+        if mapper.get("business_id"):
             try:
                 for b in fetch_mirror_businesses():
                     if b.get("business_id") == mapper["business_id"]:
-                        mapper["brand"] = b.get("name")
+                        mapper["brand"] = b.get("name") or mapper.get("brand")
                         break
             except Exception:
                 pass
 
-    source_fields = sorted({path for path in mapper.get("fields", {}).values() if path})
+    mapper_fields = mapper.get("fields")
+    if not isinstance(mapper_fields, dict):
+        mapper_fields = {}
+    source_fields = sorted({path for path in mapper_fields.values() if path})
     if not source_fields and rows and isinstance(rows[0], dict):
         source_fields = list(rows[0].keys())
 
@@ -5253,6 +6832,10 @@ def reprocess_rejected(data: dict[str, Any], *, client: Any = None) -> dict[str,
     # vanish from the review queue).
     cleanup_cutoff = utc_now_iso()
     skip_refresh = bool(data.get("skip_cache_invalidation") or data.get("is_ai_enriched", False))
+    # Every row reaching reprocess_rejected() is, by definition, already a
+    # prior failure - if it fails validation again, that's the next attempt
+    # on top of whatever this record has already been through.
+    prior_attempt_count = max((int(rec.get("attempt_count") or 0) for rec in records), default=0)
     result = save_mapper({
         "mapper": mapper,
         "rows": rows,
@@ -5261,6 +6844,7 @@ def reprocess_rejected(data: dict[str, Any], *, client: Any = None) -> dict[str,
         "event_id": event_id,
         "row_offset": (reprocessed_row_numbers[0] - 1) if len(reprocessed_row_numbers) == 1 else 0,
         "is_ai_enriched": bool(data.get("is_ai_enriched", False)),
+        "attempt_count": prior_attempt_count + 1,
     }, client=client, skip_cache_invalidation=skip_refresh)
 
     # Handle soft-deleting old error records:
@@ -5334,6 +6918,66 @@ def reprocess_rejected(data: dict[str, Any], *, client: Any = None) -> dict[str,
     except Exception as exc:
         LOGGER.warning("error_count_refresh_after_reprocess_failed event_id=%s error=%s", event_id, exc)
 
+    if result.get("mapped_rows", 0) == 0 and rows:
+        # Still invalid after a user-submitted fix - rather than a blanket
+        # "review required fields" message with nothing actionable, run the
+        # same enrichment pass the background auto-repair worker uses and
+        # hand back whatever concrete values it could infer, so the UI can
+        # suggest something instead of repeating the generic error.
+        try:
+            from whitespace_tool.geo_enrichment import enrich_raw_listing_row, detect_hierarchy_conflict, find_nearest_worldwide_city, is_us_land_coordinate
+            from whitespace_tool.sqlite_cache import get_db_connection
+            from whitespace_tool.normalization import optional_float
+            first_row = rows[0]
+            if isinstance(first_row, dict):
+                with get_db_connection() as conn:
+                    suggestion = enrich_raw_listing_row(first_row, conn)
+                    raw_lat = optional_float(first_row.get("latitude") or first_row.get("Latitude"))
+                    raw_lon = optional_float(first_row.get("longitude") or first_row.get("Longitude"))
+                    raw_zip = first_row.get("postal_code") or first_row.get("zip") or first_row.get("Zip") or first_row.get("PostalCode")
+                    raw_country = first_row.get("country") or first_row.get("Country")
+                    conflict = detect_hierarchy_conflict(raw_zip, raw_country, raw_lat, raw_lon, conn)
+                    non_us_match = None
+                    if raw_lat is not None and raw_lon is not None and not is_us_land_coordinate(raw_lat, raw_lon):
+                        # Try the US reading first (already done above via
+                        # enrich_raw_listing_row/detect_hierarchy_conflict) -
+                        # only reached when the coordinates are genuinely
+                        # outside US bounds. Look up what's actually there
+                        # worldwide instead of just rejecting the record.
+                        non_us_match = find_nearest_worldwide_city(raw_lat, raw_lon, conn)
+                changed_suggestion = {
+                    key: value for key, value in suggestion.items()
+                    if key in ("city", "state", "postal_code", "zip", "latitude", "longitude", "country")
+                    and value not in (None, "") and str(value) != str(first_row.get(key, ""))
+                }
+                if changed_suggestion:
+                    result["suggested_fix"] = changed_suggestion
+                if conflict:
+                    # A genuine ZIP-vs-coordinate disagreement is a different
+                    # situation from "one value is simply missing" - offer
+                    # both readings explicitly instead of silently picking
+                    # one, so the user (or the AI-resolve flow) chooses which
+                    # is right rather than the system guessing.
+                    result["hierarchy_conflict"] = conflict
+                if non_us_match:
+                    # Offered as an explicit "accept this as real non-US
+                    # data" choice (the frontend's Save as Non-US Data
+                    # button), not auto-applied - country gets set from
+                    # this match, which is what lets
+                    # validate_normalized_location()'s US-boundary check
+                    # exempt the record on the next validation pass instead
+                    # of asking the same question again.
+                    result["non_us_suggestion"] = {
+                        "city": non_us_match.get("city") or non_us_match.get("town"),
+                        "state": non_us_match.get("state_code") or non_us_match.get("state_name"),
+                        "country": non_us_match.get("country_name") or non_us_match.get("country_code"),
+                        "country_code": non_us_match.get("country_code"),
+                        "zip_code": non_us_match.get("zip_code"),
+                        "distance_km": non_us_match.get("distance_km"),
+                    }
+        except Exception as exc:
+            LOGGER.warning("reprocess_suggestion_failed event_id=%s error=%s", event_id, exc)
+
     return result
 
 
@@ -5344,6 +6988,41 @@ def _safe_json_dumps(value: Any) -> str:
         return json.dumps(str(value))
 
 
+def _row_has_ai_suggestion(row: Any) -> bool:
+    """Would enrichment be able to propose anything concrete for this row?
+
+    Deliberately cheap: one indexed SQLite lookup against already-cached
+    ZIP/city reference data (the same call the auto-repair worker makes),
+    never a BigQuery round trip or a network call - this runs once per
+    rejected row at write time, so it has to stay well clear of the
+    memory/latency budget in INV-12. Any failure answers "no suggestion"
+    rather than blocking a save.
+    """
+    if not isinstance(row, dict):
+        return False
+    try:
+        from whitespace_tool.geo_enrichment import enrich_raw_listing_row
+        from whitespace_tool.sqlite_cache import get_db_connection
+
+        with get_db_connection() as conn:
+            suggestion = enrich_raw_listing_row(row, conn)
+        if not isinstance(suggestion, dict):
+            return False
+        # Only counts if enrichment actually produced a *different* value
+        # for a field that matters - echoing back what the row already has
+        # is not a suggestion.
+        for key in ("city", "state", "postal_code", "zip", "latitude", "longitude", "country"):
+            value = suggestion.get(key)
+            if value in (None, ""):
+                continue
+            if str(value) != str(row.get(key, "")):
+                return True
+        return False
+    except Exception as exc:
+        LOGGER.warning("ai_suggestion_probe_failed error=%s", exc)
+        return False
+
+
 def _row_error_listing(
     event_id: str,
     business_id: str,
@@ -5352,6 +7031,8 @@ def _row_error_listing(
     row: Any,
     row_errors: list[dict[str, Any]],
     observed_at: str,
+    attempt_count: int = 0,
+    has_ai_suggestion: bool | None = None,
 ) -> dict[str, Any]:
     meta = row.get("__meta", {}) if isinstance(row, dict) and isinstance(row.get("__meta"), dict) else {}
     first_error = row_errors[0] if row_errors else {}
@@ -5372,8 +7053,18 @@ def _row_error_listing(
         "country": country,
         "is_sample_data": bool(meta.get("is_sample_data")),
         "sample_batch_id": meta.get("sample_batch_id"),
+        # Whether an AI suggestion existed for this row when it entered
+        # review. Computed once here rather than re-probed for the whole
+        # queue on every reporting load (RPT-08's AI-vs-manual pending
+        # split reads this straight off the table).
+        "has_ai_suggestion": _row_has_ai_suggestion(row) if has_ai_suggestion is None else bool(has_ai_suggestion),
         "is_deleted": False,
         "deleted_on": None,
+        # How many times this row has been submitted for reprocessing and
+        # failed again - 0 on a fresh initial-parse failure, incremented by
+        # reprocess_rejected() each time a user-submitted fix still fails.
+        # Drives the "Review Again" counter in the edit dialog.
+        "attempt_count": attempt_count,
     }
 
 
@@ -5445,6 +7136,20 @@ def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_inval
     source_fields = payload.get("source_fields", [])
     if not isinstance(mapper, dict) or not isinstance(rows, list) or not isinstance(source_fields, list):
         raise ValueError("mapper, rows, and source_fields are required")
+    # A malformed row shape is a record to review, not a reason to abandon
+    # the batch: the documented data-flow contract is "valid rows are stored;
+    # invalid rows are routed to Review Error Listings without blocking valid
+    # rows", and the row loop below already catches a non-dict row and routes
+    # it there ("Row must be an object with named fields"). This guard used to
+    # raise on the FIRST such row, so one bad record aborted the entire save
+    # and the valid rows alongside it were silently lost.
+    #
+    # It still fires when EVERY row is malformed, because that is not a data
+    # problem to review - it means the caller sent the wrong shape entirely
+    # (the review-repair path re-submitting a non-editable record), and there
+    # would be nothing to save either way.
+    if rows and all(not isinstance(row, dict) for row in rows):
+        raise ValueError("This submission is not editable field data. Please reopen the record and retry.")
     LOGGER.info(
         "save_started brand=%r source_name=%r source_type=%r rows=%d source_fields=%d",
         mapper.get("brand", ""),
@@ -5460,6 +7165,26 @@ def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_inval
 
     source_name = str(mapper["source_name"]).strip()
     source_type_id = str(mapper.get("source_type_id", "")).strip() or ensure_source_type(str(mapper.get("source_type", "unknown")))
+    try:
+        # source_fields came from the fixed-size discovery sample (parse
+        # only inspects the first MAPPER_SAMPLE_ROWS records - a documented
+        # contract, not something to vary here). A full/batch save sees
+        # real rows beyond that sample; if any carry a field discovery
+        # never saw, that's exactly the "unknown source fields" failure
+        # mode reported by users - record it as a learning signal for a
+        # future adaptive sample size, without changing today's behavior.
+        full_fields = set(collect_fields(rows)) if rows else set()
+        missed_fields = full_fields - set(source_fields)
+        if missed_fields:
+            record_field_discovery_gap(source_type_id, len(source_fields), len(full_fields), sorted(missed_fields))
+    except Exception as exc:
+        LOGGER.warning("field_discovery_gap_tracking_failed error=%s", exc)
+    try:
+        confidence_events = payload.get("mapping_confidence_events")
+        if isinstance(confidence_events, list) and confidence_events:
+            record_mapping_confidence_events(confidence_events)
+    except Exception as exc:
+        LOGGER.warning("mapping_confidence_tracking_failed error=%s", exc)
     try:
         field_definitions = field_catalog()
     except Exception as exc:
@@ -5482,6 +7207,7 @@ def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_inval
     mapper["source_type_id"] = source_type_id
     locations = []
     error_listings = []
+    incoming_attempt_count = int(payload.get("attempt_count", 0) or 0)
     for index, row in enumerate(rows):
         source_index = row_offset + index
         if sample_meta.get("is_sample_data") and isinstance(row, dict):
@@ -5532,7 +7258,7 @@ def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_inval
                 "value": str(exc),
             })
         if row_errors:
-            error_listings.append(_row_error_listing(event_id, business_id, source_type_id, source_index, row, row_errors, observed_at))
+            error_listings.append(_row_error_listing(event_id, business_id, source_type_id, source_index, row, row_errors, observed_at, attempt_count=incoming_attempt_count))
         elif location is not None:
             locations.append(location)
 
@@ -5588,7 +7314,15 @@ def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_inval
         len(mapper["fields"]),
         duplicate_listings_skipped,
     )
-    return {"event_id": event_id, "mapper_id": mapper_id, "total_rows": len(rows), "mapped_rows": len(locations), "error_listings": len(error_listings), "field_count": len(mapper["fields"]), "dataset": f"{project_id}.{dataset_id}", "row_offset": row_offset, "template_saved": save_template, "duplicate_listings_skipped": duplicate_listings_skipped}
+    try:
+        record_save_event(
+            event_id=event_id, brand=str(mapper.get("brand") or ""), total_rows=len(rows),
+            mapped_rows=len(locations), error_listings=len(error_listings),
+            duplicate_listings_skipped=duplicate_listings_skipped,
+        )
+    except Exception as exc:
+        LOGGER.warning("save_event_record_failed event_id=%s error=%s", event_id, exc)
+    return {"event_id": event_id, "mapper_id": mapper_id, "total_rows": len(rows), "mapped_rows": len(locations), "error_listings": len(error_listings), "field_count": len(mapper["fields"]), "dataset": f"{project_id}.{dataset_id}", "row_offset": row_offset, "template_saved": save_template, "duplicate_listings_skipped": duplicate_listings_skipped, "attempt_count": incoming_attempt_count}
 
 
 def clear_saved_data() -> dict[str, Any]:
@@ -5598,6 +7332,24 @@ def clear_saved_data() -> dict[str, Any]:
     truncated = clear_result["truncated_tables"]
     ZIP_REFERENCE_CACHE.pop((project_id, dataset_id), None)
     invalidate_cache()
+    # invalidate_cache() deliberately spares reporting_quality:* keys (they
+    # self-refresh on read), but clearing changes the underlying population,
+    # so those must go too.
+    invalidate_quality_cache()
+    # Rebuild silver/gold and re-sync the SQLite mirror against whatever data
+    # remains - reporting reads the mirror before BigQuery, so without this it
+    # keeps serving rows that were just cleared. force_mirror because an empty
+    # result here is the correct new truth, not a transient failure.
+    try:
+        _invoke_silver_layer(low_priority=True)
+        _rebuild_gold_and_mirror(force_mirror=True)
+        # The AI/manual fix counters are a persisted SQLite tally, not a
+        # derived read - without a forced recount they keep displaying fixes
+        # for rows that no longer exist. RULE: no metric anywhere in the app
+        # may read stale after a clear.
+        _schedule_quality_fix_metrics_refresh(force=True)
+    except Exception as mirror_exc:
+        LOGGER.warning("mirror_resync_after_clear_failed error=%s", mirror_exc)
     try:
         remaining_errors = refresh_error_count("")
     except Exception as exc:
@@ -5806,6 +7558,28 @@ def make_handler(ui_dir: Path):
                     LOGGER.warning("reporting_quality_request_failed error=%s", exc)
                     _json_response(self, 400, {"error": "Quality metrics are being prepared. Please refresh shortly."})
                 return
+            if self.path.startswith("/api/reporting/timeseries"):
+                try:
+                    _json_response(self, 200, reporting_timeseries(parse_qs(urlsplit(self.path).query)))
+                except Exception as exc:
+                    LOGGER.warning("reporting_timeseries_failed error=%s", exc)
+                    _json_response(self, 400, {"error": "Timeseries data is being prepared. Please refresh shortly."})
+                return
+            if self.path.startswith("/api/reporting/metric-export"):
+                try:
+                    body, filename = reporting_metric_export(parse_qs(urlsplit(self.path).query))
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/zip")
+                    self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except ValueError as exc:
+                    _json_response(self, 400, {"error": str(exc)})
+                except Exception as exc:
+                    LOGGER.exception("reporting_metric_export_failed error=%s", exc)
+                    _json_response(self, 400, {"error": "Could not build this export. Please retry shortly."})
+                return
             if self.path.startswith("/api/reporting/export-excel"):
                 try:
                     params = parse_qs(urlsplit(self.path).query)
@@ -5844,6 +7618,24 @@ def make_handler(ui_dir: Path):
                 city = params.get("city", [""])[0]
                 try:
                     _json_response(self, 200, search_zips(q, state, county, city))
+                except Exception as exc:
+                    _json_response(self, 400, {"error": str(exc)})
+                return
+            if self.path.startswith("/api/jobs/recent"):
+                params = parse_qs(urlsplit(self.path).query)
+                limit = int(params.get("limit", ["20"])[0] or 20)
+                offset = int(params.get("offset", ["0"])[0] or 0)
+                try:
+                    _json_response(self, 200, {
+                        "jobs": get_recent_save_events(limit, offset),
+                        "total": count_save_events(),
+                    })
+                except Exception as exc:
+                    _json_response(self, 400, {"error": str(exc)})
+                return
+            if self.path == "/api/settings":
+                try:
+                    _json_response(self, 200, {"stale_after_days": get_stale_after_days()})
                 except Exception as exc:
                     _json_response(self, 400, {"error": str(exc)})
                 return
@@ -5888,9 +7680,15 @@ def make_handler(ui_dir: Path):
             super().do_GET()
 
         def do_POST(self) -> None:
-            if self.path not in {"/api/login", "/api/preview", "/api/source-url", "/api/sheets", "/api/save", "/api/clear", "/api/master-delete", "/api/brands", "/api/brands/update", "/api/brands/merge", "/api/learning", "/api/reprocess", "/api/review/auto-repair", "/api/field-alias", "/api/custom-field", "/api/custom-field/delete", "/api/templates/save", "/api/silver/enrich", "/api/reporting/refresh", "/api/enrichment/stop", "/api/sample/load", "/api/sample/clear"}:
+            if self.path not in {"/api/login", "/api/preview", "/api/source-url", "/api/sheets", "/api/save", "/api/clear", "/api/master-delete", "/api/brands", "/api/brands/update", "/api/brands/merge", "/api/learning", "/api/reprocess", "/api/review/auto-repair", "/api/field-alias", "/api/custom-field", "/api/custom-field/delete", "/api/templates/save", "/api/silver/enrich", "/api/reporting/refresh", "/api/enrichment/stop", "/api/sample/load", "/api/sample/clear", "/api/settings"}:
                 _json_response(self, 404, {"error": "Not found"})
                 return
+            if self.path not in {"/api/review/auto-repair", "/api/enrichment/stop"}:
+                # Real user action, not the auto-repair worker's own
+                # start/stop calls - marks the app "busy" so the background
+                # loop yields instead of competing for the same resources.
+                global LAST_FOREGROUND_ACTIVITY_AT
+                LAST_FOREGROUND_ACTIVITY_AT = wall_clock_time()
             request_id = uuid4().hex
             try:
                 length = int(self.headers.get("content-length", "0"))
@@ -5944,6 +7742,22 @@ def make_handler(ui_dir: Path):
                     _json_response(self, 200, load_sample_dataset(bool(payload.get("reset"))))
                 elif self.path == "/api/sample/clear":
                     _json_response(self, 200, clear_sample_dataset())
+                elif self.path == "/api/settings":
+                    raw_days = payload.get("stale_after_days")
+                    try:
+                        days = int(raw_days)
+                    except (TypeError, ValueError):
+                        raise ValueError("stale_after_days must be a whole number of days.")
+                    if not 1 <= days <= 3650:
+                        raise ValueError("stale_after_days must be between 1 and 3650 days.")
+                    set_app_setting("stale_after_days", str(days))
+                    # The stale count is baked into every cached quality
+                    # payload, so they have to be recomputed against the new
+                    # threshold rather than served from the old snapshot -
+                    # and invalidate_cache() deliberately spares those keys,
+                    # so clear them explicitly.
+                    invalidate_quality_cache()
+                    _json_response(self, 200, {"stale_after_days": days})
                 else:
                     _json_response(self, 200, preview_source(payload))
             except Exception as exc:

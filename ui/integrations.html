@@ -38,6 +38,11 @@
   </script>
   <script src="vendor/leaflet/leaflet.js"></script>
   <script src="vendor/topojson/topojson-client.min.js"></script>
+  <!-- Vendored locally (same pattern as leaflet/topojson) rather than a CDN,
+       so charting works offline and adds no third-party runtime dependency.
+       Loaded inside the AMD-define guard above because d3's UMD build would
+       otherwise register with Monaco's AMD loader instead of window.d3. -->
+  <script src="vendor/d3/d3.min.js"></script>
   <script>
     window.define = window.__amdDefineBackup;
     delete window.__amdDefineBackup;
@@ -94,7 +99,22 @@
 
     .app-title { grid-area: title; min-width: 0; }
     header .top-tabs { grid-area: tabs; justify-self: start; margin-left: clamp(8px, 1.6vw, 28px); }
-    header .header-actions { justify-self: end; min-width: 0; flex-wrap: nowrap; justify-content: flex-end; }
+    /* header-data-actions + header-account-actions together have a fixed
+       minimum content width (~600px) that doesn't always fit next to the
+       title/tabs columns above the 900px block-layout breakpoint below.
+       Right-anchored (justify-self: end) with no room to shrink, the
+       overflow used to bleed left and paint over the nav tabs.
+       overflow-x: auto alone (a prior attempt) only swapped that for a
+       worse failure: flex-end justification scrolls an overflowing flex
+       line to show its END by default, silently clipping the START
+       (header-data-actions's own left edge) with no visible scrollbar to
+       reveal it was ever cut off. flex-wrap: wrap is the actual fix - the
+       smaller header-account-actions group (Log out / How this works)
+       drops to its own line first, freeing enough width for
+       header-data-actions to render in full on the first line untouched;
+       overflow-x/max-width stay as a last-resort safety net for the
+       genuinely-narrow case that also wraps. */
+    header .header-actions { justify-self: end; min-width: 0; max-width: 100%; overflow-x: auto; flex-wrap: wrap; justify-content: flex-end; row-gap: 8px; }
 
     .top-tabs {
       display: flex;
@@ -154,13 +174,28 @@
     .header-data-actions { justify-self: end; display: grid; grid-template-columns: 132px 148px 158px; grid-template-areas: "sample reset zipstatus" "sample restart zipsync"; align-items: stretch; gap: 5px 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--navy-soft); max-width: 100%; }
     .header-data-actions #resetMappingBtn { grid-area: reset; }
     .header-data-actions #restartMappingBtn { grid-area: restart; }
-    .header-data-actions #loadSampleDatasetHeaderBtn { grid-area: sample; }
+    /* Reset Fields Mapping only shows on the Mapper tab (MAP-05) - hiding it
+       with display:none still leaves its named grid area reserved (an
+       explicit grid-template-areas slot isn't removed just because nothing
+       fills it), leaving a visibly empty, "orphaned" gap on every other
+       tab. Outside Mapper, drop that slot from the template entirely and
+       let Restart Mapping span the full second column instead. */
+    .header-data-actions.reset-mapping-hidden { grid-template-areas: "sample restart zipstatus" "sample restart zipsync"; }
+    .header-data-actions .sample-dataset-stack { grid-area: sample; display: flex; flex-direction: column; gap: 5px; }
     .header-data-actions .header-zip-status { display: contents; }
+    #loadSampleDatasetHeaderBtn.sample-state-idle { border-color: #d97706; color: #b45309; background: #fffbeb; }
+    #loadSampleDatasetHeaderBtn.sample-state-idle:hover { background: #fef3c7; border-color: #b45309; }
+    #loadSampleDatasetHeaderBtn.sample-state-loading { border-color: #ca8a04; color: #854d0e; background: #fef9c3; }
+    #loadSampleDatasetHeaderBtn.sample-state-ready { border-color: #15803d; color: #15803d; background: #f0fdf4; }
+    .header-data-actions #clearSampleDatasetLink.sample-load-link.danger { min-height: 34px; padding: 6px 12px; font-size: 12px; }
     .header-data-actions #headerReadinessStatus { grid-area: zipstatus; justify-self: stretch; text-align: center; }
     .header-data-actions #testReadinessBtn { grid-area: zipsync; justify-self: center; align-self: center; padding-block: 0; text-align: center; }
     .header-data-actions > button { min-height: 26px; padding: 4px 8px; font-size: 10px; line-height: 1.2; white-space: normal; }
     .header-data-actions #loadSampleDatasetHeaderBtn { min-height: 52px; align-self: stretch; }
-    .header-account-actions { display: flex; flex-direction: column; align-items: stretch; justify-content: center; gap: 6px; min-width: 132px; padding-left: 12px; border-left: 1px solid var(--line); }
+    /* How this works + Log out side by side (How this works first, matching
+       the requested visual order), not stacked - saves vertical header
+       space now that this group can wrap to its own row. */
+    .header-account-actions { display: flex; flex-direction: row; align-items: center; justify-content: flex-end; gap: 8px; min-width: 132px; }
     .header-account-actions button { min-height: 24px; padding: 4px 7px; font-size: 10px; white-space: nowrap; }
     .header-account-actions #appHelpBtn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
     .header-account-actions #appHelpBtn::before { content: "i"; display: inline-grid; place-items: center; width: 14px; height: 14px; border: 1px solid currentColor; border-radius: 50%; font-size: 10px; font-weight: 800; line-height: 1; }
@@ -401,6 +436,28 @@
       margin-bottom: 8px;
       white-space: nowrap;
     }
+    /* One definition for every sidebar filter label/control so the Brand,
+       Geographic and Demographic groups can't drift apart in size or weight
+       the way they did when each carried its own inline styling. */
+    .report-filter-label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--ink);
+      margin-bottom: 4px;
+    }
+    .report-filter-control {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 7px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: inherit;
+      color: var(--ink);
+      background: var(--panel);
+    }
     .reporting-main-pane > #reportContent > * {
       width: 100%;
       box-sizing: border-box;
@@ -425,6 +482,13 @@
     }
     .reporting-main-pane .report-columns {
       grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    }
+    /* State Distribution / Top Cities carry too many columns now (population,
+       median income, pop/listing, subject-vs-competitor) for a squeezed
+       2-column layout - stacked full-width instead. An ID selector is needed
+       to outrank the !important two-column rule directly above. */
+    .reporting-main-pane #reportStateCityTables {
+      grid-template-columns: 1fr !important;
     }
     .reporting-main-pane #reportingMap {
       height: clamp(400px, 52vh, 680px) !important;
@@ -472,7 +536,7 @@
     .report-hero h1 {
       margin: 0 0 6px;
       color: var(--ink);
-      font-size: 30px;
+      font-size: 20px;
       line-height: 1.15;
       letter-spacing: 0;
     }
@@ -533,7 +597,7 @@
       border-radius: 10px;
       padding: 16px;
     }
-    .report-filter-group { border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 12px; }
+    .report-filter-group { border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 8px; }
     .report-filter-group h2 { margin: 0 0 8px; font-size: 12px; color: var(--ink); }
     .report-filter-row {
       display: grid;
@@ -1015,7 +1079,10 @@
     }
 
     .review-view { padding: 24px; }
-    .review-toolbar { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(220px, .7fr) auto auto; gap: 8px; width: 100%; max-width: none; margin-bottom: 16px; align-items: stretch; }
+    /* Five controls, five columns - the search input is capped at a normal
+       width rather than greedily taking 1fr, so the two buttons stay on the
+       same line as the filters on a laptop screen instead of wrapping. */
+    .review-toolbar { display: grid; grid-template-columns: minmax(200px, 280px) minmax(140px, 200px) minmax(140px, 200px) auto auto; justify-content: start; gap: 8px; width: 100%; max-width: none; margin-bottom: 16px; align-items: stretch; }
     .review-toolbar input, .review-toolbar select { width: 100%; min-width: 0; box-sizing: border-box; }
     .review-brand-breakdown-layout { display: grid; grid-template-columns: minmax(300px, .85fr) minmax(360px, 1.15fr); gap: 28px; align-items: center; width: 100%; }
     .review-chart-side { min-width: 0; display: grid; grid-template-columns: minmax(120px, 170px) minmax(0, 1fr); gap: 14px; align-items: center; }
@@ -1269,6 +1336,18 @@
       background: #ef4444;
       color: #ffffff;
     }
+    /* Distinct from Cancel (red/destructive) - hiding doesn't stop the save,
+       it just lets the user stop watching it. */
+    #loadingHideBtn {
+      margin-top: 10px;
+      background: rgba(37, 99, 235, 0.16);
+      border-color: #2563eb;
+      color: #bfdbfe;
+    }
+    #loadingHideBtn:hover {
+      background: #2563eb;
+      color: #ffffff;
+    }
 
     .progress-wrap {
       position: sticky;
@@ -1379,7 +1458,7 @@
     .pre-parse-parser-panel { min-height: 100%; }
     .pre-parse-parser-panel > .panel { margin-bottom: 0; }
     .pre-parse-parser-panel > #status { margin: 0 0 16px; background: var(--accent-tint); border-color: var(--accent-tint-line); color: var(--navy); }
-    #mapperView.pre-parse-active aside > .panel:not(#sourceControlsPanel) { display: none; }
+    #mapperView.pre-parse-active aside > .panel:not(#sourceControlsPanel):not(.left-rail-persistent) { display: none; }
     #mapperView.pre-parse-active #sourceControlsPanel { display: none; }
     #mapperView.pre-parse-active #defaultBrandModelPanel { display: none; }
     #mapperView.pre-parse-active #templateComponentsPanel,
@@ -1636,7 +1715,19 @@
       background: #ffffff;
       border: 1px solid var(--line);
       border-radius: 8px;
-      overflow: hidden;
+      /* overflow:hidden removed here - on a bare <table> it silently
+         clipped columns that overflowed a narrow viewport instead of
+         letting the user scroll to see them. The wrapping rule below
+         gives every table horizontal scroll (and still clips the
+         rounded corners) without needing a wrapper div added everywhere
+         a table is rendered. */
+    }
+    /* Any container that directly wraps a <table> - across the whole app,
+       not just reporting - scrolls horizontally instead of clipping or
+       overflowing the layout when the table is wider than its column. */
+    div:has(> table) {
+      overflow-x: auto;
+      border-radius: 8px;
     }
 
     th, td {
@@ -1682,6 +1773,21 @@
     }
 
     .hidden { display: none !important; }
+
+    /* Reviewing a saved template edits an existing mapping - there's no
+       source to pick, upload, or parse in that mode, so the whole
+       source-parser half of the left rail is hidden (the brand section,
+       source name, and the mapping grid itself all stay, since those are
+       still meaningful). Scoped to a mode class on #mapperView rather than
+       toggling each element's own .hidden, which updateSourceVisibility()
+       independently owns for format-specific show/hide. */
+    #mapperView.template-edit-mode .source-parser-only { display: none !important; }
+
+    /* Duplicate entry point into the same edit-brand form as the CSV-preset
+       panel's "Edit Brand Details" button (both call fillBrandFields() /
+       open #newBrandFields) - kept in the DOM/JS per product decision, just
+       force-hidden here rather than deleted, in case it's needed again. */
+    #editExistingBrandLink { display: none !important; }
 
     .login-screen {
       min-height: 100vh;
@@ -1788,6 +1894,29 @@
       grid-template-columns: minmax(180px, 0.8fr) minmax(320px, 1.6fr);
       gap: 16px;
       align-items: start;
+    }
+
+    /* Wide sources (OSM-style ones run past 100 columns) turned the Data
+       Model into an unscrollable wall. Only applied above the threshold, so
+       a short list keeps its plain layout. */
+    .entity-map-scrollable .entity-fields,
+    .entity-map-scrollable .entity-column {
+      max-height: 60vh;
+      overflow-y: auto;
+    }
+    .entity-field-search {
+      width: 100%;
+      margin: 0 0 10px;
+      padding: 7px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      font-size: 13px;
+      background: #fff;
+    }
+    .entity-field-search:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(22, 119, 238, 0.15);
     }
 
     .entity-column {
@@ -2102,6 +2231,9 @@
     <button id="loadingCancelBtn" class="loading-cancel-btn" type="button" title="Cancel this operation">
       ✕ Cancel
     </button>
+    <button id="loadingHideBtn" class="loading-cancel-btn hidden" type="button" title="Keep working in the background">
+      Hide — notify me when done
+    </button>
   </div>
   <div id="loginScreen" class="login-screen hidden">
     <div class="login-box">
@@ -2141,7 +2273,10 @@
       </nav>
       <div class="header-actions">
         <div class="header-data-actions">
-          <button class="secondary" id="loadSampleDatasetHeaderBtn" type="button">Load Sample Dataset</button>
+          <div class="sample-dataset-stack">
+            <button class="secondary sample-state-idle" id="loadSampleDatasetHeaderBtn" type="button">Load Sample Dataset</button>
+            <button class="sample-load-link danger hidden" id="clearSampleDatasetLink" type="button">Clear Sample Data</button>
+          </div>
           <button class="secondary" id="resetMappingBtn" type="button">Reset Fields Mapping</button>
           <button class="secondary" id="restartMappingBtn" type="button">Restart Mapping</button>
           <div class="header-zip-status">
@@ -2150,8 +2285,8 @@
           </div>
         </div>
         <div class="header-account-actions">
-          <button class="secondary" id="logoutBtn" type="button">Log out</button>
           <button class="text-link" id="appHelpBtn" type="button">How this works</button>
+          <button class="secondary" id="logoutBtn" type="button">Log out</button>
         </div>
       </div>
     </header>
@@ -2189,8 +2324,8 @@
           </select>
           <div id="parserBusinessValidation" class="pre-parse-brand-validation hidden" role="alert" aria-live="polite"></div>
         </div>
-        <label for="sourceType">Source format</label>
-        <select id="sourceType">
+        <label for="sourceType" class="source-parser-only">Source format</label>
+        <select id="sourceType" class="source-parser-only">
           <option value="csv">CSV</option>
           <option value="api_get_json">GET API JSON</option>
           <option value="excel">EXCEL (.XLSX)</option>
@@ -2198,7 +2333,7 @@
           <option value="python_editor">PYTHON EDITOR</option>
           <option value="xml">XML</option>
         </select>
-        <div class="field-group csv-function-field hidden">
+        <div class="field-group csv-function-field source-parser-only hidden">
           <label>CSV source</label>
           <div class="python-function-options" role="radiogroup" aria-label="CSV source">
             <label><input type="radio" name="csvFunction" value="new" checked> New</label>
@@ -2206,28 +2341,28 @@
             <label><input type="radio" name="csvFunction" value="global_hotels"> Global Hotels</label>
           </div>
         </div>
-        <div class="field-group excel-function-field hidden">
+        <div class="field-group excel-function-field source-parser-only hidden">
           <label>Excel source</label>
           <div class="python-function-options" role="radiogroup" aria-label="Excel source">
             <label><input type="radio" name="excelFunction" value="new" checked> New</label>
             <label><input type="radio" name="excelFunction" value="demo_restaurant"> Demo Restaurant</label>
           </div>
         </div>
-        <div class="field-group json-function-field hidden">
+        <div class="field-group json-function-field source-parser-only hidden">
           <label>JSON source</label>
           <div class="python-function-options" role="radiogroup" aria-label="JSON source">
             <label><input type="radio" name="jsonFunction" value="new" checked> New</label>
             <label><input type="radio" name="jsonFunction" value="dominos"> Domino's Pizza</label>
           </div>
         </div>
-        <div class="field-group xml-function-field hidden">
+        <div class="field-group xml-function-field source-parser-only hidden">
           <label>XML source</label>
           <div class="python-function-options" role="radiogroup" aria-label="XML source">
             <label><input type="radio" name="xmlFunction" value="new" checked> New</label>
             <label><input type="radio" name="xmlFunction" value="demo_xml"> Demo XML</label>
           </div>
         </div>
-        <div class="field-group api-function-field hidden">
+        <div class="field-group api-function-field source-parser-only hidden">
           <label>API source</label>
           <div class="python-function-options" role="radiogroup" aria-label="API source">
             <label><input type="radio" name="apiFunction" value="new" checked> New</label>
@@ -2235,7 +2370,7 @@
           </div>
         </div>
 
-        <div class="field-group file-field">
+        <div class="field-group file-field source-parser-only">
         <label for="sourceInputMode">Source input</label>
         <select id="sourceInputMode">
           <option value="url" selected>Public URL</option>
@@ -2248,7 +2383,7 @@
         <button id="sourceUrlEditBtn" class="source-url-control source-url-edit hidden" type="button">Edit URL</button>
         </div>
 
-        <div id="presetBrandPanel" class="preset-brand-panel hidden">
+        <div id="presetBrandPanel" class="preset-brand-panel source-parser-only hidden">
           <div class="preset-brand-summary">
             <strong id="presetBrandTitle">Preset brand</strong>
             <span id="presetBrandStatus">Preset brand selected.</span>
@@ -2281,7 +2416,7 @@
         <label for="sourceName">Source name</label>
         <input id="sourceName" placeholder="restaurant_locations_csv">
 
-        <div class="field-group record-field">
+        <div class="field-group record-field source-parser-only">
           <div class="label-row">
             <label>Record Extraction Mode</label>
             <span class="info-icon" tabindex="0" data-tooltip="Choose whether to automatically detect the best nested record layer across the source or use a specific custom record path.">i</span>
@@ -2305,14 +2440,14 @@
           </div>
         </div>
 
-        <div class="field-group excel-field">
+        <div class="field-group excel-field source-parser-only">
         <label for="sheetName">Excel sheet</label>
         <select id="sheetName" disabled>
           <option value="">Upload Excel to load sheets</option>
         </select>
         </div>
 
-        <div class="field-group api-field">
+        <div class="field-group api-field source-parser-only">
         <label for="apiUrl">GET API URL</label>
         <input id="apiUrl" placeholder="https://example.com/stores.json">
 
@@ -2352,7 +2487,7 @@
         <button class="secondary" id="addHeaderBtn" type="button">Add Header</button>
         </div>
 
-        <div class="field-group python-connector-field hidden">
+        <div class="field-group python-connector-field source-parser-only hidden">
           <label for="pythonConnectorCode">Python editor</label>
           <div class="python-function-options" role="radiogroup" aria-label="Python function">
             <label><input type="radio" name="pythonFunction" value="new" checked> New</label>
@@ -2385,7 +2520,7 @@ result = [
           <div id="pythonConnectorFeedback" class="action-feedback" role="status" aria-live="polite"></div>
         </div>
 
-        <div class="button-row">
+        <div class="button-row source-parser-only">
           <button id="parseBtn">Parse</button>
           <button class="secondary" id="resetBtn">Reset</button>
         </div>
@@ -2417,9 +2552,9 @@ result = [
         </div>
       </div>
 
-      <div class="panel">
-        <h2>Data Enrichment</h2>
-        <div class="mapping-note">Improve listing data using available location references.</div>
+      <div class="panel left-rail-persistent">
+        <h2>Brand Entity Resolution</h2>
+        <div class="mapping-note">Validates each listing against reference data, then uses AI to resolve and enrich the entity - repairing state, city, ZIP and coordinates so records that failed validation can re-enter the valid set.</div>
         <div class="button-row">
           <button class="secondary" id="reportingDataRefreshBtn" type="button">Start Enriching</button>
           <button class="secondary hidden" id="stopEnrichmentBtn" type="button">Stop Enriching</button>
@@ -2427,10 +2562,30 @@ result = [
         <div id="reportingDataRefreshStatus" class="action-feedback" role="status" aria-live="polite"></div>
       </div>
 
-      <div class="panel data-danger-panel">
-        <h2>⚠️ Data Controls</h2>
-        <div class="mapping-note">Clear loaded records or reset the warehouse completely.</div>
-        <p class="data-risk-note">Risk: deletion can remove saved listings, brands, review rows, and with master deletion every warehouse table/view.</p>
+      <!-- DAT-04: duplicate brands are detected on /app load and resolved
+           here, one group at a time. They are never offered in the brand
+           dropdown, so this rail is the only place they surface. Hidden
+           entirely when there is nothing to merge. -->
+      <div class="panel left-rail-persistent hidden" id="duplicateBrandPanel">
+        <h2>Duplicate Brands</h2>
+        <div class="mapping-note">The same brand was loaded more than once. Keep one and merge the rest into it — listings, templates and review rows are all moved over.</div>
+        <div id="duplicateBrandList" style="display: grid; gap: 10px;"></div>
+        <div id="duplicateBrandStatus" class="action-feedback" role="status" aria-live="polite"></div>
+      </div>
+
+      <div class="panel left-rail-persistent">
+        <h2>Job History</h2>
+        <div class="mapping-note">Recent save jobs — check status here instead of watching the save progress bar.</div>
+        <div id="jobHistoryList" style="display: grid; gap: 6px; max-height: 220px; overflow-y: auto;">
+          <div class="report-status" style="padding: 8px 0; font-size: 12px;">No jobs yet this session.</div>
+        </div>
+        <button type="button" id="jobHistoryShowMoreBtn" class="text-link hidden" style="margin-top: 8px;">Show More</button>
+      </div>
+
+      <div class="panel data-danger-panel left-rail-persistent">
+        <h2>&#9888;&#65039; Data Controls</h2>
+        <div class="mapping-note">Clear loaded records or fully reset your workspace.</div>
+        <p class="data-risk-note">This can remove saved brands, listings, and review items. A full reset removes all app data and cannot be undone here.</p>
         <button class="secondary danger-soft" id="clearDataBtn" type="button" title="Soft delete saved brands, listings, and review records. Reference ZIPs, fields, source types, and templates stay available.">Clear Saved Data</button>
         <button class="secondary danger-hard" id="masterDeleteBtn" type="button" title="Permanently remove all stored application data and reporting views.">Master Data Deletion</button>
         <div id="masterDeleteStatus" class="action-feedback" role="status" aria-live="polite"></div>
@@ -2518,21 +2673,70 @@ result = [
           <h2 id="appHelpTitle">How this works</h2>
           <button class="secondary app-help-close" id="appHelpCloseBtn" type="button">Close</button>
         </div>
-        <h3>1. Map a source</h3>
-        <p>Choose a brand and source format independently. Select Upload File, Public URL, GET API, or Python Editor, then click Parse. Parsing inspects a small sample to discover fields and values.</p>
-        <h3>2. Confirm the model</h3>
-        <p>Source Preview shows the actual records. Data Model shows source fields on the left and target listing fields on the right. Required fields appear first; green mappings are recognized and light-red mappings are suggestions to verify.</p>
-        <h3>3. Save and review</h3>
-        <p>Saving reloads the complete source, not only the discovery sample. Valid records continue into reporting. Invalid records remain available in Review Error Listings for manual edits or automatic enrichment.</p>
-        <h3>4. Use the tabs</h3>
+        <h3>1. Pick a brand and a file</h3>
+        <p>Choose which brand this data belongs to, then tell us where the data is coming from — an uploaded file, a public link, an API, or a custom script. Click Parse and we'll take a quick look to see what's inside.</p>
+        <h3>2. Check the field matches</h3>
+        <p>You'll see your actual records on one side, and how each column lines up to a location field on the other. Green means we matched it automatically; light red means it's a guess worth double-checking.</p>
+        <h3>3. Save, then review</h3>
+        <p>Saving processes your entire file, not just the quick preview. Good records go straight into your reporting. Anything that needs a second look shows up in Review Error Listings, where you can fix it by hand or let auto-fix handle it.</p>
+        <h3>4. Where things live</h3>
         <ul>
-          <li><strong>Mappings:</strong> ingest sources, map fields, manage brands, and start enrichment.</li>
-          <li><strong>Review Error Listings:</strong> search, edit, retry, and monitor automatic fixes.</li>
-          <li><strong>Template Library:</strong> reuse saved field mappings with lazy loading and pagination.</li>
-          <li><strong>Reporting:</strong> compare brands, identify ZIP gaps, inspect location coverage, and review data quality improvements.</li>
+          <li><strong>Mappings:</strong> bring in your data, match its fields, and manage brands.</li>
+          <li><strong>Review Error Listings:</strong> find, fix, and retry anything that didn't save cleanly.</li>
+          <li><strong>Template Library:</strong> reuse a mapping you've already set up, instead of starting over.</li>
+          <li><strong>Reporting:</strong> see how brands compare, spot coverage gaps, and check data quality.</li>
         </ul>
-        <h3>5. Understand the numbers</h3>
-        <p>Reporting uses the latest available location and quality data. The app may refresh background data quietly, while explicit refresh actions show progress. Filters apply only to the active reporting view.</p>
+        <h3>5. About the numbers you'll see</h3>
+        <p>Reporting shows the latest data we have. It updates quietly in the background, and you can always hit refresh for the newest numbers. Filters only affect the report you're currently looking at.</p>
+      </div>
+    </dialog>
+    <dialog id="sampleLoadedDialog" class="app-help-dialog" aria-labelledby="sampleLoadedTitle">
+      <div class="app-help-content">
+        <div class="app-help-header">
+          <h2 id="sampleLoadedTitle">Sample Dataset Ready</h2>
+          <button class="secondary app-help-close" id="sampleLoadedCloseBtn" type="button">Close</button>
+        </div>
+        <p id="sampleLoadedDialogText">Sample dataset loaded.</p>
+      </div>
+    </dialog>
+    <dialog id="unsavedChangesDialog" class="app-help-dialog" aria-labelledby="unsavedChangesTitle">
+      <div class="app-help-content">
+        <div class="app-help-header">
+          <h2 id="unsavedChangesTitle">Save before you leave?</h2>
+        </div>
+        <p id="unsavedChangesMessage">You've parsed and mapped a source but haven't saved it yet. Save it now, or continue and lose the mapping.</p>
+        <div style="display: flex; justify-content: center; gap: 10px; margin-top: 16px; flex-wrap: wrap;">
+          <button class="secondary" id="unsavedChangesCancelBtn" type="button">Cancel</button>
+          <button class="secondary" id="unsavedChangesContinueBtn" type="button">Continue Without Saving</button>
+          <button id="unsavedChangesSaveBtn" type="button">Save Listing Data</button>
+        </div>
+      </div>
+    </dialog>
+    <dialog id="saveCompletionDialog" class="app-help-dialog" aria-labelledby="saveCompletionTitle">
+      <div class="app-help-content">
+        <div class="app-help-header">
+          <h2 id="saveCompletionTitle">Save Complete</h2>
+        </div>
+        <p id="saveCompletionMessage"></p>
+        <div style="display: flex; justify-content: center; margin-top: 16px;">
+          <button class="secondary" id="saveCompletionOk" type="button">OK</button>
+        </div>
+      </div>
+    </dialog>
+    <dialog id="jobHistoryDialog" class="app-help-dialog" aria-labelledby="jobHistoryDialogTitle">
+      <div class="app-help-content">
+        <div class="app-help-header">
+          <h2 id="jobHistoryDialogTitle">Job History</h2>
+        </div>
+        <div id="jobHistoryDialogList" style="display: grid; gap: 6px; max-height: 50vh; overflow-y: auto;"></div>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 14px; gap: 10px; flex-wrap: wrap;">
+          <span id="jobHistoryDialogPageInfo" style="font-size: 12px; color: var(--muted);"></span>
+          <div style="display: flex; gap: 8px;">
+            <button class="secondary" id="jobHistoryDialogPrevBtn" type="button">Previous</button>
+            <button class="secondary" id="jobHistoryDialogNextBtn" type="button">Next</button>
+            <button id="jobHistoryDialogCloseBtn" type="button">Close</button>
+          </div>
+        </div>
       </div>
     </dialog>
     <section id="reportingView" class="reporting-view hidden">
@@ -2540,17 +2744,17 @@ result = [
         <div class="report-hero">
           <div>
             <h1>Reporting</h1>
-            <p>Locations, markets, and gaps.</p>
+            <p>Where your brand stands versus competitors: coverage by location, market gaps worth targeting, and how clean the underlying data is.</p>
           </div>
           <div class="report-hero-actions">
             <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-              <button id="refreshReportBtn" type="button">Refresh Report</button>
+              <div style="display: flex; flex-direction: column; gap: 3px;">
+                <button id="refreshReportBtn" type="button">Refresh Report</button>
+                <span id="reportAutoRefreshCountdown" style="font-size: 11px; color: var(--muted); text-align: center;">Next auto refresh in 5:00</span>
+              </div>
               <button id="downloadSampleCsvBtn" class="btn-download-excel hidden" type="button">
                 <span id="downloadSampleCsvIcon">📥</span> <span id="downloadSampleCsvText">Download Excel</span>
               </button>
-              <div class="sample-load-actions">
-                <button class="sample-load-link danger hidden" id="clearSampleDatasetLink" type="button">Clear Sample Data</button>
-              </div>
             </div>
             <div id="reportStatus" class="report-status">Ready</div>
           </div>
@@ -2559,24 +2763,23 @@ result = [
         <div class="reporting-dashboard-layout" style="display: flex; gap: 24px; align-items: flex-start; margin-top: 14px;">
           <!-- Left Vertical Filter Sidebar -->
           <aside class="reporting-sidebar-pane" style="width: 290px; flex-shrink: 0; position: sticky; top: 16px; background: #ffffff; border: 1px solid var(--line); border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); max-height: calc(100vh - 40px); overflow-y: auto;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--line);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--line);">
               <h2 style="font-size: 15px; font-weight: 700; color: #1e293b; margin: 0;">Report Filters</h2>
-              <span style="font-size: 11px; font-weight: 600; color: #2563eb; background: #eff6ff; padding: 2px 7px; border-radius: 4px;">Live</span>
             </div>
 
             <!-- Brand Filters Category -->
-            <div class="filter-category brand-filter-category" style="margin-bottom: 16px;">
-              <div style="font-size: 11px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;">
+            <div class="filter-category brand-filter-category" style="margin-bottom: 10px;">
+              <div class="report-filter-category-title">
                 🏷️ Brand Filters
               </div>
               <div class="report-filter-group" style="margin-bottom: 10px;">
-                <label for="reportMainBrandSelect" style="display: block; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px;">Primary Brand</label>
-                <select id="reportMainBrandSelect" style="width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px; font-weight: 600; background: var(--panel);">
+                <label for="reportMainBrandSelect" class="report-filter-label">Primary Brand</label>
+                <select id="reportMainBrandSelect" class="report-filter-control">
                   <option value="">Select Primary Brand</option>
                 </select>
               </div>
               <div class="report-filter-group" style="min-width: 0;">
-                <label style="display: block; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px;">Competitor Brands (Multi)</label>
+                <label class="report-filter-label">Competitor Brands (Multi)</label>
                 <div id="competitorDropdownContainer" style="position: relative; width: 100%; min-width: 0;">
                   <button id="competitorDropdownBtn" type="button" style="width: 100%; min-width: 0; max-width: 100%; height: 35px; text-align: left; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px; background: var(--panel); display: flex; justify-content: space-between; align-items: center; cursor: pointer; box-sizing: border-box; overflow: hidden;">
                     <span id="competitorDropdownBtnText" style="color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; flex: 1 1 auto; min-width: 0; padding-right: 6px;">Select Competitor Brands</span>
@@ -2590,58 +2793,58 @@ result = [
             </div>
 
             <!-- Geographic Filters Category -->
-            <div class="filter-category" style="margin-bottom: 16px; padding-top: 12px; border-top: 1px solid #f1f5f9;">
+            <div class="filter-category" style="margin-bottom: 10px; padding-top: 8px; border-top: 1px solid #f1f5f9;">
               <div class="report-filter-category-title">
                 📍 Geographic Filters
               </div>
               <div class="report-filter-group" style="margin-bottom: 8px;">
-                <label for="reportStateFilter" style="display: block; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 3px;">State</label>
-                <select id="reportStateFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px;">
+                <label for="reportStateFilter" class="report-filter-label">State</label>
+                <select id="reportStateFilter" class="report-filter-control">
                   <option value="">All States</option>
                 </select>
               </div>
               <div class="report-filter-group" style="margin-bottom: 8px;">
-                <label for="reportCountyFilter" style="display: block; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 3px;">County</label>
-                <select id="reportCountyFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px;">
+                <label for="reportCountyFilter" class="report-filter-label">County</label>
+                <select id="reportCountyFilter" class="report-filter-control">
                   <option value="">All Counties</option>
                 </select>
               </div>
               <div class="report-filter-group" style="margin-bottom: 8px;">
-                <label for="reportCityFilter" style="display: block; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 3px;">City</label>
-                <select id="reportCityFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px;">
+                <label for="reportCityFilter" class="report-filter-label">City</label>
+                <select id="reportCityFilter" class="report-filter-control">
                   <option value="">All Cities</option>
                 </select>
               </div>
               <div class="report-filter-group">
-                <label for="reportZipFilter" style="display: block; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 3px;">ZIP Code</label>
-                <input id="reportZipFilter" list="zipSuggestions" placeholder="Search 30k+ ZIPs..." style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px; box-sizing: border-box;">
+                <label for="reportZipFilter" class="report-filter-label">ZIP Code</label>
+                <input id="reportZipFilter" list="zipSuggestions" class="report-filter-control" placeholder="Search 30k+ ZIPs...">
                 <datalist id="zipSuggestions"></datalist>
               </div>
             </div>
 
             <!-- Demographic Filters Category -->
-            <div class="filter-category" style="margin-bottom: 16px; padding-top: 12px; border-top: 1px solid #f1f5f9;">
+            <div class="filter-category" style="margin-bottom: 10px; padding-top: 8px; border-top: 1px solid #f1f5f9;">
               <div class="report-filter-category-title">
                 👥 Demographic Filters
               </div>
               <div style="display: grid; gap: 8px;">
                 <div>
-                  <label for="reportMinPopFilter" style="display: block; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 3px;">Min Population</label>
-                  <input id="reportMinPopFilter" type="number" placeholder="Min Population" style="width: 100%; padding: 7px; font-size: 11px; border: 1px solid var(--line); border-radius: 6px; box-sizing: border-box;">
+                  <label for="reportMinPopFilter" class="report-filter-label">Min Population</label>
+                  <input id="reportMinPopFilter" type="number" class="report-filter-control" placeholder="Min Population">
                 </div>
                 <div>
-                  <label for="reportMinIncomeFilter" style="display: block; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 3px;">Min Income ($)</label>
-                  <input id="reportMinIncomeFilter" type="number" placeholder="Min Income" style="width: 100%; padding: 7px; font-size: 11px; border: 1px solid var(--line); border-radius: 6px; box-sizing: border-box;">
+                  <label for="reportMinIncomeFilter" class="report-filter-label">Min Income ($)</label>
+                  <input id="reportMinIncomeFilter" type="number" class="report-filter-control" placeholder="Min Income">
                 </div>
                 <div>
-                  <label for="reportMaxAgeFilter" style="display: block; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 3px;">Max Median Age</label>
-                  <input id="reportMaxAgeFilter" type="number" placeholder="Max Age" style="width: 100%; padding: 7px; font-size: 11px; border: 1px solid var(--line); border-radius: 6px; box-sizing: border-box;">
+                  <label for="reportMaxAgeFilter" class="report-filter-label">Max Median Age</label>
+                  <input id="reportMaxAgeFilter" type="number" class="report-filter-control" placeholder="Max Age">
                 </div>
               </div>
             </div>
 
             <!-- Actions: Apply All Filters & Reset All -->
-            <div style="display: grid; gap: 8px; padding-top: 12px; border-top: 1px solid #f1f5f9;">
+            <div style="display: grid; gap: 8px; padding-top: 8px; border-top: 1px solid #f1f5f9;">
               <button id="applyReportFiltersBtn" type="button" style="width: 100%; padding: 9px; font-size: 12px; font-weight: 600; border-radius: 6px;">Apply All Filters</button>
               <button id="resetReportFiltersBtn" type="button" class="secondary" style="width: 100%; padding: 8px; font-size: 12px; font-weight: 600; border-radius: 6px;">Reset All</button>
             </div>
@@ -2650,20 +2853,47 @@ result = [
           <!-- Right Main Dashboard Content Pane -->
           <main class="reporting-main-pane" style="flex: 1; min-width: 0;">
             <div id="reportContent" class="hidden">
-              <div class="report-grid" style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px;">
-                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportStates" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Total States</span></div>
-                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportZips" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Market ZIPs</span></div>
-                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportBrands" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Brands</span></div>
-                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportStores" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Total Stores</span></div>
-                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportLocations" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Covered Markets (ZIPs)</span></div>
-                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportBrandStates" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Covered States</span></div>
-                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportCities" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Covered Cities</span></div>
-                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportWhitespaceGaps" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Uncovered ZIPs</span></div>
+              <div class="dq-intro">
+                <div><h2>Location Intelligence &amp; Whitespace</h2><p>Where your brand and competitors actually are, how much market you cover, and which ZIPs are still open.</p></div>
               </div>
+              <div class="report-grid" style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px;">
+                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportStates" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Total States</span><button type="button" class="report-metric-download" data-metric-label="Total States" title="Download the listings behind this number, with its metrics, as Excel">⬇ Excel</button></div>
+                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportZips" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Market ZIPs</span><button type="button" class="report-metric-download" data-metric-label="Market ZIPs" title="Download the listings behind this number, with its metrics, as Excel">⬇ Excel</button></div>
+                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportBrands" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Brands</span><button type="button" class="report-metric-download" data-metric-label="Active Brands" title="Download the listings behind this number, with its metrics, as Excel">⬇ Excel</button></div>
+                <div class="report-metric" title="Every individual store/location record for the selected brand(s) - can be more than one per ZIP." style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportStores" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Total Stores</span><button type="button" class="report-metric-download" data-metric-label="Total Stores" title="Download the listings behind this number, with its metrics, as Excel">⬇ Excel</button></div>
+                <div class="report-metric" title="Distinct ZIP codes where the selected brand(s) have at least one store - not a store count." style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportLocations" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Covered Markets (ZIPs)</span><button type="button" class="report-metric-download" data-metric-label="Covered Markets (ZIPs)" title="Download the listings behind this number, with its metrics, as Excel">⬇ Excel</button></div>
+                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportBrandStates" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Covered States</span><button type="button" class="report-metric-download" data-metric-label="Covered States" title="Download the listings behind this number, with its metrics, as Excel">⬇ Excel</button></div>
+                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportCities" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Covered Cities</span><button type="button" class="report-metric-download" data-metric-label="Covered Cities" title="Download the listings behind this number, with its metrics, as Excel">⬇ Excel</button></div>
+                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportWhitespaceGaps" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Uncovered ZIPs</span><button type="button" class="report-metric-download" data-metric-label="Uncovered ZIPs" title="Download the listings behind this number, with its metrics, as Excel">⬇ Excel</button></div>
+              </div>
+
+              <!-- Moved here from the Data Quality tab (RPT-05/06/07): these
+                   three read /api/reporting/summary and /api/reporting/timeseries,
+                   not the slow quality payload, so they belong with Location
+                   Intelligence. Extended Coverage Metrics sits directly after
+                   the first number-card block per RPT-07. -->
+        <div class="dq-section"><h3>Extended Coverage Metrics</h3><div id="dqExtraGrid" class="dq-grid"><div class="report-status">Loading coverage metrics&hellip;</div></div></div>
+        <div class="dq-section">
+          <div class="dq-trend-head">
+            <h3>Trends Over Time</h3>
+            <div class="dq-trend-controls">
+              <div class="dq-period-toggle" id="dqTrendPeriod" role="group" aria-label="Trend period">
+                <button type="button" data-period="1D">1D</button>
+                <button type="button" data-period="1W">1W</button>
+                <button type="button" data-period="1M" class="active">1M</button>
+                <button type="button" data-period="1Q">1Q</button>
+                <button type="button" data-period="1Y">1Y</button>
+              </div>
+            </div>
+          </div>
+          <div id="dqTrendChart" class="dq-history-chart"><div class="report-status">Loading trend data&hellip;</div></div>
+          <div id="dqTrendLegend" class="dq-trend-legend"></div>
+        </div>
+        <div class="dq-section"><h3>Top States by Coverage</h3><div id="dqTopStatesBar" class="dq-bars"><div class="report-status">Loading coverage by state&hellip;</div></div></div>
 
               <!-- Location Map Section -->
               <section class="report-section" style="margin-top: 0;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; flex-wrap: wrap; gap: 8px;">
                   <h2>Location Map</h2>
                   <div style="font-size: 12px; color: var(--muted);">
                     <span style="display: inline-block; width: 10px; height: 10px; background: #16a34a; border-radius: 50%; margin-right: 4px;"></span>Primary Brand
@@ -2671,6 +2901,7 @@ result = [
                     <span style="display: inline-block; width: 10px; height: 10px; background: #f59e0b; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Gap ZIPs
                   </div>
                 </div>
+                <p style="margin: 0 0 12px; font-size: 11px; color: var(--muted);">Each marker is one store/location - this is the same "Total Stores" count above, not the ZIP-level "Covered Markets" count (several stores can share one ZIP).</p>
                 <div id="reportingMapContainer" style="border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #e5e7eb; position: relative;">
                   <div id="reportingMap" style="height: 480px; width: 100%; z-index: 1;"></div>
                 </div>
@@ -2682,15 +2913,19 @@ result = [
                 <div id="reportTopStateCards" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 16px;"></div>
               </section>
 
-              <!-- State Distribution & Top Cities (Spaced cleanly with 28px gap) -->
-              <div class="report-columns" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 28px; margin-top: 24px;">
+              <!-- State Distribution & Top Cities: each table now carries enough
+                   columns (population, median income, pop/listing, subject vs
+                   competitor) that a side-by-side layout squeezed them - stacked
+                   full-width instead, each with its own horizontal scroll on
+                   narrow viewports (see .report-section table wrapper below). -->
+              <div id="reportStateCityTables" class="report-columns" style="display: grid; grid-template-columns: 1fr; gap: 28px; margin-top: 24px;">
                 <section class="report-section" style="margin-top: 0;">
                   <h2>State Distribution</h2>
-                  <div id="reportTopStates"></div>
+                  <div id="reportTopStates" style="overflow-x: auto;"></div>
                 </section>
                 <section class="report-section" style="margin-top: 0;">
                   <h2>Top Cities</h2>
-                  <div id="reportTopCities"></div>
+                  <div id="reportTopCities" style="overflow-x: auto;"></div>
                 </section>
               </div>
 
@@ -2750,9 +2985,14 @@ result = [
       <h2>Review Records</h2>
       <p style="color: var(--muted); font-size: 13px; margin-top: -8px; margin-bottom: 16px;">Review records that need attention. Edit and retry when ready.</p>
       <div class="review-toolbar">
-        <input id="reviewEventId" type="search" aria-label="Entity or event ID" placeholder="Search by entity/event ID (leave empty for all records)">
+        <input id="reviewEventId" type="search" autocomplete="off" aria-label="Entity or event ID" placeholder="Search by entity / event ID">
         <select id="reviewBrandFilter" aria-label="Filter by brand">
           <option value="">All Brands</option>
+        </select>
+        <select id="reviewFixTypeFilter" aria-label="Filter by fix type">
+          <option value="">All Records</option>
+          <option value="ai_suggested">AI Suggested Fix</option>
+          <option value="manual_review">Manual Review</option>
         </select>
         <button id="reviewSearchBtn" type="button">Search Records</button>
         <button id="autoRepairReviewBtn" class="secondary" type="button">Try Auto-Fixing with AI</button>
@@ -2822,7 +3062,7 @@ result = [
     </footer>
   </div>
   <dialog id="dangerDialog" class="danger-dialog">
-    <h2>DANGER</h2>
+    <h2>&#9888;&#65039; Confirm Clear</h2>
     <p>This will delete saved brands, listings, and review records. Templates and reference data stay available.</p>
     <div class="button-row">
       <button id="confirmClearBtn" type="button">Delete Data</button>
@@ -2830,8 +3070,8 @@ result = [
     </div>
   </dialog>
   <dialog id="masterDeleteCredentialsDialog" class="danger-dialog">
-    <h2>MASTER DATA DELETION</h2>
-    <p>This will permanently remove all stored application data and reporting views. Enter your local login credentials to continue.</p>
+    <h2>Reset Workspace</h2>
+    <p>This will permanently remove all saved app data and reporting views. Enter your login credentials to continue.</p>
     <label for="masterDeleteUser">Username</label>
     <input id="masterDeleteUser" autocomplete="username" value="admin">
     <label for="masterDeletePassword">Password</label>
@@ -2842,8 +3082,8 @@ result = [
     </div>
   </dialog>
   <dialog id="masterDeleteConfirmDialog" class="danger-dialog">
-    <h2>FINAL CONFIRMATION</h2>
-    <p>Type DELETE ALL DATA to drop every table and view across all warehouse layers. This cannot be undone from this app.</p>
+    <h2>Final Confirmation</h2>
+    <p>Type DELETE ALL DATA to permanently reset the workspace. This cannot be undone from this app.</p>
     <input id="masterDeleteConfirmation" autocomplete="off" placeholder="DELETE ALL DATA">
     <div class="button-row">
       <button id="confirmMasterDeleteBtn" type="button">Delete Everything</button>
@@ -2873,6 +3113,10 @@ result = [
     el("saveBtn").addEventListener("click", saveMapper);
     el("resetMappingBtn").addEventListener("click", resetMapping);
     el("restartMappingBtn").addEventListener("click", restartMapping);
+    el("jobHistoryShowMoreBtn")?.addEventListener("click", openJobHistoryDialog);
+    el("jobHistoryDialogCloseBtn")?.addEventListener("click", () => el("jobHistoryDialog")?.close());
+    el("jobHistoryDialogPrevBtn")?.addEventListener("click", jobHistoryDialogPrev);
+    el("jobHistoryDialogNextBtn")?.addEventListener("click", jobHistoryDialogNext);
     el("clearDataBtn").addEventListener("click", clearSavedData);
     el("masterDeleteBtn").addEventListener("click", masterDeleteData);
     el("reportingDataRefreshBtn").addEventListener("click", refreshReportingData);
@@ -2899,7 +3143,30 @@ result = [
         });
     el("addCustomFieldBtn").addEventListener("click", addCustomField);
     el("dropCustomFieldBtn")?.addEventListener("click", dropCustomField);
-    document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
+    document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => {
+          const targetView = button.dataset.view;
+          // Only relevant leaving the Mapper tab with a parsed-but-unsaved
+          // source - navigating within Mapper, or when nothing's pending,
+          // just proceeds immediately as before.
+          const onMapper = !el("mapperView")?.classList.contains("hidden");
+          if (onMapper && targetView !== "mapperView" && typeof pendingUnsavedParse !== "undefined" && pendingUnsavedParse) {
+            pendingUnsavedNavTarget = targetView;
+            el("unsavedChangesDialog")?.showModal();
+            return;
+          }
+          switchView(targetView);
+        }));
+    let pendingUnsavedNavTarget = "";
+    el("unsavedChangesCancelBtn")?.addEventListener("click", () => el("unsavedChangesDialog")?.close());
+    el("unsavedChangesContinueBtn")?.addEventListener("click", () => {
+          el("unsavedChangesDialog")?.close();
+          if (pendingUnsavedNavTarget) switchView(pendingUnsavedNavTarget);
+        });
+    el("unsavedChangesSaveBtn")?.addEventListener("click", async () => {
+          el("unsavedChangesDialog")?.close();
+          await saveMapper();
+          if (pendingUnsavedNavTarget && typeof pendingUnsavedParse !== "undefined" && !pendingUnsavedParse) switchView(pendingUnsavedNavTarget);
+        });
     el("addOptionalFieldBtn").addEventListener("click", () => {
           const key = el("optionalFieldSelect").value;
           if (!key) return;
@@ -3219,6 +3486,7 @@ result = [
         });
     el("templateSourceFilter").addEventListener("change", () => { templateLibraryLoaded = false; loadTemplateLibrary(); });
     el("reviewBrandFilter")?.addEventListener("change", loadRejectedRecords);
+    el("reviewFixTypeFilter")?.addEventListener("change", loadRejectedRecords);
     document.querySelectorAll("input[name='recordExtractionMode']").forEach((radio) => {
           radio.addEventListener("change", () => {
             const isCustom = radio.value === "custom" && radio.checked;
@@ -3257,6 +3525,8 @@ result = [
     el("clearSampleDatasetLink")?.addEventListener("click", () => clearSampleDataset());
     el("appHelpBtn")?.addEventListener("click", () => el("appHelpDialog")?.showModal());
     el("appHelpCloseBtn")?.addEventListener("click", () => el("appHelpDialog")?.close());
+    el("sampleLoadedCloseBtn")?.addEventListener("click", () => el("sampleLoadedDialog")?.close());
+    el("saveCompletionOk")?.addEventListener("click", () => el("saveCompletionDialog")?.close());
     el("reloadSampleDatasetLink")?.addEventListener("click", () => loadSampleDataset(true));
     el("applyReportFiltersBtn")?.addEventListener("click", () => {
           const menu = el("competitorDropdownMenu");
@@ -3330,22 +3600,44 @@ result = [
         return;
       }
       setTimeout(() => refreshHeaderReadiness(), 10);
+      // A stale event_id can otherwise survive a page reload (browser form
+      // restore/autofill on this <input type="search">) and silently scope
+      // every Review Queue search to a long-gone save - always start clear
+      // on a fresh load; a just-completed save still fills it back in
+      // later, in the same loaded session, via saveMapper()'s own handoff.
+      if (el("reviewEventId")) el("reviewEventId").value = "";
       const urlParams = new URLSearchParams(window.location.search);
       let activeTab = urlParams.get("view") || sessionStorage.getItem("activeTab") || "mapperView";
       if (!["mapperView", "reportingView", "reviewView", "templateLibraryView"].includes(activeTab)) {
         activeTab = "mapperView";
       }
-      switchView(activeTab);
+      switchView(activeTab, true);
       setupZipTypeahead();
+      setupGeoFilterSearch();
       setupBrandDropdownListeners();
       refreshSampleDatasetStatus();
       loadGeoOptions();
-      await loadAppData();
+      if (typeof loadJobHistory === "function") loadJobHistory();
       // Paint the Review Error Listings tab badge immediately from the
       // last-known SQLite count (no live BigQuery wait), regardless of which
-      // tab opens first. A live re-count happens whenever data actually
+      // tab opens first. Fired here (not awaited, and before loadAppData())
+      // so it isn't queued behind that slower chain (field registry, brands,
+      // template filters, a full template-library fetch) - previously the
+      // badge sat at "0" until all of that resolved even though this fetch
+      // itself is fast. A live re-count happens whenever data actually
       // moves (reprocess/save), keeping the cached number honest.
       refreshReviewCount();
+      // Same reasoning as refreshReviewCount() above: paint the real,
+      // persisted AI/manual fixed counts immediately on boot regardless of
+      // which tab opens first, rather than relying solely on switchView()'s
+      // reviewView branch - a live-reproduced case showed the counters
+      // stuck at their static HTML "0" default until the user manually
+      // clicked "Try Auto-Fixing with AI", even though the real backend
+      // value was already correct and non-zero (58 at the time, verified
+      // via curl) - this call was previously only reachable through a
+      // conditional branch that this specific case never traversed.
+      if (typeof refreshFixCountersOnce === "function") refreshFixCountersOnce();
+      await loadAppData();
     })();
 
   </script>

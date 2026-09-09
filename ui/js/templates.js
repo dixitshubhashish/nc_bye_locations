@@ -33,7 +33,7 @@ function _templateSpinner() {
 
 function _templateRowHtml(template) {
       const label = templatePaging?.sourceTypeIdToLabel?.[template.source_type_id] || sourceTypeLabel(template.source_type_id);
-      return `<tr><td data-sort-value="${escapeHtml(template.name)}">${escapeHtml(template.name)}</td><td data-sort-value="${escapeHtml(templateBrandNames[template.business_id] || template.business_id)}">${escapeHtml(templateBrandNames[template.business_id] || template.business_id)}</td><td data-sort-value="${escapeHtml(label)}">${escapeHtml(label)}</td><td data-sort-value="${escapeHtml(template.created_at)}">${escapeHtml(template.created_at)}</td><td data-sort-value="${escapeHtml(template.updated_at)}">${escapeHtml(template.updated_at)}</td><td><button type="button" data-load-template="${escapeHtml(template.workflow_template_id)}">Load</button></td></tr>`;
+      return `<tr><td data-sort-value="${escapeHtml(template.name)}">${escapeHtml(template.name)}</td><td data-sort-value="${escapeHtml(templateBrandNames[template.business_id] || template.business_id)}">${escapeHtml(templateBrandNames[template.business_id] || template.business_id)}</td><td data-sort-value="${escapeHtml(label)}">${escapeHtml(label)}</td><td data-sort-value="${escapeHtml(template.created_at)}">${escapeHtml(formatTimestamp(template.created_at))}</td><td data-sort-value="${escapeHtml(template.updated_at)}">${escapeHtml(formatTimestamp(template.updated_at))}</td><td><button type="button" data-load-template="${escapeHtml(template.workflow_template_id)}">Review</button></td></tr>`;
     }
 
 async function _fetchTemplatesPage(offset, limit) {
@@ -45,7 +45,11 @@ async function _fetchTemplatesPage(offset, limit) {
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Could not load templates.");
       const templates = result.templates || [];
-      templatePageCache.set(cacheKey, { createdAt: Date.now(), templates });
+      const now = Date.now();
+      for (const [key, entry] of templatePageCache) {
+        if (now - entry.createdAt >= TEMPLATE_CACHE_TTL_MS) templatePageCache.delete(key);
+      }
+      templatePageCache.set(cacheKey, { createdAt: now, templates });
       return templates;
     }
 
@@ -60,8 +64,15 @@ function _renderTemplateRows(templates) {
       body.querySelectorAll("button[data-load-template]:not([data-bound])").forEach((button) => {
         button.setAttribute("data-bound", "1");
         button.addEventListener("click", () => {
-          setButtonBusy(button, "Loading");
+          // loadTemplateIntoEditor() is synchronous, but nothing ever
+          // restored this button afterward - it was left permanently
+          // stuck reading "Reviewing" (disabled) even after navigating back
+          // to this tab later. Restore it once done - re-opening the same
+          // template again is harmless and lets the user re-check the
+          // mapping - instead of leaving it in a busy state forever.
+          const previousHtml = setButtonBusy(button, "Reviewing");
           loadTemplateIntoEditor(templatePaging.byId[button.dataset.loadTemplate]);
+          clearButtonBusy(button, previousHtml);
         });
       });
     }
@@ -165,11 +176,37 @@ async function _loadTemplateFiltersOnce() {
       el("templateSourceFilter").innerHTML = '<option value="">All source types</option>' + sourceTypes.map((source) => `<option value="${escapeHtml(source.source_type_id)}">${escapeHtml(sourceTypeLabel(source.name))}</option>`).join("");
       populateSourceTypeSelects();
     }
+// Lock/unlock the business pickers while a saved template is being edited.
+function setTemplateEditBrandLock(locked) {
+      ["brandSelect", "parserBusinessSelect", "preParseBrandSelect"].forEach((id) => {
+        const node = el(id);
+        if (!node) return;
+        node.disabled = Boolean(locked);
+        node.title = locked ? "This template belongs to this business and cannot be re-pointed here." : "";
+      });
+      el("editExistingBrandLink")?.classList.toggle("hidden", Boolean(locked));
+    }
+
 function loadTemplateIntoEditor(template) {
       const components = template.components?.mapper || template.components || {};
       const brands = JSON.parse(el("brandSelect").dataset.brands || "[]");
       selectedBrand = brands.find((brand) => brand.business_id === template.business_id) || { business_id: template.business_id, name: components.brand || "", source_type_id: template.source_type_id };
       activeTemplateId = template.workflow_template_id;
+      // syncPreParseWorkspace() (mapper.js) relocates #newBrandFields between
+      // panels when toggling pre-parse vs. mapping mode, but only ever
+      // toggles the surrounding panel's hidden state - if the brand-create
+      // form was left open (unhidden) from an earlier edit on this same
+      // page load, it rides along still-visible and pops up here even
+      // though nothing on this path ever asked to open it. A template
+      // never needs that form, so force it closed unconditionally.
+      brandEditMode = false;
+      presetCreateMode = false;
+      el("newBrandFields")?.classList.add("hidden");
+      // Editing a saved template - no source to pick/upload/parse here, so
+      // hide the source-parser half of the left rail (see
+      // #mapperView.template-edit-mode .source-parser-only). Cleared again
+      // wherever templateEditMode goes back to false.
+      el("mapperView")?.classList.add("template-edit-mode");
       const brandOption = document.querySelector(`#brandSelect option[value="${CSS.escape(template.business_id)}"]`);
       if (brandOption) el("brandSelect").value = template.business_id;
       applyBusinessSourceType(selectedBrand, { preserveSourceType: false });
@@ -195,6 +232,12 @@ function loadTemplateIntoEditor(template) {
       autoMappedKeys = new Set();
       renderMappings();
       renderTemplateEditSourcePreview();
+      // A saved template is bound to its business_id in the backend (a
+      // template cannot exist without one), so the brand is a fact of THIS
+      // template, not a choice - changing it here would silently re-point
+      // the template at a different business. Locked while editing; released
+      // by exitTemplateEditMode().
+      setTemplateEditBrandLock(true);
       switchView("mapperView");
       setStatus(`Loaded ${template.name}. Edit the field mapping, then click Save Template to update.`, "ok");
     }

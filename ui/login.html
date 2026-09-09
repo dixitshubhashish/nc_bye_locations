@@ -77,7 +77,8 @@
       color: var(--ink);
     }
     .checkbox-row input { width: auto; }
-    button {
+    .login-box > button,
+    .login-box > .button-row button {
       width: 100%;
       margin-top: 18px;
       padding: 10px 14px;
@@ -89,18 +90,22 @@
       font-weight: 800;
       cursor: pointer;
     }
-    button:hover { background: #005fd3; }
-    button.secondary {
+    .login-box > button:hover,
+    .login-box > .button-row button:hover { background: #005fd3; }
+    .login-box > button.secondary,
+    .login-box > .button-row button.secondary {
       margin-top: 10px;
       border-color: var(--line);
       background: #ffffff;
       color: var(--ink);
     }
-    button.secondary:hover {
+    .login-box > button.secondary:hover,
+    .login-box > .button-row button.secondary:hover {
       border-color: var(--accent);
       background: #f4f8ff;
     }
-    button:disabled {
+    .login-box > button:disabled,
+    .login-box > .button-row button:disabled {
       background: #aeb8c9;
       border-color: #aeb8c9;
       cursor: not-allowed;
@@ -147,7 +152,8 @@
       white-space: normal;
       line-height: 1.45;
     }
-    .status-close { flex: 0 0 auto; margin-left: auto; border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 19px; line-height: 1; padding: 0 2px; opacity: .75; }
+    .status-point { display: block; margin-top: 4px; }
+    .status-close { flex: 0 0 auto; width: auto; min-width: 24px; margin: -2px 0 0 auto; border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 19px; line-height: 1; padding: 0 2px; opacity: .75; }
     .status-close:hover { opacity: 1; }
   </style>
 </head>

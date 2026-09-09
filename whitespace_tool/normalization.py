@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 from datetime import date, datetime, timezone
@@ -45,11 +46,27 @@ def get_nested(row: dict[str, Any], path: str, default: Any = "") -> Any:
 
 
 def clean_zip(value: Any) -> str:
-    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    # Non-US postal codes can contain letters (e.g. UK "SW1A 1AA", Canada
+    # "K1A 0B1") - stripping to digits-only used to silently destroy them
+    # (e.g. "SW1A 1AA" -> "11"). Preserve any alphanumeric code as-is
+    # (whitespace removed, upper-cased) instead; only the pure-numeric US
+    # case still collapses to the 5-digit form everything else assumes.
+    text = "".join(str(value or "").split())
+    if not text:
+        return ""
+    if any(ch.isalpha() for ch in text):
+        return text.upper()
+    digits = "".join(ch for ch in text if ch.isdigit())
     if not digits:
         return ""
     if len(digits) >= 5:
         return digits[:5]
+    if len(digits) == 4:
+        # Spreadsheet/numeric-formatting sources commonly drop a US ZIP's
+        # leading zero (e.g. Massachusetts "02134" -> "2134"). Restoring it
+        # lets the enrichment pass still find a valid match instead of
+        # treating a truncated real ZIP as unrecognizable.
+        return "0" + digits
     return digits
 
 
@@ -117,6 +134,112 @@ def optional_timestamp(value: Any) -> str | None:
     return parsed.isoformat()
 
 
+# Cap the passthrough payload so a pathological source (hundreds of wide
+# columns) can't blow the 512MB budget one row at a time. Truncation is
+# recorded in the payload itself rather than happening silently.
+EXTRAS_MAX_KEYS = 60
+EXTRAS_MAX_CHARS = 8000
+
+
+def _collect_extras(row: dict[str, Any], fields: dict[str, Any]) -> dict[str, Any] | None:
+    """Source columns this row carried that no mapped/typed field consumed.
+
+    Every parse can present a different column list, so the fixed listings
+    schema can never cover them all. Anything the mapper did not consume is
+    preserved here instead of being dropped at the bronze write.
+
+    A top-level key counts as consumed only on an exact path match. For a
+    dotted mapping ("address.street") the parent object is therefore kept
+    here too - duplicating a little is the deliberate trade against losing
+    a column, since never losing source data is the point of this field.
+    """
+    if not isinstance(row, dict):
+        return None
+    consumed = {str(path) for path in fields.values() if path}
+    extras: dict[str, Any] = {}
+    for key, value in row.items():
+        if key == "__meta" or key in consumed:
+            continue
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        # Unmapped columns went to the warehouse completely unchecked.
+        # Same rule as mapped fields: a value that cannot be what its column
+        # means is dropped rather than stored as junk.
+        from whitespace_tool.data_validation.semantic_types import clean_field_value
+        cleaned_value, action, _kind = clean_field_value(key, value)
+        if cleaned_value is None:
+            continue
+        extras[key] = cleaned_value
+        if len(extras) >= EXTRAS_MAX_KEYS:
+            extras["__truncated"] = "key limit reached"
+            break
+    if not extras:
+        return None
+    # Second guard on serialized size, for few-but-huge values.
+    try:
+        if len(json.dumps(extras, default=str)) > EXTRAS_MAX_CHARS:
+            trimmed: dict[str, Any] = {}
+            for key, value in extras.items():
+                trimmed[key] = value
+                if len(json.dumps(trimmed, default=str)) > EXTRAS_MAX_CHARS:
+                    trimmed.pop(key)
+                    trimmed["__truncated"] = "size limit reached"
+                    break
+            return trimmed or None
+    except (TypeError, ValueError):
+        return None
+    return extras
+
+
+def _apply_semantic_cleaning(record: LocationRecord) -> LocationRecord:
+    """Clear/repair any field whose value cannot be what its column means.
+
+    Runs AFTER the record is built, so it sees the same normalized values the
+    warehouse would have stored. Geo fields are excluded by
+    semantic_types.GEO_OWNED_FIELDS - clean_zip(), normalize_state_code(),
+    the cached city<->ZIP lookups and the inverted-coordinate repair are all
+    strictly smarter than a generic rule, and running over them would undo
+    that work.
+
+    Cleared values become None rather than rejecting the row, matching how
+    unparseable numerics already behave: the row's other good fields are
+    kept, and the blank field becomes something enrichment can fill.
+    """
+    # Imported here rather than at module scope: semantic_types imports the
+    # optional_* validators from this module, so a top-level import would be
+    # circular.
+    from whitespace_tool.data_validation.semantic_types import CLEARED, clean_field_value, is_geo_owned
+
+    updates: dict[str, Any] = {}
+    cleaned_fields: list[str] = []
+    for field in dataclasses.fields(record):
+        name = field.name
+        if name in ("raw", "extras", "brand", "business_id", "source_type_id", "source", "observed_at"):
+            continue
+        if is_geo_owned(name):
+            continue
+        value = getattr(record, name, None)
+        if value is None:
+            continue
+        new_value, action, _kind = clean_field_value(name, value)
+        if action != "ok":
+            updates[name] = new_value
+            if action == CLEARED:
+                cleaned_fields.append(name)
+    if not updates:
+        return record
+    record = dataclasses.replace(record, **updates)
+    if cleaned_fields:
+        # Recorded on the raw payload so review/enrichment can see WHICH
+        # fields were dropped and target them, instead of a silent blank.
+        raw = dict(record.raw or {})
+        meta = dict(raw.get("__meta") or {})
+        meta["semantically_cleared_fields"] = sorted(cleaned_fields)
+        raw["__meta"] = meta
+        record = dataclasses.replace(record, raw=raw)
+    return record
+
+
 def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name: str, index: int) -> LocationRecord | None:
     from whitespace_tool.geo_enrichment import detect_and_fix_inverted_coords, normalize_state_code
     from whitespace_tool.sqlite_cache import lookup_cached_city_state
@@ -131,7 +254,7 @@ def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name:
             match = lookup_cached_city_state(raw_city, raw_state)
             if match and match.get("zip_code"):
                 postal_code = str(match["zip_code"])
-    if not brand or not postal_code:
+    if not brand:
         return None
 
     location_id = _text(get_nested(row, fields.get("location_id", ""), ""))
@@ -146,7 +269,7 @@ def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name:
     if raw_lat is not None and raw_lon is not None:
         raw_lat, raw_lon, _ = detect_and_fix_inverted_coords(raw_lat, raw_lon)
 
-    return LocationRecord(
+    record = LocationRecord(
         brand=brand,
         business_id=str(mapper.get("business_id") or "") or None,
         source_type_id=str(mapper.get("source_type_id") or "") or None,
@@ -161,6 +284,7 @@ def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name:
         source=source_name,
         observed_at=normalized_observed or raw_observed or utc_now_iso(),
         raw=dict(row),
+        extras=_collect_extras(row, fields),
         franchise_name=_text(get_nested(row, fields.get("franchise_name", ""), "")) or None,
         concept_type=_text(get_nested(row, fields.get("concept_type", ""), "")) or None,
         cuisine_type=_text(get_nested(row, fields.get("cuisine_type", ""), "")) or None,
@@ -193,3 +317,4 @@ def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name:
         parking_availability=_text(get_nested(row, fields.get("parking_availability", ""), "")) or None,
         ratings=optional_float(get_nested(row, fields.get("ratings", ""), "")),
     )
+    return _apply_semantic_cleaning(record)

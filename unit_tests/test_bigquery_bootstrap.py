@@ -220,12 +220,18 @@ class BigQueryBootstrapTests(unittest.TestCase):
             def __init__(self):
                 self.rows = list(existing_rows)
                 self.loaded_batches = []
+                self.schema_updates = []
+                self.queries = []
 
             def get_table(self, _ref):
                 return SimpleNamespace(schema=[SimpleNamespace(name="business_id")])
 
             def query(self, _query):
+                self.queries.append(_query)
                 return FakeQueryJob(list(self.rows))
+
+            def update_table(self, table, fields):
+                self.schema_updates.append([f.name for f in table.schema])
 
             def load_table_from_json(self, rows, _table_ref, job_config=None):
                 self.loaded_batches.append(rows)
@@ -249,6 +255,20 @@ class BigQueryBootstrapTests(unittest.TestCase):
         self.assertIn("name", keys)  # the pre-existing row is preserved
         self.assertEqual(len(client.loaded_batches), 1)  # one top-up batch, not a full reseed
         self.assertGreater(len(client.loaded_batches[0]), 1)  # every missing field, not just ratings
+
+        # The ad-hoc business_id/content_hash ALTERs this used to carry were
+        # generalized to reconcile against TABLE_SCHEMAS, so a column added
+        # later (is_archived/archived_at, for the archive-not-delete flow)
+        # reaches an already-deployed table instead of needing its own
+        # hardcoded ALTER. Hardcoding one column at a time is exactly how
+        # error_listings ended up missing has_ai_suggestion in production.
+        self.assertEqual(len(client.schema_updates), 1)
+        added = set(client.schema_updates[0])
+        for column in ("is_archived", "archived_at", "content_hash", "slug", "label"):
+            self.assertIn(column, added, column)
+
+        # Archived custom fields must never reach the mapper/field pickers.
+        self.assertTrue(any("is_archived IS NOT TRUE" in q for q in client.queries))
 
     def test_reporting_fallback_uses_product_safe_bootstrap_message(self) -> None:
         # A failed first-time bootstrap should not leak BigQuery URLs/job IDs

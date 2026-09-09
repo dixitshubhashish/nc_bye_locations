@@ -440,3 +440,179 @@ class PandasIsLazyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_unmapped_source_columns_are_preserved_not_dropped():
+    # Every parse can present a different column list, so the fixed listings
+    # schema can never cover them all. Before custom_fields existed, anything
+    # the mapper did not consume was silently dropped at the bronze write:
+    # _listing_row() builds an explicit dict from LocationRecord's typed
+    # attributes, and rows_to_dataframe() reindexes onto the static schema.
+    # No error, no warning - the value simply was not there.
+    from whitespace_tool.warehouse_bigquery import (
+        build_table_rows, dataframe_to_records, rows_to_hashed_dataframe)
+    from whitespace_tool.normalization import normalize_location
+    import json
+
+    mapper = {
+        "brand": "Acme", "business_id": "b1", "source_name": "s.csv", "source_type": "csv",
+        "fields": {"name": "Name", "address": "Addr", "city": "City",
+                   "state": "State", "postal_code": "Zip", "country": "Country"},
+    }
+    row = {"Name": "Store 1", "Addr": "1 Main", "City": "Austin", "State": "TX",
+           "Zip": "78701", "Country": "United States",
+           "LoyaltyTier": "gold", "DriveThru": "yes", "Blank": "", "Missing": None}
+    record = normalize_location(row, mapper, "s.csv", 0)
+
+    # Mapped columns are not duplicated into extras; empty values are skipped.
+    assert record.extras == {"LoyaltyTier": "gold", "DriveThru": "yes"}
+
+    listing = build_table_rows([record], {})["listings"][0]
+    pushed = dataframe_to_records(rows_to_hashed_dataframe("listings", [listing]))[0]
+    assert json.loads(pushed["custom_fields"]) == {"DriveThru": "yes", "LoyaltyTier": "gold"}
+
+
+def test_custom_fields_does_not_move_listings_off_the_dataframe_load_path():
+    # custom_fields is deliberately STRING-holding-JSON, not the BigQuery
+    # JSON type: a JSON column flips table_has_json_fields("listings") True,
+    # which forces every save off load_table_from_dataframe and onto
+    # load_table_from_json - a real regression on the hottest write path.
+    from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, table_has_json_fields
+
+    column = next(f for f in TABLE_SCHEMAS["listings"] if f["name"] == "custom_fields")
+    assert column["type"] == "STRING"
+    assert column["mode"] == "NULLABLE"
+    assert table_has_json_fields("listings") is False
+
+
+def test_custom_fields_is_excluded_from_the_listing_content_hash():
+    # Including it would change every previously-stored row's content_hash,
+    # so the next save would treat the entire warehouse as new rows.
+    from whitespace_tool.warehouse_bigquery import (
+        CONTENT_HASH_FIELDS, table_hash_columns, rows_to_hashed_dataframe, dataframe_to_records)
+
+    assert "custom_fields" not in CONTENT_HASH_FIELDS
+    assert "custom_fields" not in table_hash_columns("listings")
+    base = {"business_id": "b1", "name": "S", "address": "1 Main",
+            "city_name": "Austin", "state_code": "TX", "zip_code": "78701"}
+    without = dataframe_to_records(rows_to_hashed_dataframe("listings", [dict(base)]))[0]["content_hash"]
+    with_extras = dataframe_to_records(
+        rows_to_hashed_dataframe("listings", [{**base, "custom_fields": '{"a":1}'}]))[0]["content_hash"]
+    assert without == with_extras
+
+
+def test_extras_payload_is_bounded_and_says_when_it_truncated():
+    # A pathological source (hundreds of wide columns) must not blow the
+    # 512MB budget one row at a time - but truncation must be visible in the
+    # payload, never silent.
+    from whitespace_tool.normalization import _collect_extras, EXTRAS_MAX_KEYS
+
+    wide = {f"col_{i}": f"value_{i}" for i in range(EXTRAS_MAX_KEYS + 40)}
+    bounded = _collect_extras(wide, {})
+    assert len(bounded) <= EXTRAS_MAX_KEYS + 1
+    assert bounded["__truncated"] == "key limit reached"
+
+    huge = {"a": "x" * 20000, "b": "y" * 20000}
+    trimmed = _collect_extras(huge, {})
+    assert trimmed["__truncated"] == "size limit reached"
+
+
+def test_new_schema_columns_reach_already_deployed_tables():
+    # custom_fields only helps if it actually lands on the live table. Both
+    # reconcile passes append any TABLE_SCHEMAS column the deployed table
+    # lacks - this is the mechanism that was MISSING for error_listings,
+    # which is why has_ai_suggestion broke the quality tab.
+    import inspect
+    from whitespace_tool import warehouse_bigquery
+    import whitespace_tool.workflow_server as ws
+
+    push = inspect.getsource(warehouse_bigquery.push_to_bigquery)
+    assert "if field.name not in existing_names" in push
+    assert 'client.update_table(existing, ["schema"])' in push
+    for ensure in (ws._ensure_listings_table, ws._ensure_error_listings_table):
+        assert 'client.update_table(existing, ["schema"])' in inspect.getsource(ensure), ensure.__name__
+
+
+def test_custom_fields_flows_bronze_to_silver_to_gold_to_mirror():
+    # A custom field that stops at bronze is invisible to reporting, quality,
+    # the map and every export - the warehouse stored it but nothing
+    # downstream could see it. Each hop is an explicit column list, so each
+    # one has to name it.
+    import inspect
+    import whitespace_tool.workflow_server as ws
+    from whitespace_tool.sqlite_cache import MIRROR_LOCATION_COLUMNS
+
+    silver = inspect.getsource(ws.build_silver_layer)
+    # Silver staging: listings_enriched/listings_invalid are SELECT * off it.
+    assert "l.custom_fields," in silver
+    assert "SELECT * FROM `{staging_table}`" in silver
+
+    gold = inspect.getsource(ws.build_gold_layer)
+    assert "l.custom_fields," in gold
+    assert "CREATE OR REPLACE VIEW `{location_view}`" in gold
+
+    # Gold -> SQLite mirror.
+    sync = inspect.getsource(ws.sync_gold_mirror)
+    assert "median_age, custom_fields" in sync
+    assert "custom_fields" in MIRROR_LOCATION_COLUMNS
+
+
+def test_mirror_location_columns_have_a_top_up_migration():
+    # mirror_reporting_locations had no ALTER pass (unlike mirror_businesses),
+    # so an existing .cache/whitespace_cache.db predating a newly added column
+    # would fail replace_gold_mirror()'s explicit-column INSERT with
+    # "no such column" on the first sync after an upgrade.
+    import inspect
+    from whitespace_tool import sqlite_cache
+
+    source = inspect.getsource(sqlite_cache.init_sqlite_cache)
+    assert "PRAGMA table_info(mirror_reporting_locations)" in source
+    assert "ALTER TABLE mirror_reporting_locations ADD COLUMN" in source
+
+
+def test_removing_a_custom_field_archives_it_instead_of_deleting():
+    # Listings already saved carry that field's values inside
+    # listings.custom_fields. A hard DELETE of the catalog row would strand
+    # them with no label, type or provenance to read them by.
+    import inspect
+    import whitespace_tool.workflow_server as ws
+    from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS
+
+    catalog_columns = {f["name"] for f in TABLE_SCHEMAS["field_catalogs"]}
+    assert {"is_archived", "archived_at"} <= catalog_columns
+
+    delete = inspect.getsource(ws.delete_custom_field)
+    assert "SET is_archived = TRUE" in delete
+    assert "DELETE FROM" not in delete
+    assert '"archived": True' in delete
+
+    # Archived definitions must not reach the mapper or any field picker.
+    catalog = inspect.getsource(ws.field_catalog)
+    assert "WHERE is_archived IS NOT TRUE" in catalog
+
+
+def test_recreating_an_archived_custom_field_revives_it():
+    # Re-adding a previously archived slug must restore that definition, not
+    # insert a duplicate slug alongside it - the archived row already
+    # describes the values sitting in listings.custom_fields.
+    import inspect
+    import whitespace_tool.workflow_server as ws
+
+    create = inspect.getsource(ws.create_custom_field)
+    assert "SET is_archived = FALSE" in create
+    assert "num_dml_affected_rows" in create
+    # And the column that physically stores custom values must exist before
+    # the catalog advertises somewhere for the data to go.
+    assert "_ensure_listings_table(client, project_id, dataset_id)" in create
+
+
+def test_edited_records_round_trip_unmapped_columns():
+    # The review edit form is built from Object.entries(rawObj) - every raw
+    # key, not just mapped ones - so an edit resubmits unmapped columns
+    # rather than silently dropping them. reprocess then re-derives extras
+    # from that full record via normalize_location().
+    from pathlib import Path
+
+    review_js = (Path(__file__).resolve().parents[1] / "ui" / "js" / "review.js").read_text()
+    assert "Object.entries(rawObj).filter(" in review_js
+    assert "updatedRaw[rawKey] = input.value;" in review_js

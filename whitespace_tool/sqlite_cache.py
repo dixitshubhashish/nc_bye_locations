@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import functools
 import json
 import logging
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any, Generator
 
@@ -28,6 +30,10 @@ MIRROR_LOCATION_COLUMNS = (
     "state_name", "county", "zip_code", "phone_number", "latitude", "longitude",
     "coordinate_source", "coordinate_confidence", "country", "last_observed_at",
     "population", "median_household_income", "median_age",
+    # Source columns no typed field covers, carried bronze -> silver -> gold
+    # -> mirror so custom fields survive every read path, not just the
+    # warehouse. Stored as the JSON text gold hands over.
+    "custom_fields",
 )
 MIRROR_BUSINESS_COLUMNS = (
     "business_id", "name", "slug", "description", "logo_url", "website_url", "status",
@@ -123,6 +129,15 @@ def init_sqlite_cache() -> None:
                 {", ".join(f"{col} TEXT" if col not in ("latitude", "longitude", "coordinate_confidence", "population", "median_household_income", "median_age") else f"{col} REAL" for col in MIRROR_LOCATION_COLUMNS)}
             );
         """)
+        # Same top-up migration mirror_businesses already had: an existing
+        # cache file predates any column added later, and replace_gold_mirror()
+        # INSERTs every MIRROR_LOCATION_COLUMNS name explicitly, so without
+        # this the first sync after an upgrade fails with "no such column".
+        existing_location_columns = {row["name"] for row in conn.execute("PRAGMA table_info(mirror_reporting_locations)").fetchall()}
+        for column in MIRROR_LOCATION_COLUMNS:
+            if column not in existing_location_columns:
+                column_type = "REAL" if column in {"latitude", "longitude", "coordinate_confidence", "population", "median_household_income", "median_age"} else "TEXT"
+                conn.execute(f"ALTER TABLE mirror_reporting_locations ADD COLUMN {column} {column_type};")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mirror_locations_geo ON mirror_reporting_locations (state_code, county, city_name, zip_code);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mirror_locations_brand ON mirror_reporting_locations (brand);")
         conn.execute("""
@@ -229,11 +244,153 @@ def init_sqlite_cache() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_quality_mirror_brand ON mirror_quality_listings (brand);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_quality_mirror_geo ON mirror_quality_listings (state, city);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_quality_mirror_status ON mirror_quality_listings (status);")
+        # Records every cachedb action whose wall-clock time crossed
+        # SLOW_ACTION_THRESHOLD_MS, so a slow SQLite path (contention, a
+        # missing index, WAL checkpoint stalls) is visible and queryable
+        # instead of only showing up as vague overall slowness. Trimmed to
+        # the most recent MAX_SLOW_ACTION_ROWS on every insert - this table
+        # itself must not become the memory/growth problem it's meant to
+        # catch on a 512MB deployment.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS cachedb_action_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                action TEXT NOT NULL,
+                duration_ms REAL NOT NULL,
+                detail TEXT,
+                occurred_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cachedb_action_log_occurred ON cachedb_action_log (occurred_at);")
+        # Job History: one row per save_mapper() call (fresh source save or
+        # a single-record reprocess), so the UI can show recent jobs with
+        # their status without the user having to infer it from a
+        # transient "Starting batch..." progress message that disappears
+        # once the save finishes. Local/ephemeral like auto_repair_stats -
+        # not BigQuery-authoritative, purely a UI convenience.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS save_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT,
+                brand TEXT,
+                total_rows INTEGER NOT NULL DEFAULT 0,
+                mapped_rows INTEGER NOT NULL DEFAULT 0,
+                error_listings INTEGER NOT NULL DEFAULT 0,
+                duplicate_listings_skipped INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_save_events_created ON save_events (created_at);")
+        # Tracks, per source_type, whenever the fixed discovery-sample field
+        # count (parse only inspects the first N records) turned out to
+        # miss fields that the full save later found - the raw signal a
+        # future adaptive discovery-sample size would learn from. Purely
+        # observational for now: it does not change today's discovery
+        # sample size, which is a documented product contract, not
+        # something to silently vary based on this data.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS field_discovery_learning (
+                source_type_id TEXT PRIMARY KEY,
+                sample_field_count INTEGER NOT NULL,
+                full_field_count INTEGER NOT NULL,
+                missed_fields TEXT,
+                observed_count INTEGER NOT NULL DEFAULT 1,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        # Advancing confidence score per (target field, source column name)
+        # pairing - kept-as-suggested (+1), switched to a different mapped
+        # field (+0.5), switched to unmapped (-0.5), or a brand-new manual
+        # pairing with no prior suggestion (+1) all accumulate here, so a
+        # field's auto-mapping suggestion gets more (or less) confident the
+        # more it's actually used/kept across real saves - "advanced AI
+        # kinda mapping" that stabilizes with usage instead of a fixed hint
+        # list. source_field_normalized collapses casing/punctuation
+        # differences (e.g. "Cuisine Type" and "cuisine_type" both learn
+        # into the same row) so the same real-world column name accrues
+        # one score regardless of how a given source spells it.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS field_mapping_confidence (
+                target_key TEXT NOT NULL,
+                source_field_normalized TEXT NOT NULL,
+                score REAL NOT NULL DEFAULT 0,
+                sample_count INTEGER NOT NULL DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (target_key, source_field_normalized)
+            );
+        """)
+        # Small durable key/value store for user-configurable settings that
+        # need to survive a page reload and be shared by every reader (e.g.
+        # the "how many days without an update counts as stale" threshold
+        # behind the Stale Records metric) - deliberately not in
+        # query_cache, which is a throwaway derived-payload cache.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
         try:
             conn.execute("ALTER TABLE auto_repair_stats ADD COLUMN manual_fixed INTEGER NOT NULL DEFAULT 0")
         except sqlite3.OperationalError:
             pass
         conn.commit()
+
+
+SLOW_ACTION_THRESHOLD_MS = 200.0
+MAX_SLOW_ACTION_ROWS = 500
+
+
+def _record_slow_action(action: str, duration_ms: float, detail: str = "") -> None:
+    """Best-effort: never let logging a slow action itself become a second
+    failure. Not wrapped by _timed_cache_action, so it isn't measured/logged
+    against its own threshold."""
+    LOGGER.warning("cachedb_slow_action action=%s duration_ms=%.1f detail=%s", action, duration_ms, detail)
+    try:
+        with get_db_connection() as conn:
+            conn.execute(
+                "INSERT INTO cachedb_action_log (action, duration_ms, detail) VALUES (?, ?, ?)",
+                (action, duration_ms, detail),
+            )
+            conn.execute(
+                "DELETE FROM cachedb_action_log WHERE id NOT IN "
+                "(SELECT id FROM cachedb_action_log ORDER BY id DESC LIMIT ?)",
+                (MAX_SLOW_ACTION_ROWS,),
+            )
+            conn.commit()
+    except Exception:
+        LOGGER.debug("cachedb_slow_action_log_write_failed action=%s", action, exc_info=True)
+
+
+def _timed_cache_action(func):
+    """Wrap a cachedb function so every call is timed; calls at or above
+    SLOW_ACTION_THRESHOLD_MS are logged and persisted via
+    _record_slow_action(), so a slow cachedb path is queryable later
+    (get_slow_actions()) instead of only ever showing up as vague overall
+    slowness."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        started = time.perf_counter()
+        try:
+            return func(*args, **kwargs)
+        finally:
+            duration_ms = (time.perf_counter() - started) * 1000.0
+            if duration_ms >= SLOW_ACTION_THRESHOLD_MS:
+                _record_slow_action(func.__name__, duration_ms)
+    return wrapper
+
+
+def get_slow_actions(limit: int = 50) -> list[dict[str, Any]]:
+    """Most recent cachedb actions that crossed SLOW_ACTION_THRESHOLD_MS,
+    newest first - for a future admin/debug view or ad-hoc inspection."""
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT action, duration_ms, detail, occurred_at FROM cachedb_action_log "
+            "ORDER BY id DESC LIMIT ?",
+            (max(1, min(int(limit), MAX_SLOW_ACTION_ROWS)),),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
 
 def seed_enrichment_cycle(listing_ids: list[str], cycle_id: int) -> int:
@@ -251,11 +408,18 @@ def seed_enrichment_cycle(listing_ids: list[str], cycle_id: int) -> int:
 
 
 def claim_enrichment_batch(cycle_id: int, limit: int = 2) -> list[str]:
-    """Atomically claim a small batch from the active base set."""
+    """Atomically claim a small batch from the active base set.
+
+    Claimed in random order, not by listing_id: ids from one brand tend to
+    sort together, so ordered claiming spent the early (and most likely to be
+    seen) part of every cycle on a single brand. Randomising spreads coverage
+    across brands - the full base set still drains either way, since each row
+    leaves 'pending' as soon as it is claimed.
+    """
     init_sqlite_cache()
     with get_db_connection() as conn:
         rows = conn.execute(
-            "SELECT listing_id FROM enrichment_queue WHERE cycle_id = ? AND queue_set = 'base' AND state = 'pending' ORDER BY listing_id LIMIT ?",
+            "SELECT listing_id FROM enrichment_queue WHERE cycle_id = ? AND queue_set = 'base' AND state = 'pending' ORDER BY RANDOM() LIMIT ?",
             (int(cycle_id), max(1, min(int(limit), 2))),
         ).fetchall()
         ids = [str(row["listing_id"]) for row in rows]
@@ -424,7 +588,7 @@ def cache_zipcodes(zip_records: list[dict[str, Any]]) -> None:
             );
         """, [
             {
-                "zip_code": str(r.get("zip_code", "")).strip(),
+                "zip_code": str(r.get("zip_code", "")).strip().upper(),
                 "city_name": r.get("city_name"),
                 "county": r.get("county"),
                 "state_code": r.get("state_code"),
@@ -438,6 +602,39 @@ def cache_zipcodes(zip_records: list[dict[str, Any]]) -> None:
             for r in zip_records if r.get("zip_code")
         ])
         conn.commit()
+
+
+def cache_missing_zipcodes(zip_records: list[dict[str, Any]]) -> int:
+    if not zip_records:
+        return 0
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        before = conn.total_changes
+        conn.executemany("""
+            INSERT OR IGNORE INTO us_zipcodes (
+                zip_code, city_name, county, state_code, state_name,
+                latitude, longitude, population, median_household_income, median_age
+            ) VALUES (
+                :zip_code, :city_name, :county, :state_code, :state_name,
+                :latitude, :longitude, :population, :median_household_income, :median_age
+            );
+        """, [
+            {
+                "zip_code": str(r.get("zip_code", "")).strip().upper(),
+                "city_name": r.get("city_name"),
+                "county": r.get("county"),
+                "state_code": r.get("state_code"),
+                "state_name": r.get("state_name"),
+                "latitude": float(r["latitude"]) if r.get("latitude") is not None else None,
+                "longitude": float(r["longitude"]) if r.get("longitude") is not None else None,
+                "population": float(r["population"]) if r.get("population") is not None else None,
+                "median_household_income": float(r["median_household_income"]) if r.get("median_household_income") is not None else None,
+                "median_age": float(r["median_age"]) if r.get("median_age") is not None else None,
+            }
+            for r in zip_records if r.get("zip_code")
+        ])
+        conn.commit()
+        return conn.total_changes - before
 
 
 def get_cached_zipcode(zip_code: str) -> dict[str, Any] | None:
@@ -500,7 +697,7 @@ def cache_worldwide_cities(records: list[dict[str, Any]]) -> int:
                 "district": str(r.get("district") or r.get("DISTRICT") or "").strip() or None,
                 "city": str(r.get("city") or r.get("CITY") or "").strip() or None,
                 "town": str(r.get("town") or r.get("TOWN") or "").strip() or None,
-                "zip_code": str(r.get("zip_code") or r.get("ZIP_CODE") or "").strip() or None,
+                "zip_code": str(r.get("zip_code") or r.get("ZIP_CODE") or "").strip().upper() or None,
                 "latitude": float(r["latitude"]) if r.get("latitude") is not None or r.get("LATITUDE") is not None else None,
                 "longitude": float(r["longitude"]) if r.get("longitude") is not None or r.get("LONGITUDE") is not None else None,
             }
@@ -595,7 +792,30 @@ def invalidate_cache(cache_key: str | None = None) -> None:
         if cache_key:
             conn.execute("DELETE FROM query_cache WHERE cache_key = ?;", (cache_key,))
         else:
-            conn.execute("DELETE FROM query_cache;")
+            # reporting_quality:* entries are exempt from this blanket wipe.
+            # Unlike every other cached payload here, reporting_quality_summary()
+            # already re-warms itself in the background on every single read
+            # of a warm entry (see its own should_refresh/_QUALITY_REFRESH_KEYS
+            # logic) - it doesn't need invalidation to eventually reflect a
+            # new save/reprocess. Wiping it anyway forced the Data Quality
+            # tab back into a genuinely-cold ~30-40s BigQuery recompute after
+            # *any* save/reprocess anywhere in the app, unlike Location
+            # Intelligence's tab, which reads dedicated gold-mirror tables
+            # untouched by this delete. Exempting it keeps quality numbers
+            # fast (self-healing within a read or two) the same way.
+            conn.execute("DELETE FROM query_cache WHERE cache_key NOT LIKE 'reporting_quality:%';")
+        conn.commit()
+
+
+def invalidate_quality_cache() -> None:
+    """Explicitly drop the reporting_quality:* payloads that invalidate_cache()
+    deliberately spares. Needed when something the quality numbers are
+    *computed from* changes (e.g. the stale-after-days threshold), as opposed
+    to the underlying listings changing - which the summary already re-warms
+    itself for on every read."""
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        conn.execute("DELETE FROM query_cache WHERE cache_key LIKE 'reporting_quality:%';")
         conn.commit()
 
 
@@ -739,8 +959,8 @@ def _mirror_geo_filter_sql(state: str, county: str, city: str, zip_code: str) ->
         clauses.append("LOWER(COALESCE(city_name, '')) = ?")
         params.append(city.lower())
     if zip_code:
-        clauses.append("zip_code = ?")
-        params.append(zip_code)
+        clauses.append("UPPER(zip_code) = ?")
+        params.append(zip_code.upper())
     return (" AND " + " AND ".join(clauses)) if clauses else "", params
 
 
@@ -777,3 +997,192 @@ def fetch_mirror_reporting_locations_by_brand(selected_brands: list[str]) -> lis
 def fetch_mirror_businesses() -> list[dict[str, Any]]:
     with get_db_connection() as conn:
         return [dict(row) for row in conn.execute("SELECT * FROM mirror_businesses ORDER BY name").fetchall()]
+
+
+MAX_SAVE_EVENT_ROWS = 200
+
+
+def record_save_event(
+    event_id: str, brand: str, total_rows: int, mapped_rows: int,
+    error_listings: int, duplicate_listings_skipped: int,
+) -> None:
+    """One row per save_mapper() call (a fresh source save or a single-
+    record reprocess) - status is derived once here so every reader (the
+    Job History panel) agrees on what OK/FAILED/NEEDS_REVIEW means."""
+    if mapped_rows <= 0 and total_rows > 0:
+        status = "FAILED"
+    elif error_listings > 0:
+        status = "NEEDS_REVIEW"
+    else:
+        status = "OK"
+    with get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO save_events (event_id, brand, total_rows, mapped_rows, error_listings, duplicate_listings_skipped, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (event_id, brand, total_rows, mapped_rows, error_listings, duplicate_listings_skipped, status),
+        )
+        conn.execute(
+            "DELETE FROM save_events WHERE id NOT IN (SELECT id FROM save_events ORDER BY id DESC LIMIT ?)",
+            (MAX_SAVE_EVENT_ROWS,),
+        )
+        conn.commit()
+
+
+def record_field_discovery_gap(source_type_id: str, sample_field_count: int, full_field_count: int, missed_fields: list[str]) -> None:
+    """Called from save_mapper() when the full source contained fields the
+    fixed-size discovery sample never saw. Keeps the largest gap observed
+    per source_type_id rather than every occurrence, since the useful
+    signal is "how much bigger would the sample have needed to be", not a
+    growing log."""
+    if not source_type_id:
+        return
+    with get_db_connection() as conn:
+        existing = conn.execute(
+            "SELECT full_field_count, observed_count FROM field_discovery_learning WHERE source_type_id = ?",
+            (source_type_id,),
+        ).fetchone()
+        if existing and existing["full_field_count"] >= full_field_count:
+            conn.execute(
+                "UPDATE field_discovery_learning SET observed_count = observed_count + 1, updated_at = CURRENT_TIMESTAMP WHERE source_type_id = ?",
+                (source_type_id,),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO field_discovery_learning (source_type_id, sample_field_count, full_field_count, missed_fields, observed_count) "
+                "VALUES (?, ?, ?, ?, 1) "
+                "ON CONFLICT(source_type_id) DO UPDATE SET sample_field_count=excluded.sample_field_count, "
+                "full_field_count=excluded.full_field_count, missed_fields=excluded.missed_fields, "
+                "observed_count=field_discovery_learning.observed_count + 1, updated_at=CURRENT_TIMESTAMP",
+                (source_type_id, sample_field_count, full_field_count, json.dumps(sorted(missed_fields))),
+            )
+        conn.commit()
+
+
+def get_field_discovery_gaps(limit: int = 50) -> list[dict[str, Any]]:
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT source_type_id, sample_field_count, full_field_count, missed_fields, observed_count, updated_at "
+            "FROM field_discovery_learning ORDER BY (full_field_count - sample_field_count) DESC LIMIT ?",
+            (max(1, min(int(limit), 500)),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def _normalize_field_name(value: str) -> str:
+    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+
+def record_mapping_confidence_events(events: list[dict[str, Any]]) -> None:
+    """events: [{"target_key": ..., "source_field": ..., "delta": float}, ...].
+    Upserts each (target_key, normalized source_field) pair, accumulating
+    score and sample_count rather than overwriting - the whole point is a
+    running total across every save, not a single-save snapshot."""
+    if not events:
+        return
+    with get_db_connection() as conn:
+        for event in events:
+            target_key = str(event.get("target_key") or "").strip()
+            source_field = _normalize_field_name(event.get("source_field"))
+            delta = event.get("delta")
+            if not target_key or not source_field or not isinstance(delta, (int, float)):
+                continue
+            conn.execute(
+                "INSERT INTO field_mapping_confidence (target_key, source_field_normalized, score, sample_count) "
+                "VALUES (?, ?, ?, 1) "
+                "ON CONFLICT(target_key, source_field_normalized) DO UPDATE SET "
+                "score = score + excluded.score, sample_count = sample_count + 1, updated_at = CURRENT_TIMESTAMP",
+                (target_key, source_field, float(delta)),
+            )
+        conn.commit()
+
+
+def get_mapping_confidence(target_key: str = "") -> list[dict[str, Any]]:
+    with get_db_connection() as conn:
+        if target_key:
+            rows = conn.execute(
+                "SELECT target_key, source_field_normalized, score, sample_count, updated_at "
+                "FROM field_mapping_confidence WHERE target_key = ? ORDER BY score DESC",
+                (target_key,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT target_key, source_field_normalized, score, sample_count, updated_at "
+                "FROM field_mapping_confidence ORDER BY target_key, score DESC"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_recent_save_events(limit: int = 20, offset: int = 0) -> list[dict[str, Any]]:
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT event_id, brand, total_rows, mapped_rows, error_listings, duplicate_listings_skipped, status, created_at "
+            "FROM save_events ORDER BY id DESC LIMIT ? OFFSET ?",
+            (max(1, min(int(limit), MAX_SAVE_EVENT_ROWS)), max(0, int(offset))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+DEFAULT_STALE_AFTER_DAYS = 90
+
+
+def get_app_setting(key: str, default: str = "") -> str:
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT value FROM app_settings WHERE key = ? LIMIT 1;", (key,)).fetchone()
+        return str(row["value"]) if row else default
+
+
+def set_app_setting(key: str, value: str) -> None:
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP;",
+            (key, str(value)),
+        )
+        conn.commit()
+
+
+def get_stale_after_days() -> int:
+    """Days without an update before a listing counts as stale. User
+    configurable (persisted), defaulting to the previously-hardcoded 90."""
+    try:
+        value = int(get_app_setting("stale_after_days", str(DEFAULT_STALE_AFTER_DAYS)))
+    except (TypeError, ValueError):
+        return DEFAULT_STALE_AFTER_DAYS
+    return value if 1 <= value <= 3650 else DEFAULT_STALE_AFTER_DAYS
+
+
+def count_save_events() -> int:
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT COUNT(*) AS count FROM save_events").fetchone()
+        return int(row["count"]) if row else 0
+
+
+# Time every cachedb action below and persist the slow ones (see
+# _timed_cache_action / cachedb_action_log). Wrapped in bulk here, after all
+# definitions, rather than decorating each `def` individually, so this list
+# is the single place that has to stay in sync with the module's public
+# surface - get_db_connection (a @contextmanager, timing it would only
+# measure generator setup, not the work done inside the `with` block),
+# init_sqlite_cache (one-time schema setup, not a repeated action), and the
+# logging helpers themselves are intentionally excluded.
+for _action_name in (
+    "seed_enrichment_cycle", "claim_enrichment_batch", "complete_enrichment_claim",
+    "enrichment_cycle_counts", "seed_or_swap_enrichment_cycle", "replace_quality_mirror",
+    "clear_sample_reporting_mirror", "cache_zipcodes", "cache_missing_zipcodes",
+    "get_cached_zipcode", "find_nearest_zip_in_cache", "find_nearest_worldwide_city_in_cache",
+    "lookup_cached_city_state", "get_cached_zipcode_count", "cache_worldwide_cities",
+    "get_cached_worldwide_city_count", "get_zip_reference_status", "set_zip_reference_status",
+    "get_auto_repair_stats", "set_auto_repair_stats", "increment_manual_fixed_count",
+    "get_cached_query", "set_cached_query", "invalidate_cache", "clear_local_cache_db",
+    "get_error_count", "set_error_count", "replace_gold_mirror", "get_mirror_status",
+    "fetch_mirror_zip_brand_activity", "fetch_mirror_reporting_locations",
+    "fetch_mirror_reporting_locations_by_brand", "fetch_mirror_businesses",
+    "record_save_event", "get_recent_save_events", "count_save_events",
+    "get_app_setting", "set_app_setting", "get_stale_after_days", "invalidate_quality_cache",
+    "record_field_discovery_gap", "get_field_discovery_gaps",
+    "record_mapping_confidence_events", "get_mapping_confidence",
+):
+    globals()[_action_name] = _timed_cache_action(globals()[_action_name])
+del _action_name

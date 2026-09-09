@@ -100,6 +100,9 @@ def is_us_land_coordinate(lat: float | None, lon: float | None) -> bool:
     return in_us_lat and in_us_lon
 
 
+MAX_SNAP_DISTANCE_KM = 50.0
+
+
 def haversine_distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Calculate the great-circle distance between two points on the Earth in kilometers."""
     radius = 6371.0
@@ -156,11 +159,66 @@ def find_nearest_city_and_zip(lat: float, lon: float, conn: sqlite3.Connection) 
             min_dist = dist
             best_match = r
 
-    if best_match:
+    # A "nearest" match beyond MAX_SNAP_DISTANCE_KM isn't a reliable repair -
+    # it's just whatever happened to be closest among an unrelated set
+    # (most visibly the population-only fallback above, which has no
+    # geographic bound at all). Reject rather than silently snap a
+    # coordinate to a city that may be hundreds of km away.
+    if best_match and min_dist <= MAX_SNAP_DISTANCE_KM:
         res = dict(best_match)
         res["distance_km"] = round(min_dist, 2)
         return res
     return None
+
+
+def detect_hierarchy_conflict(
+    zip_code: str | None, country: str | None, lat: float | None, lon: float | None, conn: sqlite3.Connection,
+) -> dict[str, Any] | None:
+    """A record can carry a ZIP/city/state AND lat/lon that don't actually
+    agree (e.g. the ZIP says Boston but the coordinates land near Miami).
+    Returns None when there isn't enough of both sides to compare, or when
+    they're consistent (the ZIP's own canonical coordinates are within
+    MAX_SNAP_DISTANCE_KM of the row's own lat/lon). Otherwise returns a
+    conflict payload with two candidate resolutions - "zip_based" (derived
+    from the ZIP) and "coordinate_based" (derived from the lat/lon, reusing
+    the same nearest-city lookup and 50km cap the offshore-snapping path
+    already uses) - for the caller to present as a choice. Neither
+    candidate is applied automatically; picking one is what makes it an
+    AI-resolved fix rather than a silent guess.
+    """
+    clean_zip = str(zip_code or "").strip()
+    if lat is None or lon is None or not clean_zip:
+        return None
+    zip_row = conn.execute(
+        "SELECT zip_code, city_name, state_code, state_name, latitude, longitude FROM us_zipcodes WHERE zip_code = ? LIMIT 1",
+        (clean_zip,),
+    ).fetchone()
+    if not zip_row or zip_row["latitude"] is None or zip_row["longitude"] is None:
+        return None
+    distance_km = haversine_distance_km(lat, lon, float(zip_row["latitude"]), float(zip_row["longitude"]))
+    if distance_km <= MAX_SNAP_DISTANCE_KM:
+        return None
+
+    coordinate_based = find_nearest_city_and_zip(lat, lon, conn)
+    return {
+        "distance_km": round(distance_km, 1),
+        "zip_based": {
+            "city": zip_row["city_name"],
+            "state": zip_row["state_code"],
+            "country": country or "United States",
+            "zip_code": clean_zip,
+            "latitude": zip_row["latitude"],
+            "longitude": zip_row["longitude"],
+        },
+        "coordinate_based": {
+            "city": coordinate_based["city_name"],
+            "state": coordinate_based["state_code"],
+            "country": country or "United States",
+            "zip_code": coordinate_based["zip_code"],
+            "latitude": lat,
+            "longitude": lon,
+        } if coordinate_based else None,
+    }
 
 
 def lookup_zip_and_coords_by_city_state(city: str | None, state: str | None, conn: sqlite3.Connection) -> dict[str, Any] | None:
@@ -269,7 +327,7 @@ def find_nearest_worldwide_city(
             min_dist = dist
             best_match = r
 
-    if best_match:
+    if best_match and min_dist <= MAX_SNAP_DISTANCE_KM:
         res = dict(best_match)
         res["distance_km"] = round(min_dist, 2)
         return res

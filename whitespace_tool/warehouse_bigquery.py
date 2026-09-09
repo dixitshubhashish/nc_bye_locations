@@ -160,6 +160,12 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "is_custom", "type": "BOOLEAN", "mode": "REQUIRED"},
         {"name": "created_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
         {"name": "updated_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
+        # Removing a custom field archives it rather than deleting the row:
+        # listings already written carry that field's values inside
+        # listings.custom_fields, and a hard DELETE would strand them with
+        # no label, type, or provenance to interpret them by.
+        {"name": "is_archived", "type": "BOOLEAN", "mode": "NULLABLE"},
+        {"name": "archived_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
         {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
     ],
     "us_zipcodes": [
@@ -210,15 +216,21 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "listing_id", "type": "STRING", "mode": "REQUIRED", "default": "GENERATE_UUID()"},
         {"name": "business_id", "type": "STRING", "mode": "REQUIRED"},
         {"name": "source_type_id", "type": "STRING", "mode": "REQUIRED"},
+        # location_key is always populated (normalize_location() generates a
+        # fallback when the source doesn't provide one), so it stays
+        # REQUIRED. name/address/city_name/state_code/zip_code/country are
+        # per-record data fields, not the brand identity - only brand
+        # (business_id, tied to the mapper's brand) is mandatory now, so
+        # these are NULLABLE like every other non-brand field.
         {"name": "location_key", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "name", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "address", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "city_name", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "name", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "address", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "city_name", "type": "STRING", "mode": "NULLABLE"},
         {"name": "town", "type": "STRING", "mode": "NULLABLE"},
-        {"name": "state_code", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "state_code", "type": "STRING", "mode": "NULLABLE"},
         {"name": "province", "type": "STRING", "mode": "NULLABLE"},
-        {"name": "zip_code", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "country", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "zip_code", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "country", "type": "STRING", "mode": "NULLABLE"},
         {"name": "country_code", "type": "STRING", "mode": "NULLABLE"},
         {"name": "latitude", "type": "FLOAT", "mode": "NULLABLE"},
         {"name": "longitude", "type": "FLOAT", "mode": "NULLABLE"},
@@ -261,6 +273,7 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "foot_traffic_score", "type": "FLOAT", "mode": "NULLABLE"},
         {"name": "parking_availability", "type": "STRING", "mode": "NULLABLE"},
         {"name": "ratings", "type": "FLOAT", "mode": "NULLABLE"},
+        {"name": "custom_fields", "type": "STRING", "mode": "NULLABLE"},
         {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
         {"name": "is_deleted", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "deleted_on", "type": "TIMESTAMP", "mode": "NULLABLE"},
@@ -307,6 +320,17 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "is_deleted", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "deleted_on", "type": "TIMESTAMP", "mode": "NULLABLE"},
         {"name": "is_ai_enriched", "type": "BOOLEAN", "mode": "NULLABLE"},
+        # Whether an AI suggestion was available for this row at the moment
+        # it entered/re-entered review. Computed once at write time (cheap -
+        # the reprocess path already runs the enrichment probe) so the
+        # AI-vs-manual pending split can be read straight off the table
+        # instead of re-probing the whole queue on every reporting load.
+        {"name": "has_ai_suggestion", "type": "BOOLEAN", "mode": "NULLABLE"},
+        # How many times a record has come back here after a user submitted
+        # a fix that still failed validation - drives the "Review Again"
+        # counter in the edit dialog instead of silently re-inserting a
+        # fresh row each retry with no memory of prior attempts.
+        {"name": "attempt_count", "type": "INTEGER", "mode": "NULLABLE"},
     ],
     "quality_fix_events": [
         {"name": "fix_id", "type": "STRING", "mode": "REQUIRED"},
@@ -370,7 +394,14 @@ def _scrub_config(value: Any) -> Any:
 
 
 def _listing_row(row: LocationRecord) -> dict[str, Any]:
+    # Source columns no typed field covers, preserved as a JSON document so
+    # a parse whose column list differs from every other parse does not lose
+    # data at the bronze write. Deliberately NOT part of CONTENT_HASH_FIELDS:
+    # including it would change every previously-stored row's hash and make
+    # the next save treat the whole warehouse as new rows.
+    extras = getattr(row, "extras", None)
     listing = {
+        "custom_fields": json.dumps(extras, sort_keys=True, default=str) if extras else None,
         **(row.raw.get("__meta", {}) if isinstance(row.raw, dict) and isinstance(row.raw.get("__meta"), dict) else {}),
         "listing_id": str(uuid4()),
         "business_id": getattr(row, "business_id", row.brand),
