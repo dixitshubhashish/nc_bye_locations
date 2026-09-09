@@ -7,6 +7,7 @@
     "city": "city",
     "state": "province",
     "postal_code": "postalCode",
+    "country": "country",
     "latitude": "latitude",
     "longitude": "longitude",
     "observed_at": "observed_at"

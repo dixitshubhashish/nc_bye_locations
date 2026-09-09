@@ -47,8 +47,10 @@ class SilverEnrichmentTests(unittest.TestCase):
         self.assertIn("median_household_income", sql)
         self.assertIn("z.income_per_capita", sql)
         self.assertIn("city_geos AS", sql)
+        self.assertIn("ANY_VALUE(state_code) AS state_code", sql)
+        self.assertIn("COALESCE(l.normalized_state_code, cg.state_code, z.state_code) AS state_code", sql)
         self.assertIn("COALESCE(l.latitude, z.latitude, cg.latitude) AS latitude", sql)
-        self.assertIn("COALESCE(l.normalized_city_name, LOWER(TRIM(z.city_name))) = cg.normalized_city_name", sql)
+        self.assertIn("EDIT_DISTANCE(l.normalized_city_name, cg.normalized_city_name) <= 2", sql)
         self.assertIn("coordinate_source", sql)
         self.assertIn("coordinate_confidence", sql)
         self.assertIn("geocode_query", sql)
@@ -76,6 +78,50 @@ class SilverEnrichmentTests(unittest.TestCase):
         self.assertIn("rejection_reason", sql)
         self.assertIn("latitude IS NOT NULL AND longitude IS NOT NULL", sql)
         self.assertIn("DROP TABLE IF EXISTS `project.silver._listings_staging`", sql)
+
+    def test_build_silver_layer_low_priority_uses_batch_priority(self) -> None:
+        class _ClientWithConfig(_FakeClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.configs: list[object] = []
+
+            def query(self, query: str, job_config: object = None) -> _FakeJob:
+                self.queries.append(query)
+                self.configs.append(job_config)
+                return _FakeJob()
+
+        client = _ClientWithConfig()
+        with patch.object(workflow_server, "_medallion_settings", return_value=("project", "bronze", "silver", "gold", None)):
+            with patch.object(workflow_server, "_bigquery_client", return_value=client):
+                with patch.object(workflow_server, "_ensure_dataset", side_effect=lambda *_: None):
+                    with patch.object(workflow_server, "sleep", return_value=None):
+                        result = workflow_server.build_silver_layer(low_priority=True)
+
+        self.assertEqual(result["priority"], "batch")
+        self.assertTrue(len(client.configs) > 0)
+        for cfg in client.configs:
+            self.assertIsNotNone(cfg)
+            self.assertEqual(getattr(cfg, "priority", None), "BATCH")
+
+    def test_refresh_silver_background_low_priority_thread(self) -> None:
+        calls = []
+
+        def fake_invoke(low_priority=False):
+            calls.append(low_priority)
+            return {"rows": 1}
+
+        with patch.object(workflow_server, "_invoke_silver_layer", side_effect=fake_invoke):
+            with patch.object(workflow_server, "_rebuild_gold_and_mirror", return_value={"gold": {}, "mirror": {}}):
+                with patch.object(workflow_server, "auto_repair_error_batch", return_value={"attempted": 0, "resolved": 0, "remaining": 0}):
+                    workflow_server.REPORTING_REFRESHING = False
+                    started = workflow_server._refresh_silver_background(low_priority=True)
+                    for thread in workflow_server.threading.enumerate():
+                        if thread.name == "reporting-silver-refresh":
+                            thread.join(timeout=5)
+                    workflow_server.REPORTING_REFRESHING = False
+
+        self.assertTrue(started)
+        self.assertEqual(calls, [True])
 
 
 if __name__ == "__main__":

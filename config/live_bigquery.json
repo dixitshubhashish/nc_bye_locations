@@ -15,23 +15,23 @@
   "location_sources": [
     {
       "name": "dominos_store_api",
-      "type": "dominos_api",
+      "type": "json",
       "source_tier": "live",
       "url": "REPLACE_WITH_DOMINOS_API_URL",
       "headers": {},
       "timeout_seconds": 60,
-      "mapper": "workflow_templates/dominos_api.json"
+      "mapper": "workflow_templates/dominos_json.json"
     },
     {
       "name": "pizza_hut_current_extract",
-      "type": "pizza_hut_kaggle",
+      "type": "csv",
       "source_tier": "snapshot",
       "path": "../data/source_files/pizza_hut_current.csv",
-      "mapper": "workflow_templates/pizza_hut_kaggle.json"
+      "mapper": "workflow_templates/pizza_hut_csv.json"
     },
     {
       "name": "little_caesars_current_json",
-      "type": "little_caesars_json",
+      "type": "json",
       "source_tier": "snapshot",
       "path": "../data/source_files/little_caesars_current.json",
       "mapper": "workflow_templates/little_caesars_json.json"

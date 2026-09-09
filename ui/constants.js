@@ -1,4 +1,5 @@
 window.APP_CONSTANTS = Object.freeze({
+  productName: "Competitive Whitespace Tool",
   brandName: "Birdeye",
   birdeyeLogoUrl: "https://cdn2.birdeye.com/version2/containers/header/birdeye-logo-2025@2x.png",
   birdeyeLogoDarkUrl: "https://cdn2.birdeye.com/version2/containers/header/birdeye-logo-2025@2x.png",
@@ -44,7 +45,7 @@ window.APP_CONSTANTS = Object.freeze({
     metaDescription: "Demo mapping for LA City restaurant and market inspection JSON data.",
     countryOfOrigin: "United States"
   },
-  littleCaesarsApiDemoUrl: "https://raw.githubusercontent.com/dixitshubhashish/nc_bye_locations/main/little_caesars_locations.json",
+  littleCaesarsApiDemoUrl: "https://nominatim.openstreetmap.org/search",
   littleCaesarsBrand: {
     name: "Little Caesars",
     slug: "little-caesars",
@@ -67,6 +68,16 @@ window.APP_CONSTANTS = Object.freeze({
     countryOfOrigin: "Global"
   },
   demoRestaurantExcelUrl: "https://docs.google.com/spreadsheets/d/e/2PACX-1vSHa0iIxTVG7odLSlxL8PKDdAt0Xo2ciufPLMpGm9pQuOi44nlwgs3N-Dew4pyz7g/pub?output=xlsx",
+  demoRestaurantBrand: {
+    name: "Demo Restaurant",
+    slug: "demo-restaurant",
+    description: "Demo restaurant locations from a public Excel workbook.",
+    websiteUrl: "https://docs.google.com/",
+    status: "active",
+    metaTitle: "Demo Restaurant",
+    metaDescription: "Demo Excel source for restaurant location mapping.",
+    countryOfOrigin: "United States"
+  },
   demoXmlUrl: "https://samplelib.com/xml/sample-5mb.xml",
   demoXmlBrand: {
     name: "Demo XML",
@@ -84,6 +95,11 @@ window.APP_CONSTANTS = Object.freeze({
 // Add exactly two internal tabs inside the existing Reporting screen:
 // Location Intelligence & Whitespace, and Data Quality & Improvements.
 (() => {
+  document.addEventListener("DOMContentLoaded", () => {
+    document.querySelectorAll("[data-product-name]").forEach((element) => {
+      element.textContent = window.APP_CONSTANTS.productName;
+    });
+  });
   const script = document.createElement("script");
   script.src = "/reporting-tabs.js";
   script.async = true;

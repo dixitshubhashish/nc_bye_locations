@@ -129,7 +129,7 @@ def run_quality_checks(
 
     missing_required: dict[str, int] = defaultdict(int)
     for row in locations:
-        for field in ("brand", "location_id", "address", "city", "state", "postal_code", "observed_at"):
+        for field in ("brand", "location_id", "address", "city", "state", "postal_code", "country", "observed_at"):
             if not getattr(row, field):
                 missing_required[field] += 1
     for field, count in sorted(missing_required.items()):

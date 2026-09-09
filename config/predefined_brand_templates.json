@@ -1,26 +1,46 @@
 [
   {
     "brand": "Domino's",
-    "source_name": "dominos_store_locator",
+    "source_name": "dominos_locations_json_demo",
+    "display_name": "Domino's - JSON file demo",
+    "source_format_label": "JSON",
     "source_type": "json",
     "record_path": "Stores",
-    "template_path": "config/workflow_templates/dominos_api.json",
-    "notes": "Unofficial Domino's first-party store locator JSON shape."
+    "template_path": "config/workflow_templates/dominos_json.json",
+    "notes": "JSON source-format demo. A store-locator JSON document with the records nested under the \"Stores\" array, so it also demonstrates a non-empty record path."
   },
   {
     "brand": "Pizza Hut",
-    "source_name": "pizza_hut_locations",
+    "source_name": "pizza_hut_locations_csv_demo",
+    "display_name": "Pizza Hut - CSV file demo",
+    "source_format_label": "CSV",
     "source_type": "csv",
     "record_path": "",
-    "template_path": "config/workflow_templates/pizza_hut_kaggle.json",
-    "notes": "CSV-style public/snapshot location extract shape."
+    "template_path": "config/workflow_templates/pizza_hut_csv.json",
+    "notes": "CSV source-format demo. A flat public location extract with one row per store and no record path."
   },
   {
     "brand": "Little Caesars",
-    "source_name": "little_caesars_locations",
-    "source_type": "json",
-    "record_path": "locations",
-    "template_path": "config/workflow_templates/little_caesars_json.json",
-    "notes": "Nested JSON location object shape."
+    "source_name": "little_caesars_locations_get_api_demo",
+    "display_name": "Little Caesars - GET JSON API demo",
+    "source_format_label": "GET JSON API",
+    "source_type": "api_get_json",
+    "record_path": "",
+    "template_path": "config/workflow_templates/little_caesars_get_api.json",
+    "source_url": "https://nominatim.openstreetmap.org/search",
+    "query_params": [
+      { "key": "q", "value": "Little Caesars" },
+      { "key": "countrycodes", "value": "us" },
+      { "key": "format", "value": "json" },
+      { "key": "addressdetails", "value": "1" },
+      { "key": "extratags", "value": "1" },
+      { "key": "limit", "value": "50" }
+    ],
+    "headers": [
+      { "key": "Accept", "value": "application/json" },
+      { "key": "User-Agent", "value": "CompetitiveWhitespaceTool/1.0" },
+      { "key": "Accept-Language", "value": "en" }
+    ],
+    "notes": "GET JSON API source-format demo, live against a real public endpoint. Nominatim answers with a bare top-level JSON array, so the record path is empty - the counterpart to the Domino's JSON demo, which nests under \"Stores\". limit=50 is the endpoint's own ceiling: it accepts a larger value and still returns 50 rows, so anything higher would overstate what the call actually retrieves."
   }
 ]

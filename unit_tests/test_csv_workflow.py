@@ -31,6 +31,7 @@ VALID_MAPPER = {
         "city": "city",
         "state": "state",
         "postal_code": "zip_code",
+        "country": "country",
         "latitude": "latitude",
         "longitude": "longitude",
         "opening_date": "opened_on",
@@ -45,6 +46,7 @@ VALID_ROW = {
     "city": "Raleigh",
     "state": "nc",
     "zip_code": "27601-1234",
+    "country": "United States",
     "latitude": "35.7796",
     "longitude": "-78.6382",
     "opened_on": "04/12/2024",
@@ -110,9 +112,69 @@ class CsvWorkflowTests(unittest.TestCase):
         self.assertIn("ratings", listing_fields)
         self.assertIn("ratings", CONTENT_HASH_FIELDS)
 
+    def test_email_district_state_code_country_code_in_registry_and_normalization(self) -> None:
+        registry = load_field_registry()
+        registry_keys = {field["key"] for field in registry}
+        self.assertIn("email", registry_keys)
+        self.assertIn("district", registry_keys)
+        self.assertIn("state_code", registry_keys)
+        self.assertIn("country_code", registry_keys)
+
+        email_field = next(f for f in registry if f["key"] == "email")
+        self.assertEqual(email_field["label"], "Email")
+        self.assertEqual(email_field["table"], "listings")
+        self.assertIn("contact_email", email_field["hints"])
+
+        district_field = next(f for f in registry if f["key"] == "district")
+        self.assertEqual(district_field["label"], "District")
+        self.assertIn("county", district_field["hints"])
+
+        state_code_field = next(f for f in registry if f["key"] == "state_code")
+        self.assertEqual(state_code_field["label"], "State Code")
+        self.assertIn("state_abbr", state_code_field["hints"])
+
+        country_code_field = next(f for f in registry if f["key"] == "country_code")
+        self.assertEqual(country_code_field["label"], "Country Code")
+        self.assertIn("country_iso", country_code_field["hints"])
+
+        # Test normalization mapping
+        mapper = {
+            **VALID_MAPPER,
+            "fields": {
+                **VALID_MAPPER["fields"],
+                "email": "store_email",
+                "district": "county_name",
+                "state_code": "st_code",
+                "country_code": "iso_code",
+            },
+        }
+        row = {
+            **VALID_ROW,
+            "store_email": "contact@example.com",
+            "county_name": "Travis County",
+            "st_code": "TX",
+            "iso_code": "US",
+        }
+        loc = normalize_location(row, mapper, "test_source", 0)
+        self.assertIsNotNone(loc)
+        assert loc is not None
+        self.assertEqual(loc.email, "contact@example.com")
+        self.assertEqual(loc.district, "Travis County")
+        self.assertEqual(loc.state, "TX")
+        self.assertEqual(loc.country_code, "US")
+
     def test_zip_and_scalar_normalization(self) -> None:
         self.assertEqual(clean_zip(" 12-345-6789 "), "12345")
         self.assertEqual(clean_zip("27601"), "27601")
+        # A 4-digit numeric ZIP (spreadsheet numeric formatting commonly
+        # drops a US ZIP's leading zero, e.g. MA "02134" -> "2134") is
+        # zero-padded back to 5 digits so enrichment can still match it.
+        self.assertEqual(clean_zip("2134"), "02134")
+        self.assertEqual(clean_zip(2134), "02134")
+        # Non-US postal codes with letters are preserved (whitespace
+        # stripped, upper-cased) instead of being reduced to digits-only.
+        self.assertEqual(clean_zip("sw1a 1aa"), "SW1A1AA")
+        self.assertEqual(clean_zip("K1A 0B1"), "K1A0B1")
         self.assertEqual(optional_float("35.5"), 35.5)
         self.assertIsNone(optional_float("not-a-number"))
         self.assertEqual(optional_int("42.0"), 42)
@@ -122,11 +184,16 @@ class CsvWorkflowTests(unittest.TestCase):
         self.assertEqual(optional_timestamp("2024-04-12T10:00:00Z"), "2024-04-12T10:00:00+00:00")
         self.assertIsNone(optional_timestamp("not-a-timestamp"))
 
-    def test_invalid_optional_values_are_rejected(self) -> None:
+    def test_invalid_optional_values_are_cleared_not_rejected(self) -> None:
+        # Every field validate_source_row() checks is optional and
+        # numeric/date/timestamp - a string value can never legitimately be
+        # one of these, so it's a mapping mismatch, not fixable data. Clear
+        # it (normalize_location() already stores None for it) instead of
+        # rejecting the whole row over one unmappable optional field.
         row = {**VALID_ROW, "opened_on": "0", "seats": "unknown", "observed": "not-a-timestamp"}
         mapper = {**VALID_MAPPER, "fields": {**VALID_MAPPER["fields"], "observed_at": "observed"}}
         errors = validate_source_row(row, mapper)
-        self.assertEqual({error["field"] for error in errors}, {"opening_date", "seating_capacity", "observed_at"})
+        self.assertEqual(errors, [])
 
     def test_field_validator_registry_is_explicit_and_type_driven(self) -> None:
         from whitespace_tool.data_validation.fields import FIELD_VALIDATORS
@@ -256,9 +323,14 @@ class CsvWorkflowTests(unittest.TestCase):
 
     def test_save_mapper_routes_bad_rows_to_error_listings_without_halting_valid_rows(self) -> None:
         captured_rows = {}
+        # A malformed latitude no longer rejects the row - it is cleared to
+        # None and left to geo enrichment (an optional, enrichable field), so
+        # this row still saves. An invalid ZIP is the remaining hard rule, so
+        # it is what produces the second row's error_listings entry alongside
+        # the malformed row shape.
         rows = [
             VALID_ROW,
-            {**VALID_ROW, "store_id": "bad-coords", "latitude": "not-a-latitude"},
+            {**VALID_ROW, "store_id": "bad-zip", "zip_code": "999"},
             ["unexpected", "row", "shape"],
         ]
 
@@ -284,9 +356,14 @@ class CsvWorkflowTests(unittest.TestCase):
 
     def test_save_mapper_batch_flags_preserve_event_and_skip_duplicate_template(self) -> None:
         captured_batches = []
+        # A malformed latitude no longer makes a row invalid (see
+        # test_invalid_optional_values_are_cleared_not_rejected - it's
+        # cleared to None instead, since it's optional and geo-enrichable).
+        # An invalid ZIP is still a genuine hard rule, so it's used here to
+        # produce the second row's error_listings entry.
         rows = [
             VALID_ROW,
-            {**VALID_ROW, "store_id": "bad-coords", "latitude": "not-a-latitude"},
+            {**VALID_ROW, "store_id": "bad-zip", "zip_code": "999"},
         ]
 
         def fake_push(_project_id, _dataset_id, rows_by_table, _credentials_json, **_kwargs):
@@ -327,8 +404,12 @@ class CsvWorkflowTests(unittest.TestCase):
         self.assertEqual(captured_batches[1]["error_listings"][0]["row_number"], 2)
 
     def test_standard_and_optional_fields_keep_expected_modes(self) -> None:
+        # Only brand (business_id) is mandatory now - the per-record data
+        # fields (name/address/city_name/state_code/zip_code) are NULLABLE
+        # at the BigQuery schema level too, not just in the field registry.
         required = {field["name"] for field in TABLE_SCHEMAS["listings"] if field["mode"] == "REQUIRED"}
-        self.assertTrue({"business_id", "source_type_id", "name", "address", "city_name", "state_code", "zip_code"} <= required)
+        self.assertTrue({"business_id", "source_type_id"} <= required)
+        self.assertFalse({"name", "address", "city_name", "state_code", "zip_code"} & required)
         self.assertEqual(TABLE_SCHEMAS["error_listings"][0]["name"], "event_id")
 
     def test_field_catalogs_are_business_aware_and_plural(self) -> None:
@@ -413,11 +494,40 @@ class CsvWorkflowTests(unittest.TestCase):
         self.assertTrue(any(e["field"] == "coordinates" for e in errors_coords))
         self.assertIn("coordinates outside US boundary", [e["reason"] for e in errors_coords])
 
-        # 3. Malformed dates and seating capacities
+        # 3. Malformed dates and seating capacities are cleared, not
+        # rejected - every field validate_source_row() checks is optional,
+        # numeric/date/timestamp, and normalize_location() already stores
+        # None when the value can't parse (a string can never be a real
+        # seating capacity or opening date, so there's nothing to "fix" by
+        # blocking the row over it).
         row_bad_types = {**VALID_ROW, "opened_on": "not-a-date", "seats": "invalid_number"}
         errors_types = validate_source_row(row_bad_types, VALID_MAPPER)
-        self.assertEqual({e["field"] for e in errors_types}, {"opening_date", "seating_capacity"})
-        self.assertTrue(all("hint" in e for e in errors_types))
+        self.assertEqual(errors_types, [])
+        loc_bad_types = normalize_location(row_bad_types, VALID_MAPPER, "example_csv", 0)
+        self.assertIsNotNone(loc_bad_types)
+        self.assertIsNone(loc_bad_types.opening_date)
+        self.assertIsNone(loc_bad_types.seating_capacity)
+
+    def test_out_of_us_coordinates_are_exempt_when_country_is_explicitly_non_us(self) -> None:
+        # Same out-of-bounds coordinates as the US-boundary test above, but
+        # with a real non-US country set - this is legitimate worldwide
+        # data, not a validation failure, and must not be flagged.
+        row_non_us = {**VALID_ROW, "latitude": "95.0", "longitude": "20.0", "country": "United Kingdom"}
+        loc_non_us = normalize_location(row_non_us, VALID_MAPPER, "example_csv", 0)
+        self.assertIsNotNone(loc_non_us)
+        errors_non_us = validate_normalized_location(loc_non_us, load_field_registry())
+        self.assertFalse(any(e["field"] == "coordinates" for e in errors_non_us))
+
+    def test_out_of_us_coordinates_still_flagged_when_country_is_blank(self) -> None:
+        # No country at all is not the same as an explicit non-US country -
+        # without evidence this is deliberately worldwide data, the US
+        # boundary check must still fire (this is the "try US first"
+        # ordering: only an explicit non-US country exempts the record).
+        row_blank_country = {**VALID_ROW, "latitude": "95.0", "longitude": "20.0", "country": ""}
+        loc_blank_country = normalize_location(row_blank_country, VALID_MAPPER, "example_csv", 0)
+        self.assertIsNotNone(loc_blank_country)
+        errors_blank = validate_normalized_location(loc_blank_country, load_field_registry())
+        self.assertTrue(any(e["field"] == "coordinates" for e in errors_blank))
 
     def test_currency_formatting_and_domain_boundary_checks(self) -> None:
         """Test currency cleaning ($1,250.50 -> 1250.5) and age/income domain boundaries."""
@@ -443,6 +553,33 @@ class CsvWorkflowTests(unittest.TestCase):
         errs_rev = validate_normalized_location(loc_bad_rev, load_field_registry())
         self.assertTrue(any(e["field"] == "annual_revenue" for e in errs_rev))
         self.assertIn("negative monetary amount", [e["reason"] for e in errs_rev])
+
+    def test_country_optional_field_and_registry_ordering(self) -> None:
+        """Only brand is mandatory now (enforced at the mapper level, not as
+        a field_registry entry) - every per-field registry entry, including
+        the former core location fields, is optional."""
+        registry = load_field_registry()
+        required_fields = [f for f in registry if f.get("required") is True]
+        required_keys = [f["key"] for f in required_fields]
+
+        self.assertEqual(required_keys, [])
+
+        # Verify country and country_code are present and optional
+        country_def = next(f for f in registry if f["key"] == "country")
+        self.assertFalse(country_def.get("required", False))
+        country_code_def = next(f for f in registry if f["key"] == "country_code")
+        self.assertFalse(country_code_def.get("required", False))
+
+        # Verify REQUIRED_MAPPER_FIELDS does not contain country
+        self.assertNotIn("country", REQUIRED_MAPPER_FIELDS)
+
+        # Verify missing country in location does not fail field validation
+        location = normalize_location(VALID_ROW, VALID_MAPPER, "example_csv", 0)
+        self.assertIsNotNone(location)
+        import dataclasses
+        loc_missing_country = dataclasses.replace(location, country="")
+        errors = validate_normalized_location(loc_missing_country, registry)
+        self.assertFalse(any(e["field"] == "country" for e in errors))
 
 
 if __name__ == "__main__":

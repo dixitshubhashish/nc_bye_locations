@@ -8,6 +8,7 @@
     "city": "City",
     "state": "Region",
     "postal_code": "PostalCode",
+    "country": "Country",
     "latitude": "Latitude",
     "longitude": "Longitude",
     "observed_at": "ObservedAt"

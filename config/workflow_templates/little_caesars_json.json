@@ -8,6 +8,7 @@
     "city": "address.city",
     "state": "address.state",
     "postal_code": "address.zip",
+    "country": "address.country",
     "latitude": "geo.lat",
     "longitude": "geo.lng",
     "observed_at": "metadata.observed_at"

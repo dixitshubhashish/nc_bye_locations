@@ -103,7 +103,7 @@
 
     button.disabled = true;
     const oldText = button.textContent;
-    button.textContent = "Signing in…";
+    button.textContent = "Signing in";
     const status = document.getElementById("loginStatus");
     if (status) status.className = "status hidden";
 
@@ -134,6 +134,7 @@
       sessionStorage.setItem(LOGIN_SESSION_KEY, "true");
       sessionStorage.setItem(MAPPING_SESSION_KEY, newSessionId());
       sessionStorage.removeItem(DRAFT_KEY);
+      sessionStorage.removeItem("activeTab");
       setLoginStatus("Signed in successfully.", "ok");
       showAuthenticatedApp();
     } catch (error) {

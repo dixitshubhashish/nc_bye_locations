@@ -2,8 +2,7 @@
   "subject_brand": "Domino's",
   "competitor_brands": ["Pizza Hut", "Little Caesars"],
   "geography": {
-    "type": "zip_prefixes",
-    "values": ["27", "28"]
+    "type": "us"
   },
   "similarity": {
     "metrics": ["population", "median_age"],
@@ -13,7 +12,58 @@
     "require_live_location_sources": false,
     "max_location_age_hours": 24
   },
-  "location_sources": [],
+  "location_sources": [
+    {
+      "name": "dominos_locations_json_demo",
+      "display_name": "Domino's - JSON file demo",
+      "source_format_label": "JSON",
+      "type": "json",
+      "source_tier": "snapshot",
+      "url": "https://data-m8.com/downloads/list-of-all-dominos-pizza-locations-in-the-usa-csv-and-json.json",
+      "timeout_seconds": 120,
+      "notes": "JSON source-format demo: one published JSON document holding the full US store list. Records sit in a bare top-level array, so record_path is empty.",
+      "mapper": {
+        "brand": "Domino's",
+        "record_path": "",
+        "fields": {
+          "location_id": "store_id",
+          "name": "store_name",
+          "address": "street_address",
+          "city": "city",
+          "state": "state_code",
+          "postal_code": "postal_code",
+          "country": "country_name",
+          "latitude": "latitude",
+          "longitude": "longitude",
+          "phone_number": "phone_number"
+        }
+      }
+    },
+    {
+      "name": "little_caesars_locations_get_api_demo",
+      "display_name": "Little Caesars - GET JSON API demo",
+      "source_format_label": "GET JSON API",
+      "type": "api_get_json",
+      "source_tier": "live",
+      "url": "https://nominatim.openstreetmap.org/search",
+      "query_params": [
+        { "key": "q", "value": "Little Caesars" },
+        { "key": "countrycodes", "value": "us" },
+        { "key": "format", "value": "json" },
+        { "key": "addressdetails", "value": "1" },
+        { "key": "extratags", "value": "1" },
+        { "key": "limit", "value": "50" }
+      ],
+      "headers": [
+        { "key": "Accept", "value": "application/json" },
+        { "key": "User-Agent", "value": "CompetitiveWhitespaceTool/1.0" },
+        { "key": "Accept-Language", "value": "en" }
+      ],
+      "timeout_seconds": 60,
+      "notes": "GET JSON API source-format demo: a live public endpoint queried with URL parameters and request headers rather than a file. limit=50 is the endpoint's own per-request ceiling - it accepts a higher value and still answers with 50 rows - and the loader clamps it so the config cannot claim more than the call returns.",
+      "mapper": "workflow_templates/little_caesars_get_api.json"
+    }
+  ],
   "demographics_source": {
     "name": "bigquery_public_zip_geo_acs",
     "type": "bigquery",
@@ -21,6 +71,7 @@
   },
   "limitations": [
     "ZIP-level matching uses postal code from the location source; address geocoding is outside this prototype.",
-    "Similarity is based on configurable z-score distance over the selected ZIP metrics."
+    "Similarity is based on configurable z-score distance over the selected ZIP metrics.",
+    "The Little Caesars GET JSON API demo is capped at 50 rows per request by the endpoint itself, so it demonstrates the API source format rather than full national coverage."
   ]
 }

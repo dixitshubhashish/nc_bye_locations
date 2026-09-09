@@ -34,6 +34,7 @@ class DemoDataValidationTests(unittest.TestCase):
                 "City": "Raleigh",
                 "Region": "NC",
                 "PostalCode": "27601",
+                "Country": "United States",
                 "Phone": "9195550100"
             },
             # Bad row 1: Malformed ZIP (not 5 digits)
@@ -44,6 +45,7 @@ class DemoDataValidationTests(unittest.TestCase):
                 "City": "Durham",
                 "Region": "NC",
                 "PostalCode": "999",  # Bad ZIP
+                "Country": "United States",
                 "Phone": "9195550200"
             },
             # Bad row 2: Missing postal code entirely
@@ -53,7 +55,8 @@ class DemoDataValidationTests(unittest.TestCase):
                 "AddressDescription": "789 No Zip Ave",
                 "City": "Cary",
                 "Region": "NC",
-                "PostalCode": ""  # Missing mandatory ZIP
+                "PostalCode": "",  # Missing mandatory ZIP
+                "Country": "United States"
             }
         ]
 
@@ -73,11 +76,14 @@ class DemoDataValidationTests(unittest.TestCase):
             else:
                 valid_locations.append(loc)
 
-        # Assertions
-        self.assertEqual(len(valid_locations), 1, "Only row #1 should pass validation")
-        self.assertEqual(len(error_listings), 2, "Row #2 (bad zip) and Row #3 (missing zip) must route to error_listings")
+        # Assertions. Only brand is mandatory now - row #3 (blank ZIP, but a
+        # brand) is valid; row #2's ZIP "999" is a malformed *US* ZIP (still
+        # flagged, since it's purely numeric but not 5 digits), which is
+        # distinct from "missing" and unaffected by the mandatory-field
+        # relaxation.
+        self.assertEqual(len(valid_locations), 2, "Rows #1 and #3 should pass validation")
+        self.assertEqual(len(error_listings), 1, "Only row #2 (malformed US ZIP) routes to error_listings")
         self.assertEqual(error_listings[0]["row"], 2)
-        self.assertEqual(error_listings[1]["row"], 3)
 
 
 if __name__ == "__main__":

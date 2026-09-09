@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -33,16 +34,34 @@ def _pandas():
 # ingestion_id/mapping_id/sample_batch_id (ingestion-run metadata, not
 # content), first_observed_at/last_observed_at (time-varying by design),
 # and is_deleted/deleted_on (mutable state).
+#
+# business_id is excluded TOO, and that is the whole point: the hash answers
+# "is this the same physical place?", and which brand filed the record is not
+# part of that question. With business_id inside, the identical store filed
+# under two brand records produced two different hashes, so a cross-brand
+# duplicate was undetectable by construction. Per-brand dedupe does not
+# depend on it either - _dedupe_listings_against_bronze() keys on the
+# composite (business_id, content_hash), carrying the brand explicitly.
+#
+# Removing a field changes every hash. LEGACY_CONTENT_HASH_FIELDS below
+# reproduces the old definition so already-stored rows stay recognisable
+# until they are rehashed - see rehash_listings_content_hash().
 CONTENT_HASH_FIELDS: tuple[str, ...] = (
-    "business_id", "name", "address", "city_name", "town", "state_code", "province",
+    "name", "address", "city_name", "town", "state_code", "province",
     "zip_code", "country", "latitude", "longitude", "franchise_name", "concept_type",
     "cuisine_type", "neighborhood", "district", "phone_number", "website_url",
     "google_maps_link", "social_media_handles", "operating_hours", "seating_capacity",
     "service_types", "opening_date", "status", "annual_revenue", "average_ticket_size",
     "daily_footfall", "monthly_footfall", "rental_cost", "lease_cost",
     "population_density", "average_household_income", "competitor_count",
-    "foot_traffic_score", "parking_availability", "ratings",
+    "foot_traffic_score", "parking_availability", "ratings", "country_code", "email",
 )
+
+
+# The hash definition in force before business_id was removed. Kept so a row
+# written under the old rule can still be recognised as the same listing
+# rather than re-inserted as a new one; nothing new is ever written with it.
+LEGACY_CONTENT_HASH_FIELDS: tuple[str, ...] = ("business_id",) + CONTENT_HASH_FIELDS
 
 
 def _canonical_hash_payload(row: dict[str, Any], fields: tuple[str, ...] | list[str]) -> str:
@@ -67,8 +86,23 @@ def _canonical_hash_payload_from_values(values: list[Any], fields: tuple[str, ..
 
 
 def content_hash(row: dict[str, Any]) -> str:
-    """Deterministic SHA-256 over a listing's stable content fields."""
+    """Deterministic SHA-256 over a listing's stable content fields.
+
+    Brand-independent: the same physical store hashes identically no matter
+    which brand record it was filed under, which is what makes a cross-brand
+    duplicate detectable at all.
+    """
     payload = _canonical_hash_payload(row, CONTENT_HASH_FIELDS)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def legacy_content_hash(row: dict[str, Any]) -> str:
+    """The hash this row WOULD have had before business_id was removed.
+
+    Used only to recognise already-stored rows during the transition, so a
+    re-save matches the existing row instead of inserting a duplicate.
+    """
+    payload = _canonical_hash_payload(row, LEGACY_CONTENT_HASH_FIELDS)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -146,6 +180,18 @@ LOGGER = logging.getLogger("whitespace_tool.workflow")
 
 
 TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
+    # Auto-mapping confidence lives in SQLite for speed, but that file is on
+    # ephemeral disk on Render - a restart would erase everything the app had
+    # learned about which source column maps to which field. Mirrored here so
+    # the learning is durable; SQLite stays the fast read path.
+    "field_mapping_confidence": [
+        {"name": "target_key", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "source_field_normalized", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "score", "type": "FLOAT", "mode": "NULLABLE"},
+        {"name": "sample_count", "type": "INTEGER", "mode": "NULLABLE"},
+        {"name": "updated_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
+        {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
+    ],
     "field_catalogs": [
         {"name": "field_id", "type": "STRING", "mode": "REQUIRED", "default": "GENERATE_UUID()"},
         {"name": "business_id", "type": "STRING", "mode": "NULLABLE"},
@@ -160,6 +206,12 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "is_custom", "type": "BOOLEAN", "mode": "REQUIRED"},
         {"name": "created_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
         {"name": "updated_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
+        # Removing a custom field archives it rather than deleting the row:
+        # listings already written carry that field's values inside
+        # listings.custom_fields, and a hard DELETE would strand them with
+        # no label, type, or provenance to interpret them by.
+        {"name": "is_archived", "type": "BOOLEAN", "mode": "NULLABLE"},
+        {"name": "archived_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
         {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
     ],
     "us_zipcodes": [
@@ -210,23 +262,46 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "listing_id", "type": "STRING", "mode": "REQUIRED", "default": "GENERATE_UUID()"},
         {"name": "business_id", "type": "STRING", "mode": "REQUIRED"},
         {"name": "source_type_id", "type": "STRING", "mode": "REQUIRED"},
+        # location_key is always populated (normalize_location() generates a
+        # fallback when the source doesn't provide one), so it stays
+        # REQUIRED. name/address/city_name/state_code/zip_code/country are
+        # per-record data fields, not the brand identity - only brand
+        # (business_id, tied to the mapper's brand) is mandatory now, so
+        # these are NULLABLE like every other non-brand field.
         {"name": "location_key", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "name", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "address", "type": "STRING", "mode": "REQUIRED"},
-        {"name": "city_name", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "name", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "address", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "city_name", "type": "STRING", "mode": "NULLABLE"},
         {"name": "town", "type": "STRING", "mode": "NULLABLE"},
-        {"name": "state_code", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "state_code", "type": "STRING", "mode": "NULLABLE"},
         {"name": "province", "type": "STRING", "mode": "NULLABLE"},
-        {"name": "zip_code", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "zip_code", "type": "STRING", "mode": "NULLABLE"},
         {"name": "country", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "country_code", "type": "STRING", "mode": "NULLABLE"},
         {"name": "latitude", "type": "FLOAT", "mode": "NULLABLE"},
         {"name": "longitude", "type": "FLOAT", "mode": "NULLABLE"},
         {"name": "first_observed_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
         {"name": "last_observed_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
-        {"name": "template_id", "type": "STRING", "mode": "NULLABLE"},
+        # RULE R0: a listing must always name the business AND the template
+        # that produced it. NOTE: BigQuery cannot promote an existing
+        # NULLABLE column, so this binds newly created tables; the write
+        # path in save_mapper() is what guarantees it for existing ones.
+        {"name": "template_id", "type": "STRING", "mode": "REQUIRED"},
         {"name": "ingestion_id", "type": "STRING", "mode": "NULLABLE"},
         {"name": "mapping_id", "type": "STRING", "mode": "NULLABLE"},
         {"name": "validation_status", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "validated", "type": "BOOLEAN", "mode": "NULLABLE"},
+        {"name": "enriched_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
+        {"name": "max_enriched", "type": "BOOLEAN", "mode": "NULLABLE"},
+        # Set TRUE when a human corrects this row through the review-edit
+        # path for a silver-layer validity failure (missing_state,
+        # unresolved_coordinates, etc.) - distinct from `validated`, which
+        # tracks enrichment having RUN, not a person having looked at it.
+        # State lives on bronze (the edit authority), not silver/gold, per
+        # the project's "fix must be recorded as state" rule - silver is
+        # rebuilt from bronze on every run, so the flag must be here to
+        # survive a rebuild.
+        {"name": "user_reviewed", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "is_sample_data", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "sample_batch_id", "type": "STRING", "mode": "NULLABLE"},
         # Enhanced location fields
@@ -236,6 +311,7 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "neighborhood", "type": "STRING", "mode": "NULLABLE"},
         {"name": "district", "type": "STRING", "mode": "NULLABLE"},
         {"name": "phone_number", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "email", "type": "STRING", "mode": "NULLABLE"},
         {"name": "website_url", "type": "STRING", "mode": "NULLABLE"},
         {"name": "google_maps_link", "type": "STRING", "mode": "NULLABLE"},
         {"name": "social_media_handles", "type": "STRING", "mode": "NULLABLE"},
@@ -256,6 +332,7 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "foot_traffic_score", "type": "FLOAT", "mode": "NULLABLE"},
         {"name": "parking_availability", "type": "STRING", "mode": "NULLABLE"},
         {"name": "ratings", "type": "FLOAT", "mode": "NULLABLE"},
+        {"name": "custom_fields", "type": "STRING", "mode": "NULLABLE"},
         {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
         {"name": "is_deleted", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "deleted_on", "type": "TIMESTAMP", "mode": "NULLABLE"},
@@ -301,6 +378,78 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
         {"name": "is_deleted", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "deleted_on", "type": "TIMESTAMP", "mode": "NULLABLE"},
+        {"name": "is_ai_enriched", "type": "BOOLEAN", "mode": "NULLABLE"},
+        # Whether an AI suggestion was available for this row at the moment
+        # it entered/re-entered review. Computed once at write time (cheap -
+        # the reprocess path already runs the enrichment probe) so the
+        # AI-vs-manual pending split can be read straight off the table
+        # instead of re-probing the whole queue on every reporting load.
+        {"name": "has_ai_suggestion", "type": "BOOLEAN", "mode": "NULLABLE"},
+        # How many times a record has come back here after a user submitted
+        # a fix that still failed validation - drives the "Review Again"
+        # counter in the edit dialog instead of silently re-inserting a
+        # fresh row each retry with no memory of prior attempts.
+        {"name": "attempt_count", "type": "INTEGER", "mode": "NULLABLE"},
+        # A row that was EVER invalid stays marked forever. Fixing a record
+        # soft-deletes its error row (is_deleted = TRUE), which removed it
+        # from every count - so "how many bad listings have we had in total,
+        # and how were they resolved" was unanswerable and the fix counters
+        # appeared to reset. These two columns make the population cumulative:
+        # was_ever_invalid never clears, resolution_status moves pending->fixed.
+        {"name": "was_ever_invalid", "type": "BOOLEAN", "mode": "NULLABLE"},
+        {"name": "resolution_status", "type": "STRING", "mode": "NULLABLE"},
+        # A row the user has edited and accepted, even though it does not
+        # validate yet. Keeping their input rather than rejecting it means the
+        # save returns immediately (no live re-validation round trip) and
+        # enrichment re-checks it later, when it may well have the reference
+        # data it was missing.
+        {"name": "user_reviewed", "type": "BOOLEAN", "mode": "NULLABLE"},
+        {"name": "user_reviewed_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
+    ],
+    # Durable record of "these two brand records are the same brand".
+    #
+    # A merge cannot live only in bronze. Silver is CREATE OR REPLACE'd from
+    # bronze on every rebuild, and a sample reload re-inserts the source rows
+    # wholesale - so a merge applied as a one-off UPDATE is undone the next
+    # time either runs, which is exactly the "I already merged this, why is it
+    # back" the user hit. Recording the mapping instead means every silver
+    # build re-applies it, so a merged pair can never reappear downstream.
+    "brand_merges": [
+        {"name": "source_business_id", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "target_business_id", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "merged_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
+        {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
+    ],
+    "quality_fix_events": [
+        {"name": "fix_id", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "listing_id", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "event_id", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "row_number", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "fix_type", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "processed", "type": "BOOLEAN", "mode": "REQUIRED"},
+        {"name": "improved", "type": "BOOLEAN", "mode": "REQUIRED"},
+        {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "created_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
+    ],
+    "reporting_quality_snapshots": [
+        {"name": "snapshot_date", "type": "DATE", "mode": "REQUIRED"},
+        {"name": "scope_key", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "captured_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
+        {"name": "total_records", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "invalid_records", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "needs_manual_review", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "ai_fixed", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "manual_fixed", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "zip_missing", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "coordinates_missing", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "duplicate_records", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "zip_completeness_pct", "type": "FLOAT", "mode": "REQUIRED"},
+        {"name": "coordinate_completeness_pct", "type": "FLOAT", "mode": "REQUIRED"},
+        {"name": "duplicate_rate_pct", "type": "FLOAT", "mode": "REQUIRED"},
+        {"name": "stale_records", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "entity_resolution_attempts", "type": "INTEGER", "mode": "REQUIRED"},
+        {"name": "entity_resolution_success_rate_pct", "type": "FLOAT", "mode": "REQUIRED"},
+        {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
     ],
 }
 
@@ -333,10 +482,18 @@ def _scrub_config(value: Any) -> Any:
 
 
 def _listing_row(row: LocationRecord) -> dict[str, Any]:
+    # Source columns no typed field covers, preserved as a JSON document so
+    # a parse whose column list differs from every other parse does not lose
+    # data at the bronze write. Deliberately NOT part of CONTENT_HASH_FIELDS:
+    # including it would change every previously-stored row's hash and make
+    # the next save treat the whole warehouse as new rows.
+    extras = getattr(row, "extras", None)
     listing = {
+        "custom_fields": json.dumps(extras, sort_keys=True, default=str) if extras else None,
         **(row.raw.get("__meta", {}) if isinstance(row.raw, dict) and isinstance(row.raw.get("__meta"), dict) else {}),
         "listing_id": str(uuid4()),
         "business_id": getattr(row, "business_id", row.brand),
+        "is_ai_enriched": bool((row.raw or {}).get("__meta", {}).get("is_ai_enriched", False)) if isinstance(row.raw, dict) else False,
         "source_type_id": getattr(row, "source_type_id", ""),
         "location_key": row.location_id,
         "name": row.name,
@@ -347,6 +504,7 @@ def _listing_row(row: LocationRecord) -> dict[str, Any]:
         "province": row.province,
         "zip_code": row.zip5,
         "country": row.country,
+        "country_code": getattr(row, "country_code", None),
         "latitude": row.latitude,
         "longitude": row.longitude,
         "first_observed_at": row.observed_at,
@@ -358,6 +516,7 @@ def _listing_row(row: LocationRecord) -> dict[str, Any]:
         "neighborhood": row.neighborhood,
         "district": row.district,
         "phone_number": row.phone_number,
+        "email": getattr(row, "email", None),
         "website_url": row.website_url,
         "google_maps_link": row.google_maps_link,
         "social_media_handles": row.social_media_handles,
@@ -378,6 +537,8 @@ def _listing_row(row: LocationRecord) -> dict[str, Any]:
         "foot_traffic_score": row.foot_traffic_score,
         "parking_availability": row.parking_availability,
         "ratings": row.ratings,
+        "validated": True,
+        "enriched_at": None,
         "is_deleted": False,
         "deleted_on": None,
     }
@@ -539,8 +700,21 @@ def push_to_bigquery(
             LOGGER.info("db_batch_load_succeeded table=%s rows=%d job_id=%s", table_ref, len(rows), load_job.job_id)
 
 
+PROTECTED_DATASETS: set[str] = {"sample_locations"}
+
+
+def _assert_not_protected_dataset(dataset_name: str) -> None:
+    ds = str(dataset_name).split(".")[-1].strip().lower()
+    if ds in PROTECTED_DATASETS:
+        raise PermissionError(f"CRITICAL SAFETY RULE: '{ds}' is an immutable reference dataset. No delete, drop, update, or truncate operations are permitted.")
+
+
 def _clear_dataset_tables_with_client(client: Any, dataset_ref: str) -> dict[str, list[str]]:
-    preserved_tables = {"us_zipcodes", "field_catalogs", "field_catalog", "source_types", "workflow_templates"}
+    _assert_not_protected_dataset(dataset_ref)
+    # Learning survives a data clear: the confidence table describes HOW to map,
+    # not what was mapped, so wiping listings must not cost it.
+    preserved_tables = {"us_zipcodes", "field_catalogs", "field_catalog", "source_types",
+                        "workflow_templates", "quality_fix_events", "field_mapping_confidence"}
     table_refs = [table.reference for table in client.list_tables(dataset_ref) if table.table_id not in preserved_tables]
     LOGGER.warning("db_clear_started dataset=%s table_count=%d", dataset_ref, len(table_refs))
     soft_deleted: list[str] = []
@@ -554,6 +728,8 @@ def _clear_dataset_tables_with_client(client: Any, dataset_ref: str) -> dict[str
             query = f"""
             ALTER TABLE `{dataset_ref}.{t_id}` ADD COLUMN IF NOT EXISTS is_deleted BOOL;
             ALTER TABLE `{dataset_ref}.{t_id}` ADD COLUMN IF NOT EXISTS deleted_on TIMESTAMP;
+            ALTER TABLE `{dataset_ref}.{t_id}` ADD COLUMN IF NOT EXISTS validated BOOL;
+            ALTER TABLE `{dataset_ref}.{t_id}` ADD COLUMN IF NOT EXISTS enriched_at TIMESTAMP;
             UPDATE `{dataset_ref}.{t_id}` SET is_deleted = TRUE, deleted_on = CURRENT_TIMESTAMP() WHERE is_deleted IS NOT TRUE;
             """
             client.query(query).result()
@@ -573,6 +749,7 @@ def clear_dataset_tables(
     dataset_id: str,
     credentials_json: str | None = None,
 ) -> dict[str, list[str]]:
+    _assert_not_protected_dataset(dataset_id)
     try:
         from google.cloud import bigquery
         from google.oauth2 import service_account
@@ -593,29 +770,64 @@ def drop_dataset_tables(
     project_id: str,
     dataset_id: str,
     credentials_json: str | None = None,
+    client: Any = None,
+    max_workers: int = 8,
 ) -> dict[str, list[str]]:
+    """Drop every object in a dataset, concurrently, on a reused client.
+
+    Two things this used to do badly, both paid three times over by the master
+    delete (bronze, silver, gold):
+
+    * It built a brand new `bigquery.Client` on every call and never closed
+      it - the exact pattern this repo already records as the cause of a gRPC
+      socket/OOM leak. `client` can now be passed in so the caller's memoised
+      client is reused, and a client created here is closed.
+    * It deleted objects strictly one at a time. `delete_table` is a cheap
+      REST call (~0.5s), so the fix is concurrency, not batching.
+
+    MEASURED, because the obvious idea was wrong: collapsing the deletes into
+    one multi-statement DROP script made it SLOWER - 14 objects took 9.4s as a
+    single query job versus 8.1s deleting them one by one, because a BigQuery
+    query job carries seconds of fixed scheduling overhead that a REST delete
+    does not. Running the cheap calls in parallel is what actually helps.
+    """
+    _assert_not_protected_dataset(dataset_id)
     try:
         from google.cloud import bigquery
         from google.oauth2 import service_account
     except ImportError as exc:
         raise RuntimeError("Install the storage client dependencies before deleting master data.") from exc
 
-    if credentials_json:
-        credentials = service_account.Credentials.from_service_account_file(credentials_json)
-        client = bigquery.Client(project=project_id, credentials=credentials)
-    else:
-        client = bigquery.Client(project=project_id)
+    owns_client = client is None
+    if owns_client:
+        if credentials_json:
+            credentials = service_account.Credentials.from_service_account_file(credentials_json)
+            client = bigquery.Client(project=project_id, credentials=credentials)
+        else:
+            client = bigquery.Client(project=project_id)
 
-    dataset_ref = f"{project_id}.{dataset_id}"
-    table_items = list(client.list_tables(dataset_ref))
-    LOGGER.warning("db_master_delete_started dataset=%s object_count=%d", dataset_ref, len(table_items))
-    dropped: list[str] = []
-    dropped_objects: list[dict[str, str]] = []
-    for table in table_items:
-        client.delete_table(table.reference, not_found_ok=True)
-        object_type = str(getattr(table, "table_type", "") or "TABLE")
-        dropped.append(table.table_id)
-        dropped_objects.append({"name": table.table_id, "type": object_type})
-        LOGGER.warning("db_master_object_dropped dataset=%s object=%s type=%s", dataset_ref, table.table_id, object_type)
-    LOGGER.warning("db_master_delete_succeeded dataset=%s dropped_count=%d", dataset_ref, len(dropped))
-    return {"dropped_tables": dropped, "dropped_objects": dropped_objects}
+    try:
+        dataset_ref = f"{project_id}.{dataset_id}"
+        table_items = list(client.list_tables(dataset_ref))
+        LOGGER.warning("db_master_delete_started dataset=%s object_count=%d", dataset_ref, len(table_items))
+        dropped: list[str] = []
+        dropped_objects: list[dict[str, str]] = []
+        if table_items:
+            def drop_one(table: Any) -> tuple[str, str]:
+                client.delete_table(table.reference, not_found_ok=True)
+                return table.table_id, str(getattr(table, "table_type", "") or "TABLE")
+
+            with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(table_items)))) as pool:
+                for table_id, object_type in pool.map(drop_one, table_items):
+                    dropped.append(table_id)
+                    dropped_objects.append({"name": table_id, "type": object_type})
+                    LOGGER.warning("db_master_object_dropped dataset=%s object=%s type=%s",
+                                   dataset_ref, table_id, object_type)
+        LOGGER.warning("db_master_delete_succeeded dataset=%s dropped_count=%d", dataset_ref, len(dropped))
+        return {"dropped_tables": dropped, "dropped_objects": dropped_objects}
+    finally:
+        if owns_client:
+            try:
+                client.close()
+            except Exception:
+                pass

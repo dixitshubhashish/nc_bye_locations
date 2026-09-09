@@ -46,9 +46,11 @@ class ListBrandsSerializationTests(unittest.TestCase):
             QueryJobConfig=lambda **kwargs: types.SimpleNamespace(**kwargs),
             ScalarQueryParameter=lambda *a, **k: ("param", a, k),
         )
+        fake_cloud = types.ModuleType("google.cloud")
+        fake_cloud.bigquery = fake_bigquery
         self._mods = patch.dict(sys.modules, {
             "google": types.ModuleType("google"),
-            "google.cloud": types.ModuleType("google.cloud"),
+            "google.cloud": fake_cloud,
             "google.cloud.bigquery": fake_bigquery,
         })
         self._mods.start()

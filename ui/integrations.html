@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Location Intelligence</title>
+  <title>Competitive Whitespace Tool</title>
   <script src="constants.js"></script>
   <script>
     (function() {
@@ -23,6 +23,7 @@
   <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.0/min/vs/loader.js"></script>
   <script src="https://cdn.jsdelivr.net/pyodide/v0.27.0/full/pyodide.js"></script>
   <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
+  <link rel="stylesheet" href="css/mapper.css?v=parser-type-v1" />
   <script>
     // Monaco's AMD loader.js (above) defines a global `define()` function.
     // Leaflet and topojson-client are both UMD-wrapped and check for
@@ -37,6 +38,11 @@
   </script>
   <script src="vendor/leaflet/leaflet.js"></script>
   <script src="vendor/topojson/topojson-client.min.js"></script>
+  <!-- Vendored locally (same pattern as leaflet/topojson) rather than a CDN,
+       so charting works offline and adds no third-party runtime dependency.
+       Loaded inside the AMD-define guard above because d3's UMD build would
+       otherwise register with Monaco's AMD loader instead of window.d3. -->
+  <script src="vendor/d3/d3.min.js"></script>
   <script>
     window.define = window.__amdDefineBackup;
     delete window.__amdDefineBackup;
@@ -59,6 +65,13 @@
       --warn: #9a5b13;
       --error: #a52626;
       --ok: #246b3d;
+      /* Rendered height of the sticky <header>, measured and kept current by
+         syncAppHeaderOffset() in js/common.js - the header grows when its
+         action buttons wrap, so anything that pins itself underneath has to
+         read the live value rather than assume one. This declaration is only
+         the fallback for the moment before that first runs; it matches the
+         71px .progress-wrap already uses for its own sticky offset. */
+      --app-header-h: 71px;
     }
 
     * { box-sizing: border-box; }
@@ -66,7 +79,9 @@
     html, body {
       margin: 0;
       padding: 0;
-      min-width: 1280px;
+      min-width: 0;
+      width: 100%;
+      overflow-x: hidden;
       background: var(--bg);
       color: var(--ink);
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -80,22 +95,52 @@
       z-index: 10;
       border-bottom: 1px solid var(--line);
       background: #ffffff;
-      padding: 18px 24px;
-      display: flex;
+      padding: 10px 18px;
+      display: grid;
+      grid-template-columns: auto auto minmax(0, 1fr);
+      grid-template-areas: "title tabs utilities";
       align-items: center;
-      justify-content: space-between;
-      gap: 16px;
+      gap: 14px;
+      min-width: 0;
     }
+
+    .app-title { grid-area: title; min-width: 0; }
+    header .top-tabs { grid-area: tabs; justify-self: start; margin-left: clamp(8px, 1.6vw, 28px); }
+    /* header-data-actions + header-account-actions together have a fixed
+       minimum content width (~600px) that doesn't always fit next to the
+       title/tabs columns above the 900px block-layout breakpoint below.
+       Right-anchored (justify-self: end) with no room to shrink, the
+       overflow used to bleed left and paint over the nav tabs.
+       overflow-x: auto alone (a prior attempt) only swapped that for a
+       worse failure: flex-end justification scrolls an overflowing flex
+       line to show its END by default, silently clipping the START
+       (header-data-actions's own left edge) with no visible scrollbar to
+       reveal it was ever cut off. flex-wrap: wrap is the actual fix - the
+       smaller header-account-actions group (Log out / How this works)
+       drops to its own line first, freeing enough width for
+       header-data-actions to render in full on the first line untouched;
+       overflow-x/max-width stay as a last-resort safety net for the
+       genuinely-narrow case that also wraps. */
+    header .header-actions { justify-self: end; min-width: 0; max-width: 100%; overflow-x: auto; flex-wrap: wrap; justify-content: flex-end; row-gap: 8px; }
 
     .top-tabs {
       display: flex;
       gap: 6px;
+      align-items: center;
+      padding: 5px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--navy-soft);
     }
 
     .top-tab {
       background: #ffffff;
       color: var(--ink);
       border-color: var(--line);
+      min-height: 44px;
+      padding: 10px 18px;
+      font-size: 15px;
+      font-weight: 800;
     }
 
     .top-tab.active {
@@ -103,19 +148,20 @@
       color: #ffffff;
     }
 
-    .header-actions { display: flex; gap: 6px; align-items: center; }
-    .header-actions button { font-size: 12px; padding: 6px 8px; }
+    .header-actions { grid-area: utilities; display: flex; gap: 12px; align-items: center; justify-content: flex-end; min-width: 0; }
+    .header-actions button { min-height: 24px; font-size: 10px; padding: 4px 7px; }
     .header-readiness {
       display: inline-flex;
       align-items: center;
+      justify-content: center;
       gap: 6px;
-      min-height: 30px;
-      padding: 5px 9px;
+      min-height: 26px;
+      padding: 4px 8px;
       border: 1px solid var(--line);
       border-radius: 6px;
       background: #ffffff;
       color: var(--muted);
-      font-size: 12px;
+      font-size: 11px;
       white-space: nowrap;
     }
     .header-readiness::before {
@@ -129,13 +175,39 @@
     .header-readiness.ok { color: var(--ok); border-color: #b9d6c3; background: #f2fbf5; }
     .header-readiness.warn { color: var(--warn); border-color: #e5cfaa; background: #fff9ed; }
     .header-readiness.error { color: var(--error); border-color: #e8bbbb; background: #fff5f5; }
-    .danger-dialog { border: 2px solid var(--error); border-radius: 8px; padding: 22px; color: var(--ink); }
-    .danger-dialog::backdrop { background: rgba(31, 41, 51, 0.48); }
-    .danger-dialog h2 { color: var(--error); font-size: 20px; }
-    .danger-dialog p { max-width: 440px; }
+    .header-zip-status { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+    .header-zip-status #testReadinessBtn { align-self: flex-start; }
+    .header-link-actions { display: flex; align-items: center; gap: 12px; margin-left: 6px; }
+    .header-data-actions { justify-self: end; display: grid; grid-template-columns: 132px 148px 158px; grid-template-areas: "sample reset zipstatus" "sample restart zipsync"; align-items: stretch; gap: 5px 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--navy-soft); max-width: 100%; }
+    .header-data-actions #resetMappingBtn { grid-area: reset; }
+    .header-data-actions #restartMappingBtn { grid-area: restart; }
+    /* Reset Fields Mapping only shows on the Mapper tab (MAP-05) - hiding it
+       with display:none still leaves its named grid area reserved (an
+       explicit grid-template-areas slot isn't removed just because nothing
+       fills it), leaving a visibly empty, "orphaned" gap on every other
+       tab. Outside Mapper, drop that slot from the template entirely and
+       let Restart Mapping span the full second column instead. */
+    .header-data-actions.reset-mapping-hidden { grid-template-areas: "sample restart zipstatus" "sample restart zipsync"; }
+    .header-data-actions .sample-dataset-stack { grid-area: sample; display: flex; flex-direction: column; gap: 5px; }
+    .header-data-actions .header-zip-status { display: contents; }
+    #loadSampleDatasetHeaderBtn.sample-state-idle { border-color: #d97706; color: #b45309; background: #fffbeb; }
+    #loadSampleDatasetHeaderBtn.sample-state-idle:hover { background: #fef3c7; border-color: #b45309; }
+    #loadSampleDatasetHeaderBtn.sample-state-loading { border-color: #ca8a04; color: #854d0e; background: #fef9c3; }
+    #loadSampleDatasetHeaderBtn.sample-state-ready { border-color: #15803d; color: #15803d; background: #f0fdf4; }
+    .header-data-actions #clearSampleDatasetLink.sample-load-link.danger { min-height: 34px; padding: 6px 12px; font-size: 12px; }
+    .header-data-actions #headerReadinessStatus { grid-area: zipstatus; justify-self: stretch; text-align: center; }
+    .header-data-actions #testReadinessBtn { grid-area: zipsync; justify-self: center; align-self: center; padding-block: 0; text-align: center; }
+    .header-data-actions > button { min-height: 26px; padding: 4px 8px; font-size: 10px; line-height: 1.2; white-space: normal; }
+    .header-data-actions #loadSampleDatasetHeaderBtn { min-height: 52px; align-self: stretch; }
+    /* How this works + Log out side by side (How this works first, matching
+       the requested visual order), not stacked - saves vertical header
+       space now that this group can wrap to its own row. */
+    .header-account-actions { display: flex; flex-direction: row; align-items: center; justify-content: flex-end; gap: 8px; min-width: 132px; }
+    .header-account-actions button { min-height: 24px; padding: 4px 7px; font-size: 10px; white-space: nowrap; }
+    .header-account-actions #appHelpBtn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+    .header-account-actions #appHelpBtn::before { content: "i"; display: inline-grid; place-items: center; width: 14px; height: 14px; border: 1px solid currentColor; border-radius: 50%; font-size: 10px; font-weight: 800; line-height: 1; }
 
     header.reporting-active #productTitle,
-    header.reporting-active #resetMappingBtn,
     header.reporting-active #clearDataBtn { visibility: hidden; }
 
     .reporting-view {
@@ -147,6 +219,452 @@
       max-width: 1180px;
       margin: 0 auto;
       min-height: 860px;
+    }
+
+    /* Reporting is a full workspace view; keep the filter rail fixed while the
+       dashboard uses all remaining laptop and desktop width. */
+    .reporting-view,
+    .reporting-view .report-shell {
+      width: 100%;
+      max-width: none;
+      box-sizing: border-box;
+    }
+    .reporting-subtabs { display: flex; gap: 6px; margin: 14px 0 18px; padding: 5px; width: fit-content; border: 1px solid var(--line); border-radius: 8px; background: var(--navy-soft); }
+    .reporting-subtab { border: 0; background: transparent; color: var(--muted); min-height: 34px; padding: 7px 13px; font-size: 12px; font-weight: 800; }
+    .reporting-subtab.active { color: #ffffff; background: var(--accent); border-radius: 6px; }
+    .report-quality-panel { margin: 0 0 20px; padding: 20px; border: 1px solid var(--line); border-radius: 9px; background: #ffffff; }
+    .report-quality-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; border-bottom: 1px solid var(--line); padding-bottom: 14px; }
+    .report-quality-heading h2 { margin: 0; font-size: 21px; color: var(--navy); }
+    .report-quality-heading p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+    .report-quality-period { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .report-quality-kpis { display: grid; grid-template-columns: repeat(6, minmax(120px, 1fr)); gap: 10px; margin: 16px 0; }
+    .report-quality-kpi { padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: #f8fbff; }
+    .report-quality-kpi strong { display: block; color: var(--navy); font-size: 22px; line-height: 1.15; }
+    .report-quality-kpi span { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.25; }
+    .report-quality-trend-layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); gap: 18px; }
+    .report-quality-chart-section, .report-quality-comparison { min-width: 0; }
+    .report-quality-chart-section h3, .report-quality-comparison h3 { margin: 0 0 8px; color: var(--navy); font-size: 14px; }
+    .report-quality-chart { min-height: 190px; border: 1px solid var(--line); border-radius: 7px; padding: 8px; background: #fbfdff; }
+    .report-quality-chart svg { display: block; width: 100%; height: 175px; }
+    .quality-comparison-row { display: flex; justify-content: space-between; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+    .quality-comparison-row strong { color: var(--navy); }
+    @media (max-width: 900px) { .report-quality-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } .report-quality-trend-layout { grid-template-columns: 1fr; } }
+    .reporting-view {
+      padding: clamp(16px, 2.4vw, 32px);
+      grid-column: 1 / -1;
+      min-width: 0;
+    }
+    .reporting-view .report-shell {
+      max-width: 1600px;
+      margin-inline: auto;
+    }
+    .reporting-dashboard-layout {
+      display: grid !important;
+      grid-template-columns: 290px minmax(0, 1fr);
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .reporting-main-pane,
+    .reporting-main-pane > #reportContent {
+      min-width: 0;
+      width: 100% !important;
+      max-width: none !important;
+      box-sizing: border-box;
+    }
+    .reporting-main-pane {
+      grid-column: 2;
+      display: block !important;
+      grid-template-columns: none !important;
+    }
+    #competitorDropdownBtnText {
+      color: var(--ink) !important;
+      opacity: 1 !important;
+    }
+    #competitorDropdownBtn[data-tooltip] {
+      position: relative;
+    }
+    #competitorDropdownBtn[data-tooltip]::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      left: 0;
+      top: calc(100% + 6px);
+      z-index: 1100;
+      display: none;
+      max-width: 360px;
+      padding: 7px 9px;
+      border-radius: 5px;
+      background: #1f2937;
+      color: #ffffff;
+      font-size: 12px;
+      font-weight: 500;
+      line-height: 1.35;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      box-shadow: 0 5px 14px rgba(15, 23, 42, 0.22);
+      pointer-events: none;
+    }
+    #competitorDropdownBtn[data-tooltip]:hover::after,
+    #competitorDropdownBtn[data-tooltip]:focus-visible::after {
+      display: block;
+    }
+    .competitor-dropdown-toolbar button[data-action] {
+      display: inline-block !important;
+      width: auto !important;
+      min-width: 34px;
+      height: auto !important;
+      margin: 0;
+      padding: 3px 5px !important;
+      border: 0 !important;
+      background: transparent !important;
+      color: var(--accent) !important;
+      font-size: 11px !important;
+      font-weight: 700 !important;
+      line-height: 1.2;
+      white-space: nowrap;
+    }
+    .competitor-dropdown-toolbar button[data-action="deselect-all"] {
+      color: var(--muted) !important;
+    }
+    .competitor-dropdown-toolbar > div {
+      margin-right: 8px;
+      flex-shrink: 0;
+    }
+    .report-hero-actions > div:first-child {
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      row-gap: 6px;
+    }
+    .report-hero-actions .sample-load-actions {
+      flex-direction: row;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      align-items: center;
+    }
+    .report-hero-actions > div:first-child > button {
+      flex: 0 0 auto;
+    }
+    .report-hero-actions {
+      min-width: min(100%, 560px);
+      max-width: 100%;
+    }
+    .report-hero-actions > div:first-child {
+      width: 100%;
+      display: grid !important;
+      grid-template-columns: auto auto;
+      justify-content: end;
+      gap: 10px !important;
+      align-items: center;
+    }
+    .report-hero-actions .sample-load-actions {
+      min-width: 0;
+      justify-content: flex-end;
+    }
+    .report-hero-actions #refreshReportBtn,
+    .report-hero-actions #clearSampleDatasetLink {
+      width: auto !important;
+      min-width: 140px !important;
+      white-space: nowrap;
+      padding: 12px 18px !important;
+      font-size: 14px !important;
+      line-height: 1.2 !important;
+      min-height: 44px !important;
+      border-radius: 7px !important;
+      box-sizing: border-box !important;
+      display: inline-flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+    }
+    .report-hero-actions .report-status {
+      width: 100%;
+      box-sizing: border-box;
+    }
+    @media (max-width: 700px) {
+      .report-hero-actions {
+        min-width: 0;
+        width: 100%;
+      }
+      .report-hero-actions > div:first-child {
+        grid-template-columns: 1fr;
+      }
+      .report-hero-actions #refreshReportBtn,
+      .report-hero-actions #clearSampleDatasetLink {
+        width: 100% !important;
+      }
+    }
+    /* ==================================================================
+       REPORT FILTER RAIL - one design, both reporting tabs.
+
+       Location Intelligence (markup further down this file) and Data
+       Quality (markup in reporting-tabs.js buildQualityPanel) were two
+       separately hand-styled panels that had drifted apart in card
+       treatment, padding, label size, section headers and search
+       behaviour - reported as "why are they different, even spacing is
+       different". Everything the rail looks like is defined here, once,
+       and BOTH markups carry these classes with no inline styling of
+       their own, so the only thing that can differ between the two tabs
+       now is which filters they hold.
+       ================================================================== */
+    .report-filter-rail {
+      box-sizing: border-box;
+      width: 100%;
+      min-width: 0;
+      padding: 16px;
+      background: #ffffff;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+      /* Pinned, and NEVER scrolling inside itself.
+
+         Explicit owner instruction: "i wanted it to stick even if we scroll
+         right side screens, but it should be all open always no scroll on
+         filters sections".
+
+         The previous attempt gave the rail max-height + overflow-y so its
+         bottom buttons stayed reachable. That produced a HORIZONTAL
+         scrollbar on the rail, which is what got reported. The cause is a
+         CSS rule that is easy to miss: you cannot scroll one axis only. Per
+         the overflow spec, when one axis is a scrolling value and the other
+         is `visible`, the `visible` one computes to `auto`. So `overflow-y:
+         auto` silently turned overflow-x into `auto` as well, and any child
+         a pixel over the content box - a select at width:100% inside 16px
+         padding, a long option label - raised a horizontal bar.
+
+         Dropping the internal scroll removes both bars at once and leaves
+         every filter permanently open, which is what was asked for.
+
+         The typeahead work done for the scrolling version is NOT wasted and
+         must stay: attachSearchableSelect() positions .select-suggestions
+         with position:fixed off the input's own rect, so the panel is
+         immune to clipping by any ancestor - including this one when it was
+         a scroll box, and including the page itself now.
+
+         Known trade-off, stated rather than hidden: a sticky box does not
+         move with the page, so if the rail is ever taller than the viewport,
+         the filters past the fold cannot be reached at that window size.
+         The 900px breakpoint below already returns the rail to normal flow
+         for narrow layouts, which is where that is most likely to bite.
+
+         The offset is the live header height (see --app-header-h) plus a
+         12px gap, never a guessed number: the header is sticky at top:0 and
+         gets taller when its actions wrap, and the rail has to clear
+         whatever it actually is. */
+      position: sticky;
+      top: calc(var(--app-header-h, 71px) + 12px);
+      /* align-self:start stops a grid/flex parent stretching the rail to the
+         row height, which would defeat sticky entirely. */
+      align-self: start;
+      max-height: none;
+      overflow: visible;
+      /* position:sticky makes this a stacking context, which re-parents
+         everything inside it - including the competitor popup (1050) and the
+         typeahead panels (1200) - to the rail's own level. Without a z-index
+         the rail would sit at 0 and the Leaflet map beside it (its container
+         carries z-index:1) would paint straight over both. 30 clears the map
+         and the chart tooltips (20) while staying far below the loading
+         overlay (9999); the modals are native <dialog>s in the top layer, so
+         they are unaffected either way. */
+      z-index: 30;
+    }
+    .report-filter-rail-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--line);
+    }
+    .report-filter-rail-head h2 {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 700;
+      color: #1e293b;
+    }
+    /* Single column. The rail is 290px, so a two-up grid leaves ~129px per
+       card - narrower than the typeahead panel that now hangs off half of
+       them, and too tight for a search box above a select. */
+    .report-filter-section {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+      margin: 0;
+      padding: 10px 0 0;
+      border-top: 1px solid #f1f5f9;
+    }
+    .report-filter-section:first-of-type {
+      padding-top: 0;
+      border-top: 0;
+    }
+    .report-filter-section-title {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      font-weight: 700;
+      color: #475569;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+    }
+    .report-filter-group {
+      /* Positioning context for whatever this card hangs off itself (the
+         competitor popup lives in one of these). The typeahead panel no
+         longer needs it - .select-suggestions is viewport-anchored so that
+         the rail's own scroll box cannot clip it - but a card that is a
+         positioning context costs nothing and keeps any absolutely
+         positioned child of a filter card anchored to its own card. */
+      position: relative;
+      min-width: 0;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+    }
+    .report-filter-label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--ink);
+      margin-bottom: 4px;
+    }
+    .report-filter-control {
+      width: 100%;
+      box-sizing: border-box;
+      height: 33px;
+      padding: 7px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: inherit;
+      color: var(--ink);
+      background: var(--panel);
+    }
+    .report-filter-control:focus { outline: 2px solid #bfdbfe; outline-offset: 1px; }
+    /* attachSearchableSelect() (common.js) inserts its input immediately
+       before the select it searches, so this is the gap between the two. It
+       belongs here rather than in that component, which has no business
+       knowing this rail exists. */
+    .report-filter-group > input[type="search"].report-filter-control { margin-bottom: 6px; }
+    /* The competitor picker is a button plus a popup rather than a <select>,
+       so it takes the control's metrics explicitly instead of inheriting
+       them - that is the whole reason the two rails' control heights could
+       disagree before. */
+    .report-filter-multi { position: relative; width: 100%; min-width: 0; }
+    .report-filter-multi-btn {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 4px;
+      text-align: left;
+      cursor: pointer;
+      overflow: hidden;
+    }
+    .report-filter-multi-btn > span:first-child {
+      flex: 1 1 auto;
+      min-width: 0;
+      color: var(--ink);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .report-filter-multi-caret { flex: 0 0 auto; font-size: 10px; color: var(--muted); }
+    .report-filter-multi-menu .report-checks { max-height: 230px; }
+    .report-filter-multi-menu {
+      display: none;
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      right: 0;
+      z-index: 1050;
+      max-height: 250px;
+      overflow-y: auto;
+      padding: 8px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 10px 25px rgba(15, 23, 42, 0.18);
+    }
+    /* The actions block is just another section, so the switch and the two
+       buttons line up on the same grid as the filters above them. */
+    .report-filter-actions button {
+      width: 100%;
+      padding: 9px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: normal;
+    }
+    .reporting-main-pane > #reportContent > * {
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .reporting-main-pane .report-section,
+    .reporting-main-pane .report-columns {
+      min-width: 0;
+      max-width: none;
+    }
+    .reporting-main-pane .report-columns > .report-section {
+      min-width: 0;
+      overflow: hidden;
+    }
+    .reporting-main-pane .report-columns > .report-section > div {
+      min-width: 0;
+      max-width: 100%;
+      overflow-x: auto;
+    }
+    .reporting-main-pane .report-columns table {
+      width: 100%;
+      min-width: 0;
+    }
+    .reporting-main-pane .report-columns {
+      grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    }
+    /* State Distribution / Top Cities carry too many columns now (population,
+       median income, pop/listing, subject-vs-competitor) for a squeezed
+       2-column layout - stacked full-width instead. An ID selector is needed
+       to outrank the !important two-column rule directly above. */
+    .reporting-main-pane #reportStateCityTables {
+      grid-template-columns: 1fr !important;
+    }
+    .reporting-main-pane #reportingMap {
+      height: clamp(400px, 52vh, 680px) !important;
+      min-height: 400px;
+    }
+    .reporting-main-pane .report-grid {
+      grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)) !important;
+    }
+    @media (max-width: 900px) {
+      .reporting-dashboard-layout {
+        grid-template-columns: 1fr;
+      }
+      .reporting-main-pane {
+        grid-column: 1;
+      }
+      /* Stacked layout: the rail sits ABOVE the dashboard rather than beside
+         it, so there is nothing to stay pinned alongside - and a pinned box
+         in a one-column stack is just a scroll box wedged between the header
+         and the report. Back to normal flow, where the page scroll reaches
+         Apply / Reset like every other control. One rule, so the Data
+         Quality rail (which stacks at the same 900px breakpoint, see
+         .dq-layout in reporting-tabs.js) does exactly the same thing. */
+      .report-filter-rail {
+        position: static;
+        max-height: none;
+        overflow: visible;
+        z-index: auto;
+      }
+    }
+    @media (max-width: 600px) {
+      .reporting-view {
+        padding: 12px;
+      }
+      .reporting-main-pane #reportingMap {
+        height: 56vh !important;
+        min-height: 340px;
+      }
+      .reporting-main-pane .report-columns {
+        grid-template-columns: 1fr !important;
+      }
     }
 
     .report-hero {
@@ -162,7 +680,7 @@
     .report-hero h1 {
       margin: 0 0 6px;
       color: var(--ink);
-      font-size: 30px;
+      font-size: 20px;
       line-height: 1.15;
       letter-spacing: 0;
     }
@@ -179,72 +697,58 @@
       gap: 4px;
     }
     .sample-load-link {
-      border: 0;
-      background: transparent;
+      border: 1px solid #cbd6e6;
+      background: #ffffff;
       color: var(--accent);
-      padding: 0;
-      font-size: 12px;
-      text-decoration: underline;
+      padding: 12px 18px;
+      border-radius: 7px;
+      font-size: 14px;
+      font-weight: 800;
       cursor: pointer;
+      white-space: nowrap;
+      min-height: 44px;
     }
     .sample-load-link:hover {
       color: #005fd3;
-      background: transparent;
-      text-decoration-thickness: 2px;
-      text-underline-offset: 3px;
+      background: var(--navy-soft);
+      border-color: #9ebbe9;
+    }
+    .sample-load-link.danger {
+      border-color: #ef4444;
+      background: #dc2626;
+      color: #ffffff;
+    }
+    .sample-load-link.danger:hover {
+      border-color: #b91c1c;
+      background: #b91c1c;
+      color: #ffffff;
     }
     .sample-load-link:disabled {
       color: var(--muted);
       cursor: not-allowed;
-      text-decoration-color: transparent;
+      background: #f4f6f8;
     }
     .sample-load-link.hidden { display: none; }
-    #loadSampleDatasetBtn.ready {
-      color: var(--ok);
-      border-color: #b9d6c3;
-      background: #f2fbf5;
-      cursor: default;
-    }
-
     .report-hero p { margin: 0; color: var(--muted); max-width: 780px; }
+    .view-intro {
+      border-bottom: 1px solid var(--line);
+      padding: 24px 32px 18px;
+    }
+    .view-intro h1,
+    .view-intro h2 {
+      margin: 0 0 6px;
+      color: var(--ink);
+      font-size: 20px;
+      line-height: 1.15;
+      letter-spacing: 0;
+    }
+    .view-intro p {
+      margin: 0;
+      color: var(--muted);
+      max-width: 860px;
+      line-height: 1.42;
+    }
     .report-source { color: var(--muted); font-size: 12px; margin-top: 8px; overflow-wrap: anywhere; }
-    .report-filters {
-      display: grid;
-      gap: 12px;
-      margin: 18px 0;
-      align-items: start;
-      background: var(--accent-tint);
-      border: 1px solid var(--accent-tint-line);
-      border-radius: 10px;
-      padding: 16px;
-    }
-    .report-filter-group { border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 12px; }
-    .report-filter-group h2 { margin: 0 0 8px; font-size: 12px; color: var(--ink); }
-    .report-filter-row {
-      display: grid;
-      gap: 12px;
-      align-items: start;
-    }
-    .report-filter-row.primary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .report-filter-row.geo { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-    .report-filter-row.demographics { grid-template-columns: minmax(260px, 0.5fr); justify-content: center; }
-    .report-filter-group.demographics .demographic-inputs {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 8px;
-    }
-    .report-filter-actions {
-      display: flex;
-      justify-content: center;
-      gap: 8px;
-      padding-top: 8px;
-      border-top: 1px solid var(--accent-tint-line);
-    }
-    .report-filter-actions button {
-      min-width: 132px;
-      padding: 7px 10px;
-      font-size: 12px;
-    }
     .brand-map-marker {
       width: 16px;
       height: 16px;
@@ -303,8 +807,6 @@
     .report-checks { display: grid; gap: 6px; max-height: 150px; overflow: auto; }
     .report-checks label { display: flex; gap: 7px; align-items: center; color: var(--ink); font-weight: 650; }
     .report-checks input { width: auto; }
-    .report-geo-filters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .report-geo-filters input { width: 100%; }
     .report-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 16px 0 22px; }
     .report-metric { border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 14px; min-height: 88px; }
     .report-metric strong { display: block; font-size: 28px; line-height: 1.1; color: var(--navy, var(--ink)); }
@@ -314,6 +816,293 @@
     .report-columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
     .report-empty-states { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
     .report-empty-states span { border: 1px solid var(--line); border-radius: 999px; padding: 5px 9px; background: #ffffff; color: var(--muted); font-weight: 700; }
+    .table-scroll-container {
+      width: 100%;
+      max-width: 100%;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+      margin-top: 8px;
+    }
+    .table-scroll-container table {
+      width: 100%;
+      min-width: 950px;
+      border-collapse: collapse;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .table-scroll-container th {
+      background: #f8fafc;
+      padding: 9px 14px;
+      font-weight: 700;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #475569;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+    }
+    .table-scroll-container td {
+      padding: 8px 14px;
+      border-bottom: 1px solid #f1f5f9;
+      color: #1e293b;
+      font-size: 12px;
+    }
+    .table-scroll-container tr:last-child td {
+      border-bottom: none;
+    }
+    .table-scroll-container tr:hover td {
+      background: #f8fafc;
+    }
+    .btn-download-excel {
+      font-size: 14px;
+      padding: 12px 18px;
+      min-height: 44px;
+      border-radius: 7px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      cursor: pointer;
+      font-weight: 600;
+      white-space: nowrap;
+      border: 1px solid var(--line);
+      background: #ffffff;
+      color: var(--ink);
+      transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+      box-sizing: border-box;
+    }
+    .btn-download-excel:hover {
+      background: #f1f5f9;
+      border-color: #cbd5e1;
+    }
+    .btn-download-excel.loading {
+      background: #dc2626 !important;
+      color: #ffffff !important;
+      border-color: #b91c1c !important;
+      cursor: wait;
+    }
+    .btn-download-excel.ready {
+      background: #16a34a !important;
+      color: #ffffff !important;
+      border-color: #15803d !important;
+    }
+    /* Competitor Benchmark View Styles */
+    .comp-bench-section {
+      background: #ffffff;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 24px;
+      margin-top: 24px;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
+    }
+    .comp-bench-header-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .comp-bench-title {
+      margin: 0;
+      font-size: 26px;
+      font-weight: 750;
+      color: #172554;
+      line-height: 1.2;
+      letter-spacing: -0.015em;
+    }
+    .comp-view-switcher {
+      display: inline-flex;
+      gap: 4px;
+      padding: 4px;
+      background: #f1f5f9;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    .comp-view-btn {
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 650;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .comp-view-btn.active {
+      background: #ffffff;
+      color: #172554;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.12);
+    }
+    .comp-bench-table-wrap {
+      width: 100%;
+      overflow-x: auto;
+      background: #ffffff;
+      border-radius: 8px;
+    }
+    .comp-bench-table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      table-layout: fixed;
+    }
+    .comp-bench-table th {
+      padding: 12px 14px;
+      font-size: 14px;
+      font-weight: 700;
+      color: #1e3a8a;
+      background: #f8fafc;
+      border-bottom: 1px solid #e2e8f0;
+      white-space: nowrap;
+    }
+    /* The brand cell puts "Brand VS Competitor" on ONE line, so it needs the
+       width the three metric columns were not using - each held a short
+       number and a short parenthetical under generous padding. */
+    .comp-bench-table th.brand-col {
+      background: transparent;
+      width: 46%;
+      min-width: 300px;
+    }
+    .comp-bench-table th.loc-col {
+      width: 19%;
+      min-width: 118px;
+    }
+    .comp-bench-table th.state-col {
+      width: 17.5%;
+      min-width: 110px;
+    }
+    .comp-bench-table th.city-col {
+      width: 17.5%;
+      min-width: 110px;
+    }
+    .comp-bench-table td {
+      padding: 16px 14px;
+      border-bottom: 1px solid #f1f5f9;
+      vertical-align: middle;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }
+    .comp-bench-table tr:hover td {
+      background: #fafcff;
+    }
+    .comp-bench-brand-cell {
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      flex-wrap: nowrap;
+      gap: 10px;
+      width: 100%;
+      min-width: 0;
+    }
+    .comp-brand-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex: 0 1 auto;
+    }
+    .comp-brand-primary {
+      color: #1e293b;
+    }
+    .comp-brand-vs {
+      color: #2563eb;
+      padding-left: 0;
+      flex: 1 1 auto;
+    }
+    .comp-primary-name {
+      font-size: 14px;
+      font-weight: 700;
+      color: #1e293b;
+      /* Was word-break/overflow-wrap, which is what pushed the competitor
+         onto a second line. A name too long for the cell now truncates and
+         keeps its full text in the title attribute. */
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+      flex: 0 1 auto;
+      line-height: 1.3;
+    }
+    .comp-vs-badge {
+      font-size: 10px;
+      font-weight: 800;
+      color: #64748b;
+      background: #f1f5f9;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 1px 5px;
+      user-select: none;
+      letter-spacing: 0.04em;
+      flex-shrink: 0;
+    }
+    .comp-link-name {
+      font-size: 14px;
+      font-weight: 600;
+      color: #2563eb;
+      text-decoration: none;
+      cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+      flex: 0 1 auto;
+      line-height: 1.3;
+    }
+    .comp-link-name:hover {
+      color: #1d4ed8;
+      text-decoration: underline;
+    }
+    .comp-logo-icon {
+      width: 22px;
+      height: 22px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .comp-logo-icon svg {
+      width: 22px;
+      height: 22px;
+      display: block;
+    }
+    .comp-metric-cell {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      min-width: 0;
+    }
+    .comp-metric-num {
+      font-size: 16px;
+      font-weight: 700;
+      color: #0f172a;
+      line-height: 1.2;
+    }
+    .comp-metric-diff {
+      font-size: 11.5px;
+      color: #64748b;
+      font-style: italic;
+      line-height: 1.3;
+    }
+    .comp-sales-footer {
+      margin: 20px 0 4px;
+      font-size: 13.5px;
+      color: #475569;
+      line-height: 1.5;
+    }
+    .comp-sales-footer a {
+      color: #2563eb;
+      text-decoration: none;
+      font-weight: 500;
+    }
+    .comp-sales-footer a:hover {
+      text-decoration: underline;
+    }
+
     .state-code-label {
       background: transparent;
       border: 0;
@@ -402,32 +1191,62 @@
       border-radius: 50%;
       animation: spin 0.8s linear infinite;
     }
+    /* The sliding bar that used to run under every "…ing" status line is
+       gone. It was a second, competing progress indicator next to the
+       spinner - a long bar whose text kept "going and coming" - and it
+       communicated nothing the verb-ing label and spinner did not already
+       say. The spinner alone is the standard here. */
     .report-status.loading {
       position: relative;
-      overflow: hidden;
-    }
-    .report-status.loading::after {
-      content: "";
-      position: absolute;
-      left: 0;
-      bottom: 0;
-      width: 35%;
-      height: 3px;
-      background: var(--accent);
-      animation: reportProgress 1.1s ease-in-out infinite;
     }
     @keyframes spin {
       to { transform: rotate(360deg); }
     }
-    @keyframes reportProgress {
-      0% { transform: translateX(-100%); }
-      100% { transform: translateX(300%); }
+
+    /* Five-state cards in the review queue. Colour carries meaning: blue AI,
+       indigo AI-suggested, green manual-fixed, amber awaiting a person. */
+    .review-state-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; background: #fff; }
+    .review-state-card strong { display: block; font-size: 22px; font-weight: 800; line-height: 1.1; }
+    .review-state-card span { font-size: 11px; color: var(--muted); }
+    .review-state-card.state-ai-fixed { background: #eff6ff; border-color: #bfdbfe; }
+    .review-state-card.state-ai-fixed strong { color: #1d4ed8; }
+    .review-state-card.state-ai-suggested-fixed { background: #eef2ff; border-color: #c7d2fe; }
+    .review-state-card.state-ai-suggested-fixed strong { color: #4338ca; }
+    .review-state-card.state-manual-fixed { background: #ecfdf5; border-color: #a7f3d0; }
+    .review-state-card.state-manual-fixed strong { color: #047857; }
+    .review-state-card.state-ai-pending { background: #f8fafc; border-color: #cbd5e1; }
+    .review-state-card.state-ai-pending strong { color: #475569; }
+    .review-state-card.state-manual-pending { background: #fff7ed; border-color: #fed7aa; }
+    .review-state-card.state-manual-pending strong { color: #b45309; }
+
+    /* Effort icon + count, replacing the words "Attempt N". */
+    .review-attempt-badge {
+      display: inline-flex; align-items: center; gap: 3px;
+      margin-left: 6px; padding: 1px 7px; border-radius: 999px;
+      background: #fff1f0; color: #cf1322; font-size: 11px; font-weight: 700;
+      vertical-align: middle;
     }
+    .review-attempt-badge svg { display: block; }
 
     .review-view { padding: 24px; }
-    .review-toolbar { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(220px, .7fr) auto; gap: 8px; width: 100%; max-width: 980px; margin-bottom: 16px; align-items: stretch; }
+    /* Five controls, five columns - the search input is capped at a normal
+       width rather than greedily taking 1fr, so the two buttons stay on the
+       same line as the filters on a laptop screen instead of wrapping. */
+    .review-toolbar { display: grid; grid-template-columns: minmax(200px, 280px) minmax(140px, 200px) minmax(140px, 200px) auto auto; justify-content: start; gap: 8px; width: 100%; max-width: none; margin-bottom: 16px; align-items: stretch; }
     .review-toolbar input, .review-toolbar select { width: 100%; min-width: 0; box-sizing: border-box; }
     .review-brand-breakdown-layout { display: grid; grid-template-columns: minmax(300px, .85fr) minmax(360px, 1.15fr); gap: 28px; align-items: center; width: 100%; }
+    .review-chart-side { min-width: 0; display: grid; grid-template-columns: minmax(120px, 170px) minmax(0, 1fr); gap: 14px; align-items: center; }
+    .review-ai-summary { min-width: 0; box-sizing: border-box; padding: 14px 12px; border: 1px solid #b9d6c3; border-radius: 8px; background: #f2fbf5; }
+    .review-ai-summary strong { display: block; color: #147d63; font-size: 24px; line-height: 1.1; }
+    .review-ai-summary span, .review-manual-summary span { display: block; margin-top: 6px; color: #53627d; font-size: 12px; line-height: 1.25; }
+    .review-manual-summary { min-width: 0; box-sizing: border-box; padding: 14px 12px; border: 1px solid #b9d6c3; border-radius: 8px; background: #f2fbf5; grid-column: 1; }
+    .review-manual-summary strong { display: block; color: #147d63; font-size: 24px; line-height: 1.1; }
+    .review-ai-percent-summary, .review-manual-percent-summary { min-width: 0; box-sizing: border-box; padding: 14px 12px; border: 1px solid #cbd8eb; border-radius: 8px; background: #f5f8fd; grid-column: 1; }
+    .review-ai-percent-summary strong, .review-manual-percent-summary strong { display: block; color: #2563eb; font-size: 22px; line-height: 1.1; }
+    .review-ai-percent-summary span, .review-manual-percent-summary span { display: block; margin-top: 6px; color: #53627d; font-size: 12px; line-height: 1.25; }
+    .review-manual-percent-summary { border-color: #f1b8b4; background: #fff1f0; }
+    .review-manual-percent-summary strong { color: #cf1322; }
+    .review-chart-side > #reviewBrandChart { grid-column: 2; grid-row: 1 / span 4; }
     #reviewBrandChart { min-height: 340px; display: flex; justify-content: center; align-items: center; position: relative; }
     #reviewBrandChart svg { width: min(340px, 100%); height: auto; overflow: visible; }
     .review-chart-tooltip { position: absolute; z-index: 4; pointer-events: none; display: none; max-width: 220px; padding: 8px 10px; border-radius: 6px; background: #1f2937; color: #fff; font-size: 12px; line-height: 1.35; box-shadow: 0 4px 12px rgba(15, 23, 42, .22); white-space: nowrap; }
@@ -435,6 +1254,11 @@
     @media (max-width: 760px) {
       .review-toolbar { grid-template-columns: 1fr; max-width: none; }
       .review-brand-breakdown-layout { grid-template-columns: 1fr; gap: 12px; }
+      .review-chart-side { grid-template-columns: 1fr; }
+      .review-ai-summary { text-align: center; }
+      .review-manual-summary { text-align: center; }
+      .review-ai-percent-summary, .review-manual-percent-summary { text-align: center; }
+      .review-chart-side > #reviewBrandChart { grid-column: 1; grid-row: auto; }
       #reviewBrandChart { min-height: 280px; }
     }
     .review-row-actions { white-space: nowrap; }
@@ -442,17 +1266,20 @@
     .text-link:hover { color: #005fd3; background: #edf4ff; }
     .text-link:focus-visible { outline: 2px solid #8bb8ff; outline-offset: 2px; }
     .text-link:active { color: #ffffff; background: var(--accent); }
+    .sortable-header { cursor: pointer; user-select: none; white-space: nowrap; }
+    .sortable-header:focus-visible { outline: 2px solid #8bb8ff; outline-offset: -2px; }
+    .sort-indicator { display: inline-block; margin-left: 5px; color: var(--muted); font-size: 11px; }
     .demo-code-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 7px; background: #f8fafc; }
     .demo-code-actions button { padding: 7px 10px; font-size: 12px; }
     .demo-code-feedback { flex: 1 1 180px; color: var(--muted); font-size: 12px; }
     .demo-code-feedback.ok { color: #147d63; }
     .demo-code-feedback.error { color: #c43b54; }
-    #newBrandFields.brand-edit-modal.is-open { position: fixed; inset: 50% auto auto 50%; z-index: 1200; width: min(520px, calc(100vw - 32px)); max-height: min(720px, calc(100vh - 32px)); overflow-y: auto; transform: translate(-50%, -50%); margin: 0; padding: 22px; background: #ffffff; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 24px 70px rgba(15, 23, 42, 0.28); }
-    #newBrandFields.brand-edit-modal.is-open::before { content: ""; position: fixed; inset: 50% auto auto 50%; width: 100vw; height: 100vh; transform: translate(-50%, -50%); z-index: -1; background: rgba(15, 23, 42, 0.38); }
     .brand-edit-heading { display: none; margin: 0 0 14px; font-size: 18px; }
-    #newBrandFields.brand-edit-modal.is-open .brand-edit-heading { display: block; }
     .brand-source-format-field { display: none; }
     .template-library { padding: 24px; }
+    .template-library .view-intro {
+      margin: -24px -24px 20px;
+    }
     .template-search { display: flex; gap: 8px; max-width: 900px; margin-bottom: 16px; }
     .template-search input { flex: 1; min-width: 180px; }
     .template-search select { flex: 0 1 220px; min-width: 140px; }
@@ -517,12 +1344,41 @@
 
     .json-viewer-panel { overflow: hidden; }
     .json-viewer-link { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 9px 12px; border: 1px solid var(--accent); border-radius: 5px; background: var(--accent); color: var(--accent-ink); font-weight: 700; text-decoration: none; }
+    /* Duplicate-brand bulk merge: one row per candidate, name once per group. */
+    .dup-brand-group { border: 1px solid #e5cfaa; border-left: 4px solid #f59e0b; border-radius: 6px; padding: 10px; background: #fff9ed; margin-bottom: 10px; }
+    .dup-brand-name { font-weight: 700; margin-bottom: 6px; font-size: 13px; }
+    .dup-brand-count { font-weight: 400; color: var(--muted); font-size: 11px; }
+    .dup-brand-row { display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff; margin-top: 6px; cursor: pointer; }
+    .dup-brand-row:hover { border-color: var(--accent); }
+    .dup-brand-row input { margin-top: 2px; }
+    .dup-brand-meta { display: grid; gap: 2px; min-width: 0; }
+    .dup-brand-id { font-family: monospace; font-size: 11px; color: var(--ink); }
+    .dup-brand-pick { font-family: inherit; font-style: normal; font-size: 10px; font-weight: 700;
+                      color: #047857; background: #ecfdf5; border: 1px solid #a7f3d0;
+                      border-radius: 999px; padding: 0 6px; margin-left: 6px; }
+    .dup-brand-facts { font-size: 11px; color: var(--muted); }
+
+    .table-export-btn {
+      margin-left: 10px; padding: 4px 9px; font-size: 11px; font-weight: 700;
+      vertical-align: middle; border: 1px solid var(--line); border-radius: 6px;
+      background: #fff; color: var(--muted); cursor: pointer;
+    }
+    .table-export-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+    /* .panel is declared LATER in this stylesheet at the same specificity,
+       so its `background: var(--panel)` was winning and this panel rendered
+       plain white - losing the warning treatment entirely. Qualified with
+       .panel so it wins on specificity regardless of source order. */
+    .panel.data-danger-panel,
     .data-danger-panel {
       display: flex;
       flex-direction: column;
       gap: 8px;
-      background: #fff8e6;
-      border-color: #f2d5a6;
+      /* Warmer than the previous near-white #fff8e6: this is a destructive
+         zone and should read as one at a glance. */
+      background: linear-gradient(180deg, #fff4d6 0%, #ffe9bf 100%);
+      border: 1px solid #e6b800;
+      box-shadow: inset 3px 0 0 #d97706;
     }
     .data-danger-panel h2 {
       display: flex;
@@ -573,19 +1429,36 @@
       overflow: hidden;
     }
 
-    .python-function-options { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
+    .python-function-options { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; padding: 8px 10px; border: 1px solid var(--accent-tint-line); border-radius: 6px; background: var(--accent-tint); }
     .python-function-options label { display: inline-flex; align-items: center; gap: 6px; width: auto; margin: 0; font-weight: 700; }
     .python-function-options input { width: auto; }
+    .source-input-options {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 10px;
+      padding: 8px 10px;
+      border: 1px solid #bae6fd;
+      border-radius: 6px;
+      background: #ecfeff;
+    }
+    .source-input-options label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      width: auto;
+      margin: 0;
+      color: #075985;
+      font-weight: 700;
+    }
+    .source-input-options input { width: auto; accent-color: #0284c7; }
+    .source-input-mode-select {
+      display: none;
+    }
 
     .connector-output { min-height: 150px; margin-top: 8px; }
 
     main.connector-active { grid-template-columns: minmax(420px, 520px) minmax(0, 1fr); }
-    .connector-editor-dialog { width: min(1200px, calc(100vw - 48px)); height: min(800px, calc(100vh - 48px)); border: 0; border-radius: 8px; padding: 0; }
-    .connector-editor-dialog::backdrop { background: rgba(31, 41, 51, 0.48); }
-    .connector-editor-dialog-content { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100%; padding: 20px; background: var(--panel); }
-    .connector-editor-dialog-header { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding-bottom: 16px; }
-    .connector-editor-dialog-title { margin: 0; font-size: 18px; }
-    .connector-editor-dialog .connector-editor { height: 100%; }
 
     .loading-overlay {
       position: fixed;
@@ -662,6 +1535,18 @@
       background: #ef4444;
       color: #ffffff;
     }
+    /* Distinct from Cancel (red/destructive) - hiding doesn't stop the save,
+       it just lets the user stop watching it. */
+    #loadingHideBtn {
+      margin-top: 10px;
+      background: rgba(37, 99, 235, 0.16);
+      border-color: #2563eb;
+      color: #bfdbfe;
+    }
+    #loadingHideBtn:hover {
+      background: #2563eb;
+      color: #ffffff;
+    }
 
     .progress-wrap {
       position: sticky;
@@ -703,10 +1588,237 @@
 
     main {
       display: grid;
-      grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
+      grid-template-columns: minmax(0, 380px) minmax(0, 1fr);
       min-height: calc(100vh - 70px);
+      min-width: 0;
     }
 
+    #mapperView main.pre-parse-layout {
+      grid-template-columns: minmax(320px, 40%) minmax(0, 60%);
+    }
+    .default-brand-model-panel {
+      min-height: 340px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      background: #ffffff;
+      border: 1px solid #d9e3f2;
+      border-top: 4px solid var(--accent);
+      border-radius: 8px;
+      padding: clamp(24px, 4vw, 56px);
+      box-shadow: 0 8px 24px rgba(26, 61, 96, 0.06);
+    }
+    .default-brand-model-panel h2 {
+      color: #1f2d3d;
+      font-size: clamp(20px, 2vw, 28px);
+      margin-bottom: 10px;
+    }
+    .default-brand-model-panel p {
+      max-width: 620px;
+      color: #53627d;
+      font-size: 15px;
+      line-height: 1.6;
+      margin: 0;
+    }
+    .default-brand-model-summary {
+      margin-top: 22px;
+      padding: 14px 16px;
+      background: var(--navy-soft);
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      color: #34445b;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .default-brand-model-summary strong { color: #147d63; }
+    .default-brand-model-panel .button-row { margin-top: 22px; }
+    .default-brand-model-panel .button-row button { min-width: 170px; }
+    .help-link { align-self: center; color: var(--accent); background: transparent; border: 0; padding: 4px 6px; font-size: 12px; font-weight: 750; text-decoration: underline; }
+    .help-link:hover { color: #0759e8; background: var(--navy-soft); }
+    .app-help-dialog { width: min(760px, calc(100vw - 32px)); max-height: min(760px, calc(100vh - 32px)); border: 1px solid var(--line); border-radius: 10px; padding: 0; color: var(--ink); box-shadow: 0 24px 70px rgba(15, 23, 42, 0.28); }
+    .app-help-dialog::backdrop { background: rgba(15, 23, 42, 0.38); }
+    .app-help-content { padding: 24px; background: var(--panel); }
+    .app-help-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--line); padding-bottom: 14px; }
+    .app-help-header h2 { margin: 0; color: var(--navy); font-size: 22px; }
+    .app-help-close { padding: 6px 10px; }
+    .app-help-content h3 { margin: 20px 0 6px; color: var(--navy); font-size: 15px; }
+    .app-help-content p, .app-help-content li { color: var(--muted); font-size: 14px; line-height: 1.55; }
+    .app-help-content ul { margin: 6px 0 0; padding-left: 20px; }
+    /* Notice dialog: tone-carrying, not a bare paragraph under a rule. */
+    .app-notice .app-help-content { padding: 22px 22px 18px; }
+    .app-notice-body { display: flex; gap: 14px; align-items: flex-start; }
+    .app-notice-icon {
+      flex: 0 0 auto; width: 40px; height: 40px; border-radius: 50%;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 20px; font-weight: 800;
+      background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0;
+    }
+    .app-notice-text h2 { margin: 2px 0 6px; font-size: 18px; color: var(--navy); }
+    .app-notice-text p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
+    .app-notice-actions { display: flex; justify-content: flex-end; margin-top: 18px; }
+    .app-notice-actions button { min-width: 96px; }
+    /* Tones. Default is success; warn/error recolour only the icon so the
+       shell stays the one Birdeye dialog. */
+    .app-notice.tone-warn .app-notice-icon { background: #fff8e6; color: #8a5a00; border-color: #ffe58f; }
+    .app-notice.tone-error .app-notice-icon { background: #fef2f2; color: var(--error); border-color: #fecaca; }
+    .app-notice.tone-info .app-notice-icon { background: var(--navy-soft); color: var(--accent); border-color: #bfdbfe; }
+    /* Typeahead panel for the searchable selects. Viewport-anchored, NOT
+       anchored to the card it belongs to: the reporting filter rail is a
+       pinned box that scrolls inside itself (it has to be, or its Apply /
+       Reset buttons sit below the fold forever), and an overflow:auto
+       ancestor clips any absolutely positioned descendant at its edge. A
+       fixed box's containing block is the viewport instead, so the rail's
+       scroll box cannot touch it. attachSearchableSelect() in js/common.js
+       owns the coordinates - it sets left/top (or bottom, when it flips the
+       panel above a control that sits low in the rail), the width to match
+       the control, and a max-height clamped to the space actually available -
+       and it recomputes them on every scroll and resize while the panel is
+       open, since a fixed box does not travel with its anchor. */
+    .select-suggestions {
+      /* z-index above the competitor popup (1050) and above Leaflet's panes
+         (400-700) - at z-index 30 the map painted over the ZIP/City
+         suggestions. Inside the rail this is now relative to the rail's own
+         stacking context (see .report-filter-rail's z-index), which is what
+         clears the map for the whole rail at once. */
+      position: fixed; z-index: 1200;
+      /* No margin: the 2px gap from the control is part of the coordinates
+         common.js computes, and a margin here would push the panel back down
+         over the input whenever it flips above one. */
+      margin: 0;
+      /* Ceiling on the panel height - common.js lowers it further when the
+         control is close to the top or bottom edge of the screen. Scroll
+         rather than a capped item count, so a broad query still reaches every
+         match. */
+      max-height: 320px; overflow-y: auto; overscroll-behavior: contain;
+      min-width: 220px; max-width: 380px;
+      background: var(--panel); border: 1px solid var(--line);
+      border-radius: 8px; box-shadow: 0 10px 28px rgba(15, 23, 42, 0.18);
+    }
+    .select-suggestion {
+      padding: 7px 10px; font-size: 12px; color: var(--ink); cursor: pointer;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .select-suggestion:hover { background: var(--navy-soft); color: var(--accent); }
+    .select-suggestion-empty { padding: 8px 10px; font-size: 12px; color: var(--muted); }
+    /* The pinned "+ Create New Brand" row. It carries the same colours as the
+       native option.create-new-option it stands in for, and sticks to the top
+       so it stays reachable after scrolling a thousand brands. */
+    .select-suggestion.is-create {
+      position: sticky; top: 0; z-index: 1;
+      color: #0b5f55; font-weight: 800; background: #e7f6ef;
+      border-bottom: 1px solid #c9ead9;
+    }
+    .select-suggestion.is-create:hover { background: #d5efe2; color: #0b5f55; }
+    /* An empty review queue is a success state, not a blank screen. */
+    .review-empty-ok {
+      display: flex; flex-direction: column; align-items: center; gap: 8px;
+      padding: 44px 20px; text-align: center;
+      border: 1px solid #a7f3d0; border-radius: 12px; background: #ecfdf5;
+    }
+    .review-empty-ok-emoji { font-size: 44px; line-height: 1; }
+    .review-empty-ok strong { font-size: 24px; font-weight: 800; color: #047857; }
+    .review-empty-ok span { font-size: 14px; color: #059669; max-width: 460px; }
+    /* Top States bars: the whole group highlights on hover, so the pointer
+       does not have to find the thin filled rect itself. */
+    .dq-state-bar { cursor: pointer; }
+    .dq-state-bar .dq-state-bar-fill { transition: fill 120ms ease; }
+    .dq-state-bar:hover .dq-state-bar-fill { fill: var(--accent); }
+    /* Confirm/notice bodies are set with textContent (never innerHTML, so a
+       brand name can't inject markup), which means line breaks only survive
+       if the paragraph honours them. */
+    #appConfirmMessage, #appNoticeMessage { white-space: pre-line; overflow-wrap: anywhere; }
+    /* Notice and confirm carry a sentence or two, not a document. The shared
+       760px shell left them mostly empty space with the text stretched across
+       it - the box and its contents were sized independently. These size to
+       the message instead, and the content is what sets the width. */
+    #appNoticeDialog, #appConfirmDialog, #saveCompletionDialog, #sampleLoadedDialog {
+      width: auto;
+      min-width: min(320px, calc(100vw - 32px));
+      max-width: min(460px, calc(100vw - 32px));
+    }
+    #appNoticeDialog .app-help-content,
+    #appConfirmDialog .app-help-content,
+    #saveCompletionDialog .app-help-content,
+    #sampleLoadedDialog .app-help-content { padding: 20px; }
+    #appNoticeDialog .app-help-header h2,
+    #appConfirmDialog .app-help-header h2,
+    #saveCompletionDialog .app-help-header h2,
+    #sampleLoadedDialog .app-help-header h2 { font-size: 18px; }
+    /* The unsaved-changes dialog holds three buttons in a row, so it needs a
+       little more room than a plain confirm but still nothing like 760px. */
+    #unsavedChangesDialog { width: auto; max-width: min(560px, calc(100vw - 32px)); }
+    /* Every dialog in the app uses this one shell
+       (.app-help-dialog > .app-help-content > .app-help-header > h2). These
+       modifiers vary only size and tone, so nothing needs a bespoke frame:
+       --editor is the tall/wide code-editor size, --form is the mid-width
+       record form, and --danger keeps the destructive-action signal (red
+       border, red rule, red title) without leaving the shell. */
+    .app-help-dialog--editor { width: min(1200px, calc(100vw - 48px)); height: min(800px, calc(100vh - 48px)); max-height: none; }
+    .app-help-dialog--editor .app-help-content { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100%; }
+    .app-help-dialog--editor #pythonConnectorDialogHost { min-height: 0; padding-top: 14px; }
+    .app-help-dialog--editor .connector-editor { height: 100%; }
+    .app-help-dialog--form { width: min(700px, calc(100vw - 32px)); }
+    .app-help-dialog--danger { width: min(520px, calc(100vw - 32px)); border-color: var(--error); }
+    .app-help-dialog--danger .app-help-header { border-bottom-color: var(--error); }
+    .app-help-dialog--danger .app-help-header h2 { color: var(--error); }
+    .pre-parse-brand-panel, .pre-parse-parser-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px; }
+    .pre-parse-brand-panel { margin-bottom: 16px; }
+    .pre-parse-brand-panel h2, .pre-parse-parser-panel h2 { color: var(--navy); }
+    .pre-parse-brand-panel .brand-mode-choice { display: flex; gap: 14px; flex-wrap: wrap; margin: 12px 0 16px; padding: 10px; background: var(--accent-tint); border: 1px solid var(--accent-tint-line); border-radius: 6px; }
+    .pre-parse-brand-panel .brand-mode-choice label { display: inline-flex; align-items: center; gap: 7px; width: auto; margin: 0; color: var(--navy); }
+    .pre-parse-brand-panel .brand-mode-choice input { width: auto; }
+    .pre-parse-brand-validation { margin: 8px 0 0; padding: 8px 10px; color: #b42318; background: #fff5f5; border: 1px solid #f2b8b5; border-left: 3px solid #d92d20; border-radius: 6px; font-size: 12px; font-weight: 700; }
+    .parser-business-field { margin: 0 0 14px; }
+    .parser-business-field label { display: block; margin-bottom: 8px; color: var(--muted); font-weight: 800; }
+    .parser-business-field select { width: 100%; }
+    .wide-brand-selector {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 8px 12px;
+      align-items: end;
+    }
+    .wide-brand-selector > label,
+    .wide-brand-selector > button,
+    .wide-brand-selector > .pre-parse-brand-validation,
+    .wide-brand-selector > #newBrandFields,
+    .wide-brand-selector > #presetBrandPanel {
+      grid-column: 1 / -1;
+    }
+    .wide-brand-selector > label {
+      margin-bottom: 0;
+    }
+    .wide-brand-selector > input[type="search"] {
+      grid-column: 1;
+      margin: 0;
+    }
+    .wide-brand-selector > select {
+      grid-column: 2;
+      margin: 0;
+    }
+    @media (max-width: 900px) {
+      .wide-brand-selector {
+        grid-template-columns: 1fr;
+      }
+      .wide-brand-selector > input[type="search"],
+      .wide-brand-selector > select {
+        grid-column: 1;
+      }
+    }
+    .pre-parse-parser-panel { min-height: 100%; }
+    .pre-parse-parser-panel > .panel { margin-bottom: 0; }
+    .pre-parse-parser-panel > #status { margin: 0 0 16px; background: var(--accent-tint); border-color: var(--accent-tint-line); color: var(--navy); }
+    #mapperView.preparse-booting > #status { visibility: hidden; }
+    #mapperView.pre-parse-active aside > .panel:not(#sourceControlsPanel):not(.left-rail-persistent) { display: none; }
+    #mapperView.preparse-booting .left-rail-persistent { visibility: hidden; }
+    #mapperView.pre-parse-active #sourceControlsPanel { display: none; }
+    #mapperView.pre-parse-active #defaultBrandModelPanel { display: none; }
+    #mapperView.pre-parse-active #templateComponentsPanel,
+    #mapperView.pre-parse-active #optionalFieldsPanel,
+    #mapperView.pre-parse-active #mappingPreviewTabs,
+    #mapperView.pre-parse-active #sourcePreview,
+    #mapperView.pre-parse-active #entityPreview { display: none; }
+    #mapperView.pre-parse-active #preParseBrandPanel,
+    #mapperView.pre-parse-active #preParseParserHost { display: block; }
     aside {
       border-right: 1px solid var(--line);
       background: #fbfcfa;
@@ -820,9 +1932,27 @@
       padding-bottom: 4px;
     }
 
+    .panel-title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .mandatory-note {
+      color: var(--error);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
     .required {
       color: var(--error);
       font-weight: 800;
+      display: inline-block;
+      transform: translateY(-0.22em);
+      margin-right: 3px;
+      line-height: 1;
     }
 
     select.auto-mapped {
@@ -924,10 +2054,11 @@
     .status.warn, #status.warn { color: var(--warn); border-color: #e5cfaa; border-left-color: #f59e0b; background: #fff9ed; }
     .status.error, #status.error { color: var(--error); border-color: #e8bbbb; border-left-color: #ef4444; background: #fff5f5; }
 
-    #status { position: relative; display: flex; justify-content: space-between; align-items: flex-start; }
-    .status-close { display: none; background: none; border: none; cursor: pointer; font-size: 20px; padding: 0; margin: -2px 0 0 12px; color: inherit; opacity: 0.7; }
+    .status { position: relative; display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+    .status-close { display: block; flex: 0 0 auto; background: none; border: none; cursor: pointer; font-size: 20px; line-height: 1; padding: 0; margin: -2px 0 0 auto; color: inherit; opacity: 0.7; }
     .status-close:hover { opacity: 1; }
-    #status.error .status-close, #status.warn .status-close { display: block; }
+    .status-retry { flex: 0 0 auto; border: 1px solid currentColor; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; padding: 4px 9px; font-weight: 700; }
+    .status-retry:hover { background: rgba(255,255,255,0.55); }
 
     table {
       width: 100%;
@@ -935,15 +2066,42 @@
       background: #ffffff;
       border: 1px solid var(--line);
       border-radius: 8px;
-      overflow: hidden;
+      /* overflow:hidden removed here - on a bare <table> it silently
+         clipped columns that overflowed a narrow viewport instead of
+         letting the user scroll to see them. The wrapping rule below
+         gives every table horizontal scroll (and still clips the
+         rounded corners) without needing a wrapper div added everywhere
+         a table is rendered. */
+    }
+    /* Two-row alternating bands on every reporting table. Scanning a wide
+       row left-to-right is where the eye slips a line, and a flat background
+       gives it nothing to hold on to. Banded in PAIRS (not single-row zebra)
+       so the grouping stays readable when rows wrap to two lines. Scoped to
+       reporting so data-entry tables elsewhere keep their plain look. */
+    #reportingView table tbody tr:nth-child(4n+1),
+    #reportingView table tbody tr:nth-child(4n+2) {
+      background: linear-gradient(180deg, #fbfdff 0%, #f4f8fd 100%);
+    }
+    #reportingView table tbody tr:nth-child(4n+3),
+    #reportingView table tbody tr:nth-child(4n+4) {
+      background: #ffffff;
+    }
+    #reportingView table tbody tr:hover { background: #e8f1fd; }
+
+    /* Any container that directly wraps a <table> - across the whole app,
+       not just reporting - scrolls horizontally instead of clipping or
+       overflowing the layout when the table is wider than its column. */
+    div:has(> table) {
+      overflow-x: auto;
+      border-radius: 8px;
     }
 
     th, td {
       border-bottom: 1px solid var(--line);
-      padding: 8px 10px;
+      padding: 11px 12px;
       text-align: left;
       vertical-align: top;
-      font-size: 12px;
+      font-size: 14px;
       min-width: 120px;
       max-width: 260px;
       overflow-wrap: break-word;
@@ -981,6 +2139,28 @@
     }
 
     .hidden { display: none !important; }
+
+    /* Reviewing a saved template edits an existing mapping - there's no
+       source to pick, upload, or parse in that mode, so the whole
+       source-parser half of the left rail is hidden (the brand section,
+       source name, and the mapping grid itself all stay, since those are
+       still meaningful). Scoped to a mode class on #mapperView rather than
+       toggling each element's own .hidden, which updateSourceVisibility()
+       independently owns for format-specific show/hide. */
+    #mapperView.template-edit-mode .source-parser-only { display: none !important; }
+    /* Reviewing a saved template: the brand is a fact of the template, not a
+       choice (setTemplateEditBrandLock disables the select), so a search box
+       over a list you cannot pick from is dead furniture. The input and its
+       panel are created at runtime by attachSearchableSelect(), which is why
+       this hides them by id rather than by class. */
+    #mapperView.template-edit-mode #brandSelectSearch,
+    #mapperView.template-edit-mode #brandSelectSuggestions { display: none !important; }
+
+    /* Duplicate entry point into the same edit-brand form as the CSV-preset
+       panel's "Edit Brand Details" button (both call fillBrandFields() /
+       open #newBrandFields) - kept in the DOM/JS per product decision, just
+       force-hidden here rather than deleted, in case it's needed again. */
+    #editExistingBrandLink { display: none !important; }
 
     .login-screen {
       min-height: 100vh;
@@ -1089,6 +2269,29 @@
       align-items: start;
     }
 
+    /* Wide sources (OSM-style ones run past 100 columns) turned the Data
+       Model into an unscrollable wall. Only applied above the threshold, so
+       a short list keeps its plain layout. */
+    .entity-map-scrollable .entity-fields,
+    .entity-map-scrollable .entity-column {
+      max-height: 60vh;
+      overflow-y: auto;
+    }
+    .entity-field-search {
+      width: 100%;
+      margin: 0 0 10px;
+      padding: 7px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      font-size: 13px;
+      background: #fff;
+    }
+    .entity-field-search:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(22, 119, 238, 0.15);
+    }
+
     .entity-column {
       display: grid;
       gap: 12px;
@@ -1133,20 +2336,26 @@
     }
 
     .entity-field.source-row-item {
-      grid-template-columns: minmax(130px, 1fr) minmax(100px, 1fr);
+      grid-template-columns: minmax(130px, 1.1fr) minmax(96px, 0.7fr) minmax(180px, 1fr);
     }
 
     .entity-field-name { font-weight: 700; }
     .entity-field-source { color: var(--muted); overflow-wrap: anywhere; font-size: 11px; }
     .entity-field-source.mapped { color: var(--ok); font-weight: 600; }
     .entity-field-source.unmapped { color: #8a9298; font-style: italic; }
-    .entity-map-select {
+    .source-map-select,
+    .source-preview-map-select {
       width: 100%;
       padding: 4px 6px;
       font-size: 11px;
       border: 1px solid var(--line);
       border-radius: 4px;
       background: #ffffff;
+    }
+    .source-preview-map-select {
+      display: block;
+      margin-top: 4px;
+      min-width: 150px;
     }
 
     /* Birdeye-inspired product styling: bright blue actions, white navigation, cool gray workspace. */
@@ -1182,13 +2391,16 @@
     }
 
     header h1 { color: var(--ink); letter-spacing: 0; }
-    .top-tabs { gap: 4px; }
+    .top-tabs { gap: 5px; }
     .top-tab {
       background: transparent;
       color: var(--muted);
       border-color: transparent;
       border-radius: 5px;
-      padding: 9px 11px;
+      min-height: 44px;
+      padding: 10px 18px;
+      font-size: 15px;
+      font-weight: 800;
     }
     .top-tab:hover { color: var(--accent); background: var(--navy-soft); }
     .top-tab.active { background: var(--accent); color: #ffffff; }
@@ -1318,8 +2530,8 @@
     header .brand-logo-image { filter: none; }
     .app-footer .brand-logo-image { filter: brightness(0) invert(1); }
     header .brand-mark { color: var(--cyan); }
-    .app-title { display: flex; align-items: center; gap: 18px; }
-    .app-title h1 { white-space: nowrap; }
+    .app-title { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+    .app-title h1 { margin: 0; white-space: normal; overflow-wrap: anywhere; line-height: 1.05; }
     .app-footer {
       display: flex;
       justify-content: space-between;
@@ -1340,12 +2552,15 @@
     }
 
     @media (max-width: 900px) {
-      main, main.connector-active { grid-template-columns: 1fr; }
+      main, main.connector-active, #mapperView main.pre-parse-layout { grid-template-columns: 1fr; }
       header { display: block; min-width: 0; padding: 14px 16px; }
       .app-title { margin-bottom: 12px; }
       .app-title h1 { white-space: normal; }
       .top-tabs, .header-actions { max-width: 100%; overflow-x: auto; padding-bottom: 2px; }
       .header-actions { flex-wrap: wrap; margin-top: 8px; }
+      .header-data-actions { width: 100%; max-width: none; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-areas: "sample zipstatus" "reset zipsync" "restart ."; }
+      .header-data-actions #loadSampleDatasetHeaderBtn { min-height: 42px; }
+      .header-account-actions { margin-left: 0; padding-left: 0; border-left: 0; min-width: 0; }
       .header-actions #clearDataBtn { margin-left: auto; }
       .header-actions #logoutBtn { margin-left: 0; }
       .top-tab { padding: 7px 9px; font-size: 12px; }
@@ -1353,17 +2568,6 @@
       .header-actions #clearDataBtn { color: #ffd7df; border-color: #b94b65; background: rgba(196, 59, 84, 0.16); }
       .header-actions #clearDataBtn:hover { color: #ffffff; border-color: #dc7187; background: rgba(196, 59, 84, 0.32); }
       .header-actions #logoutBtn { color: #dbe5ff; border-color: #52678f; }
-      .report-filter-row.primary,
-      .report-filter-row.geo,
-      .report-filter-row.demographics {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-      }
-      .report-filter-group.demographics .demographic-inputs {
-        grid-template-columns: 1fr;
-      }
-      .report-filter-actions {
-        flex-wrap: wrap;
-      }
       aside { border-right: 0; border-bottom: 1px solid var(--line); }
       .mapping-grid { grid-template-columns: 1fr; }
       .mapping-head { display: none; }
@@ -1372,16 +2576,6 @@
       .app-footer { align-items: flex-start; flex-direction: column; padding: 18px 16px; }
     }
 
-    @media (max-width: 560px) {
-      .report-filter-row.primary,
-      .report-filter-row.geo,
-      .report-filter-row.demographics {
-        grid-template-columns: 1fr;
-      }
-      .report-filter-actions button {
-        width: 100%;
-      }
-    }
   </style>
 </head>
 <body>
@@ -1392,13 +2586,16 @@
     <button id="loadingCancelBtn" class="loading-cancel-btn" type="button" title="Cancel this operation">
       ✕ Cancel
     </button>
+    <button id="loadingHideBtn" class="loading-cancel-btn hidden" type="button" title="Keep working in the background">
+      Hide — notify me when done
+    </button>
   </div>
   <div id="loginScreen" class="login-screen hidden">
     <div class="login-box">
       <div class="brand-lockup login-brand" aria-label="Birdeye brand reference">
         <span class="brand-icon-crop"><img class="brand-logo-image" data-logo-src="birdeyeLogoDarkUrl" alt="Birdeye"></span>
       </div>
-      <h1 id="productTitle">Location Intelligence</h1>
+      <h1 id="productTitle" data-product-name></h1>
       <label for="loginUser">Username</label>
       <input id="loginUser" autocomplete="username" value="admin">
       <label for="loginPassword">Password</label>
@@ -1419,24 +2616,40 @@
     <header>
       <div class="app-title">
         <div class="brand-lockup" aria-label="Birdeye brand reference">
-          <span class="brand-icon-crop"><img class="brand-logo-image" data-logo-src="birdeyeLogoLightUrl" alt="Birdeye"></span>
+          <span class="brand-icon-crop"><img class="brand-logo-image" data-logo-src="birdeyeLogoDarkUrl" alt="Birdeye"></span>
         </div>
-        <h1>Location Intelligence</h1>
+        <h1 data-product-name></h1>
       </div>
       <nav class="top-tabs" aria-label="Primary navigation">
         <button class="top-tab active" data-view="mapperView" type="button">Mappings</button>
-        <button class="top-tab" data-view="reviewView" type="button">Review Error Listings (<span id="reviewCount">0</span>)</button>
+        <button class="top-tab" data-view="reviewView" type="button">Review Queue (<span id="reviewCount">0</span>)</button>
         <button class="top-tab" data-view="templateLibraryView" type="button">Template Library</button>
         <button class="top-tab" data-view="reportingView" type="button">Reporting</button>
       </nav>
       <div class="header-actions">
-        <button class="secondary" id="resetMappingBtn" type="button">Reset Fields Mapping</button>
-        <button class="secondary" id="restartMappingBtn" type="button">Restart Mapping</button>
-        <div id="headerReadinessStatus" class="header-readiness">ZIPs not checked</div>
-        <button class="secondary" id="logoutBtn" type="button">Log out</button>
+        <div class="header-data-actions">
+          <div class="sample-dataset-stack">
+            <button class="secondary sample-state-idle" id="loadSampleDatasetHeaderBtn" type="button">Load Sample Dataset</button>
+            <button class="sample-load-link danger hidden" id="clearSampleDatasetLink" type="button">Clear Sample Data</button>
+          </div>
+          <button class="secondary" id="resetMappingBtn" type="button">Reset Fields Mapping</button>
+          <button class="secondary" id="restartMappingBtn" type="button">Restart Mapping</button>
+          <div class="header-zip-status">
+            <div id="headerReadinessStatus" class="header-readiness">ZIPs not checked</div>
+            <button class="text-link" id="testReadinessBtn" type="button">Sync US ZIPs</button>
+          </div>
+        </div>
+        <div class="header-account-actions">
+          <button class="text-link" id="appHelpBtn" type="button">How this works</button>
+          <button class="secondary" id="logoutBtn" type="button">Log out</button>
+        </div>
       </div>
     </header>
-    <div id="mapperView">
+    <div id="mapperView" class="pre-parse-active preparse-booting">
+      <div class="view-intro">
+        <h1>Mappings</h1>
+        <p>Choose the brand and source, preview incoming fields, then map that structure into the location model before saving clean rows and routing exceptions to Review.</p>
+      </div>
       <div id="status" class="status">Choose a source and parse it to start mapping in left pane.<button class="status-close" aria-label="Dismiss message" style="display: none;">×</button></div>
       <div id="saveProgress" class="progress-wrap hidden" aria-live="polite" aria-busy="false">
       <div class="progress-label"><span id="progressMessage">Preparing your records</span><span id="progressValue">0%</span></div>
@@ -1444,16 +2657,36 @@
     </div>
     <main>
     <aside>
-      <div class="panel">
+      <div class="pre-parse-brand-panel hidden" id="preParseBrandPanel">
+        <h2>Brand Model</h2>
+        <div class="brand-mode-choice" role="radiogroup" aria-label="Brand mode">
+          <label><input type="radio" name="preParseBrandMode" id="preParseCreateBrand" value="create" checked> Create a brand</label>
+          <label><input type="radio" name="preParseBrandMode" id="preParseEditBrand" value="edit"> Edit a brand</label>
+        </div>
+        <div id="preParseBrandValidation" class="pre-parse-brand-validation hidden" role="alert" aria-live="polite"></div>
+        <div id="preParseBrandHost"></div>
+      </div>
+      <div class="panel" id="sourceControlsPanel">
         <h2>Source Controls</h2>
         <label id="brandSelectLabel" for="brandSelect">Brand</label>
         <select id="brandSelect" aria-label="Select brand">
           <option value="">Select an existing brand</option>
           <option class="create-new-option" value="__create_new__">+ Create New Brand</option>
         </select>
+        <div id="brandSelectValidation" class="pre-parse-brand-validation hidden" role="alert" aria-live="polite"></div>
         <button id="editExistingBrandLink" class="text-link hidden" type="button">Edit brand details</button>
-        <label for="sourceType">Source format</label>
-        <select id="sourceType">
+        <div id="parserBusinessField" class="parser-business-field hidden">
+          <!-- BB13: "Brand" on both sides of the 40/60 layout. The backend
+               calls it a business; the user never should have to know that. -->
+          <label for="parserBusinessSelect">Brand</label>
+          <select id="parserBusinessSelect" aria-label="Select brand before parsing">
+            <option value="">Select an existing brand</option>
+            <option class="create-new-option" value="__create_new__">+ Create New Brand</option>
+          </select>
+          <div id="parserBusinessValidation" class="pre-parse-brand-validation hidden" role="alert" aria-live="polite"></div>
+        </div>
+        <label for="sourceType" class="source-parser-only">Source format</label>
+        <select id="sourceType" class="source-parser-only">
           <option value="csv">CSV</option>
           <option value="api_get_json">GET API JSON</option>
           <option value="excel">EXCEL (.XLSX)</option>
@@ -1461,7 +2694,7 @@
           <option value="python_editor">PYTHON EDITOR</option>
           <option value="xml">XML</option>
         </select>
-        <div class="field-group csv-function-field hidden">
+        <div class="field-group csv-function-field source-parser-only hidden">
           <label>CSV source</label>
           <div class="python-function-options" role="radiogroup" aria-label="CSV source">
             <label><input type="radio" name="csvFunction" value="new" checked> New</label>
@@ -1469,28 +2702,28 @@
             <label><input type="radio" name="csvFunction" value="global_hotels"> Global Hotels</label>
           </div>
         </div>
-        <div class="field-group excel-function-field hidden">
+        <div class="field-group excel-function-field source-parser-only hidden">
           <label>Excel source</label>
           <div class="python-function-options" role="radiogroup" aria-label="Excel source">
             <label><input type="radio" name="excelFunction" value="new" checked> New</label>
             <label><input type="radio" name="excelFunction" value="demo_restaurant"> Demo Restaurant</label>
           </div>
         </div>
-        <div class="field-group json-function-field hidden">
+        <div class="field-group json-function-field source-parser-only hidden">
           <label>JSON source</label>
           <div class="python-function-options" role="radiogroup" aria-label="JSON source">
             <label><input type="radio" name="jsonFunction" value="new" checked> New</label>
             <label><input type="radio" name="jsonFunction" value="dominos"> Domino's Pizza</label>
           </div>
         </div>
-        <div class="field-group xml-function-field hidden">
+        <div class="field-group xml-function-field source-parser-only hidden">
           <label>XML source</label>
           <div class="python-function-options" role="radiogroup" aria-label="XML source">
             <label><input type="radio" name="xmlFunction" value="new" checked> New</label>
             <label><input type="radio" name="xmlFunction" value="demo_xml"> Demo XML</label>
           </div>
         </div>
-        <div class="field-group api-function-field hidden">
+        <div class="field-group api-function-field source-parser-only hidden">
           <label>API source</label>
           <div class="python-function-options" role="radiogroup" aria-label="API source">
             <label><input type="radio" name="apiFunction" value="new" checked> New</label>
@@ -1498,9 +2731,13 @@
           </div>
         </div>
 
-        <div class="field-group file-field">
-        <label for="sourceInputMode">Source input</label>
-        <select id="sourceInputMode">
+        <div class="field-group file-field source-parser-only">
+        <label id="sourceInputModeLabel">Source input</label>
+        <div class="source-input-options" role="radiogroup" aria-labelledby="sourceInputModeLabel">
+          <label><input type="radio" name="sourceInputModeChoice" value="url" checked> Public URL</label>
+          <label><input type="radio" name="sourceInputModeChoice" value="file"> Upload file</label>
+        </div>
+        <select id="sourceInputMode" class="source-input-mode-select" aria-hidden="true" tabindex="-1">
           <option value="url" selected>Public URL</option>
           <option value="file">Upload file</option>
         </select>
@@ -1511,7 +2748,7 @@
         <button id="sourceUrlEditBtn" class="source-url-control source-url-edit hidden" type="button">Edit URL</button>
         </div>
 
-        <div id="presetBrandPanel" class="preset-brand-panel hidden">
+        <div id="presetBrandPanel" class="preset-brand-panel source-parser-only hidden">
           <div class="preset-brand-summary">
             <strong id="presetBrandTitle">Preset brand</strong>
             <span id="presetBrandStatus">Preset brand selected.</span>
@@ -1544,7 +2781,7 @@
         <label for="sourceName">Source name</label>
         <input id="sourceName" placeholder="restaurant_locations_csv">
 
-        <div class="field-group record-field">
+        <div class="field-group record-field source-parser-only">
           <div class="label-row">
             <label>Record Extraction Mode</label>
             <span class="info-icon" tabindex="0" data-tooltip="Choose whether to automatically detect the best nested record layer across the source or use a specific custom record path.">i</span>
@@ -1568,14 +2805,14 @@
           </div>
         </div>
 
-        <div class="field-group excel-field">
+        <div class="field-group excel-field source-parser-only">
         <label for="sheetName">Excel sheet</label>
         <select id="sheetName" disabled>
           <option value="">Upload Excel to load sheets</option>
         </select>
         </div>
 
-        <div class="field-group api-field">
+        <div class="field-group api-field source-parser-only">
         <label for="apiUrl">GET API URL</label>
         <input id="apiUrl" placeholder="https://example.com/stores.json">
 
@@ -1615,7 +2852,7 @@
         <button class="secondary" id="addHeaderBtn" type="button">Add Header</button>
         </div>
 
-        <div class="field-group python-connector-field hidden">
+        <div class="field-group python-connector-field source-parser-only hidden">
           <label for="pythonConnectorCode">Python editor</label>
           <div class="python-function-options" role="radiogroup" aria-label="Python function">
             <label><input type="radio" name="pythonFunction" value="new" checked> New</label>
@@ -1648,7 +2885,7 @@ result = [
           <div id="pythonConnectorFeedback" class="action-feedback" role="status" aria-live="polite"></div>
         </div>
 
-        <div class="button-row">
+        <div class="button-row source-parser-only">
           <button id="parseBtn">Parse</button>
           <button class="secondary" id="resetBtn">Reset</button>
         </div>
@@ -1680,33 +2917,81 @@ result = [
         </div>
       </div>
 
-      <div class="panel">
-        <h2>Reporting Data</h2>
-        <div class="mapping-note">Refresh saved records for reporting.</div>
+      <div class="panel left-rail-persistent">
+        <h2>Brand Entity Resolution</h2>
+        <div class="mapping-note">Validates each listing against reference data, then uses AI to resolve and enrich the entity - repairing state, city, ZIP and coordinates so records that failed validation can re-enter the valid set.</div>
         <div class="button-row">
-          <button class="secondary" id="reportingDataRefreshBtn" type="button">Refresh Data</button>
+          <button class="secondary" id="reportingDataRefreshBtn" type="button">Start Enriching</button>
+          <!-- A two-state toggle, not a stop. It no longer kills the run: it
+               drops the pace to a trickle that keeps draining the queue in the
+               background, and a second click puts it back to full speed. The
+               label here is only the starting state - renderEnrichmentToggle()
+               (js/reporting.js) rewrites it from the server's throttled flag on
+               every status poll, so a reload during an eased run still shows
+               the right action. -->
+          <button class="secondary hidden" id="stopEnrichmentBtn" type="button" data-enrichment-mode="full">Ease Off Enriching</button>
         </div>
         <div id="reportingDataRefreshStatus" class="action-feedback" role="status" aria-live="polite"></div>
       </div>
 
-      <div class="panel data-danger-panel">
-        <h2>⚠️ Data Controls</h2>
-        <div class="mapping-note">Clear loaded records or reset the warehouse completely.</div>
-        <p class="data-risk-note">Risk: deletion can remove saved listings, brands, review rows, and with master deletion every warehouse table/view.</p>
+      <!-- DAT-04: duplicate brands are detected on /app load and resolved
+           here, one group at a time. They are never offered in the brand
+           dropdown, so this rail is the only place they surface. Hidden
+           entirely when there is nothing to merge. -->
+      <div class="panel left-rail-persistent hidden" id="duplicateBrandPanel">
+        <h2>Duplicate Brands</h2>
+        <div class="mapping-note">This brand was added more than once. Choose which one to keep &mdash; all its stores, templates and review items move across. Nothing is deleted.</div>
+        <div id="duplicateBrandList" style="display: grid; gap: 10px;"></div>
+        <div id="duplicateBrandStatus" class="action-feedback" role="status" aria-live="polite"></div>
+      </div>
+
+      <div class="panel left-rail-persistent">
+        <h2>Job History</h2>
+        <div class="mapping-note">Recent save jobs — check status here instead of watching the save progress bar.</div>
+        <div id="jobHistoryList" style="display: grid; gap: 6px; max-height: 220px; overflow-y: auto;">
+          <div class="report-status" style="padding: 8px 0; font-size: 12px;">No jobs yet this session.</div>
+        </div>
+        <button type="button" id="jobHistoryShowMoreBtn" class="text-link hidden" style="margin-top: 8px;">Show More</button>
+      </div>
+
+      <div class="panel data-danger-panel left-rail-persistent">
+        <h2>&#9888;&#65039; Data Controls</h2>
+        <div class="mapping-note">Clear loaded records or fully reset your workspace.</div>
+        <p class="data-risk-note">This can remove saved brands, listings, and review items. A full reset removes all app data and cannot be undone here.</p>
         <button class="secondary danger-soft" id="clearDataBtn" type="button" title="Soft delete saved brands, listings, and review records. Reference ZIPs, fields, source types, and templates stay available.">Clear Saved Data</button>
-        <button class="secondary danger-hard" id="masterDeleteBtn" type="button" title="Drop every table and view across bronze, silver, and gold datasets. Partitioned tables are removed through their base tables.">Master Data Deletion</button>
+        <button class="secondary danger-hard" id="masterDeleteBtn" type="button" title="Permanently remove all stored application data and reporting views.">Master Data Deletion</button>
         <div id="masterDeleteStatus" class="action-feedback" role="status" aria-live="polite"></div>
       </div>
 
     </aside>
 
     <section>
-      <div class="panel">
-        <h2>Template Components</h2>
+      <div class="pre-parse-parser-panel hidden" id="preParseParserHost"></div>
+      <div class="default-brand-model-panel" id="defaultBrandModelPanel">
+        <h2>Default Brand Model</h2>
+        <p>Create or edit the brand profile that will be used when this source is launched. Brand details stay independent from source format and will remain linked to the existing brand workflow after parsing.</p>
+        <div class="default-brand-model-summary" id="defaultBrandModelSummary">
+          <strong>No brand selected</strong><br>
+          Choose an existing brand or create a new one to begin.
+        </div>
+        <div class="button-row">
+          <button id="defaultBrandModelBtn" type="button">Create Default Brand</button>
+        </div>
+      </div>
+      <div class="panel mapper-template-components-panel hidden" id="templateComponentsPanel">
+        <div class="panel-title-row">
+          <h2>Template Components</h2>
+          <span class="mandatory-note">* indicates mandatory fields required</span>
+          <!-- Shown only when there are parsed columns and nothing is mapped
+               to them - the one moment where the grid is useless and there is
+               no other way back to the suggestions. -->
+          <button id="autoMapFieldsBtn" class="secondary hidden" type="button"
+                  title="Match the parsed columns to fields automatically">Auto-map fields</button>
+        </div>
         <div class="mapping-grid" id="mappingGrid"></div>
       </div>
 
-      <div class="panel">
+      <div class="panel optional-fields-panel hidden" id="optionalFieldsPanel">
         <h2>Optional Fields</h2>
         <div class="mapping-note">Add fields available in this source. New fields appear at the end of the mapping list.</div>
         <div class="optional-fields-layout">
@@ -1740,7 +3025,7 @@ result = [
         </div>
       </div>
 
-      <div class="tabs">
+      <div class="tabs hidden" id="mappingPreviewTabs">
         <button class="tab active" data-tab="sourcePreview">Source Preview</button>
         <button class="tab" data-tab="entityPreview">Data Model</button>
       </div>
@@ -1750,13 +3035,85 @@ result = [
     </section>
     </main>
     </div>
-    <dialog id="pythonConnectorDialog" class="connector-editor-dialog">
-      <div class="connector-editor-dialog-content">
-        <div class="connector-editor-dialog-header">
-          <h2 class="connector-editor-dialog-title">Python Editor</h2>
-          <button class="secondary" id="minimizePythonConnectorBtn" type="button">Minimize Editor</button>
+    <dialog id="pythonConnectorDialog" class="app-help-dialog app-help-dialog--editor" aria-labelledby="pythonConnectorTitle">
+      <div class="app-help-content">
+        <div class="app-help-header">
+          <h2 id="pythonConnectorTitle">Python Editor</h2>
+          <button class="secondary app-help-close" id="minimizePythonConnectorBtn" type="button">Minimize Editor</button>
         </div>
         <div id="pythonConnectorDialogHost"></div>
+      </div>
+    </dialog>
+    <dialog id="appHelpDialog" class="app-help-dialog" aria-labelledby="appHelpTitle">
+      <div class="app-help-content">
+        <div class="app-help-header">
+          <h2 id="appHelpTitle">How this works</h2>
+          <button class="secondary app-help-close" id="appHelpCloseBtn" type="button">Close</button>
+        </div>
+        <h3>1. Pick a brand and a file</h3>
+        <p>Choose which brand this data belongs to, then tell us where the data is coming from — an uploaded file, a public link, an API, or a custom script. Click Parse and we'll take a quick look to see what's inside.</p>
+        <h3>2. Check the field matches</h3>
+        <p>You'll see your actual records on one side, and how each column lines up to a location field on the other. Green means we matched it automatically; light red means it's a guess worth double-checking.</p>
+        <h3>3. Save, then review</h3>
+        <p>Saving processes your entire file, not just the quick preview. Good records go straight into your reporting. Anything that needs a second look shows up in Review Error Listings, where you can fix it by hand or let auto-fix handle it.</p>
+        <h3>4. Where things live</h3>
+        <ul>
+          <li><strong>Mappings:</strong> bring in your data, match its fields, and manage brands.</li>
+          <li><strong>Review Error Listings:</strong> find, fix, and retry anything that didn't save cleanly.</li>
+          <li><strong>Template Library:</strong> reuse a mapping you've already set up, instead of starting over.</li>
+          <li><strong>Reporting:</strong> see how brands compare, spot coverage gaps, and check data quality.</li>
+        </ul>
+        <h3>5. About the numbers you'll see</h3>
+        <p>Reporting shows the latest data we have. It updates quietly in the background, and you can always hit refresh for the newest numbers. Filters only affect the report you're currently looking at.</p>
+      </div>
+    </dialog>
+    <dialog id="sampleLoadedDialog" class="app-help-dialog" aria-labelledby="sampleLoadedTitle">
+      <div class="app-help-content">
+        <div class="app-help-header">
+          <h2 id="sampleLoadedTitle">Sample Dataset Ready</h2>
+          <button class="secondary app-help-close" id="sampleLoadedCloseBtn" type="button">Close</button>
+        </div>
+        <p id="sampleLoadedDialogText">Sample dataset loaded.</p>
+      </div>
+    </dialog>
+    <dialog id="unsavedChangesDialog" class="app-help-dialog" aria-labelledby="unsavedChangesTitle">
+      <div class="app-help-content">
+        <div class="app-help-header">
+          <h2 id="unsavedChangesTitle">Save before you leave?</h2>
+        </div>
+        <p id="unsavedChangesMessage">You've parsed and mapped a source but haven't saved it yet. Save it now, or continue and lose the mapping.</p>
+        <div style="display: flex; justify-content: center; gap: 10px; margin-top: 16px; flex-wrap: wrap;">
+          <button class="secondary" id="unsavedChangesCancelBtn" type="button">Cancel</button>
+          <button class="secondary" id="unsavedChangesContinueBtn" type="button">Continue Without Saving</button>
+          <button id="unsavedChangesSaveBtn" type="button">Save Listing Data</button>
+        </div>
+      </div>
+    </dialog>
+    <dialog id="saveCompletionDialog" class="app-help-dialog" aria-labelledby="saveCompletionTitle">
+      <div class="app-help-content">
+        <div class="app-help-header">
+          <h2 id="saveCompletionTitle">Save Complete</h2>
+        </div>
+        <p id="saveCompletionMessage"></p>
+        <div style="display: flex; justify-content: center; margin-top: 16px;">
+          <button class="secondary" id="saveCompletionOk" type="button">OK</button>
+        </div>
+      </div>
+    </dialog>
+    <dialog id="jobHistoryDialog" class="app-help-dialog" aria-labelledby="jobHistoryDialogTitle">
+      <div class="app-help-content">
+        <div class="app-help-header">
+          <h2 id="jobHistoryDialogTitle">Job History</h2>
+        </div>
+        <div id="jobHistoryDialogList" style="display: grid; gap: 6px; max-height: 50vh; overflow-y: auto;"></div>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 14px; gap: 10px; flex-wrap: wrap;">
+          <span id="jobHistoryDialogPageInfo" style="font-size: 12px; color: var(--muted);"></span>
+          <div style="display: flex; gap: 8px;">
+            <button class="secondary" id="jobHistoryDialogPrevBtn" type="button">Previous</button>
+            <button class="secondary" id="jobHistoryDialogNextBtn" type="button">Next</button>
+            <button id="jobHistoryDialogCloseBtn" type="button">Close</button>
+          </div>
+        </div>
       </div>
     </dialog>
     <section id="reportingView" class="reporting-view hidden">
@@ -1764,145 +3121,284 @@ result = [
         <div class="report-hero">
           <div>
             <h1>Reporting</h1>
-            <p>Locations, markets, and gaps.</p>
+            <p>Explore the gold reporting layer: market coverage, competitor overlap, whitespace ZIPs, trend movement, and the data quality signals behind every filtered view.</p>
           </div>
           <div class="report-hero-actions">
-            <div style="display: flex; gap: 8px; align-items: flex-start;">
-              <div class="sample-load-actions">
-                <button class="secondary" id="loadSampleDatasetBtn" type="button">Load Sample Dataset</button>
-                <button class="sample-load-link hidden" id="reloadSampleDatasetLink" type="button">Clear sample data and reload</button>
+            <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+              <div style="display: flex; flex-direction: column; gap: 3px;">
+                <button id="refreshReportBtn" type="button">Refresh Report</button>
+                <span id="reportAutoRefreshCountdown" style="font-size: 11px; color: var(--muted); text-align: center;">Next auto refresh in 5:00</span>
               </div>
-              <button id="refreshReportBtn" type="button">Refresh Report</button>
             </div>
             <div id="reportStatus" class="report-status">Ready</div>
           </div>
         </div>
-        <div class="report-filters" style="display: grid; gap: 12px;">
-          <div class="report-filter-row primary">
-          <div class="report-filter-group">
-            <h2>Primary Brand</h2>
-            <select id="reportMainBrandSelect" style="width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px; font-weight: 600; background: var(--panel);">
-              <option value="">Select Primary Brand</option>
-            </select>
-          </div>
-          <div class="report-filter-group">
-            <h2>Competitor Brands (Multi)</h2>
-            <div id="competitorDropdownContainer" style="position: relative;">
-              <button id="competitorDropdownBtn" type="button" style="width: 100%; text-align: left; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px; background: var(--panel); display: flex; justify-content: space-between; align-items: center; cursor: pointer;">
-                <span id="competitorDropdownBtnText">Select Competitor Brands</span>
-                <span style="font-size: 10px; margin-left: 4px;">▼</span>
-              </button>
-              <div id="competitorDropdownMenu" style="display: none; position: absolute; top: 100%; left: 0; right: 0; z-index: 1000; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 20px rgba(0,0,0,0.15); max-height: 220px; overflow-y: auto; padding: 8px; margin-top: 4px;">
-                <div id="competitorBrandChecks" class="report-checks"></div>
+        <!-- 2-Column Dashboard Layout: Left Vertical Filter Pane + Right Main Content Pane -->
+        <div class="reporting-dashboard-layout" style="display: flex; gap: 24px; align-items: flex-start; margin-top: 14px;">
+          <!-- Left Vertical Filter Sidebar -->
+          <!-- Filter rail. Same classes, same order, same spacing as the
+               Data Quality rail (built in reporting-tabs.js
+               buildQualityPanel) - the two are one component holding
+               different filters, so nothing in here carries styling of its
+               own. See "REPORT FILTER RAIL" in the stylesheet above. -->
+          <aside class="report-filter-rail">
+            <div class="report-filter-rail-head">
+              <h2>Report Filters</h2>
+            </div>
+
+            <div class="report-filter-section">
+              <div class="report-filter-section-title">&#127991;&#65039; Brand Filters</div>
+              <div class="report-filter-group">
+                <label for="reportMainBrandSelect" class="report-filter-label">Primary Brand</label>
+                <select id="reportMainBrandSelect" class="report-filter-control">
+                  <option value="">Select Primary Brand</option>
+                </select>
+              </div>
+              <div class="report-filter-group">
+                <label for="competitorDropdownBtn" class="report-filter-label">Competitor Brands (Multi)</label>
+                <div id="competitorDropdownContainer" class="report-filter-multi">
+                  <button id="competitorDropdownBtn" type="button" class="report-filter-control report-filter-multi-btn">
+                    <span id="competitorDropdownBtnText">Select Competitor Brands</span>
+                    <span class="report-filter-multi-caret" aria-hidden="true">&#9660;</span>
+                  </button>
+                  <div id="competitorDropdownMenu" class="report-filter-multi-menu">
+                    <div id="competitorBrandChecks" class="report-checks"></div>
+                  </div>
+                </div>
               </div>
             </div>
-          </div>
-          </div>
-          <div class="report-filter-row geo">
-            <div class="report-filter-group">
-              <h2>State</h2>
-              <select id="reportStateFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px;">
-                <option value="">All States</option>
-              </select>
-            </div>
-            <div class="report-filter-group">
-              <h2>County</h2>
-              <select id="reportCountyFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px;">
-                <option value="">All Counties</option>
-              </select>
-            </div>
-            <div class="report-filter-group">
-              <h2>City</h2>
-              <select id="reportCityFilter" style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px;">
-                <option value="">All Cities</option>
-              </select>
-            </div>
-            <div class="report-filter-group">
-              <h2>ZIP</h2>
-              <input id="reportZipFilter" list="zipSuggestions" placeholder="Search 30k+ ZIPs..." style="width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px;">
-              <datalist id="zipSuggestions"></datalist>
-            </div>
-          </div>
-          <div class="report-filter-row demographics">
-            <div class="report-filter-group demographics">
-              <h2>Market Demographics</h2>
-              <div class="demographic-inputs">
-                <input id="reportMinPopFilter" type="number" placeholder="Min Population" style="padding: 7px; font-size: 10px;">
-                <input id="reportMinIncomeFilter" type="number" placeholder="Min Income" style="padding: 7px; font-size: 10px;">
-                <input id="reportMaxAgeFilter" type="number" placeholder="Max Median Age" style="padding: 7px; font-size: 10px;">
+
+            <div class="report-filter-section">
+              <div class="report-filter-section-title">&#128205; Geographic Filters</div>
+              <div class="report-filter-group">
+                <label for="reportStateFilter" class="report-filter-label">State</label>
+                <select id="reportStateFilter" class="report-filter-control">
+                  <option value="">All States</option>
+                </select>
+              </div>
+              <div class="report-filter-group">
+                <label for="reportCountyFilter" class="report-filter-label">County</label>
+                <select id="reportCountyFilter" class="report-filter-control">
+                  <option value="">All Counties</option>
+                </select>
+              </div>
+              <div class="report-filter-group">
+                <label for="reportCityFilter" class="report-filter-label">City</label>
+                <select id="reportCityFilter" class="report-filter-control">
+                  <option value="">All Cities</option>
+                </select>
+              </div>
+              <div class="report-filter-group">
+                <label for="reportZipFilter" class="report-filter-label">ZIP Code</label>
+                <!-- The one control here that is NOT a searchable select: ZIP
+                     matches are fetched from the server as you type
+                     (setupZipTypeahead), because 30k+ ZIPs are never all in
+                     the page to filter client-side. -->
+                <input id="reportZipFilter" list="zipSuggestions" class="report-filter-control" placeholder="Search ZIP">
+                <datalist id="zipSuggestions"></datalist>
               </div>
             </div>
-          </div>
-          <div class="report-filter-actions" aria-label="Report filter actions">
-            <button id="applyReportFiltersBtn" type="button">Apply All Filters</button>
-            <button id="resetReportFiltersBtn" type="button" class="secondary">Reset All</button>
-          </div>
-        </div>
 
-        <div id="reportContent" class="hidden" style="margin-top: 20px;">
-          <div class="report-grid" style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px;">
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportStates" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Total State</span></div>
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportZips" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">ZIP Locations</span></div>
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportBrands" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Brands</span></div>
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportStores" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Stores</span></div>
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportLocations" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Market Locations</span></div>
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportBrandStates" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Brand States</span></div>
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportCities" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Brand Cities</span></div>
-            <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportWhitespaceGaps" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Gap ZIPs</span></div>
-          </div>
-          <section class="report-section" style="margin-top: 0;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-              <h2>Location Map</h2>
-              <div style="font-size: 12px; color: var(--muted);">
-                <span style="display: inline-block; width: 10px; height: 10px; background: #16a34a; border-radius: 50%; margin-right: 4px;"></span>Primary Brand
-                <span style="display: inline-block; width: 10px; height: 10px; background: #dc2626; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Competitor Brands
-                <span style="display: inline-block; width: 10px; height: 10px; background: #f59e0b; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Gap ZIPs
+            <div class="report-filter-section">
+              <div class="report-filter-section-title">&#128101; Demographic Filters</div>
+              <div class="report-filter-group">
+                <label for="reportMinPopFilter" class="report-filter-label">Min Population</label>
+                <input id="reportMinPopFilter" type="number" class="report-filter-control" placeholder="Min Population">
+              </div>
+              <div class="report-filter-group">
+                <label for="reportMinIncomeFilter" class="report-filter-label">Min Income ($)</label>
+                <input id="reportMinIncomeFilter" type="number" class="report-filter-control" placeholder="Min Income">
+              </div>
+              <div class="report-filter-group">
+                <label for="reportMaxAgeFilter" class="report-filter-label">Max Median Age</label>
+                <input id="reportMaxAgeFilter" type="number" class="report-filter-control" placeholder="Max Age">
               </div>
             </div>
-            <div id="reportingMapContainer" style="border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #e5e7eb; position: relative;">
-              <div id="reportingMap" style="height: 480px; width: 100%; z-index: 1;"></div>
-            </div>
-          </section>
 
-          <section class="report-section" style="margin-top: 24px;">
-            <h2>Top States</h2>
-            <div id="reportTopStateCards" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 16px;"></div>
-          </section>
-
-          <div class="report-columns" style="margin-top: 20px;">
-            <section class="report-section" style="margin-top: 0;">
-              <h2>State Distribution</h2>
-              <div id="reportTopStates"></div>
-            </section>
-
-            <section class="report-section" style="margin-top: 0;">
-              <h2>Top Cities</h2>
-              <div id="reportTopCities"></div>
-            </section>
-          </div>
-          <section class="report-section">
-            <div id="reportBrandComparisonHeading" style="margin-bottom: 16px;">
-              <h2 id="reportBrandComparisonTitle" style="margin: 0 0 12px;">Brand Comparison</h2>
+            <!-- Auto-apply switch first, then Apply / Reset - the same order
+                 and the same host-div pattern as the Data Quality rail, so
+                 the control sits in the same place on both tabs. It is
+                 mounted by setupReportAutoApply() (js/reporting.js). -->
+            <div class="report-filter-section report-filter-actions">
+              <div id="reportAutoApplyHost"></div>
+              <button id="applyReportFiltersBtn" type="button">Apply All Filters</button>
+              <button id="resetReportFiltersBtn" type="button" class="secondary">Reset All</button>
             </div>
-            <div id="reportBrandComparisonCards" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 16px;"></div>
-            <div style="margin-top: 20px;">
-              <h3 style="margin: 0 0 12px; font-size: 15px; color: var(--ink);">Head-to-Head Comparison</h3>
-              <div id="reportBrandsTable"></div>
+          </aside>
+
+          <!-- Right Main Dashboard Content Pane -->
+          <main class="reporting-main-pane" style="flex: 1; min-width: 0;">
+            <div id="reportContent" class="hidden">
+              <div class="dq-intro">
+                <div><h2>Location Intelligence &amp; Whitespace</h2><p>Use validated location records to compare your footprint with competitors, inspect map coverage, find open ZIPs, and follow market movement over time.</p></div>
+              </div>
+              <div class="report-grid" style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px;">
+                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportStates" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Total States</span><button type="button" class="report-metric-download" data-metric-label="Total States" title="Download the listings behind this number, with its metrics, as Excel">⬇ Excel</button></div>
+                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportZips" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Market ZIPs</span><button type="button" class="report-metric-download" data-metric-label="Market ZIPs" title="Download the listings behind this number, with its metrics, as Excel">⬇ Excel</button></div>
+                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportBrands" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Active Brands</span><button type="button" class="report-metric-download" data-metric-label="Active Brands" title="Download the listings behind this number, with its metrics, as Excel">⬇ Excel</button></div>
+                <div class="report-metric" title="Every individual listing record for the selected brand(s) - can be more than one per ZIP." style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportStores" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Total Listings</span><button type="button" class="report-metric-download" data-metric-label="Total Listings" title="Download the listings behind this number, with its metrics, as Excel">⬇ Excel</button></div>
+                <div class="report-metric" title="Distinct ZIP codes where the selected brand(s) have at least one store - not a store count." style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportLocations" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Covered Markets (ZIPs)</span><button type="button" class="report-metric-download" data-metric-label="Covered Markets (ZIPs)" title="Download the listings behind this number, with its metrics, as Excel">⬇ Excel</button></div>
+                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportBrandStates" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Covered States</span><button type="button" class="report-metric-download" data-metric-label="Covered States" title="Download the listings behind this number, with its metrics, as Excel">⬇ Excel</button></div>
+                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportCities" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Covered Cities</span><button type="button" class="report-metric-download" data-metric-label="Covered Cities" title="Download the listings behind this number, with its metrics, as Excel">⬇ Excel</button></div>
+                <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportWhitespaceGaps" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Uncovered ZIPs</span><button type="button" class="report-metric-download" data-metric-label="Uncovered ZIPs" title="Download the listings behind this number, with its metrics, as Excel">⬇ Excel</button></div>
+              </div>
+
+              <!-- Location Map Section -->
+              <section class="report-section" style="margin-top: 0;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; flex-wrap: wrap; gap: 8px;">
+                  <h2>Location Map</h2>
+                  <div style="font-size: 12px; color: var(--muted);">
+                    <span style="display: inline-block; width: 10px; height: 10px; background: #16a34a; border-radius: 50%; margin-right: 4px;"></span>Primary Brand
+                    <span style="display: inline-block; width: 10px; height: 10px; background: #dc2626; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Competitor Brands
+                    <span style="display: inline-block; width: 10px; height: 10px; background: #f59e0b; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Gap ZIPs
+                  </div>
+                </div>
+                <!-- Rewritten by renderReportingMap() when the report comes back capped:
+                     the server returns at most 1000 map records, and a truncated map
+                     must say so rather than read as the whole footprint. -->
+                <p id="reportingMapNote" style="margin: 0 0 12px; font-size: 11px; color: var(--muted);">Each marker is one listing - the same "Total Listings" count above, not the ZIP-level "Covered Markets" count (several listings can share one ZIP).</p>
+                <div id="reportingMapContainer" style="border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #e5e7eb; position: relative;">
+                  <div id="reportingMap" style="height: 480px; width: 100%; z-index: 1;"></div>
+                </div>
+              </section>
+
+              <div class="dq-section"><h3>Top States by Coverage</h3><div id="dqTopStatesBar" class="dq-bars"><div class="report-status"><span class="spinner"></span> Loading coverage by state</div></div></div>
+
+              <!-- Moved here from the Data Quality tab (RPT-05/06/07): these
+                   read /api/reporting/summary and /api/reporting/timeseries,
+                   not the slow quality payload, so they belong with Location
+                   Intelligence after the map and coverage panels. -->
+              <div class="dq-section">
+                <div class="dq-trend-head">
+                  <h3>Trends Over Time</h3>
+                  <div class="dq-trend-controls">
+                    <!-- 1H first, and it is not decoration: every live listing was
+                         loaded inside a single calendar day, so anything that
+                         truncates to DAY collapses each of these periods to one
+                         point and the buttons appear to do nothing. 1H buckets by
+                         MINUTE and 1D by HOUR, which is where the shape of the
+                         loads actually is. The click handler in reporting-tabs.js
+                         reads data-period generically, so a button is all this
+                         needs. -->
+                    <div class="dq-period-toggle" id="dqTrendPeriod" role="group" aria-label="Trend period">
+                      <button type="button" data-period="1H" class="active">1H</button>
+                      <button type="button" data-period="1D">1D</button>
+                      <button type="button" data-period="1W">1W</button>
+                      <button type="button" data-period="1M">1M</button>
+                      <button type="button" data-period="1Q">1Q</button>
+                      <button type="button" data-period="1Y">1Y</button>
+                    </div>
+                  </div>
+                </div>
+                <div id="dqTrendChart" class="dq-history-chart"><div class="report-status"><span class="spinner"></span> Loading trend data</div></div>
+                <div id="dqTrendLegend" class="dq-trend-legend"></div>
+              </div>
+              <!-- Moved from the Data Quality tab: this is a count-over-time question,
+                   which belongs with Location Intelligence, and it now plots
+                   LISTINGS over time (not just invalid records) with the same
+                   period control as Trends and a competitor comparison line. -->
+              <div class="dq-section">
+                <div class="dq-trend-head">
+                  <h3>Historical Quality &amp; Change Tracking</h3>
+                  <div class="dq-trend-controls">
+                    <!-- Same endpoint, same granularities as Trends above.
+                         All period-toggle chart features default to 1H so a
+                         same-day dataset does not collapse into a single
+                         point on first paint. -->
+                    <div class="dq-period-toggle" role="group" aria-label="History period">
+                      <button type="button" data-history-period="1H" class="active">1H</button>
+                      <button type="button" data-history-period="1D">1D</button>
+                      <button type="button" data-history-period="1W">1W</button>
+                      <button type="button" data-history-period="1M">1M</button>
+                      <button type="button" data-history-period="1Q">1Q</button>
+                      <button type="button" data-history-period="1Y">1Y</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="dq-history-grid">
+                  <div id="dqHistoryChart" class="dq-history-chart"><div class="report-status">Loading history</div></div>
+                  <div id="dqPeriodComparisons"></div>
+                </div>
+              </div>
+
+              <!-- Top States Section (Dynamic Heading: X's Top States) -->
+              <section class="report-section" style="margin-top: 24px;">
+                <h2 id="reportTopStatesHeading">Top States <button type="button" class="table-export-btn" data-table-export="top-states" title="Download this table as a ZIP (Excel + CSV + notes)">&#11015; Download</button></h2>
+                <div id="reportTopStateCards" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 16px;"></div>
+              </section>
+
+              <!-- State Distribution & Top Cities: each table now carries enough
+                   columns (population, median income, pop/listing, subject vs
+                   competitor) that a side-by-side layout squeezed them - stacked
+                   full-width instead, each with its own horizontal scroll on
+                   narrow viewports (see .report-section table wrapper below). -->
+              <div id="reportStateCityTables" class="report-columns" style="display: grid; grid-template-columns: 1fr; gap: 28px; margin-top: 24px;">
+                <section class="report-section" style="margin-top: 0;">
+                  <h2>State Distribution</h2>
+                  <div id="reportTopStates" style="overflow-x: auto;"></div>
+                </section>
+                <section class="report-section" style="margin-top: 0;">
+                  <h2>Top Cities <button type="button" class="table-export-btn" data-table-export="top-cities" title="Download this table as a ZIP (Excel + CSV + notes)">&#11015; Download</button></h2>
+                  <div id="reportTopCities" style="overflow-x: auto;"></div>
+                </section>
+              </div>
+
+              <!-- Brand Comparison Section -->
+              <section class="report-section" id="reportBrandComparisonSection">
+                <div id="reportBrandComparisonHeading" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;">
+                  <h2 id="reportBrandComparisonTitle" style="margin: 0; font-size: 26px; font-weight: 750; color: #172554;">Brand Comparison <button type="button" class="table-export-btn" data-table-export="brand-comparison" title="Download this table as a ZIP (Excel + CSV + notes)">&#11015; Download</button></h2>
+                  <div id="competitorViewSwitcher" class="comp-view-switcher" role="tablist" aria-label="Brand comparison views">
+                    <button type="button" class="comp-view-btn active" data-comp-view="benchmark">Competitor Benchmark</button>
+                    <button type="button" class="comp-view-btn" data-comp-view="cards">Cards &amp; Overview</button>
+                    <button type="button" class="comp-view-btn" data-comp-view="table">Detailed Table</button>
+                  </div>
+                </div>
+                <div id="reportCompetitorBenchmarkView">
+                  <div id="reportCompetitorBenchmarkContent"></div>
+                </div>
+                <div id="reportBrandComparisonCardsView" class="hidden">
+                  <div id="reportBrandComparisonCards" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 16px;"></div>
+                </div>
+                <div id="reportBrandComparisonTableView" class="hidden">
+                  <div style="margin-top: 10px;">
+                    <h3 style="margin: 0 0 12px; font-size: 15px; color: var(--ink);">Head-to-Head Comparison</h3>
+                    <div id="reportBrandsTable"></div>
+                  </div>
+                </div>
+              </section>
+
+              <!-- Market Gaps Section with Pagination -->
+              <section class="report-section">
+                <h2>Market Gaps <button type="button" class="table-export-btn" data-table-export="market-gaps" title="Download this table as a ZIP (Excel + CSV + notes)">&#11015; Download</button></h2>
+                <p style="margin: -4px 0 12px; color: var(--muted); font-size: 13px;">ZIP codes where competitors are present and the selected brand is not.</p>
+                <div id="reportGapsTable"></div>
+                <div id="reportGapsPagination" style="margin-top: 12px;"></div>
+              </section>
+
+              <!-- States & Territories Without Tracked Locations -->
+              <section class="report-section">
+                <h2>States & Territories Without Tracked Locations</h2>
+                <div id="reportEmptyStates" class="report-empty-states"></div>
+              </section>
+
+              <!-- Full filtered reporting export; available only with a primary brand. -->
+              <section class="report-section" style="max-width: 100%; overflow: visible;">
+                <!-- The export button belongs on the section it exports, not
+                     in the page hero: up there it sat beside Refresh Report
+                     with nothing to say what it downloaded. -->
+                <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap;">
+                  <h2 style="margin: 0 0 4px;">Location Records Sample</h2>
+                  <button id="downloadSampleCsvBtn" class="btn-download-excel hidden" type="button">
+                    <span id="downloadSampleCsvIcon">📥</span> <span id="downloadSampleCsvText">Download Excel</span>
+                  </button>
+                </div>
+                <p style="margin: 0 0 12px; color: var(--muted); font-size: 12px;">Browse sample records with horizontal scroll. <strong>Download Excel</strong> gives you the full 2-sheet export across all brands.</p>
+                <div class="table-scroll-container">
+                  <div id="reportSampleRecords"></div>
+                </div>
+              </section>
             </div>
-          </section>
-          <section class="report-section">
-            <h2>Market Gaps</h2>
-            <p style="margin: -4px 0 12px; color: var(--muted); font-size: 13px;">ZIP codes where competitors are present and the selected brand is not.</p>
-            <div id="reportGapsTable"></div>
-          </section>
-          <section class="report-section">
-            <h2>States & Territories Without Tracked Locations</h2>
-            <div id="reportEmptyStates" class="report-empty-states"></div>
-          </section>
-          <section class="report-section">
-            <h2>Location Records Sample</h2>
-            <div id="reportSampleRecords"></div>
-          </section>
+          </main>
         </div>
       </div>
     </section>
@@ -1911,41 +3407,96 @@ result = [
       <h2>Review Records</h2>
       <p style="color: var(--muted); font-size: 13px; margin-top: -8px; margin-bottom: 16px;">Review records that need attention. Edit and retry when ready.</p>
       <div class="review-toolbar">
-        <input id="reviewEventId" type="search" aria-label="Entity or event ID" placeholder="Search by entity/event ID (leave empty for all records)">
+        <input id="reviewEventId" type="search" autocomplete="off" aria-label="Entity or event ID" placeholder="Search by entity / event ID">
         <select id="reviewBrandFilter" aria-label="Filter by brand">
           <option value="">All Brands</option>
         </select>
+        <select id="reviewFixTypeFilter" aria-label="Filter by fix type">
+          <option value="">All Records</option>
+          <option value="ai_suggested">AI Suggested Fix</option>
+          <option value="manual_review">Manual Review</option>
+        </select>
         <button id="reviewSearchBtn" type="button">Search Records</button>
+        <button id="autoRepairReviewBtn" class="secondary" type="button">Try Auto-Fixing with AI</button>
       </div>
       <div id="reviewBrandBreakdown" class="review-brand-breakdown" style="display: none; margin: 8px 0 18px; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; background: #fff;">
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px;">
           <strong style="font-size: 13px; color: var(--ink);">Error Distribution by Brand</strong>
           <span id="reviewBrandBreakdownTotal" style="font-size: 12px; color: var(--muted);"></span>
+          <span id="reviewManualCount" style="font-size: 12px; color: var(--muted);"></span>
         </div>
         <div class="review-brand-breakdown-layout">
-          <div id="reviewBrandChart"></div>
+          <div class="review-chart-side">
+            <!-- Five mutually exclusive states over every listing that was
+                 EVER invalid, so the totals accumulate across days instead of
+                 resetting when a record gets fixed. Same source as the
+                 reporting tab's cards, so the two always agree. -->
+            <div class="review-state-card state-ai-fixed">
+              <strong id="reviewStateAiFixed">-</strong>
+              <span>Fixed by AI</span>
+            </div>
+            <div class="review-state-card state-ai-suggested-fixed">
+              <strong id="reviewStateAiSuggestedFixed">-</strong>
+              <span>Fixed from AI suggestion</span>
+            </div>
+            <div class="review-state-card state-manual-fixed">
+              <strong id="reviewStateManualFixed">-</strong>
+              <span>Fixed manually</span>
+            </div>
+            <div class="review-state-card state-ai-pending">
+              <strong id="reviewStateAiPending">-</strong>
+              <span>AI suggestion awaiting review</span>
+            </div>
+            <div class="review-state-card state-manual-pending">
+              <strong id="reviewStateManualPending">-</strong>
+              <span>Awaiting manual review</span>
+            </div>
+            <div class="review-state-card">
+              <strong id="reviewStateTotal">-</strong>
+              <span>Ever invalid (all time)</span>
+            </div>
+            <div class="review-ai-percent-summary">
+              <strong id="reviewAiFixedPercent">0.00%</strong>
+              <span>AI Fixed by Total Error</span>
+            </div>
+            <!-- Kept for the live auto-repair poll, which reports progress
+                 against the currently running batch. -->
+            <strong id="reviewAiFixedCount" hidden>0</strong>
+            <strong id="reviewManualFixedCount" hidden>0</strong>
+            <strong id="reviewManualFixedPercent" hidden>0.00%</strong>
+            <div id="reviewBrandChart"></div>
+          </div>
           <div id="reviewBrandTable" style="overflow-x: auto; min-height: 200px;"></div>
         </div>
       </div>
+      <div id="reviewAutoRepairStatus" class="status hidden" role="status" aria-live="polite"></div>
       <div id="reviewResults" class="status">Search review records.</div>
     </section>
-    <dialog id="editRecordDialog" class="connector-editor-dialog" style="max-width: 700px; height: auto; max-height: 90vh;">
-      <div class="connector-editor-dialog-content" style="display: flex; flex-direction: column; overflow: hidden; padding: 24px;">
-        <div class="connector-editor-dialog-header">
-          <h2 class="connector-editor-dialog-title">Edit Record</h2>
-          <button class="secondary" id="closeEditRecordBtn" type="button">✕ Close</button>
+    <dialog id="editRecordDialog" class="app-help-dialog app-help-dialog--form" aria-labelledby="editRecordTitle">
+      <div class="app-help-content">
+        <div class="app-help-header">
+          <h2 id="editRecordTitle">Edit Record</h2>
+          <button class="secondary app-help-close" id="closeEditRecordBtn" type="button">Close</button>
         </div>
-        <div id="editRecordHints" style="background: #fff8e6; border: 1px solid #ffe58f; border-radius: 6px; padding: 12px; font-size: 13px; color: #8c6b00; margin-bottom: 16px;"></div>
+        <div id="editRecordHints" style="background: #fff8e6; border: 1px solid #ffe58f; border-radius: 6px; padding: 12px; font-size: 13px; color: #8c6b00; margin: 16px 0;"></div>
         <div id="editRecordFeedback" class="action-feedback" style="margin-bottom: 16px; display: none;"></div>
-        <div id="editRecordForm" style="flex: 1; overflow-y: auto; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; padding-right: 4px;"></div>
+        <div id="editRecordForm" style="max-height: 46vh; overflow-y: auto; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; padding-right: 4px;"></div>
         <div class="button-row" style="margin-top: 12px;">
           <button id="submitEditRecordBtn" type="button">Retry Record</button>
+          <!-- Keeps the user's edit even when it still fails validation:
+               saved as reviewed and re-checked later at enrichment, rather
+               than bounced back for a value the system may not be able to
+               confirm yet. -->
+          <button id="acceptAsReviewedBtn" class="secondary hidden" type="button">Save anyway, review later</button>
           <button class="secondary" id="cancelEditRecordBtn" type="button">Cancel</button>
         </div>
       </div>
     </dialog>
     <section id="templateLibraryView" class="template-library hidden">
-      <h2>Template Library</h2>
+      <div class="view-intro">
+        <h2>Template Library</h2>
+        <p>Reuse saved source mappings by brand and format, inspect stored source fields, repair assignments, and keep future loads aligned to the same template structure.</p>
+      </div>
       <div class="template-search">
         <input id="templateSearch" placeholder="Search templates">
         <select id="templateBusinessFilter" aria-label="Filter by brand"><option value="">All brands</option></select>
@@ -1961,41 +3512,85 @@ result = [
       <p id="brandDisclaimer"></p>
     </footer>
   </div>
-  <dialog id="dangerDialog" class="danger-dialog">
-    <h2>DANGER</h2>
-    <p>This will delete saved brands, listings, and review records. Templates and reference data stay available.</p>
-    <div class="button-row">
-      <button id="confirmClearBtn" type="button">Delete Data</button>
-      <button class="secondary" id="cancelClearBtn" type="button">Cancel</button>
+  <!-- One themed notice/confirm pair so nothing has to fall back to the
+       browser's own alert()/confirm() chrome, which ignored the app theme
+       and could not be styled. Both follow the centred-OK convention. -->
+  <dialog id="appNoticeDialog" class="app-help-dialog app-notice" aria-labelledby="appNoticeTitle">
+    <div class="app-help-content">
+      <!-- An outcome, not a form: the icon carries the tone and the heading
+           sits beside it, rather than a bare rule across an empty box. -->
+      <div class="app-notice-body">
+        <span class="app-notice-icon" id="appNoticeIcon" aria-hidden="true">&#10003;</span>
+        <div class="app-notice-text">
+          <h2 id="appNoticeTitle">Done</h2>
+          <p id="appNoticeMessage"></p>
+        </div>
+      </div>
+      <div class="app-notice-actions">
+        <button id="appNoticeOk" type="button">OK</button>
+      </div>
     </div>
   </dialog>
-  <dialog id="masterDeleteCredentialsDialog" class="danger-dialog">
-    <h2>MASTER DATA DELETION</h2>
-    <p>This will drop every table and view across bronze, silver, and gold. Partitioned tables are removed through their base tables. Enter your local login credentials to continue.</p>
-    <label for="masterDeleteUser">Username</label>
-    <input id="masterDeleteUser" autocomplete="username" value="admin">
-    <label for="masterDeletePassword">Password</label>
-    <input id="masterDeletePassword" type="password" autocomplete="current-password">
-    <div class="button-row">
-      <button id="masterDeleteCredentialNextBtn" type="button">Continue</button>
-      <button class="secondary" id="cancelMasterDeleteCredentialsBtn" type="button">Cancel</button>
+  <dialog id="appConfirmDialog" class="app-help-dialog" aria-labelledby="appConfirmTitle">
+    <div class="app-help-content">
+      <div class="app-help-header">
+        <h2 id="appConfirmTitle">Please confirm</h2>
+      </div>
+      <p id="appConfirmMessage"></p>
+      <div style="display: flex; justify-content: center; gap: 10px; margin-top: 16px;">
+        <button id="appConfirmYes" type="button">Yes</button>
+        <button id="appConfirmNo" class="secondary" type="button">Cancel</button>
+      </div>
     </div>
   </dialog>
-  <dialog id="masterDeleteConfirmDialog" class="danger-dialog">
-    <h2>FINAL CONFIRMATION</h2>
-    <p>Type DELETE ALL DATA to drop every table and view across all warehouse layers. This cannot be undone from this app.</p>
-    <input id="masterDeleteConfirmation" autocomplete="off" placeholder="DELETE ALL DATA">
-    <div class="button-row">
-      <button id="confirmMasterDeleteBtn" type="button">Delete Everything</button>
-      <button class="secondary" id="cancelMasterDeleteBtn" type="button">Cancel</button>
+  <dialog id="dangerDialog" class="app-help-dialog app-help-dialog--danger" aria-labelledby="dangerDialogTitle">
+    <div class="app-help-content">
+      <div class="app-help-header">
+        <h2 id="dangerDialogTitle">&#9888;&#65039; Confirm Clear</h2>
+      </div>
+      <p>This will delete saved brands, listings, and review records. Templates and reference data stay available.</p>
+      <div class="button-row">
+        <button id="confirmClearBtn" type="button">Delete Data</button>
+        <button class="secondary" id="cancelClearBtn" type="button">Cancel</button>
+      </div>
+    </div>
+  </dialog>
+  <dialog id="masterDeleteCredentialsDialog" class="app-help-dialog app-help-dialog--danger" aria-labelledby="masterDeleteCredentialsTitle">
+    <div class="app-help-content">
+      <div class="app-help-header">
+        <h2 id="masterDeleteCredentialsTitle">&#9888;&#65039; Reset Workspace</h2>
+      </div>
+      <p>This will permanently remove all saved app data and reporting views. Enter your login credentials to continue.</p>
+      <label for="masterDeleteUser">Username</label>
+      <input id="masterDeleteUser" autocomplete="username" value="admin">
+      <label for="masterDeletePassword">Password</label>
+      <input id="masterDeletePassword" type="password" autocomplete="current-password">
+      <div class="button-row">
+        <button id="masterDeleteCredentialNextBtn" type="button">Continue</button>
+        <button class="secondary" id="cancelMasterDeleteCredentialsBtn" type="button">Cancel</button>
+      </div>
+    </div>
+  </dialog>
+  <dialog id="masterDeleteConfirmDialog" class="app-help-dialog app-help-dialog--danger" aria-labelledby="masterDeleteConfirmTitle">
+    <div class="app-help-content">
+      <div class="app-help-header">
+        <h2 id="masterDeleteConfirmTitle">&#9888;&#65039; Final Confirmation</h2>
+      </div>
+      <p>Type DELETE ALL DATA to permanently reset the workspace. This cannot be undone from this app.</p>
+      <input id="masterDeleteConfirmation" autocomplete="off" placeholder="DELETE ALL DATA">
+      <div class="button-row">
+        <button id="confirmMasterDeleteBtn" type="button">Delete Everything</button>
+        <button class="secondary" id="cancelMasterDeleteBtn" type="button">Cancel</button>
+      </div>
     </div>
   </dialog>
 
-  <script src="js/common.js"></script>
+  <script src="js/common.js?v=preparse-layout-v2"></script>
   <script src="js/reporting.js"></script>
+  <script src="reporting-tabs.js?v=quality-layout-v4"></script>
   <script src="js/review.js"></script>
   <script src="js/templates.js"></script>
-  <script src="js/mapper.js"></script>
+  <script src="js/mapper.js?v=preparse-layout-v6"></script>
   <script>
     el("parseBtn").addEventListener("click", parseSource);
     el("testReadinessBtn")?.addEventListener("click", testReadiness);
@@ -2010,11 +3605,19 @@ result = [
     el("addHeaderBtn").addEventListener("click", () => addPairRow("customHeaders", "x-client-id", "value"));
     el("authType").addEventListener("change", updateAuthVisibility);
     el("saveBtn").addEventListener("click", saveMapper);
-    el("resetMappingBtn").addEventListener("click", resetMapping);
+    // Clears the mapping and keeps the parsed columns, so "Auto-map fields"
+    // can re-suggest against them. resetMapping() (full teardown, including
+    // the parse) stays on the navigate-away / discard paths below.
+    el("resetMappingBtn").addEventListener("click", resetFieldMappingsOnly);
     el("restartMappingBtn").addEventListener("click", restartMapping);
+    el("jobHistoryShowMoreBtn")?.addEventListener("click", openJobHistoryDialog);
+    el("jobHistoryDialogCloseBtn")?.addEventListener("click", () => el("jobHistoryDialog")?.close());
+    el("jobHistoryDialogPrevBtn")?.addEventListener("click", jobHistoryDialogPrev);
+    el("jobHistoryDialogNextBtn")?.addEventListener("click", jobHistoryDialogNext);
     el("clearDataBtn").addEventListener("click", clearSavedData);
     el("masterDeleteBtn").addEventListener("click", masterDeleteData);
     el("reportingDataRefreshBtn").addEventListener("click", refreshReportingData);
+    el("stopEnrichmentBtn")?.addEventListener("click", toggleEnrichmentEasing);
     el("logoutBtn").addEventListener("click", logout);
     document.querySelector(".status-close")?.addEventListener("click", () => {
           el("status").className = "status";
@@ -2029,14 +3632,52 @@ result = [
     el("cancelMasterDeleteCredentialsBtn").addEventListener("click", () => el("masterDeleteCredentialsDialog").close());
     el("confirmMasterDeleteBtn").addEventListener("click", performMasterDeleteData);
     el("cancelMasterDeleteBtn").addEventListener("click", () => el("masterDeleteConfirmDialog").close());
-    el("reviewSearchBtn").addEventListener("click", loadRejectedRecords);
+    el("reviewSearchBtn").addEventListener("click", () => { reviewPage = 0; loadRejectedRecords(); });
+    el("autoRepairReviewBtn")?.addEventListener("click", autoRepairReviewBatch);
     el("templateSearchBtn").addEventListener("click", () => { templateLibraryLoaded = false; loadTemplateLibrary(); });
     el("templateSearch").addEventListener("keydown", (event) => {
           if (event.key === "Enter") { templateLibraryLoaded = false; loadTemplateLibrary(); }
         });
     el("addCustomFieldBtn").addEventListener("click", addCustomField);
     el("dropCustomFieldBtn")?.addEventListener("click", dropCustomField);
-    document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
+    document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => {
+          const targetView = button.dataset.view;
+          // Only relevant leaving the Mapper tab with a parsed-but-unsaved
+          // source - navigating within Mapper, or when nothing's pending,
+          // just proceeds immediately as before.
+          const onMapper = !el("mapperView")?.classList.contains("hidden");
+          if (onMapper && targetView !== "mapperView" && typeof pendingUnsavedParse !== "undefined" && pendingUnsavedParse) {
+            pendingUnsavedNavTarget = targetView;
+            el("unsavedChangesDialog")?.showModal();
+            return;
+          }
+          // Clicking Mappings is a NEW mapping workflow, not a continuation
+          // of the template edit that happens to reuse this view. Without
+          // this, template-edit-mode stayed on, the nav highlight kept
+          // pointing at Template Library, and the Mappings tab looked dead.
+          if (targetView === "mapperView" && el("mapperView")?.classList.contains("template-edit-mode")) {
+            if (typeof resetMapping === "function") resetMapping();
+          }
+          switchView(targetView);
+        }));
+    let pendingUnsavedNavTarget = "";
+    el("unsavedChangesCancelBtn")?.addEventListener("click", () => el("unsavedChangesDialog")?.close());
+    el("unsavedChangesContinueBtn")?.addEventListener("click", () => {
+          el("unsavedChangesDialog")?.close();
+          // "Continue Without Saving" means DISCARD. It used to only navigate
+          // away, so the parsed source, its mappings and the selected brand
+          // all survived - come back to Mappings and the abandoned parse was
+          // still sitting there, and switching tabs carried it around. The
+          // user declined to save it; keeping it is the opposite of that.
+          if (typeof resetMapping === "function") resetMapping();
+          if (pendingUnsavedNavTarget) switchView(pendingUnsavedNavTarget);
+        });
+    el("unsavedChangesSaveBtn")?.addEventListener("click", async () => {
+          el("unsavedChangesDialog")?.close();
+          await saveMapper();
+          if (pendingUnsavedNavTarget && typeof pendingUnsavedParse !== "undefined" && !pendingUnsavedParse) switchView(pendingUnsavedNavTarget);
+        });
+    el("autoMapFieldsBtn")?.addEventListener("click", () => autoMapUnmappedFields());
     el("addOptionalFieldBtn").addEventListener("click", () => {
           const key = el("optionalFieldSelect").value;
           if (!key) return;
@@ -2058,12 +3699,24 @@ result = [
         });
     el("resetBtn").addEventListener("click", () => location.reload());
     el("brandSelect").addEventListener("change", (event) => {
+          if (el("parserBusinessSelect") && el("parserBusinessSelect").value !== event.target.value) {
+            el("parserBusinessSelect").value = event.target.value;
+          }
           resetTemplateSelection();
           if (event.target.value === "__create_new__") {
             selectedBrand = null;
+            if (businessRequirementTouched) setPreParseBrandValidation("Select an existing brand or create a new one before parsing.");
             brandEditMode = false;
+            presetCreateMode = false;
+            // Picking a different brand ends any in-progress preset edit -
+            // the open form no longer describes the selected brand. Leaving
+            // this set made the preset panel come back showing "Cancel Edit"
+            // with its fields unlocked, and sent the next preset click down
+            // the update path when the user expected a create.
+            presetBrandEditMode = false;
             el("editExistingBrandLink").classList.add("hidden");
             el("createBrandBtn").textContent = "Save Brand";
+            el("createBrandBtn").classList.remove("hidden");
             el("sourceType").disabled = false;
             resetSourceInputsForNewMode(el("sourceType").value);
             setNewBusinessSourceType(el("sourceType").value);
@@ -2076,13 +3729,19 @@ result = [
             syncCustomFieldBusinessPickers();
             updateOutput();
             updateDropCustomFieldPicker();
+            renderMappings();
             return;
           }
           const brands = JSON.parse(event.target.dataset.brands || "[]");
           selectedBrand = brands.find((brand) => brand.business_id === event.target.value) || null;
+          if (selectedBrand) setPreParseBrandValidation("");
+          else if (businessRequirementTouched) setPreParseBrandValidation("Select an existing brand or create a new one before parsing.");
           brandEditMode = false;
+          presetCreateMode = false;
+          presetBrandEditMode = false;
           el("editExistingBrandLink").classList.toggle("hidden", !selectedBrand);
           el("createBrandBtn").textContent = "Save Brand";
+          el("createBrandBtn").classList.toggle("hidden", Boolean(selectedBrand));
           el("newBrandFields").classList.add("hidden");
           el("newBrandFields").classList.remove("is-open");
           if (selectedBrand) applyBusinessSourceType(selectedBrand);
@@ -2096,10 +3755,61 @@ result = [
           syncCustomFieldBusinessPickers();
           updateOutput();
           updateDropCustomFieldPicker();
+          renderMappings();
+        });
+    el("parserBusinessSelect")?.addEventListener("change", (event) => {
+          businessRequirementTouched = true;
+          setBusinessSelectValue(event.target.value, true);
+        });
+    el("defaultBrandModelBtn")?.addEventListener("click", () => {
+          if (selectedBrand) {
+            el("editExistingBrandLink")?.click();
+            return;
+          }
+          el("brandSelect").value = "__create_new__";
+          el("brandSelect").dispatchEvent(new Event("change"));
+        });
+    el("preParseCreateBrand")?.addEventListener("change", () => {
+          if (!el("preParseCreateBrand").checked) return;
+          openBrandEditorForm("create");
+        });
+    el("preParseEditBrand")?.addEventListener("change", () => {
+          if (!el("preParseEditBrand").checked) return;
+          const brands = JSON.parse(el("brandSelect")?.dataset.brands || "[]");
+          if (!brands.some((brand) => brand?.business_id)) {
+            setStatus("No existing brands are available to edit.", "warn");
+            el("preParseCreateBrand").checked = true;
+            openBrandEditorForm("create");
+            return;
+          }
+          if (selectedBrand?.business_id) {
+            openBrandEditorForm("edit");
+            return;
+          }
+          el("newBrandFields")?.classList.add("hidden");
+          el("newBrandFields")?.classList.remove("is-open", "editing-brand");
+          el("brandSelect")?.focus();
+          setStatus("Select an existing brand to edit its details.", "ok");
         });
     el("customFieldBusinessSelect").addEventListener("change", updateDropCustomFieldPicker);
     el("dropCustomFieldBusinessSelect").addEventListener("change", updateDropCustomFieldPicker);
-    el("createBrandBtn").addEventListener("click", () => brandEditMode ? updateExistingBrand() : createNewBrand());
+    el("createBrandBtn").addEventListener("click", () => {
+          // THREE separate flags decide what this one button means, and each
+          // is set by a different path that opens the form: brandEditMode
+          // (the "Edit brand" link and the pre-parse Edit radio),
+          // presetBrandEditMode (the CSV preset panel's "Edit Brand
+          // Details") and presetCreateMode (create-from-preset). Consulting
+          // only brandEditMode left the preset edit path on the CREATE
+          // branch, so clicking Save on a form showing an existing brand's
+          // details filed a SECOND copy of that brand instead of updating it.
+          // Editing is: the form was opened against a brand that already
+          // exists. The business_id check is what keeps a stale
+          // presetBrandEditMode from turning a genuine create into an
+          // update - with no selected brand there is nothing to update.
+          const editingExistingBrand = (brandEditMode || presetBrandEditMode) && Boolean(selectedBrand?.business_id);
+          if (editingExistingBrand) return updateExistingBrand();
+          return createNewBrand("", presetCreateMode && activeCsvPresetConfig ? presetMetadata() : {});
+        });
     el("loadDemoPeBrandBtn")?.addEventListener("click", () => applyDemoPeBrandFunction());
     el("copyDemoPeBrandBtn")?.addEventListener("click", async () => {
           try {
@@ -2129,14 +3839,18 @@ result = [
           el("newBrandFields").classList.add("editing-brand");
           el("brandFormHeading").textContent = "Edit brand details";
           el("createBrandBtn").textContent = "Update Brand";
+          el("createBrandBtn").classList.remove("hidden");
           el("editExistingBrandLink").classList.add("hidden");
         });
     el("cancelBrandEditBtn").addEventListener("click", () => {
           brandEditMode = false;
+          presetCreateMode = false;
+          presetBrandEditMode = false;
           el("newBrandFields").classList.add("hidden");
           el("newBrandFields").classList.remove("is-open");
           el("newBrandFields").classList.remove("editing-brand");
           el("createBrandBtn").textContent = "Save Brand";
+          el("createBrandBtn").classList.toggle("hidden", Boolean(selectedBrand));
           el("brandFormHeading").textContent = "Brand details";
           el("editExistingBrandLink").classList.toggle("hidden", !selectedBrand);
         });
@@ -2157,15 +3871,35 @@ result = [
           setStatus("Preset URL is editable for this run.", "warn");
         });
     el("newBrandName").addEventListener("input", updateOutput);
+    el("newBrandDescription").addEventListener("input", () => {
+          autoGrowBrandTextarea(el("newBrandDescription"));
+          updateOutput();
+        });
+    el("newBrandMetaDescription").addEventListener("input", () => {
+          autoGrowBrandTextarea(el("newBrandMetaDescription"));
+          updateOutput();
+        });
     el("sourceName").addEventListener("input", updateOutput);
     el("sourceUrl").addEventListener("input", () => {
+          if (el("sourceUrl").value.trim()) markBusinessRequirementTouched();
           sourceParsed = false;
           loadExcelSheets();
           updateOutput();
         });
-    el("fileInput").addEventListener("change", () => {
+    el("apiUrl").addEventListener("input", () => {
+          if (el("apiUrl").value.trim()) markBusinessRequirementTouched();
           sourceParsed = false;
-          setStatus("Source ready. Ready to review fields.", "ok");
+          updateOutput();
+        });
+    el("pythonConnectorCode")?.addEventListener("input", () => {
+          if (el("pythonConnectorCode").value.trim()) markBusinessRequirementTouched();
+          sourceParsed = false;
+          updateOutput();
+        });
+    el("fileInput").addEventListener("change", () => {
+          if (el("fileInput").files.length) markBusinessRequirementTouched();
+          sourceParsed = false;
+          setStatus(sourceReadyToParseMessage(), "warn");
           loadExcelSheets();
         });
     el("sheetName").addEventListener("change", () => {
@@ -2218,14 +3952,9 @@ result = [
           }
           el("newBrandFields").classList.add("hidden");
           resetSourceInputsForNewMode(nextSourceType);
-          setStatus("Source ready. Ready to review fields.", "ok");
+          setStatus("Choose a source and parse it to start mapping in left pane.", "");
           el("fileInput").value = "";
           updateSourceVisibility();
-          if (!selectedBrand) {
-            el("templateSourceFilter").value = currentSourceTypeId();
-            resetTemplateSelection();
-            loadTemplateLibrary();
-          }
         });
     el("newBrandSourceType").addEventListener("change", () => {
           const option = el("newBrandSourceType").selectedOptions[0];
@@ -2255,8 +3984,17 @@ result = [
             }
           }
           sourceParsed = false;
+          if (typeof syncSourceInputModeRadios === "function") syncSourceInputModeRadios();
           updateSourceVisibility();
           loadExcelSheets();
+          setStatus("Choose a source and parse it to start mapping in left pane.", "");
+        });
+    document.querySelectorAll("input[name='sourceInputModeChoice']").forEach((input) => {
+          input.addEventListener("change", () => {
+            if (!input.checked) return;
+            el("sourceInputMode").value = input.value;
+            el("sourceInputMode").dispatchEvent(new Event("change", { bubbles: true }));
+          });
         });
     document.querySelectorAll("input[name='csvFunction']").forEach((input) => {
           input.addEventListener("change", () => updateCsvFunctionSelection(input.value));
@@ -2287,6 +4025,7 @@ result = [
         });
     el("templateSourceFilter").addEventListener("change", () => { templateLibraryLoaded = false; loadTemplateLibrary(); });
     el("reviewBrandFilter")?.addEventListener("change", loadRejectedRecords);
+    el("reviewFixTypeFilter")?.addEventListener("change", loadRejectedRecords);
     document.querySelectorAll("input[name='recordExtractionMode']").forEach((radio) => {
           radio.addEventListener("change", () => {
             const isCustom = radio.value === "custom" && radio.checked;
@@ -2318,46 +4057,86 @@ result = [
         });
     el("refreshReportBtn").addEventListener("click", () => {
           reportLoaded = false;
-          loadReporting();
+          refreshReportingNow();
         });
-    el("loadSampleDatasetBtn").addEventListener("click", () => loadSampleDataset(false));
-    el("reloadSampleDatasetLink").addEventListener("click", () => loadSampleDataset(true));
+    el("loadSampleDatasetBtn")?.addEventListener("click", () => loadSampleDataset(false));
+    el("loadSampleDatasetHeaderBtn")?.addEventListener("click", () => loadSampleDataset(false));
+    el("clearSampleDatasetLink")?.addEventListener("click", () => clearSampleDataset());
+    el("appHelpBtn")?.addEventListener("click", () => el("appHelpDialog")?.showModal());
+    el("appHelpCloseBtn")?.addEventListener("click", () => el("appHelpDialog")?.close());
+    el("sampleLoadedCloseBtn")?.addEventListener("click", () => el("sampleLoadedDialog")?.close());
+    el("saveCompletionOk")?.addEventListener("click", () => {
+      el("saveCompletionDialog")?.close();
+      // The save is finished, so the mapping workspace has nothing left to
+      // act on - hand back the 40/60 pre-parse layout ready for the next
+      // source instead of leaving the consumed mapping on screen.
+      if (typeof resetMapping === "function") resetMapping();
+    });
+    el("reloadSampleDatasetLink")?.addEventListener("click", () => loadSampleDataset(true));
     el("applyReportFiltersBtn")?.addEventListener("click", () => {
+          const menu = el("competitorDropdownMenu");
+          if (menu) menu.style.display = "none";
+          // An explicit Apply subsumes whatever auto-apply had queued - a
+          // debounce still counting down, or competitor ticks held back
+          // while that dropdown was open. Without this they fire a second,
+          // identical report load moments after this one.
+          reportAutoApply?.cancel();
           reportLoaded = false;
-          loadReporting();
+          loadReporting({ interactive: true });
         });
-    el("resetReportFiltersBtn")?.addEventListener("click", () => {
+    el("resetReportFiltersBtn")?.addEventListener("click", async () => {
+          if (el("reportMainBrandSelect")) el("reportMainBrandSelect").value = "";
           if (el("reportStateFilter")) el("reportStateFilter").value = "";
           if (el("reportCountyFilter")) el("reportCountyFilter").value = "";
           if (el("reportCityFilter")) el("reportCityFilter").value = "";
           if (el("reportZipFilter")) el("reportZipFilter").value = "";
-          if (el("reportMainBrandSelect")) el("reportMainBrandSelect").value = "";
-          document.querySelectorAll("input[name='competitorBrand']").forEach((input) => input.checked = false);
+          if (el("reportMinPopFilter")) el("reportMinPopFilter").value = "";
+          if (el("reportMinIncomeFilter")) el("reportMinIncomeFilter").value = "";
+          if (el("reportMaxAgeFilter")) el("reportMaxAgeFilter").value = "";
+          clearReportFilterSearch(el("resetReportFiltersBtn"));
+          document.querySelectorAll("input[name='competitorBrand']").forEach((input) => { input.checked = false; });
+          const selectAll = document.querySelector("input[name='competitorBrand_selectAll']");
+          if (selectAll) { selectAll.checked = false; selectAll.indeterminate = false; }
+          if (typeof updateCompetitorOptions === "function") updateCompetitorOptions();
+          if (typeof updateCompetitorDropdownText === "function") updateCompetitorDropdownText();
+          const menu = el("competitorDropdownMenu");
+          if (menu) menu.style.display = "none";
+          await loadGeoOptions();
+          // Same reason as Apply above: this clears every control and runs
+          // the report itself, so anything auto-apply had queued is stale.
+          reportAutoApply?.cancel();
           reportLoaded = false;
-          loadReporting();
+          loadReporting({ interactive: true });
         });
     el("reportStateFilter")?.addEventListener("change", async () => {
           if (el("reportCountyFilter")) el("reportCountyFilter").value = "";
           if (el("reportCityFilter")) el("reportCityFilter").value = "";
           if (el("reportZipFilter")) el("reportZipFilter").value = "";
+          // The dependent dropdowns are always refreshed - that keeps the
+          // controls coherent and is not the report query - while the reload
+          // itself goes through the auto-apply switch, so turning it off
+          // silences the geographic filters too rather than only some of the
+          // rail.
           await loadGeoOptions();
-          reportLoaded = false;
-          loadReporting();
+          reportAutoApply?.schedule();
         });
     el("reportCountyFilter")?.addEventListener("change", async () => {
           if (el("reportCityFilter")) el("reportCityFilter").value = "";
           if (el("reportZipFilter")) el("reportZipFilter").value = "";
           await loadGeoOptions();
-          reportLoaded = false;
-          loadReporting();
+          reportAutoApply?.schedule();
         });
     ["reportCityFilter", "reportZipFilter"].forEach((id) => {
           el(id)?.addEventListener("change", () => {
-            reportLoaded = false;
-            loadReporting();
+            reportAutoApply?.schedule();
           });
           el(id)?.addEventListener("keydown", (event) => {
             if (event.key === "Enter") {
+              // Enter in these boxes is an explicit submit, the same gesture
+              // as clicking Apply All Filters, so it still runs with the
+              // auto-apply switch off - and cancels the debounce for the
+              // same reason that button does.
+              reportAutoApply?.cancel();
               reportLoaded = false;
               loadReporting();
             }
@@ -2382,22 +4161,56 @@ result = [
         return;
       }
       setTimeout(() => refreshHeaderReadiness(), 10);
-      setupZipTypeahead();
-      setupBrandDropdownListeners();
-      refreshSampleDatasetStatus();
-      loadGeoOptions();
-      await loadAppData();
-      // Paint the Review Error Listings tab badge immediately from the
-      // last-known SQLite count (no live BigQuery wait), regardless of which
-      // tab opens first. A live re-count happens whenever data actually
-      // moves (reprocess/save), keeping the cached number honest.
-      refreshReviewCount();
+      // A stale event_id can otherwise survive a page reload (browser form
+      // restore/autofill on this <input type="search">) and silently scope
+      // every Review Queue search to a long-gone save - always start clear
+      // on a fresh load; a just-completed save still fills it back in
+      // later, in the same loaded session, via saveMapper()'s own handoff.
+      if (el("reviewEventId")) el("reviewEventId").value = "";
       const urlParams = new URLSearchParams(window.location.search);
       let activeTab = urlParams.get("view") || sessionStorage.getItem("activeTab") || "mapperView";
       if (!["mapperView", "reportingView", "reviewView", "templateLibraryView"].includes(activeTab)) {
         activeTab = "mapperView";
       }
-      switchView(activeTab);
+      switchView(activeTab, true);
+      setupZipTypeahead();
+      refreshReportFilterSearch();
+      setupBrandDropdownListeners();
+      // After setupBrandDropdownListeners(), which owns the competitor
+      // dropdown's open/closed state that auto-apply defers on.
+      setupReportAutoApply();
+      refreshSampleDatasetStatus();
+      loadGeoOptions();
+      // The enrichment control lives on the mapping view's left rail, but the
+      // only thing that used to start its status poll was loadReporting() -
+      // so an eased run reloaded onto any other view left the user with no
+      // visible way back to full speed. Started here instead, on boot,
+      // regardless of which view opens: the first poll is what establishes
+      // whether enrichment is currently eased and therefore what the toggle
+      // must offer. It settles to a 30s tick when there is nothing to watch,
+      // and stops itself once a run it was watching ends.
+      if (typeof startEnrichmentStatusPolling === "function") startEnrichmentStatusPolling();
+      if (typeof loadJobHistory === "function") loadJobHistory();
+      // Paint the Review Error Listings tab badge immediately from the
+      // last-known SQLite count (no live BigQuery wait), regardless of which
+      // tab opens first. Fired here (not awaited, and before loadAppData())
+      // so it isn't queued behind that slower chain (field registry, brands,
+      // template filters, a full template-library fetch) - previously the
+      // badge sat at "0" until all of that resolved even though this fetch
+      // itself is fast. A live re-count happens whenever data actually
+      // moves (reprocess/save), keeping the cached number honest.
+      refreshReviewCount();
+      // Same reasoning as refreshReviewCount() above: paint the real,
+      // persisted AI/manual fixed counts immediately on boot regardless of
+      // which tab opens first, rather than relying solely on switchView()'s
+      // reviewView branch - a live-reproduced case showed the counters
+      // stuck at their static HTML "0" default until the user manually
+      // clicked "Try Auto-Fixing with AI", even though the real backend
+      // value was already correct and non-zero (58 at the time, verified
+      // via curl) - this call was previously only reachable through a
+      // conditional branch that this specific case never traversed.
+      if (typeof refreshFixCountersOnce === "function") refreshFixCountersOnce();
+      await loadAppData();
     })();
 
   </script>

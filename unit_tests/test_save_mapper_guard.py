@@ -13,20 +13,30 @@ def _mapper():
         "source_type": "csv",
         "source_type_id": "src-1",  # provided, so ensure_source_type() (BigQuery) is skipped
         "business_id": "biz-1",
-        "fields": {"name": "Name", "address": "Addr", "city": "City", "state": "State", "postal_code": "Zip"},
+        "fields": {"name": "Name", "address": "Addr", "city": "City", "state": "State", "postal_code": "Zip", "country": "Country", "latitude": "Lat"},
     }
 
 
-SOURCE_FIELDS = ["Name", "Addr", "City", "State", "Zip"]
+SOURCE_FIELDS = ["Name", "Addr", "City", "State", "Zip", "Country", "Lat"]
 
 
 def _invalid_rows(n):
-    # Empty Zip -> normalize_location() returns None -> required_location error, for every row.
-    return [{"Name": f"S{i}", "Addr": "1 St", "City": "Austin", "State": "TX", "Zip": ""} for i in range(n)]
+    # Under the "only brand is mandatory" rule (see normalize_location()),
+    # a blank name/address/city/state/zip no longer makes a row invalid -
+    # brand is always present here via the mapper-level fallback. A
+    # malformed *numeric* value (e.g. latitude that isn't a number) no
+    # longer fails validate_source_row() either - every field it checks is
+    # optional, so an unparseable value is cleared to None (normalize_location()
+    # already does this) rather than blocking the row, since there's
+    # nothing to "fix" by rejecting a record over one bad optional field.
+    # A malformed ZIP is still a genuine hard rule (validate_normalized_location()'s
+    # "invalid US ZIP code" check), so it's used here as the one remaining
+    # way to produce an invalid row.
+    return [{"Name": f"S{i}", "Addr": "1 St", "City": "Austin", "State": "TX", "Zip": "999", "Country": "United States", "Lat": "30.27"} for i in range(n)]
 
 
 def _valid_row():
-    return {"Name": "Good Store", "Addr": "1 Main St", "City": "Austin", "State": "TX", "Zip": "78701"}
+    return {"Name": "Good Store", "Addr": "1 Main St", "City": "Austin", "State": "TX", "Zip": "78701", "Country": "United States", "Lat": "30.27"}
 
 
 class SaveMapperAllInvalidGuardTests(unittest.TestCase):
@@ -104,6 +114,25 @@ class SaveMapperAllInvalidGuardTests(unittest.TestCase):
             )
         self.assertEqual(result["mapped_rows"], 1)
         self.assertEqual(result["error_listings"], 2)
+        push.assert_called_once()
+
+    def test_non_brand_fields_are_no_longer_mandatory(self) -> None:
+        # A row with nothing but a well-typed value set (brand only comes
+        # from the mapper level here) is valid - no address/city/state/zip
+        # at all. Only brand is mandatory now, at every layer.
+        with patch.object(ws, "_warehouse_settings", return_value=("p", "d", None)), \
+             patch.object(ws, "_bigquery_client", return_value=object()), \
+             patch.object(ws, "_load_mapped_zip_demographics", return_value={}), \
+             patch.object(ws, "_dedupe_listings_against_bronze", side_effect=lambda c, p, d, rows: (rows, 0)), \
+             patch.object(ws, "push_to_bigquery") as push, \
+             patch.object(ws, "_maybe_refresh_after_save"):
+            result = ws.save_mapper({
+                "mapper": _mapper(),
+                "rows": [{"Name": "", "Addr": "", "City": "", "State": "", "Zip": "", "Country": "", "Lat": ""}],
+                "source_fields": SOURCE_FIELDS,
+            })
+        self.assertEqual(result["mapped_rows"], 1)
+        self.assertEqual(result["error_listings"], 0)
         push.assert_called_once()
 
 

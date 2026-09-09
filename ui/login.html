@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Location Intelligence Login</title>
+  <title>Competitive Whitespace Tool Login</title>
   <script src="constants.js"></script>
   <link id="appFavicon" rel="icon" type="image/png">
   <script>document.getElementById("appFavicon").href = window.APP_CONSTANTS.birdeyeFaviconUrl;</script>
@@ -77,7 +77,8 @@
       color: var(--ink);
     }
     .checkbox-row input { width: auto; }
-    button {
+    .login-box > button,
+    .login-box > .button-row button {
       width: 100%;
       margin-top: 18px;
       padding: 10px 14px;
@@ -89,8 +90,22 @@
       font-weight: 800;
       cursor: pointer;
     }
-    button:hover { background: #005fd3; }
-    button:disabled {
+    .login-box > button:hover,
+    .login-box > .button-row button:hover { background: #005fd3; }
+    .login-box > button.secondary,
+    .login-box > .button-row button.secondary {
+      margin-top: 10px;
+      border-color: var(--line);
+      background: #ffffff;
+      color: var(--ink);
+    }
+    .login-box > button.secondary:hover,
+    .login-box > .button-row button.secondary:hover {
+      border-color: var(--accent);
+      background: #f4f8ff;
+    }
+    .login-box > button:disabled,
+    .login-box > .button-row button:disabled {
       background: #aeb8c9;
       border-color: #aeb8c9;
       cursor: not-allowed;
@@ -128,12 +143,24 @@
     .status.ok { border-color: #b7e0c6; background: #f1fbf7; color: var(--ok); }
     .status.error { border-color: #e4b3bf; background: #fff1f4; color: var(--error); }
     .status.warn { border-color: #f2d5a6; background: #fff8ed; color: var(--warn); }
+    .status { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+    .status-message {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow-wrap: break-word;
+      word-break: normal;
+      white-space: normal;
+      line-height: 1.45;
+    }
+    .status-point { display: block; margin-top: 4px; }
+    .status-close { flex: 0 0 auto; width: auto; min-width: 24px; margin: -2px 0 0 auto; border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 19px; line-height: 1; padding: 0 2px; opacity: .75; }
+    .status-close:hover { opacity: 1; }
   </style>
 </head>
 <body>
   <main class="login-box">
     <img class="brand-logo-image" data-logo-src="birdeyeLogoDarkUrl" alt="Birdeye">
-    <h1>Location Intelligence</h1>
+    <h1 data-product-name></h1>
     <label for="loginUser">Username</label>
     <input id="loginUser" autocomplete="username" value="admin">
     <label for="loginPassword">Password</label>
