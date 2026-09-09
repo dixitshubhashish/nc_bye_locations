@@ -12,6 +12,11 @@ let enrichmentStatusTimer = null;
 let reportingCountdownTimer = null;
 let reportingCountdownSeconds = 300;
 let reportingWarmupTimer = null;
+// The Location Intelligence filter rail's auto-apply switch, created by
+// setupReportAutoApply(). Module level because the geographic filters keep
+// their own change handlers in integrations.html (they also have to refresh
+// the dependent dropdowns) and hand only the reload itself to the toggle.
+let reportAutoApply = null;
 
 const canonicalBrandMap = new Map();
 const canonicalToRawMap = new Map();
@@ -186,6 +191,135 @@ function scheduleReportingWarmupPoll(delayMs = 5000) {
         loadReporting({ interactive: false });
       }, delayMs);
     }
+// ---- Auto-apply filters: one switch, shared by both reporting tabs ------
+//
+// Location Intelligence and Data Quality both carry a filter rail that
+// should behave like a live dashboard - move a control, see the result -
+// plus an escape hatch for anyone setting several filters at once who does
+// not want a query fired between each one. The two tabs differ only in
+// which controls they watch and what "apply" means, so they pass those in
+// and this owns the switch, the debounce and the deferral rules; the
+// alternative is the same plumbing maintained in two files, which is what
+// attachSearchableSelect() in common.js exists to avoid.
+//
+// It is a switch rather than a button that renames itself ("Stop auto
+// apply" / "Restart auto apply", which is what the Data Quality tab used to
+// have): that label describes what a click would do, i.e. the opposite of
+// the current state, so reading it told you nothing at a glance.
+const autoApplyToggles = new Map();
+
+function injectAutoApplyToggleStyles() {
+  if (el("autoApplyToggleStyles")) return;
+  // Carried by the component, not by either tab's stylesheet: the Location
+  // rail is styled inline in integrations.html and the Quality rail by
+  // reporting-tabs.js injectStyles(), and a shared control cannot depend on
+  // which of those happens to own the page it lands in.
+  const style = document.createElement("style");
+  style.id = "autoApplyToggleStyles";
+  style.textContent = `
+    .auto-apply-toggle{box-sizing:border-box;width:100%;min-width:0}
+    .auto-apply-toggle-label{position:relative;display:flex;align-items:center;gap:8px;box-sizing:border-box;width:100%;margin:0;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink);font-size:12px;font-weight:600;cursor:pointer;user-select:none}
+    /* Hidden, not replaced: it stays a real checkbox so the switch keeps
+       keyboard focus, Space to flip it, and role="switch" for screen
+       readers. Class-scoped because both rails have a broad
+       "every input in this panel" rule that would otherwise size it. */
+    .auto-apply-toggle .auto-apply-toggle-input{position:absolute;width:1px;height:1px;padding:0;margin:0;border:0;opacity:0;pointer-events:none}
+    .auto-apply-toggle-track{position:relative;flex:0 0 auto;width:34px;height:18px;border-radius:999px;background:#cbd5e1;transition:background .15s ease}
+    .auto-apply-toggle-thumb{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(15,23,42,.35);transition:transform .15s ease}
+    .auto-apply-toggle .auto-apply-toggle-input:checked+.auto-apply-toggle-track{background:var(--accent,#2563eb)}
+    .auto-apply-toggle .auto-apply-toggle-input:checked+.auto-apply-toggle-track .auto-apply-toggle-thumb{transform:translateX(16px)}
+    .auto-apply-toggle .auto-apply-toggle-input:focus-visible+.auto-apply-toggle-track{outline:2px solid var(--accent,#2563eb);outline-offset:2px}
+    .auto-apply-toggle-text{flex:1 1 auto;min-width:0}
+    .auto-apply-toggle-state{flex:0 0 auto;font-size:11px;font-weight:750;letter-spacing:.02em;text-transform:uppercase;color:var(--accent,#2563eb)}
+    /* Off is a state the user chose and will then forget: the amber card
+       (kept from the button this replaced) keeps "filters are not applying"
+       visible while they work down the rest of the rail. */
+    .auto-apply-toggle[data-auto='off'] .auto-apply-toggle-label{background:#fff7ed;border-color:#f59e0b;color:#b45309}
+    .auto-apply-toggle[data-auto='off'] .auto-apply-toggle-state{color:#b45309}
+  `;
+  document.head.appendChild(style);
+}
+
+// hostId          - empty element the switch is mounted into.
+// watchIds        - controls that need nothing but "changed, reload"; a tab
+//                   with controls that do more (cascading dropdowns) wires
+//                   those itself and calls schedule() at the end.
+// shouldDefer()   - true while applying would be disruptive; the change is
+//                   held and run by resume() once that passes.
+// Returns { element, input, isEnabled, schedule, resume, cancel } - cancel()
+// is for an explicit Apply/Reset, which subsumes anything queued here.
+function attachAutoApplyToggle(hostId, { id = "", label = "Auto apply filters", title = "", watchIds = [], onApply = null, shouldDefer = null, delayMs = 400 } = {}) {
+  const host = el(hostId);
+  if (!host) return null;
+  if (autoApplyToggles.has(hostId)) return autoApplyToggles.get(hostId);
+  injectAutoApplyToggleStyles();
+  const inputId = id || `${hostId}Input`;
+  const wrapper = document.createElement("div");
+  wrapper.className = "auto-apply-toggle";
+  wrapper.dataset.auto = "on";
+  wrapper.innerHTML = `
+    <label class="auto-apply-toggle-label" for="${inputId}"${title ? ` title="${escapeHtml(title)}"` : ""}>
+      <input type="checkbox" role="switch" class="auto-apply-toggle-input" id="${inputId}" checked>
+      <span class="auto-apply-toggle-track" aria-hidden="true"><span class="auto-apply-toggle-thumb"></span></span>
+      <span class="auto-apply-toggle-text">${escapeHtml(label)}</span>
+      <span class="auto-apply-toggle-state" aria-hidden="true">On</span>
+    </label>
+  `;
+  host.appendChild(wrapper);
+  const input = wrapper.querySelector(".auto-apply-toggle-input");
+  const stateText = wrapper.querySelector(".auto-apply-toggle-state");
+  let timer = null;
+  // Set when a change arrived that shouldDefer() asked us to hold, so
+  // resume() can tell "something is waiting" from "nothing happened".
+  let deferred = false;
+
+  const cancel = () => {
+    window.clearTimeout(timer);
+    timer = null;
+    deferred = false;
+  };
+
+  const schedule = () => {
+    if (!input.checked) return;
+    if (typeof shouldDefer === "function" && shouldDefer()) {
+      window.clearTimeout(timer);
+      deferred = true;
+      return;
+    }
+    deferred = false;
+    // Debounced: setting three filters in a row is one query, not three.
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => {
+      timer = null;
+      if (typeof onApply === "function") onApply();
+    }, delayMs);
+  };
+
+  const resume = () => {
+    // Only fires if something actually changed while deferred, so opening
+    // and closing a dropdown without touching it costs nothing.
+    if (deferred) schedule();
+  };
+
+  input.addEventListener("change", () => {
+    wrapper.dataset.auto = input.checked ? "on" : "off";
+    stateText.textContent = input.checked ? "On" : "Off";
+    if (input.checked) {
+      // Switching back on applies whatever moved while it was off, so the
+      // view can never sit out of step with the controls.
+      schedule();
+    } else {
+      cancel();
+    }
+  });
+
+  watchIds.forEach((watchId) => el(watchId)?.addEventListener("change", schedule));
+
+  const controller = { element: wrapper, input, isEnabled: () => input.checked, schedule, resume, cancel };
+  autoApplyToggles.set(hostId, controller);
+  return controller;
+}
+
 function checkedValues(name) {
       return [...document.querySelectorAll(`input[name="${name}"]:checked`)].map((input) => input.value);
     }
@@ -312,13 +446,53 @@ let mapMarkerLayerGroup = null;
 let stateBoundaryLayerGroup = null;
 let stateCirclesLayerGroup = null;
 let cityCirclesLayerGroup = null;
-let pinMarkersLayerGroup = null;
-let gapMarkersLayerGroup = null;
+// These two were cross-named for a long time: the loop over map_records (the
+// individual listings) filled the group called "gap", and the loop over the
+// whitespace gap ZIPs filled the group called "pin". syncMapLayersByZoom()
+// then reasoned about them BY NAME and did the exact opposite of what its own
+// comment claimed - it zoom-gated the gaps and always-showed the listings.
+// That is the defect behind BB14 ("when zoom in sometimes the red green and
+// gaps dot are going away"). Named for their contents now, so the next reader
+// cannot be misled the same way.
+let gapMarkersLayerGroup = null;    // whitespace candidate ZIPs (orange)
+let storeMarkersLayerGroup = null;  // individual listings (blue/green/red)
 let staticMapZoom = 1;
 // Keep the complete contiguous US in view, with enough scale to read the
 // state-level layer without opening on an overly distant national view.
 const DEFAULT_US_MAP_VIEW = { center: [39.8283, -98.5795], zoom: 5 };
 const DEFAULT_US_BOUNDS = [[24.3963, -125.0], [49.3844, -66.9346]];
+// How many listings the server will hand this map, at most: the reporting
+// query ends in LIMIT 1000 and the SQLite mirror takes the same 1000-row
+// slice. Neither orders the rows first, so on a dataset larger than that the
+// map receives an arbitrary block rather than a spread - on the current cache
+// (42,869 listings, all with coordinates, across 59 states) the first 1000
+// rows are 973 Massachusetts, which is exactly the reported "only 1 area
+// showing solid dots". Raising or ordering that limit is a server change; all
+// this map can do is not present the sample as the whole picture.
+const MAP_RECORD_DISPLAY_CAP = 1000;
+// Zooming into a single state (or narrower) means the national round-robin
+// sample is the wrong data source - it deliberately spreads only ~1/state
+// worth of rows nationwide, so a state with real depth reads as sparse. Once
+// the user is at state tier or closer, fetch that area's own full listing
+// set instead (see fetchFullScopeMapRecords / maybeFetchFullScopeMapData).
+// A hard per-scope ceiling still applies server-side (spec handed to the
+// backend owner alongside this change) because even one state can carry
+// several thousand rows and the browser still has to render every marker.
+const SCOPED_MAP_ZOOM_THRESHOLD = 6.0;
+const SCOPED_MAP_FETCH_DEBOUNCE_MS = 450;
+// Per-scope caches so panning/zooming within a state already fetched does
+// not refire the request, and so switching scopes never mixes their rows.
+const scopedMapRecordsCache = new Map(); // scopeKey -> records[]
+const scopedMapFetchInFlight = new Set();
+let scopedMapFetchTimer = null;
+// The state a marker click or the state filter put the map "inside" of. Read
+// alongside the zoom level so the scoped fetch fires from either path (a
+// direct filter pick or a bubble click that only calls setView).
+let currentMapScopeState = "";
+// The last payload renderReportingMap was actually given, so a scoped fetch
+// landing later can re-render with the fuller records for the SAME gaps/
+// state bubbles/filters without re-running the whole loadReporting() cycle.
+let lastRenderedMapPayload = { gapRecords: [], stateRecords: [], filters: {} };
 const stateNameToCode = {
       Alabama: "AL", Alaska: "AK", Arizona: "AZ", Arkansas: "AR", California: "CA", Colorado: "CO", Connecticut: "CT", Delaware: "DE",
       Florida: "FL", Georgia: "GA", Hawaii: "HI", Idaho: "ID", Illinois: "IL", Indiana: "IN", Iowa: "IA", Kansas: "KS",
@@ -411,38 +585,165 @@ function renderStaticUSMap(stateRecords = []) {
         });
       });
     }
+// A layer with nothing in it is not a layer worth switching to.
+function layerHasContent(group) {
+  if (!group) return false;
+  try { return group.getLayers().length > 0; } catch (_) { return false; }
+}
+
+// ...and neither is a layer whose content is all somewhere else. This is what
+// makes the state -> city drill-down behave: clicking a state bubble flies to
+// that state at zoom 7, which is city tier, but the city bubbles are built
+// from map_records - a capped payload that may hold nothing at all for that
+// state (see MAP_RECORD_DISPLAY_CAP). Handing over to a tier whose markers
+// are two thousand miles away is what "clicking the state leads nowhere"
+// actually was: the state bubbles came off and nothing replaced them on
+// screen. Checking the CURRENT VIEW instead keeps the state bubble up when
+// there is no city detail to drill into here.
+function layerHasContentInView(group) {
+  if (!reportingMap || !group) return false;
+  try {
+    const view = reportingMap.getBounds();
+    return group.getLayers().some((layer) => {
+      const position = typeof layer.getLatLng === "function" ? layer.getLatLng() : null;
+      return position ? view.contains(position) : true;
+    });
+  } catch (_) {
+    return layerHasContent(group);
+  }
+}
+
+// Add/remove without asking the caller to remember which state a layer is in.
+// The old add/remove pairs, written out three times per branch, are how the
+// two marker groups ended up being treated inconsistently in the first place.
+function toggleMapLayer(group, visible) {
+  if (!group || !reportingMap) return;
+  const attached = reportingMap.hasLayer(group);
+  if (visible && !attached) reportingMap.addLayer(group);
+  else if (!visible && attached) reportingMap.removeLayer(group);
+}
+
+// The drill-down: nation -> state bubbles, state -> city bubbles, city ->
+// individual listings. Only the two AGGREGATE layers are zoom-gated; the
+// markers that represent real rows are not.
+//
+// The listing markers (blue when no primary brand is chosen, green for the
+// primary brand, red for competitors) and the whitespace gap ZIPs (orange)
+// stay on at every zoom, including the default national view. That is the
+// explicit ask - "blue solid should be shown when zooming in as well" - and
+// it is also what stops markers from vanishing mid-zoom (BB14). Aggregates
+// are a summary of those markers, so they hand over as you zoom in rather
+// than replacing them.
 function syncMapLayersByZoom() {
   if (!reportingMap) return;
   const currentZoom = reportingMap.getZoom();
   const activeCityFilter = String(el("reportCityFilter")?.value || "").trim();
   const activeZipFilter = String(el("reportZipFilter")?.value || "").trim();
-  const isPinLevel = Boolean(activeCityFilter || activeZipFilter) || currentZoom >= 9.5;
-  const isCityLevel = currentZoom >= 6.0 && currentZoom < 9.5;
+  // Filtering to one city or ZIP means the user is already "there", whatever
+  // the zoom reads - summarising a single city as one bubble helps nobody.
+  const isListingLevel = Boolean(activeCityFilter || activeZipFilter) || currentZoom >= 9.5;
+  let tier = isListingLevel ? "listing" : (currentZoom >= 6.0 ? "city" : "state");
 
-  if (isPinLevel) {
-    if (pinMarkersLayerGroup && !reportingMap.hasLayer(pinMarkersLayerGroup)) reportingMap.addLayer(pinMarkersLayerGroup);
-    if (cityCirclesLayerGroup && reportingMap.hasLayer(cityCirclesLayerGroup)) reportingMap.removeLayer(cityCirclesLayerGroup);
-    if (stateCirclesLayerGroup && reportingMap.hasLayer(stateCirclesLayerGroup)) reportingMap.removeLayer(stateCirclesLayerGroup);
-  } else if (isCityLevel) {
-    if (pinMarkersLayerGroup && reportingMap.hasLayer(pinMarkersLayerGroup)) reportingMap.removeLayer(pinMarkersLayerGroup);
-    if (cityCirclesLayerGroup && !reportingMap.hasLayer(cityCirclesLayerGroup)) reportingMap.addLayer(cityCirclesLayerGroup);
-    if (stateCirclesLayerGroup && reportingMap.hasLayer(stateCirclesLayerGroup)) reportingMap.removeLayer(stateCirclesLayerGroup);
-  } else {
-    // National level: show state circles
-    if (pinMarkersLayerGroup && reportingMap.hasLayer(pinMarkersLayerGroup)) reportingMap.removeLayer(pinMarkersLayerGroup);
-    if (cityCirclesLayerGroup && reportingMap.hasLayer(cityCirclesLayerGroup)) reportingMap.removeLayer(cityCirclesLayerGroup);
-    if (stateCirclesLayerGroup && !reportingMap.hasLayer(stateCirclesLayerGroup)) reportingMap.addLayer(stateCirclesLayerGroup);
+  // BB14 guard, kept: never hand over to a tier that has nothing in it. The
+  // layers are built from different payloads (state bubbles from top_states,
+  // city bubbles and listing markers from map_records, which the server caps
+  // at 1000 rows), so a tier can legitimately be empty while the one below it
+  // is full. Falling back beats handing the user a blank map.
+  if (tier === "listing" && !layerHasContentInView(storeMarkersLayerGroup)) {
+    tier = currentZoom >= 6.0 ? "city" : "state";
   }
-  // Gap ZIPs are an analysis layer, so keep them visible at every zoom level.
-  if (gapMarkersLayerGroup && !reportingMap.hasLayer(gapMarkersLayerGroup)) {
-    reportingMap.addLayer(gapMarkersLayerGroup);
+  if (tier === "city" && !layerHasContentInView(cityCirclesLayerGroup)) {
+    tier = "state"; // and if the state bubbles are empty too, there was genuinely nothing to draw
+  }
+
+  toggleMapLayer(stateCirclesLayerGroup, tier === "state");
+  toggleMapLayer(cityCirclesLayerGroup, tier === "city");
+  toggleMapLayer(storeMarkersLayerGroup, true);
+  toggleMapLayer(gapMarkersLayerGroup, true);
+
+  if (tier === "state") {
+    // Zoomed back out to national tier: the sampled payload is the right
+    // data source again, and a scope picked up from a bubble click (not the
+    // filter dropdown) no longer applies.
+    if (!String(el("reportStateFilter")?.value || "").trim()) currentMapScopeState = "";
+  } else {
+    maybeFetchFullScopeMapData();
+  }
+}
+
+// Debounced so a rapid pan/zoom inside a state does not fire a request per
+// frame - only once movement settles does this check run (called from the
+// same zoomend/moveend path as syncMapLayersByZoom).
+function maybeFetchFullScopeMapData() {
+  if (!reportingMap) return;
+  if (scopedMapFetchTimer) clearTimeout(scopedMapFetchTimer);
+  scopedMapFetchTimer = setTimeout(() => {
+    scopedMapFetchTimer = null;
+    if (!reportingMap || reportingMap.getZoom() < SCOPED_MAP_ZOOM_THRESHOLD) return;
+    const activeStateFilter = String(el("reportStateFilter")?.value || "").trim().toUpperCase();
+    const scopeState = activeStateFilter || currentMapScopeState;
+    if (!scopeState) return; // no narrower-than-national area identified yet
+    fetchFullScopeMapRecords(scopeState);
+  }, SCOPED_MAP_FETCH_DEBOUNCE_MS);
+}
+
+// Fetches the FULL (server-capped, not nationally-sampled) listing set for
+// one state, so zooming into it shows its real depth instead of the ~1/state
+// slice the national round-robin sample hands out. See reportingQueryString
+// for the shared filter params this reuses - only `state` and the new
+// `map_scope=full` flag are added on top.
+async function fetchFullScopeMapRecords(scopeState) {
+  const cacheKey = `${scopeState}|${reportingQueryString()}`;
+  if (scopedMapRecordsCache.has(cacheKey) || scopedMapFetchInFlight.has(cacheKey)) return;
+  scopedMapFetchInFlight.add(cacheKey);
+  try {
+    const params = new URLSearchParams(reportingQueryString());
+    params.set("state", scopeState);
+    // Backend contract (see workflow_server.py map_query spec): when a
+    // state/county/city/zip filter narrows scope, skip the national
+    // round-robin ranking/limit entirely and return that area's full set up
+    // to its own (higher) ceiling instead of the 5,000-row national cap.
+    params.set("map_scope", "full");
+    const response = await fetch(`/api/reporting?${params.toString()}`);
+    if (!response.ok) return;
+    const result = await response.json();
+    const records = result.map_records || [];
+    scopedMapRecordsCache.set(cacheKey, records);
+    // Only redraw if the user is still looking at this same scope - a slow
+    // response landing after the user panned away should not yank the map.
+    const activeStateFilter = String(el("reportStateFilter")?.value || "").trim().toUpperCase();
+    const stillRelevant = (activeStateFilter || currentMapScopeState) === scopeState
+      && reportingMap && reportingMap.getZoom() >= SCOPED_MAP_ZOOM_THRESHOLD;
+    if (stillRelevant) {
+      renderReportingMap(
+        records,
+        lastRenderedMapPayload.gapRecords,
+        lastRenderedMapPayload.stateRecords,
+        lastRenderedMapPayload.filters,
+        { fullScope: true, scopeLabel: stateCodeToName[scopeState] || scopeState }
+      );
+    }
+  } catch (_) {
+    // Silent - the already-rendered sampled data stays on screen.
+  } finally {
+    scopedMapFetchInFlight.delete(cacheKey);
   }
 }
 
 let mapZoomListenerAttached = false;
 
-function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [], filters = {}) {
+function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [], filters = {}, opts = {}) {
       if (!el("reportingMap")) return;
+      lastRenderedMapPayload = { gapRecords, stateRecords, filters };
+      // A fresh national render (not a scoped follow-up fetch) means the
+      // scope caches and any narrowed-by-click state no longer necessarily
+      // match what is on screen - the filters could have changed underneath
+      // them. Clearing here (not on every call) keeps a scoped re-render
+      // from wiping its own just-fetched cache entry.
+      if (!opts.fullScope) {
+        scopedMapRecordsCache.clear();
+        if (!String(el("reportStateFilter")?.value || "").trim()) currentMapScopeState = "";
+      }
       const displayStates = (stateRecords || []).filter((row) => Number(row.locations || 0) > 0);
       if (!window.L) {
         renderStaticUSMap(displayStates);
@@ -465,23 +766,39 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [],
         stateBoundaryLayerGroup = L.layerGroup().addTo(reportingMap);
         stateCirclesLayerGroup = L.layerGroup().addTo(reportingMap);
         cityCirclesLayerGroup = L.layerGroup().addTo(reportingMap);
-        pinMarkersLayerGroup = L.layerGroup().addTo(reportingMap);
         gapMarkersLayerGroup = L.layerGroup().addTo(reportingMap);
+        storeMarkersLayerGroup = L.layerGroup().addTo(reportingMap);
       }
       if (!mapZoomListenerAttached && reportingMap) {
+        // moveend as well as zoomend: which tier is worth showing now depends
+        // on what is in the current view (layerHasContentInView), so panning
+        // from a state with city detail to one without has to re-decide it,
+        // exactly as zooming does. Leaflet fires moveend after a programmatic
+        // setView too, which is how the state-bubble click lands on the right
+        // tier.
         reportingMap.on("zoomend", syncMapLayersByZoom);
+        reportingMap.on("moveend", syncMapLayersByZoom);
         mapZoomListenerAttached = true;
       }
       if (mapMarkerLayerGroup) mapMarkerLayerGroup.clearLayers();
       if (stateBoundaryLayerGroup) stateBoundaryLayerGroup.clearLayers();
       if (stateCirclesLayerGroup) stateCirclesLayerGroup.clearLayers();
       if (cityCirclesLayerGroup) cityCirclesLayerGroup.clearLayers();
-      if (pinMarkersLayerGroup) pinMarkersLayerGroup.clearLayers();
       if (gapMarkersLayerGroup) gapMarkersLayerGroup.clearLayers();
+      if (storeMarkersLayerGroup) storeMarkersLayerGroup.clearLayers();
 
       const primaryBrand = selectedPrimaryBrand(filters);
       const primaryBrandKey = primaryBrand.toLowerCase();
+      // Two collections, because "everything on the map" and "what the user
+      // just filtered to" are not the same set. bounds is the whole drawing;
+      // focusBounds holds only the things that actually honour a city/ZIP
+      // filter - the listing markers and the city bubbles built from them.
+      // State centroids and whitespace gap ZIPs are deliberately kept OUT of
+      // focusBounds: the gap payload is filtered by state but not by county,
+      // city or ZIP, so including it made "filter to one city" fit the whole
+      // state and the map never actually drilled in.
       const bounds = [];
+      const focusBounds = [];
       const activeStateFilter = String(el("reportStateFilter")?.value || "").toUpperCase();
       const activeCountyFilter = String(el("reportCountyFilter")?.value || "");
       const activeCityFilter = String(el("reportCityFilter")?.value || "");
@@ -568,8 +885,12 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [],
           offset: [0, -10]
         });
 
-        // Click on state bubble zooms into state at city level
+        // Click on state bubble zooms into state at city level. Record the
+        // scope so maybeFetchFullScopeMapData() (fired from the resulting
+        // zoomend) knows which state's full listing set to fetch - setView
+        // alone carries no state identity by the time that handler runs.
         marker.on("click", () => {
+          currentMapScopeState = stateCode;
           if (reportingMap) reportingMap.setView([lat, lon], 7);
         });
 
@@ -605,6 +926,7 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [],
         const avgLat = item.lats.reduce((a, b) => a + b, 0) / item.lats.length;
         const avgLon = item.lons.reduce((a, b) => a + b, 0) / item.lons.length;
         bounds.push([avgLat, avgLon]);
+        focusBounds.push([avgLat, avgLon]);
 
         const cityMarker = L.circleMarker([avgLat, avgLon], {
           radius: Math.max(7, Math.min(22, Math.sqrt(item.count) * 2.2)),
@@ -627,8 +949,11 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [],
           offset: [0, -8]
         });
 
-        // Click on city bubble zooms into city at street/pin level
+        // Click on city bubble zooms into city at street/pin level; keep the
+        // state scope so the full-listing fetch stays active while drilling
+        // deeper rather than resetting to national.
         cityMarker.on("click", () => {
+          if (item.state) currentMapScopeState = item.state;
           if (reportingMap) reportingMap.setView([avgLat, avgLon], 11);
         });
 
@@ -641,6 +966,7 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [],
         const lon = parseFloat(rec.longitude);
         if (!isUSLatLong(lat, lon)) return; // Discard non-US coordinates
         bounds.push([lat, lon]);
+        focusBounds.push([lat, lon]);
         const isPrimary = primaryBrandKey && String(rec.brand || "").toLowerCase() === primaryBrandKey;
         const color = primaryBrandKey ? (isPrimary ? "#16a34a" : "#dc2626") : "#3b82f6";
         const stateLabel = rec.state_name || rec.state || "";
@@ -664,7 +990,7 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [],
             ${rec.phone_number ? `<span style="color: #64748b;">📞 ${escapeHtml(rec.phone_number)}</span>` : ""}
           </div>
         `);
-        gapMarkersLayerGroup.addLayer(marker);
+        storeMarkersLayerGroup.addLayer(marker);
       });
 
       gapRecords.forEach((gap) => {
@@ -694,13 +1020,38 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [],
             <span><strong>Median Age:</strong> ${gap.median_age || "N/A"} yrs</span>
           </div>
         `);
-        pinMarkersLayerGroup.addLayer(marker);
+        gapMarkersLayerGroup.addLayer(marker);
       });
+
+      // Say so when the map is only showing a slice (see
+      // MAP_RECORD_DISPLAY_CAP). A partial map that looks complete is how
+      // "only one area has listings" gets read off a national view.
+      const mapNote = el("reportingMapNote");
+      if (mapNote) {
+        if (opts.fullScope) {
+          mapNote.textContent = `Showing the full listing set for ${escapeHtml(opts.scopeLabel || "this area")} (${formatNumber((mapRecords || []).length)} listings), not the national sample.`;
+        } else {
+          mapNote.textContent = (mapRecords || []).length >= MAP_RECORD_DISPLAY_CAP
+            ? `Showing the first ${formatNumber(MAP_RECORD_DISPLAY_CAP)} listings this report returned, not every listing - each marker is one listing, and they are not spread evenly across states. Filter by brand, state or city to map an area in full, or zoom into a state on the map to load its full listing set. The state bubbles above them are counted over all listings.`
+            : `Each marker is one listing - the same "Total Listings" count above, not the ZIP-level "Covered Markets" count (several listings can share one ZIP).`;
+        }
+      }
 
       syncMapLayersByZoom();
 
-      if (bounds.length && shouldFocusFilteredArea) {
-        reportingMap.fitBounds(bounds, { padding: [30, 30], maxZoom: 12 });
+      // A geographic filter means "take me there"; no filter means the whole
+      // country, which is also what Reset All lands on once it has cleared
+      // the geo controls and reloaded.
+      if (shouldFocusFilteredArea && (focusBounds.length || bounds.length)) {
+        // Falling back to bounds means the filtered area returned no mappable
+        // listing at all (it can: the server caps map_records - see
+        // MAP_RECORD_DISPLAY_CAP - so a real state can come back with none of
+        // its rows). That leaves a state centroid, a single point, and
+        // fitBounds on one point goes straight to maxZoom - hence the lower
+        // ceiling there. Zooming to street level on a guessed centroid is
+        // worse than showing the state.
+        const focused = focusBounds.length > 0;
+        reportingMap.fitBounds(focused ? focusBounds : bounds, { padding: [30, 30], maxZoom: focused ? 12 : 7 });
       } else {
         reportingMap.fitBounds(DEFAULT_US_BOUNDS, { padding: [18, 18], maxZoom: DEFAULT_US_MAP_VIEW.zoom });
       }
@@ -722,6 +1073,10 @@ function syncReportingFilters(result) {
           mainSel.innerHTML = '<option value="">All Brands</option>';
         }
         updateCompetitorOptions();
+        // Same rule as the geo cascade: the brand list was just rewritten
+        // (up to 1,002 of them), so the search has to be pointed at the new
+        // options rather than the ones it cached last load.
+        refreshReportFilterSearch();
         brandDropdownsInitialized = true;
       }
       loadGeoOptions();
@@ -783,18 +1138,68 @@ function setupBrandDropdownListeners() {
       const dropdownBtn = el("competitorDropdownBtn");
       const dropdownMenu = el("competitorDropdownMenu");
       if (dropdownBtn && dropdownMenu) {
+        // Closing this menu is what releases the competitor ticks auto-apply
+        // held back while it was open (see setupReportAutoApply), so both
+        // ways of closing it have to say so - hence the open/closed state is
+        // read out rather than just toggled.
         dropdownBtn.addEventListener("click", (e) => {
           e.stopPropagation();
-          dropdownMenu.style.display = dropdownMenu.style.display === "block" ? "none" : "block";
+          const opening = dropdownMenu.style.display !== "block";
+          dropdownMenu.style.display = opening ? "block" : "none";
+          if (!opening) reportAutoApply?.resume();
         });
         document.addEventListener("click", (e) => {
           if (!e.target.closest("#competitorDropdownContainer")) {
+            const wasOpen = dropdownMenu.style.display === "block";
             dropdownMenu.style.display = "none";
+            if (wasOpen) reportAutoApply?.resume();
           }
         });
       }
       setupBrandComparisonViewSwitcher();
     }
+
+// Mounts the shared auto-apply switch on the Location Intelligence rail and
+// wires the filters that need nothing more than "changed, reload". The
+// geographic ones are deliberately absent: they live in integrations.html
+// because changing a state also has to repopulate county/city/ZIP, which
+// must happen whether auto-apply is on or off - only their reload is handed
+// back here via reportAutoApply.schedule().
+function setupReportAutoApply() {
+  reportAutoApply = attachAutoApplyToggle("reportAutoApplyHost", {
+    id: "reportAutoApplyToggle",
+    title: "Run the report automatically whenever a filter changes. Turn it off to set several filters first, then use Apply All Filters.",
+    watchIds: ["reportMainBrandSelect", "reportMinPopFilter", "reportMinIncomeFilter", "reportMaxAgeFilter"],
+    // Competitor brands are ticked inside an open dropdown, and a reload
+    // rebuilds that very list (syncReportingFilters -> updateCompetitorOptions
+    // re-renders #competitorBrandChecks), throwing away the brand search the
+    // user typed and moving the rows under their cursor mid-selection. Hold
+    // the reload until the dropdown closes - which is the same call the
+    // manual Apply button already makes before it runs.
+    shouldDefer: () => el("competitorDropdownMenu")?.style.display === "block",
+    onApply: () => {
+      reportLoaded = false;
+      loadReporting({ interactive: true });
+    }
+  });
+  const competitorChecks = el("competitorBrandChecks");
+  if (competitorChecks) {
+    // Delegated to the container rather than bound to the checkboxes:
+    // updateCompetitorOptions() replaces its contents on every report load,
+    // so per-checkbox listeners would be discarded with them. The container
+    // element itself survives.
+    competitorChecks.addEventListener("change", (event) => {
+      // The brand search box sits in the same container and fires change on
+      // blur; it only hides rows, it is not a filter on the report.
+      const changedName = event.target?.name || "";
+      if (changedName === "competitorBrand" || changedName === "competitorBrand_selectAll") reportAutoApply?.schedule();
+    });
+    competitorChecks.addEventListener("click", (event) => {
+      // All / None move the checkboxes in code, which fires no change event.
+      if (event.target?.closest?.("[data-action='select-all'],[data-action='deselect-all']")) reportAutoApply?.schedule();
+    });
+  }
+}
 
 let activeBrandComparisonView = "benchmark";
 
@@ -1059,15 +1464,50 @@ function renderCompetitorBenchmarkView(primaryRow, competitorRows, totals = {}, 
     });
   });
 }
-async function loadGeoOptions() {
-      const state = el("reportStateFilter")?.value || "";
-      const county = el("reportCountyFilter")?.value || "";
+// ---------------------------------------------------------------------------
+// Geographic filters - ONE implementation, used by BOTH reporting tabs
+// ---------------------------------------------------------------------------
+// Location Intelligence and Data Quality show the same four cascading
+// geographic controls (State -> County -> City -> ZIP), so the loader, the
+// cascade and the ZIP typeahead live here once and are parameterised by
+// element id. The two tabs previously carried separate filter code and
+// drifted apart - tab 2 was left with a lone State select while tab 1
+// cascaded all four - which is what the user kept reporting ("geo filters on
+// tab 2 aren't same as tab 1"). A second copy is the failure mode, not the
+// fix: any behaviour added below is on both tabs the moment it is written.
+//
+// A rail descriptor names controls, nothing more:
+//   state/county/city  the selects this rail reads the current selection FROM
+//                      and rebuilds from /api/geo/options
+//   zip / zipList      the ZIP input and the <datalist> its server-side
+//                      suggestions are written into
+//   ownsStateOptions   false when the tab supplies its own State list (Data
+//                      Quality lists only states that actually have issues,
+//                      from /api/reporting/quality) - the cascade still READS
+//                      that select, it just must not overwrite what the tab
+//                      put in it
+//   onOptionsRebuilt   re-points that rail's search component at the options
+//                      just written, since each rail attaches the shared
+//                      search component to its own list of control ids
+const REPORT_GEO_RAIL = {
+  state: "reportStateFilter",
+  county: "reportCountyFilter",
+  city: "reportCityFilter",
+  zip: "reportZipFilter",
+  zipList: "zipSuggestions",
+  ownsStateOptions: true,
+  onOptionsRebuilt: () => refreshReportFilterSearch(),
+};
+
+async function loadGeoOptions(rail = REPORT_GEO_RAIL) {
+      const state = el(rail.state)?.value || "";
+      const county = el(rail.county)?.value || "";
       try {
         const response = await fetch(`/api/geo/options?state=${encodeURIComponent(state)}&county=${encodeURIComponent(county)}`);
         const data = await response.json();
         if (!response.ok) return;
 
-        const stateSel = el("reportStateFilter");
+        const stateSel = rail.ownsStateOptions === false ? null : el(rail.state);
         if (stateSel && stateSel.options.length <= 1 && data.states?.length) {
           const current = stateSel.value;
           stateSel.innerHTML = '<option value="">All States</option>' + data.states.map((st) => {
@@ -1078,7 +1518,7 @@ async function loadGeoOptions() {
           stateSel.value = current;
         }
 
-        const countySel = el("reportCountyFilter");
+        const countySel = el(rail.county);
         if (countySel) {
           const currentCounty = countySel.value;
           const countyList = data.counties || [];
@@ -1086,92 +1526,95 @@ async function loadGeoOptions() {
           countySel.value = countyList.includes(currentCounty) ? currentCounty : "";
         }
 
-        const citySel = el("reportCityFilter");
+        const citySel = el(rail.city);
         if (citySel) {
           const currentCity = citySel.value;
           const cityList = data.cities || [];
           citySel.innerHTML = '<option value="">All Cities</option>' + cityList.map((ct) => `<option value="${escapeHtml(ct)}">${escapeHtml(ct)}</option>`).join("");
           citySel.value = cityList.includes(currentCity) ? currentCity : "";
         }
-        // Cache the full option set first, then re-narrow it - otherwise a
-        // repopulate would silently discard whatever the user had typed.
-        GEO_SEARCHABLE_FILTERS.forEach(([selectId]) => {
-          cacheGeoOptions(selectId);
-          applyGeoOptionSearch(selectId);
-        });
+        // State/county/city were just rewritten from the server response, so
+        // the search component has to re-read them here or it keeps offering
+        // the previous state's counties. Each rail re-attaches its own
+        // controls - hence the hook rather than a hard-coded call.
+        (rail.onOptionsRebuilt || refreshReportFilterSearch)();
       } catch (err) {}
     }
 
-const GEO_SEARCHABLE_FILTERS = [
-  ["reportStateFilter", "states"],
-  ["reportCountyFilter", "counties"],
-  ["reportCityFilter", "cities"],
-];
-const geoOptionCache = {};
+// Every long <select> on the Location rail, searched by the SAME component
+// as the brand pickers (attachSearchableSelect, common.js). This replaced a
+// second, parallel search implementation that lived here - it had no
+// suggestion panel, no open-on-focus, no re-homing, and a "Type 2+ letters
+// to search counties" placeholder explaining a minimum length that a
+// client-side filter over already-fetched options has no reason to have.
+// The Data Quality rail calls the same component on its own selects
+// (reporting-tabs.js), so both tabs search the same way.
+const REPORT_SEARCHABLE_FILTERS = ["reportMainBrandSelect", "reportStateFilter", "reportCountyFilter", "reportCityFilter"];
 
-function setupGeoFilterSearch() {
-      GEO_SEARCHABLE_FILTERS.forEach(([selectId, label]) => {
-        const select = el(selectId);
-        if (!select || document.getElementById(`${selectId}Search`)) return;
-        const search = document.createElement("input");
-        search.id = `${selectId}Search`;
-        search.type = "search";
-        search.className = "report-filter-control report-filter-search";
-        search.placeholder = `Type 2+ letters to search ${label}`;
-        search.setAttribute("aria-label", `Search ${label}`);
-        search.autocomplete = "off";
-        select.parentNode.insertBefore(search, select);
-        search.addEventListener("input", () => applyGeoOptionSearch(selectId));
-        cacheGeoOptions(selectId);
-      });
-    }
+// MUST be called immediately after anything rebuilds one of these selects.
+// attachSearchableSelect caches the option list, and re-reads it from the
+// select on every call - so a rebuild that is not followed by a re-attach
+// leaves the search filtering a list that no longer matches the control
+// (BB9/BB10: a newly created brand was invisible to the search because the
+// cache predated it). threshold 15 keeps the chrome off short lists - a
+// three-county dropdown does not need a search box - and minChars 1 matches
+// the brand pickers in mapper.js.
+function refreshReportFilterSearch() {
+  if (typeof attachSearchableSelect !== "function") return;
+  REPORT_SEARCHABLE_FILTERS.forEach((selectId) => attachSearchableSelect(selectId, { threshold: 15, minChars: 1 }));
+}
 
-function cacheGeoOptions(selectId) {
-      const select = el(selectId);
-      if (!select || select.options.length <= 1) return;
-      geoOptionCache[selectId] = Array.from(select.options).map((option) => ({ value: option.value, text: option.textContent }));
-    }
-
-function applyGeoOptionSearch(selectId) {
-      const select = el(selectId);
-      const search = document.getElementById(`${selectId}Search`);
-      const allOptions = geoOptionCache[selectId];
-      if (!select || !search || !allOptions || !allOptions.length) return;
-      const query = search.value.trim().toLowerCase();
-      const selected = select.value;
-      // Under 2 characters there is nothing worth narrowing by, so show the
-      // full list. The blank "All X" option and whatever is currently
-      // selected always survive the filter, so a search can never strip the
-      // active selection out of the control.
-      const matches = query.length < 2
-        ? allOptions
-        : allOptions.filter((option) => !option.value || option.value === selected || option.text.toLowerCase().includes(query));
-      select.innerHTML = matches.map((option) => `<option value="${escapeHtml(option.value)}">${escapeHtml(option.text)}</option>`).join("");
-      select.value = selected;
-    }
-let zipTypeaheadTimer = null;
-let zipTypeaheadRequestId = 0;
-function setupZipTypeahead() {
-      const zipInput = el("reportZipFilter");
-      const datalist = el("zipSuggestions");
+// "Reset All" has to clear the rail's search boxes too: a search box still
+// holding text over a select showing only its matches is a filter the user
+// just asked to be rid of. Takes any node in the rail so each tab clears its
+// own - shared with the Data Quality rail's Reset All (reporting-tabs.js).
+function clearReportFilterSearch(nodeInRail) {
+  const rail = nodeInRail?.closest?.(".report-filter-rail");
+  if (!rail) return;
+  rail.querySelectorAll('input[type="search"]').forEach((input) => {
+    input.value = "";
+    // Re-expands the select this input had narrowed: attachSearchableSelect
+    // assigns oninput as a property, and it rebuilds the control from the
+    // cached full list whenever the query is empty.
+    if (typeof input.oninput === "function") input.oninput();
+  });
+}
+// The one control on either rail that is NOT a searchable select: 30k+ ZIPs
+// are never all in the page, so this queries /api/zips/search as the user
+// types and writes the matches into that rail's own <datalist>. Same function
+// for both tabs, driven by the rail descriptor - the Data Quality tab gets
+// this behaviour by passing its ids, not by getting a second copy of it.
+function setupZipTypeahead(rail = REPORT_GEO_RAIL) {
+      const zipInput = el(rail.zip);
+      const datalist = el(rail.zipList);
       if (!zipInput || !datalist) return;
 
+      // Debounce timer and request id are per rail (closure state) rather
+      // than module-level, now that two rails run this same function: shared
+      // state would let a keystroke on one rail cancel the other rail's
+      // in-flight request and silently drop its suggestions.
+      let typeaheadTimer = null;
+      let latestRequestId = 0;
+
       zipInput.addEventListener("input", () => {
-        clearTimeout(zipTypeaheadTimer);
+        clearTimeout(typeaheadTimer);
         const query = zipInput.value.trim();
-        const requestId = ++zipTypeaheadRequestId;
+        const requestId = ++latestRequestId;
         if (!query) {
           datalist.innerHTML = "";
           return;
         }
-        zipTypeaheadTimer = setTimeout(async () => {
-          const state = el("reportStateFilter")?.value || "";
-          const county = el("reportCountyFilter")?.value || "";
-          const city = el("reportCityFilter")?.value || "";
+        typeaheadTimer = setTimeout(async () => {
+          // Scoped by whatever this rail's cascade has already narrowed to,
+          // so ZIP is the last step of the same State -> County -> City chain
+          // rather than a free-floating search over the whole country.
+          const state = el(rail.state)?.value || "";
+          const county = el(rail.county)?.value || "";
+          const city = el(rail.city)?.value || "";
           try {
             const resp = await fetch(`/api/zips/search?q=${encodeURIComponent(query)}&state=${encodeURIComponent(state)}&county=${encodeURIComponent(county)}&city=${encodeURIComponent(city)}`);
             const data = await resp.json();
-            if (requestId !== zipTypeaheadRequestId) return;
+            if (requestId !== latestRequestId) return;
             if (resp.ok && data.zips) {
               datalist.innerHTML = data.zips.map((z) => `<option value="${escapeHtml(z.zip_code)}">${escapeHtml(z.zip_code)} - ${escapeHtml(z.city_name)}, ${escapeHtml(z.state_name || stateCodeToName[z.state_code] || "")} (Pop: ${formatNumber(z.population)})</option>`).join("");
             }
@@ -1286,7 +1729,7 @@ function setupSampleRecordsDownload() {
     btn.classList.add("loading");
     btn.disabled = true;
     if (icon) icon.textContent = "⏳";
-    if (text) text.textContent = "Preparing Excel…";
+    if (text) text.textContent = "Preparing Excel";
 
     try {
       const queryString = reportingQueryString();
@@ -1334,7 +1777,7 @@ function setupSampleRecordsDownload() {
       btn.disabled = false;
       if (icon) icon.textContent = "📥";
       if (text) text.textContent = "Download Excel";
-      showAppNotice(productSafeError(err.message, "Excel export failed."), "Export failed");
+      showAppNotice(productSafeError(err.message, "Excel export failed."), "Export failed", "error");
     }
   });
 }
@@ -1758,16 +2201,60 @@ async function refreshReportingNow() {
       }
 }
 
+// The enrichment control does not stop enrichment any more - it eases it
+// off. The queue keeps draining at roughly 2 rows every 30 seconds instead of
+// 10 every 5, which is slow enough to stay out of the user's way while still
+// making progress. That makes the button a two-state toggle over one route:
+// POST /api/enrichment/stop eases, the same route with {resume:true} returns
+// to full speed. Its label therefore has to describe what a click will DO,
+// and it is rendered from the server's throttled flag rather than flipped
+// locally - otherwise reloading the page mid-ease would show "Ease Off" over
+// an already-eased queue.
+const ENRICHMENT_EASE_LABEL = "Ease Off Enriching";
+const ENRICHMENT_RESUME_LABEL = "Resume Full Speed";
+// Deliberately no spinner, no processed count and no "current record" line:
+// at this pace a progress indicator crawls, and a crawling progress bar reads
+// as a hung app rather than a considerate one. One calm sentence, so the
+// quiet is explained rather than mistaken for nothing happening.
+const ENRICHMENT_EASED_NOTE = "Enrichment eased off. It keeps working quietly in the background.";
+
+function renderEnrichmentToggle(button, eased) {
+  if (!button) return;
+  button.dataset.enrichmentMode = eased ? "eased" : "full";
+  button.textContent = eased ? ENRICHMENT_RESUME_LABEL : ENRICHMENT_EASE_LABEL;
+  button.title = eased
+    ? "Enrichment is running at a trickle in the background. Put it back to full speed."
+    : "Keep enriching, but slowly enough to stay out of your way. Nothing is discarded and nothing stops.";
+}
+
+// Fast only while there is something to watch. Eased work moves a couple of
+// rows in half a minute and displays nothing at all, and an idle app displays
+// nothing either - polling those every 3s is hundreds of requests an hour to
+// learn nothing, on a 512MB deployment. The slow tick still has a job: it is
+// what keeps the toggle honest about the server's current pace.
+const ENRICHMENT_POLL_MS = 3000;
+const ENRICHMENT_QUIET_POLL_MS = 30000;
+let enrichmentPollIntervalMs = 0;
+
 function stopEnrichmentStatusPolling() {
       if (enrichmentStatusTimer) {
         window.clearInterval(enrichmentStatusTimer);
         enrichmentStatusTimer = null;
       }
+      enrichmentPollIntervalMs = 0;
+    }
+
+// A running poller is deliberately left alone by startEnrichmentStatusPolling
+// below, so anything that CHANGES the thing being polled has to ask for a
+// fresh look: this fires an immediate poll and re-picks the cadence.
+function restartEnrichmentStatusPolling() {
+      stopEnrichmentStatusPolling();
+      startEnrichmentStatusPolling();
     }
 
 function startEnrichmentStatusPolling() {
       if (enrichmentStatusTimer) return;
-      let sawRunning = false;
+      let sawWork = false;
       const poll = async () => {
         try {
           const response = await fetch("/api/enrichment/status", { cache: "no-store" });
@@ -1775,10 +2262,26 @@ function startEnrichmentStatusPolling() {
           const state = await response.json();
           const target = el("reportingDataRefreshStatus");
           const stopButton = el("stopEnrichmentBtn");
-          const running = state.refreshing || state.state === "running";
-          if (running) sawRunning = true;
+          // "eased" is a state of its own, not a flavour of running, and it
+          // outranks running: the server reports state="eased" while work is
+          // in flight under the throttle, and keeps throttled=true even once
+          // the queue goes quiet (the pace is a setting, not a run). Either
+          // way the user asked not to be shown the processing.
+          const eased = state.throttled === true || state.state === "eased";
+          const running = !eased && (state.refreshing || state.state === "running");
+          if (running || eased) sawWork = true;
+          // Always re-rendered, never toggled on click alone: this is what
+          // makes the button correct after a reload, and after another tab
+          // (or the shutdown path) changes the pace.
+          renderEnrichmentToggle(stopButton, eased);
           if (!target) return;
-          if (running) {
+          if (eased) {
+            // The toggle stays visible - it is the only way back to full
+            // speed - but everything that reads as "processing" goes.
+            target.className = "action-feedback";
+            target.textContent = ENRICHMENT_EASED_NOTE;
+            stopButton?.classList.remove("hidden");
+          } else if (running) {
             target.className = "action-feedback";
             target.innerHTML = `${busyMarkup("Enriching in progress")} <small>Processed ${Number(state.processed || 0)} records${state.current_id ? `; current ${escapeHtml(state.current_id)}` : ""}.</small>`;
             stopButton?.classList.remove("hidden");
@@ -1795,12 +2298,26 @@ function startEnrichmentStatusPolling() {
           }
           // Stop polling once a run we were watching has reached a terminal
           // state - otherwise this timer runs every 3s for the rest of the
-          // session (leak risk on a 512MB deployment).
-          if (sawRunning && !running) stopEnrichmentStatusPolling();
+          // session (leak risk on a 512MB deployment). An eased run is NOT
+          // terminal: the queue is still draining and, more importantly, the
+          // toggle has to keep reflecting the server's pace or it would sit
+          // offering the wrong action. So it keeps polling - slowly.
+          if (sawWork && !running && !eased) {
+            stopEnrichmentStatusPolling();
+            return;
+          }
+          // Re-arm at the cadence the current state deserves.
+          const wanted = running ? ENRICHMENT_POLL_MS : ENRICHMENT_QUIET_POLL_MS;
+          if (wanted !== enrichmentPollIntervalMs) {
+            if (enrichmentStatusTimer) window.clearInterval(enrichmentStatusTimer);
+            enrichmentPollIntervalMs = wanted;
+            enrichmentStatusTimer = window.setInterval(poll, wanted);
+          }
         } catch (_) {}
       };
       poll();
-      enrichmentStatusTimer = window.setInterval(poll, 3000);
+      enrichmentPollIntervalMs = ENRICHMENT_POLL_MS;
+      enrichmentStatusTimer = window.setInterval(poll, ENRICHMENT_POLL_MS);
     }
 
 async function refreshReportingData() {
@@ -1810,7 +2327,11 @@ async function refreshReportingData() {
       const previousButton = setButtonBusy(button, "Enriching");
       stopButton?.classList.remove("hidden");
       target.className = "action-feedback";
-      target.innerHTML = busyMarkup("Enriching in progress");
+      // Starting a run while the pace is eased must not flash the very
+      // spinner the easing exists to remove; the poll below settles both
+      // cases within a tick either way.
+      if (stopButton?.dataset.enrichmentMode === "eased") target.textContent = ENRICHMENT_EASED_NOTE;
+      else target.innerHTML = busyMarkup("Enriching in progress");
       try {
         const response = await fetch("/api/reporting/refresh", {
           method: "POST",
@@ -1821,6 +2342,10 @@ async function refreshReportingData() {
         if (!response.ok) throw new Error(result.error || "Could not refresh data.");
         target.className = "action-feedback ok";
         target.textContent = `Enrichment started for ${result.rows || 0} records.`;
+        // The poller may be sitting on its quiet 30s tick (nothing was
+        // running a moment ago), and a run the user just started should not
+        // wait that long to be picked up and shown.
+        restartEnrichmentStatusPolling();
       } catch (error) {
         target.className = "action-feedback error";
         target.textContent = productSafeError(error.message, "Could not refresh data.");
@@ -1830,8 +2355,45 @@ async function refreshReportingData() {
       }
     }
 
-async function stopEnrichment() {
-      await fetch("/api/enrichment/stop", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+// Both directions of the toggle. Which one a click means is read off the
+// button, whose label the status poll keeps truthful - not off a module flag
+// that a reload would lose. The route is still called /api/enrichment/stop:
+// it keeps its name for existing clients, but with {} it eases and with
+// {resume:true} it returns to full speed. Neither touches the hard-stop flag,
+// so nothing is abandoned and the queue is never left half-processed.
+async function toggleEnrichmentEasing() {
+      const button = el("stopEnrichmentBtn");
       const target = el("reportingDataRefreshStatus");
-      if (target) { target.className = "action-feedback warn"; target.textContent = "Stop requested. The current database operation will finish safely."; }
+      const resume = button?.dataset.enrichmentMode === "eased";
+      if (button) button.disabled = true;
+      try {
+        const response = await fetch("/api/enrichment/stop", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(resume ? { resume: true } : {})
+        });
+        let result = {};
+        try { result = await response.json(); } catch (_) {}
+        if (!response.ok) throw new Error(result.error || "Could not change the enrichment pace.");
+        // The server's own answer decides the new state, not the click that
+        // asked for it - the two can disagree (another tab, a run that ended
+        // meanwhile), and the server is the one that knows.
+        const eased = result.throttled === true || result.state === "eased";
+        renderEnrichmentToggle(button, eased);
+        if (target) {
+          target.className = "action-feedback";
+          target.textContent = eased ? ENRICHMENT_EASED_NOTE : "Enrichment is back at full speed.";
+        }
+        // The pace just changed under the poller, so it needs a fresh look:
+        // this confirms the control against the server immediately and moves
+        // the tick to the cadence the new pace deserves.
+        restartEnrichmentStatusPolling();
+      } catch (error) {
+        if (target) {
+          target.className = "action-feedback error";
+          target.textContent = productSafeError(error.message, "Could not change the enrichment pace.");
+        }
+      } finally {
+        if (button) button.disabled = false;
+      }
     }

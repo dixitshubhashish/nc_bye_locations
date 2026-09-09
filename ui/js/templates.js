@@ -11,7 +11,7 @@ const TEMPLATE_CACHE_TTL_MS = 60 * 1000;
 // Without this guard, two concurrent loadTemplateFilters().then(
 // loadTemplateLibrary) chains race on #templateResults - whichever
 // resolves last wins, and if that one hits an error or a slower response,
-// it can stomp the other call's already-rendered table with "Loading..."
+// it can stomp the other call's already-rendered table with "Loading"
 // or an error, leaving the table never actually shown.
 function loadTemplateLibrary() {
       if (loadTemplateLibraryPromise) return loadTemplateLibraryPromise;
@@ -182,7 +182,7 @@ function setTemplateEditBrandLock(locked, businessId = "", brandLabel = "") {
         const node = el(id);
         if (!node) return;
         node.disabled = Boolean(locked);
-        node.title = locked ? "This template belongs to this business and cannot be re-pointed here." : "";
+        node.title = locked ? "This template belongs to this brand and cannot be re-pointed here." : "";
         // A locked picker must SHOW the brand, not the "Select an existing
         // brand" placeholder. The option can be genuinely absent (this select
         // hides duplicate brands, and the template may point at a hidden
@@ -257,6 +257,12 @@ function loadTemplateIntoEditor(template) {
       // grid + Save to work off sourceFields with no live rows.
       templateEditMode = true;
       sourceParsed = false;
+      // Opening a saved template to look at it is NOT unsaved work. This flag
+      // survives from any earlier parse in the same session, so navigating
+      // away after merely viewing a template raised "Save before you leave?"
+      // over a template the user had not touched. It is set again below only
+      // when a mapping is actually changed.
+      pendingUnsavedParse = false;
       optionalMappingKeys = new Set(Object.keys(mappingSelections).filter((key) => !primaryMappingKeys.has(key)));
       hiddenMappingKeys = new Set();
       autoMappedKeys = new Set();
@@ -310,10 +316,24 @@ async function loadTemplateSampleRecords() {
         }
         // Only columns that actually carry a value in this sample - a table
         // of empty columns is worse than a narrower, honest one.
-        const columns = Object.keys(records[0]).filter((key) => records.some((row) => row[key] !== null && row[key] !== ""));
+        const allKeys = Array.from(new Set(records.flatMap((row) => Object.keys(row))));
+        const columns = allKeys.filter((key) => records.some((row) => row[key] !== null && row[key] !== undefined && row[key] !== ""));
+        // Source columns with no mapped home yet. These are the ones the user
+        // came here to map, so they lead the table and are marked - showing
+        // only the already-mapped columns made the preview useless for the
+        // one job the template editor exists to do.
+        const unmapped = new Set(result.unmapped_columns || []);
+        columns.sort((a, b) => (unmapped.has(b) ? 1 : 0) - (unmapped.has(a) ? 1 : 0));
+        // Say which rows these are. When the template's own id matched
+        // nothing we fall back to the brand's rows, and claiming the template
+        // produced them would be untrue.
+        const provenance = result.matched_by === "business"
+          ? `Showing ${records.length} record${records.length === 1 ? "" : "s"} saved for this brand - use them to check the mapping.`
+          : `Showing ${records.length} record${records.length === 1 ? "" : "s"} already saved under this template.`;
         host.innerHTML = `
-          <div style="font-size:12px; color: var(--muted); margin-bottom:6px;">Showing ${records.length} record${records.length === 1 ? "" : "s"} already saved under this template.</div>
-          <div style="overflow-x:auto;"><table><thead><tr>${columns.map((c) => `<th>${escapeHtml(formatFieldLabel ? formatFieldLabel(c) : c)}</th>`).join("")}</tr></thead>
+          <div style="font-size:12px; color: var(--muted); margin-bottom:6px;">${provenance}</div>
+          ${unmapped.size ? `<div style="font-size:12px; margin-bottom:6px; color:#8a5a00;">${unmapped.size} column${unmapped.size === 1 ? "" : "s"} in this data ${unmapped.size === 1 ? "is" : "are"} not mapped yet - marked below, and available in the mapping list on the left.</div>` : ""}
+          <div style="overflow-x:auto;"><table><thead><tr>${columns.map((c) => `<th${unmapped.has(c) ? ' style="background:#fff8e6; color:#8a5a00;" title="Not mapped yet"' : ""}>${escapeHtml(formatFieldLabel ? formatFieldLabel(c) : c)}${unmapped.has(c) ? " *" : ""}</th>`).join("")}</tr></thead>
           <tbody>${records.map((row) => `<tr>${columns.map((c) => `<td>${escapeHtml(row[c] ?? "")}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
       } catch (error) {
         host.innerHTML = `<div class="status">${escapeHtml(productSafeError(error.message, "Could not load saved records for this template."))}</div>`;

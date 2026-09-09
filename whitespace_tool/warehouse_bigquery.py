@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -281,13 +282,26 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "longitude", "type": "FLOAT", "mode": "NULLABLE"},
         {"name": "first_observed_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
         {"name": "last_observed_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
-        {"name": "template_id", "type": "STRING", "mode": "NULLABLE"},
+        # RULE R0: a listing must always name the business AND the template
+        # that produced it. NOTE: BigQuery cannot promote an existing
+        # NULLABLE column, so this binds newly created tables; the write
+        # path in save_mapper() is what guarantees it for existing ones.
+        {"name": "template_id", "type": "STRING", "mode": "REQUIRED"},
         {"name": "ingestion_id", "type": "STRING", "mode": "NULLABLE"},
         {"name": "mapping_id", "type": "STRING", "mode": "NULLABLE"},
         {"name": "validation_status", "type": "STRING", "mode": "NULLABLE"},
         {"name": "validated", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "enriched_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
         {"name": "max_enriched", "type": "BOOLEAN", "mode": "NULLABLE"},
+        # Set TRUE when a human corrects this row through the review-edit
+        # path for a silver-layer validity failure (missing_state,
+        # unresolved_coordinates, etc.) - distinct from `validated`, which
+        # tracks enrichment having RUN, not a person having looked at it.
+        # State lives on bronze (the edit authority), not silver/gold, per
+        # the project's "fix must be recorded as state" rule - silver is
+        # rebuilt from bronze on every run, so the flag must be here to
+        # survive a rebuild.
+        {"name": "user_reviewed", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "is_sample_data", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "sample_batch_id", "type": "STRING", "mode": "NULLABLE"},
         # Enhanced location fields
@@ -391,6 +405,20 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         # data it was missing.
         {"name": "user_reviewed", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "user_reviewed_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
+    ],
+    # Durable record of "these two brand records are the same brand".
+    #
+    # A merge cannot live only in bronze. Silver is CREATE OR REPLACE'd from
+    # bronze on every rebuild, and a sample reload re-inserts the source rows
+    # wholesale - so a merge applied as a one-off UPDATE is undone the next
+    # time either runs, which is exactly the "I already merged this, why is it
+    # back" the user hit. Recording the mapping instead means every silver
+    # build re-applies it, so a merged pair can never reappear downstream.
+    "brand_merges": [
+        {"name": "source_business_id", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "target_business_id", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "merged_at", "type": "TIMESTAMP", "mode": "REQUIRED"},
+        {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
     ],
     "quality_fix_events": [
         {"name": "fix_id", "type": "STRING", "mode": "REQUIRED"},
@@ -742,7 +770,27 @@ def drop_dataset_tables(
     project_id: str,
     dataset_id: str,
     credentials_json: str | None = None,
+    client: Any = None,
+    max_workers: int = 8,
 ) -> dict[str, list[str]]:
+    """Drop every object in a dataset, concurrently, on a reused client.
+
+    Two things this used to do badly, both paid three times over by the master
+    delete (bronze, silver, gold):
+
+    * It built a brand new `bigquery.Client` on every call and never closed
+      it - the exact pattern this repo already records as the cause of a gRPC
+      socket/OOM leak. `client` can now be passed in so the caller's memoised
+      client is reused, and a client created here is closed.
+    * It deleted objects strictly one at a time. `delete_table` is a cheap
+      REST call (~0.5s), so the fix is concurrency, not batching.
+
+    MEASURED, because the obvious idea was wrong: collapsing the deletes into
+    one multi-statement DROP script made it SLOWER - 14 objects took 9.4s as a
+    single query job versus 8.1s deleting them one by one, because a BigQuery
+    query job carries seconds of fixed scheduling overhead that a REST delete
+    does not. Running the cheap calls in parallel is what actually helps.
+    """
     _assert_not_protected_dataset(dataset_id)
     try:
         from google.cloud import bigquery
@@ -750,22 +798,36 @@ def drop_dataset_tables(
     except ImportError as exc:
         raise RuntimeError("Install the storage client dependencies before deleting master data.") from exc
 
-    if credentials_json:
-        credentials = service_account.Credentials.from_service_account_file(credentials_json)
-        client = bigquery.Client(project=project_id, credentials=credentials)
-    else:
-        client = bigquery.Client(project=project_id)
+    owns_client = client is None
+    if owns_client:
+        if credentials_json:
+            credentials = service_account.Credentials.from_service_account_file(credentials_json)
+            client = bigquery.Client(project=project_id, credentials=credentials)
+        else:
+            client = bigquery.Client(project=project_id)
 
-    dataset_ref = f"{project_id}.{dataset_id}"
-    table_items = list(client.list_tables(dataset_ref))
-    LOGGER.warning("db_master_delete_started dataset=%s object_count=%d", dataset_ref, len(table_items))
-    dropped: list[str] = []
-    dropped_objects: list[dict[str, str]] = []
-    for table in table_items:
-        client.delete_table(table.reference, not_found_ok=True)
-        object_type = str(getattr(table, "table_type", "") or "TABLE")
-        dropped.append(table.table_id)
-        dropped_objects.append({"name": table.table_id, "type": object_type})
-        LOGGER.warning("db_master_object_dropped dataset=%s object=%s type=%s", dataset_ref, table.table_id, object_type)
-    LOGGER.warning("db_master_delete_succeeded dataset=%s dropped_count=%d", dataset_ref, len(dropped))
-    return {"dropped_tables": dropped, "dropped_objects": dropped_objects}
+    try:
+        dataset_ref = f"{project_id}.{dataset_id}"
+        table_items = list(client.list_tables(dataset_ref))
+        LOGGER.warning("db_master_delete_started dataset=%s object_count=%d", dataset_ref, len(table_items))
+        dropped: list[str] = []
+        dropped_objects: list[dict[str, str]] = []
+        if table_items:
+            def drop_one(table: Any) -> tuple[str, str]:
+                client.delete_table(table.reference, not_found_ok=True)
+                return table.table_id, str(getattr(table, "table_type", "") or "TABLE")
+
+            with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(table_items)))) as pool:
+                for table_id, object_type in pool.map(drop_one, table_items):
+                    dropped.append(table_id)
+                    dropped_objects.append({"name": table_id, "type": object_type})
+                    LOGGER.warning("db_master_object_dropped dataset=%s object=%s type=%s",
+                                   dataset_ref, table_id, object_type)
+        LOGGER.warning("db_master_delete_succeeded dataset=%s dropped_count=%d", dataset_ref, len(dropped))
+        return {"dropped_tables": dropped, "dropped_objects": dropped_objects}
+    finally:
+        if owns_client:
+            try:
+                client.close()
+            except Exception:
+                pass

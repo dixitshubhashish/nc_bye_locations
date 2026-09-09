@@ -87,8 +87,28 @@ function attachSearchableSelect(selectId, { threshold = 15, minChars = 2 } = {})
       const select = document.getElementById(selectId);
       if (!select) return;
       const liveOptions = Array.from(select.options).map((option) => ({ value: option.value, text: option.textContent, className: option.className }));
+      // Refresh the cache BEFORE the threshold check. Bailing out early left
+      // an existing input holding a stale option list: after saving a brand,
+      // loadBrands() reloads with a search term, the select briefly holds
+      // only a handful of options, this returned - and the cache kept the old
+      // list, which did not contain the brand just created. The suggestion
+      // panel then could not offer it, and the next keystroke rebuilt the
+      // select from that stale list, so the new brand vanished from the
+      // dropdown too (BB9/BB10).
+      const existing = document.getElementById(`${selectId}Search`);
+      if (existing && liveOptions.length) existing.dataset.allOptions = JSON.stringify(liveOptions);
       if (liveOptions.length <= threshold) return;
-      let search = document.getElementById(`${selectId}Search`);
+      let search = existing;
+      // Self-healing: the input is a SIBLING of its select, and this app
+      // physically relocates the brand controls between panels
+      // (syncPreParseWorkspace). That routine works off a snapshot of the
+      // panel's children taken once, so an input created after the snapshot
+      // was stranded in the hidden panel when everything else moved back -
+      // the search box simply vanished. Put it back beside its select on
+      // every call instead of trusting where it was left.
+      if (search && search.parentNode !== select.parentNode) {
+        select.parentNode.insertBefore(search, select);
+      }
       if (!search) {
         search = document.createElement("input");
         search.type = "search";
@@ -98,20 +118,247 @@ function attachSearchableSelect(selectId, { threshold = 15, minChars = 2 } = {})
         // Plain label. This filters the select's own options in memory
         // (liveOptions above) - it never queries the server - so there is no
         // reason to explain a minimum length to the user.
-        search.placeholder = selectId === "brandSelect" ? "Search brand" : "Search";
+        // Both brand pickers (the mapping view's and the 40/60 pre-parse
+        // window's) say what they search; everything else is generic.
+        search.placeholder = (selectId === "brandSelect" || selectId === "parserBusinessSelect")
+          ? "Search brand" : "Search";
         search.setAttribute("aria-label", "Search this list");
         select.parentNode.insertBefore(search, select);
       }
       search.dataset.allOptions = JSON.stringify(liveOptions);
+
+      // A real suggestion list, not just a filtered <select>.
+      //
+      // Filtering the select's own options only helps once the dropdown is
+      // already open - the user typing sees nothing happen, which is why this
+      // read as "the suggestion doesn't pop up". A standard typeahead panel
+      // shows the matches under the input as you type, click to choose.
+      let panel = document.getElementById(`${selectId}Suggestions`);
+      if (!panel) {
+        panel = document.createElement("div");
+        panel.id = `${selectId}Suggestions`;
+        panel.className = "select-suggestions hidden";
+        panel.setAttribute("role", "listbox");
+      }
+      // Re-home on every call, for the same reason the input is re-homed:
+      // this app physically relocates these controls between panels. Only
+      // the DOM position matters now: the panel is position:fixed and takes
+      // its coordinates from the input's own rect (positionSuggestions,
+      // below), so it no longer needs its container to be a positioning
+      // context and no longer forces position:relative onto it.
+      if (panel.parentNode !== search.parentNode) {
+        search.parentNode.insertBefore(panel, search.nextSibling);
+      }
+
+      const hideSuggestions = () => { panel.classList.add("hidden"); panel.innerHTML = ""; };
+
+      // ---- Viewport-anchored placement ---------------------------------
+      // The panel was absolutely positioned inside whatever card held the
+      // control, so ANY ancestor with overflow auto/hidden/clip sliced it off
+      // at that ancestor's edge. The reporting filter rail is exactly such an
+      // ancestor: it is pinned (position:sticky) AND scrolls inside itself,
+      // because a pinned rail that does not scroll internally leaves its own
+      // "Apply All Filters" / "Reset All" buttons below the fold with no way
+      // to reach them. Both of those have to hold at once, so the panel is
+      // the piece that has to get out.
+      //
+      // position:fixed is how it gets out: a fixed box's containing block is
+      // the viewport, and an ancestor's overflow only clips descendants whose
+      // containing-block chain runs through it - so the rail's scroll box
+      // cannot touch this panel. (Nothing between these controls and <body>
+      // sets transform/filter/contain, which are the properties that would
+      // drag a fixed box back inside an ancestor.) The trade is that a fixed
+      // box does not travel with its anchor, so the coordinates are computed
+      // from the input's live rect on open and again on every scroll/resize
+      // while the panel is open.
+      const PANEL_MAX_HEIGHT = 320; // keep in step with .select-suggestions
+      const VIEWPORT_MARGIN = 8;
+      const ANCHOR_GAP = 2;
+      // Nearest clipping ancestor - the filter rail, on both reporting tabs.
+      // Resolved once per attach (the option list is re-read far more often
+      // than the controls are relocated) and used only to tell whether the
+      // anchor is still showing.
+      let clipper;
+      const getClipper = () => {
+        if (clipper !== undefined) return clipper;
+        clipper = null;
+        let node = search.parentElement;
+        while (node && node !== document.body && node !== document.documentElement) {
+          try {
+            const style = window.getComputedStyle(node);
+            if (/(auto|scroll|hidden|clip)/.test(`${style.overflowY} ${style.overflowX}`)) { clipper = node; break; }
+          } catch (_) {}
+          node = node.parentElement;
+        }
+        return clipper;
+      };
+      // Scrolling the rail can carry the input out of sight while it still
+      // holds focus. A panel left hanging beside nothing is worse than no
+      // panel, so that case closes it instead of repositioning it.
+      const anchorOnScreen = (rect) => {
+        const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+        const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+        if (rect.bottom <= 0 || rect.top >= viewportHeight) return false;
+        if (rect.right <= 0 || rect.left >= viewportWidth) return false;
+        const box = getClipper()?.getBoundingClientRect();
+        return !box || (rect.bottom > box.top && rect.top < box.bottom);
+      };
+      const positionSuggestions = () => {
+        if (panel.classList.contains("hidden")) return;
+        const rect = search.getBoundingClientRect();
+        if (!anchorOnScreen(rect)) { hideSuggestions(); return; }
+        const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+        const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+        // The panel stands in for the select's own popup, so it matches the
+        // control's width. min-width has to be overridden as well, or the
+        // stylesheet's generic 220px floor makes the panel wider than a
+        // narrow control and hangs it off that control's right edge.
+        const width = Math.round(rect.width) || search.offsetWidth || select.offsetWidth;
+        if (width) {
+          panel.style.width = `${width}px`;
+          panel.style.minWidth = `${width}px`;
+          panel.style.maxWidth = "none";
+        }
+        const roomBelow = viewportHeight - rect.bottom - ANCHOR_GAP - VIEWPORT_MARGIN;
+        const roomAbove = rect.top - ANCHOR_GAP - VIEWPORT_MARGIN;
+        // Flip above the input when there is more room up there. This is what
+        // keeps the LAST filters in a pinned rail usable: a control sitting
+        // near the bottom of the viewport has almost nothing under it, and a
+        // fixed panel drawn downwards would run off the screen - a fixed box
+        // does not lengthen the page, so nothing could ever scroll to it.
+        const flipUp = roomBelow < Math.min(PANEL_MAX_HEIGHT, roomAbove) && roomAbove > roomBelow;
+        panel.style.maxHeight = `${Math.max(120, Math.min(PANEL_MAX_HEIGHT, flipUp ? roomAbove : roomBelow))}px`;
+        panel.style.position = "fixed";
+        panel.style.right = "auto";
+        const maxLeft = viewportWidth - (width || rect.width) - VIEWPORT_MARGIN;
+        panel.style.left = `${Math.round(Math.max(VIEWPORT_MARGIN, Math.min(rect.left, maxLeft)))}px`;
+        if (flipUp) {
+          panel.style.top = "auto";
+          panel.style.bottom = `${Math.round(viewportHeight - rect.top + ANCHOR_GAP)}px`;
+        } else {
+          panel.style.bottom = "auto";
+          panel.style.top = `${Math.round(rect.bottom + ANCHOR_GAP)}px`;
+        }
+      };
+      // Anything that can move the anchor has to move the panel: the page
+      // scrolling, the rail scrolling inside itself, the window resizing.
+      // capture:true is required for the middle one - scroll events do not
+      // bubble, so a listener on window only sees a nested scroller's scroll
+      // during the capture phase. Registered once per panel: this whole
+      // function re-runs on every option-list refresh, so the previous pair
+      // is removed first rather than piling up a listener per rebuild.
+      if (typeof panel.__untrackViewport === "function") panel.__untrackViewport();
+      const onViewportChange = () => positionSuggestions();
+      window.addEventListener("scroll", onViewportChange, true);
+      window.addEventListener("resize", onViewportChange);
+      panel.__untrackViewport = () => {
+        window.removeEventListener("scroll", onViewportChange, true);
+        window.removeEventListener("resize", onViewportChange);
+      };
+      const choose = (value) => {
+        select.value = value;
+        hideSuggestions();
+        search.value = "";
+        search.oninput();
+        select.dispatchEvent(new Event("change"));
+      };
+      panel.onmousedown = (event) => {
+        const row = event.target.closest("[data-suggestion-value]");
+        if (!row) return;
+        event.preventDefault();
+        choose(row.dataset.suggestionValue);
+      };
+      search.onblur = () => window.setTimeout(hideSuggestions, 150);
+      // Focusing the box shows NOTHING until something is typed (user
+      // instruction). Dumping 1,000 names under the cursor the moment the box
+      // is clicked is the same wall of text the native popup gives, just in a
+      // different container - this panel is for narrowing, not for browsing.
+      // Browsing the whole list is what clicking the select does (below).
+      search.onfocus = () => {
+        const query = search.value.trim().toLowerCase().replace(/\s+/g, " ");
+        if (query) renderSuggestions(query);
+        else hideSuggestions();
+      };
+      search.onkeydown = (event) => { if (event.key === "Escape") hideSuggestions(); };
+
+      // Suppress the native <select> popup and open the bounded panel instead.
+      //
+      // This is the actual fix for "big dropdown with no height limit or
+      // scroll". A native popup is drawn by the OS, not the page: max-height,
+      // overflow and size on a <select> or its <option>s are ignored, so with
+      // 1,000 brands the browser draws a list as tall as the screen and no
+      // amount of CSS shortens it. Styling the typeahead panel never helped
+      // because the panel was not what opened. The only way to bound this
+      // list is to not open the native popup at all - preventDefault() on
+      // mousedown does that - and hand the click to the panel, which does
+      // have a fixed max-height and its own scroll.
+      //
+      // Keyboard use of the select is deliberately left untouched.
+      select.onmousedown = (event) => {
+        // A locked select (template review locks the brand to the template's
+        // own business_id) must not offer a list to pick from.
+        if (event.button !== 0 || select.disabled) return;
+        event.preventDefault();
+        search.focus();
+        renderSuggestions(search.value.trim().toLowerCase().replace(/\s+/g, " "), true);
+      };
+
+      // showAll: open the panel with the whole list, for focus/click. The
+      // native <select> popup cannot be height-capped by CSS - with 1,000
+      // brands the browser draws a list the length of the screen. The panel
+      // can be, and already is (.select-suggestions: fixed max-height with
+      // scroll), so opening it on focus gives the user the bounded, scrollable
+      // list instead of the native one.
+      const renderSuggestions = (query, showAll = false) => {
+        if (!query && !showAll) return hideSuggestions();
+        const all = JSON.parse(search.dataset.allOptions || "[]");
+        // "+ Create New Brand" is a real <option> on these selects. Now that
+        // the native popup never opens, the panel is the ONLY way to reach it,
+        // so pin it to the top and keep it visible whatever the query - it is
+        // an action, not a search result, and a user typing a name that does
+        // not exist yet is exactly who needs it.
+        const pinned = all.filter((option) => option.value === "__create_new__");
+        const matches = all
+          .filter((option) => option.value && option.value !== "__create_new__"
+            && (!query || String(option.text || "").toLowerCase().replace(/\s+/g, " ").includes(query)))
+          ;
+        // No item cap: the panel has a fixed height and scrolls (see
+        // .select-suggestions), so truncating the list only hid brands the
+        // user had already narrowed to. With 1,000 brands a one-character
+        // query can legitimately match a hundred of them, and the twelfth
+        // being silently the last is worse than a scrollbar.
+        if (!matches.length && !pinned.length) {
+          if (!query) return hideSuggestions();
+          panel.innerHTML = '<div class="select-suggestion-empty">No matches</div>';
+          panel.classList.remove("hidden");
+          positionSuggestions();
+          return;
+        }
+        const renderRow = (option, extraClass = "") =>
+          `<div class="select-suggestion${extraClass}" role="option" data-suggestion-value="${escapeHtml(option.value)}">${escapeHtml(option.text)}</div>`;
+        panel.innerHTML = pinned.map((option) => renderRow(option, " is-create")).join("")
+          + (matches.length ? matches.map((option) => renderRow(option)).join("")
+             : (query ? '<div class="select-suggestion-empty">No matches</div>' : ""));
+        panel.classList.remove("hidden");
+        // Width AND coordinates both come from the input's live rect now,
+        // not from an offset parent - see positionSuggestions above.
+        positionSuggestions();
+      };
+
       search.oninput = () => {
         const allOptions = JSON.parse(search.dataset.allOptions || "[]");
-        const query = search.value.trim().toLowerCase();
+        const query = search.value.trim().toLowerCase().replace(/\s+/g, " ");
         const selected = select.value;
+        // Case- and whitespace-insensitive, and it matches anywhere in the
+        // name, so "verde" finds "Casa Verde" and "CASA" finds it too.
         const matches = query.length < minChars
           ? allOptions
-          : allOptions.filter((option) => !option.value || option.value === selected || option.text.toLowerCase().includes(query));
+          : allOptions.filter((option) => !option.value
+              || option.value === selected
+              || String(option.text || "").toLowerCase().replace(/\s+/g, " ").includes(query));
         select.innerHTML = matches.map((option) => `<option value="${escapeHtml(option.value)}"${option.className ? ` class="${escapeHtml(option.className)}"` : ""}>${escapeHtml(option.text)}</option>`).join("");
         select.value = matches.some((option) => option.value === selected) ? selected : "";
+        renderSuggestions(query);
       };
     }
 function formatTimestamp(value) {
@@ -258,7 +505,7 @@ function showLoadingOverlay(message, onCancel, onHide) {
         try { activeAbortController.abort(); } catch (_) {}
       }
       activeAbortController = new AbortController();
-      el("loadingOverlayMessage").textContent = message || "Working...";
+      el("loadingOverlayMessage").innerHTML = busyMarkup(message || "Working");
       el("loadingOverlaySub").textContent = "Processing records.";
       el("loadingOverlay").classList.remove("hidden");
       el("loadingCancelBtn").classList.toggle("hidden", typeof onCancel !== "function");
@@ -282,7 +529,7 @@ function showLoadingOverlay(message, onCancel, onHide) {
       };
     }
 function updateLoadingOverlay(message, detail = "") {
-      el("loadingOverlayMessage").textContent = message || "Working...";
+      el("loadingOverlayMessage").innerHTML = busyMarkup(message || "Working");
       el("loadingOverlaySub").textContent = detail || "Processing records.";
     }
 function hideLoadingOverlay() {
@@ -330,9 +577,16 @@ function hideProgress() {
 // different product every time they appeared. Both degrade to the native
 // call only if the dialog element is missing (e.g. a page that does not
 // include the shell markup).
-function showAppNotice(message, title = "Done") {
+// tone: "ok" (default) | "warn" | "error" | "info". It only changes the icon
+// and its colour - the shell stays the one Birdeye dialog.
+function showAppNotice(message, title = "Done", tone = "ok") {
       const dialog = el("appNoticeDialog");
       if (!dialog || typeof dialog.showModal !== "function") { window.alert(message); return; }
+      const icons = { ok: "\u2713", warn: "!", error: "\u2715", info: "i" };
+      dialog.classList.remove("tone-warn", "tone-error", "tone-info");
+      if (tone && tone !== "ok") dialog.classList.add(`tone-${tone}`);
+      const icon = el("appNoticeIcon");
+      if (icon) icon.textContent = icons[tone] || icons.ok;
       el("appNoticeTitle").textContent = title;
       el("appNoticeMessage").textContent = message;
       const ok = el("appNoticeOk");
@@ -363,7 +617,10 @@ function showAppConfirm(message, title = "Please confirm") {
     }
 
 function busyMarkup(label = "Loading") {
-      const cleanLabel = String(label).replace(/\.\.\.+$/, "").trim();
+      // Strips BOTH "..." and the single-glyph ellipsis. The spinner is the
+      // app's one progress signal - trailing dots next to a spinner say the
+      // same thing twice, and on their own they say it worse.
+      const cleanLabel = String(label).replace(/(\.\.\.+|\u2026)\s*$/, "").trim();
       return `<span class="busy-label">${escapeHtml(cleanLabel)} <span class="inline-spinner"></span></span>`;
     }
 function setButtonBusy(button, label = "Loading") {
@@ -464,7 +721,7 @@ function updateLoginButtonReferenceState() {
     }
 async function refreshHeaderReadiness(force = false) {
       if (readinessCheckInFlight && !force) return readinessCheckInFlight;
-      setHeaderReadiness("Checking ZIPs...", "warn");
+      setHeaderReadiness("Checking ZIPs", "warn");
       setReadinessButtonDisabled(true);
       readinessCheckInFlight = (async () => {
         try {
@@ -495,7 +752,7 @@ async function runReadinessCheck(target) {
         return;
       }
       target.className = "status";
-      target.textContent = "Checking readiness...";
+      target.textContent = "Checking readiness";
       try {
         const response = await fetchReadinessPing();
         const result = await response.json();
@@ -539,6 +796,14 @@ async function login() {
 async function loadAppData() {
       if (appDataLoaded) return;
       appDataLoaded = true;
+      // Paint the remembered brands FIRST, synchronously. loadBrands() is a
+      // network round trip and attachSearchableSelect() cannot create the
+      // search box until options exist, so the brand controls were simply
+      // absent for the first few seconds of a cold start. The real list
+      // overwrites this as soon as it lands.
+      if (typeof paintRememberedBrands === "function") {
+        try { paintRememberedBrands(); } catch (_) {}
+      }
       await Promise.allSettled([loadFieldRegistry(), loadBrands(), loadTemplateFilters()]);
       // Apply the initial mapper layout (and enable the brand-dependent
       // "Edit a brand" radio/buttons) as soon as brands are in, rather than
@@ -638,7 +903,7 @@ async function prepareReferenceData() {
       loginButton.disabled = false;
       if (status) {
         status.className = "status";
-        status.textContent = "Preparing ZIP reference data...";
+        status.textContent = "Preparing ZIP reference data";
       }
       try {
         const response = await fetch("/api/prepare");
@@ -668,4 +933,35 @@ function logout() {
       sessionStorage.removeItem(mappingSessionStorageKey);
       sessionStorage.removeItem(draftStorageKey);
       window.location.replace("/login");
+    }
+
+// The app header is position:sticky at the top of every view, so anything
+// else that pins itself has to start below it - the reporting filter rail
+// (.report-filter-rail, both reporting tabs) does exactly that. The header's
+// height is not a constant: .header-actions wraps to a second line on narrow
+// windows and the brand logo loads late, so a hard-coded offset either tucks
+// the rail's first filter under the header or leaves a gap under it. Publish
+// the measured height as a CSS custom property and let the stylesheet do the
+// arithmetic (top / max-height) from it. Stylesheets read it as
+// var(--app-header-h, 71px), so nothing breaks before this first runs.
+function syncAppHeaderOffset() {
+      const header = document.querySelector("header");
+      if (!header) return;
+      const height = Math.round(header.getBoundingClientRect().height);
+      // A hidden or not-yet-laid-out header measures 0; keeping the previous
+      // (or fallback) value is better than pinning the rail to the very top.
+      if (height > 0) document.documentElement.style.setProperty("--app-header-h", `${height}px`);
+    }
+if (typeof document !== "undefined" && !window.__appHeaderOffsetTracked) {
+      window.__appHeaderOffsetTracked = true;
+      syncAppHeaderOffset();
+      window.addEventListener("resize", syncAppHeaderOffset);
+      // The header also changes height without the window changing size: the
+      // logo image finishes loading, a long brand name pushes the account
+      // actions onto their own row. ResizeObserver catches those; the resize
+      // listener above is the fallback where it is unavailable.
+      try {
+        const header = document.querySelector("header");
+        if (header && typeof ResizeObserver === "function") new ResizeObserver(syncAppHeaderOffset).observe(header);
+      } catch (_) {}
     }

@@ -1,9 +1,298 @@
 # Codex Project Handoff
 
+## SESSION HANDOFF (2026-09-10) — READ THIS FIRST
+
+Written for the next session (model change mid-work). Everything below was measured, not assumed; where a number appears, it came from a real run.
+
+### Multi-agent sync
+Use `AGENT_SYNC.md` as the live coordination board when Codex and Claude are both working. Read it before starting, claim one workstream there, update it after every meaningful change, and keep `docs/bug_tracker.md` + this file authoritative for bug status and durable handoff notes.
+
+2026-09-10 user routing update: Claude should redirect UI fixes and bug-report/UI reproduction work to Codex. Claude/subagents should avoid claiming `ui/` files unless explicitly re-routed by the user; Codex owns UI follow-through and browser-style loading/reproduction notes.
+
+2026-09-10 ownership routing update: Codex owns frontend/UI work. Claude owns backend/query/data work. Cross-surface tasks should be split in `AGENT_SYNC.md`: Codex handles frontend, asks Claude to take backend/query action there; Claude handles backend/query, asks Codex to take frontend action there. Avoid overlapping claimed files unless the user explicitly redirects.
+
+2026-09-10 bug tracker rule: when a user follow-up is part of the same defect, enhance the existing `BUG-N` entry instead of creating a new bug. Create a new bug only for a distinct issue.
+
+2026-09-10 UI workstream: Codex fixed BUG-91, the app-header brand lockup adjustment. "Competitive Whitespace Tool" now sits below the Birdeye logo instead of beside it. CSS-only change in `ui/integrations.html`; no server restart required.
+
+2026-09-10 UI workstream: Codex fixed BUG-92. Trends Over Time and Historical Quality & Change Tracking now align their period controls beside the chart heading, share the same chart height, and default period-toggle chart features to `1H`.
+
+2026-09-10 BUG-92 follow-up: Codex corrected the Location Intelligence panel order missed in the first pass. The order is now number cards, Location Map, Top States by Coverage, then Trends Over Time and Historical Quality.
+
+2026-09-10 UI workstream: Codex fixed BUG-93. `/app` and Mapper refresh now start in the clean 40/60 pre-parse workflow, and old mapper drafts are not restored when the boot target is `mapperView`. Other tab refresh restore behavior is preserved. Clarified by BUG-95: left-rail utility panels remain visible below the 40/60 start surface.
+
+2026-09-10 BUG-93 follow-up: Codex fixed the pre-parse boot paint order. `#mapperView` starts with `preparse-booting`, hiding left-rail utility panels only until `syncPreParseWorkspace()` has populated the 40/60 containers; then the utility panels show below them.
+
+2026-09-10 BUG-93 follow-up: the boot-time full-width `#status` is now also hidden while `preparse-booting` is present, then shown only after it has been relocated into the 40/60 parser panel.
+
+2026-09-10 UI workstream: Codex fixed BUG-94, the BUG-91 header sizing follow-up. Main top nav tabs are larger and right-side utility buttons are smaller, with a contract test preventing the later theme block from shrinking the nav again.
+
+2026-09-10 UI workstream: Codex fixed BUG-95. Selecting a brand before parse now locks the required Brand Name mapping to that selected brand and disables the dropdown; save rows carry a frontend `__brand` value and `source_fields` includes it. Brand Entity Resolution, Job History, and Data Controls remain visible below the 40/60 start surface.
+
+2026-09-10 UI workstream: Codex fixed BUG-96. Reporting hero and both inner-tab intro blurbs now use crisp, functionality-specific copy; reporting tabs cache-buster bumped to `quality-layout-v3`.
+
+2026-09-10 BUG-96 follow-up: copy expanded to medium-length architecture/goal language. Reporting hero names the gold reporting layer and filtered views; Location Intelligence names validated records/map/open ZIPs/trends; Data Quality names rejected listings/quality mirrors/issues/fixes/freshness/repair.
+
+2026-09-10 BUG-96 follow-up: Mapping and Template Library now have page-level intro descriptions too. Mapping copy sits above the 40/60 start workspace; Template Library copy describes saved source mappings, stored source fields, repairs, and repeat-load alignment.
+
+2026-09-10 UI workstream: Codex fixed BUG-98. Selecting a brand before parse no longer auto-opens the edit-brand form, so clicking Parse cannot leak that form into the parse flow; explicit edit controls still open it.
+
+2026-09-10 UI workstream: Codex fixed BUG-99. Source Input now renders as a cyan radio group with `Public URL` still selected by default; the hidden `sourceInputMode` select remains as the compatibility state holder for parser logic, drafts, and presets.
+
+2026-09-10 UI workstream: Codex fixed BUG-100. The 40/60 pre-parse brand selectors split brand search and selected brand into left/right columns on wider panes, while the compact left-rail mapping view stays stacked.
+
+### Start here
+1. Read this section, then `docs/bug_tracker.md` (now one flat `BUG-N` list — see "Bug IDs" below), then the Rules section of this file.
+2. `scripts/` holds the repeated command blocks (syntax check, server restart, login+cookie, test suite). Use them instead of retyping — that is why they exist.
+3. Nothing is committed. The last commit is `4f6bd6c`; a large batch is outstanding in the working tree. **Do not commit or push unless the user explicitly asks.**
+
+### Standing user rules (still in force)
+- Do NOT commit or push unless explicitly asked.
+- Do NOT fabricate numbers. Measure, then state. If unmeasured, say so.
+- A message starting with `URGENT` jumps the queue.
+- Keep **at most 2 background workers** running (explicit, 2026-09-10).
+- Flag genuinely ambiguous product decisions rather than guessing. The user responds well to the AskUserQuestion popup and asked for it by name.
+- `sample_locations` is an immutable source dataset; the reset/clear/drop helpers raise `PermissionError` if pointed at it.
+
+### Bug IDs
+`docs/bug_tracker.md` is now a single flat list of `BUG-N` entries with no category sections. Status is a FIELD, not a heading. Every old identifier (`B1`, `BB14`, `U2`, `DAT-04`, `RPT-08`, `FLT-02`, `INV-15`, `Q8`, `O8`, ...) is preserved as `Previously:` on its entry, so `grep -n "Previously: BB14" docs/bug_tracker.md` still resolves. Append new bugs as the next `BUG-N`.
+
+### What changed this session (all uncommitted)
+
+**Critical fixes**
+- `create_brand()` was completely broken: `INSERT ... SELECT ... WHERE NOT EXISTS` with no `FROM`. BigQuery rejects a `WHERE` on a `SELECT` that has no `FROM`. Fixed with `FROM UNNEST([1])`. Verified live: create returns 200/`created:true`; a case-different name returns 200/`created:false` with the same `business_id`.
+- Raw warehouse diagnostics were reaching the browser verbatim. `productSafeError` in `ui/js/common.js` is a word denylist and the message contained none of its terms. Fixed server-side at the single choke point `_json_response()` (`_sanitize_error_fields`), which matches the SHAPE of a diagnostic (`Job ID:`, `reason:`, `at [8:5]`, tracebacks, HTTP status prefixes, >300 chars) rather than particular nouns. Real text is logged with an 8-char reference shown to the user. Human messages like `Brand name is required` pass through untouched — verified.
+- Data Quality fix-state cards showed `—` beside real data. `fix_states` is a GLOBAL mirror-backed figure but was frozen into the PER-FILTER cached payload, so any filter combination first built while the mirror was cold served `{"computed": false}` forever. Now re-read on every cache hit, and the cold "warming" placeholder carries it too. Verified by injecting the stale shape into the exact cache key the browser requests.
+- Map showed one metro only. `map_query` ended in `LIMIT 1000` with **no ORDER BY**, so BigQuery returned an arbitrary block — 973 Massachusetts out of 42,869 listings across 59 states. Now round-robins by state (`ROW_NUMBER() OVER (PARTITION BY state ...)`, ordered by rank) and `MAP_RECORD_LIMIT = 5000`. Measured after: 5,000 records, 59 states, ~100 each, 1.8MB in 2.17s. `_mirror_map_records()` interleaves the same way.
+- Leaflet layer groups were CROSS-NAMED: the store loop added to `gapMarkersLayerGroup`, the gap loop to `pinMarkersLayerGroup`, so `syncMapLayersByZoom()` did the inverse of its own comment. Renamed (`storeMarkersLayerGroup`) and rebuilt around a `state`→`city`→`listing` tier.
+
+**Merge durability (user's "why did the merge come back")**
+- New `_apply_brand_merges_to_bronze()`. `merge_brands()` only ever fixed bronze as it stood that second; a sample reload / re-save / re-parse re-inserted the original `business_id` and resurrected the retired brand, and the duplicate-brand rail reads bronze. Every silver build now reconciles bronze FIRST. Everything carrying `business_id` moves: `listings`, `error_listings`, `workflow_templates` (which hold mapped AND unmapped structure), and `field_catalogs` (slug-collision-safe; collisions archived, not deleted). Retired brands are re-soft-deleted.
+- Verified by simulating the resurrection (pointed a listing back at a retired brand, marked the brand live) then reconciling: both counts returned to 0 and the listing's `business_id` was restored. Self-reversing, safe to re-run.
+- `run_sql_rows` / `run_sql_dml` now accept and forward `low_priority` (they silently dropped it before; only `run_sql` honoured it), so background reconciliation issues BATCH-priority jobs.
+
+**Performance (measured)**
+- `list_templates()` had no mirror while `/api/brands` and ZIP search did: 2.36–3.63s per call, never faster, for a ~1.6KB payload, on the critical path of opening a Review row. Now cached: **2.55s cold → 4.8ms warm**. `invalidate_template_cache()` added and called on template save.
+- `content_hash` backfill EXECUTED (user-approved): 27,704 of 42,802 rows rewritten in 367s, matching the dry-run prediction exactly.
+
+**Features / behaviour changes**
+- "Stop Enriching" is now an EASE-OFF, not a stop. `ease_enrichment()`; `/api/enrichment/stop` takes `{}` to ease and `{"resume": true}` to restore. Pacing measured: full speed 10 rows/5s pause, eased 2 rows/30s pause. Status reports `throttled` and `state: "eased"` so the UI drops the spinner entirely. `ENRICHMENT_STOP_REQUESTED` is untouched by easing — it remains the genuine abort for shutdown/destructive ops.
+- Hourly trend granularity added (supersedes the earlier "day level only" instruction). `1H:(MINUTE,1 HOUR)`, `1D:(HOUR,1 DAY)`, then DAY/DAY/WEEK/MONTH. Cache key bumped to `v3`. Verified live: 1H→2 points, 1D→5 points, 1W/1M/1Q/1Y→1 point.
+- Template Library excludes deleted and zero-listing templates, marking them `status: "inactive"` with a `listing_count`; `include_inactive=1` returns them. **Auto-repair MUST pass `include_inactive=True`** — error rows by definition have no live listings, so filtering there would silently stop repairing them.
+- Native `<select>` popups are suppressed for searchable selects (`select.onmousedown` → `preventDefault()`, bails on `disabled`). A native popup's height CANNOT be capped by CSS, which is why 1,000 brands drew a full-screen list; the bounded typeahead panel opens instead. Focus shows nothing until typed (explicit instruction). `__create_new__` is pinned at the panel top — it is now the ONLY route to brand creation, so do not remove it.
+- Reporting filter rail: `position: sticky` + `align-self: start`, **no internal scroll**. Note the CSS trap that caused the reported horizontal scrollbar: per spec, when one overflow axis is a scrolling value and the other is `visible`, the `visible` one computes to `auto` — so `overflow-y: auto` forced `overflow-x: auto`. `.select-suggestions` is `position: fixed` off the input rect so no ancestor can clip it.
+- Demo sources renamed to declare FORMAT: `json_locations.py` (Domino's JSON demo), `get_json_api_locations.py` (Little Caesars GET JSON API demo), `csv_locations.py` (Pizza Hut CSV demo + the type→module dispatcher). Legacy type strings kept as aliases. The Little Caesars preset in `mapper.js` now reads `source_url`/`query_params`/`headers` from `/api/predefined-templates` instead of hardcoded literals — it had drifted to a Manhattan viewbox at `limit=25` while the config was US-wide at 50.
+- Measured facts worth keeping: Nominatim silently caps at 50 (limit=50, 200 and 1000 all return exactly 50 rows); Domino's JSON returns 7,342 records.
+
+### OPEN — pick these up
+
+> **FINAL UPDATE — stable stopping point, all agents idle, suite green.**
+> This replaces the two prior "UPDATE" notes above it. Read this one; the
+> earlier ones are kept only for the narrative of how we got here.
+
+**Session-final state:**
+- Zero background workers running. Full suite: **609 passed, 0 failed**
+  (`./scripts/run-tests.sh`). `./scripts/check-syntax.sh`: all clean.
+- Nothing committed. Last commit still `4f6bd6c`. Do not commit/push unless asked.
+- Server IS currently running (restarted to pick up the map-scope change below);
+  any previously-saved cookie jar is invalid — re-run `scripts/login.sh`.
+
+**Item 1 (Review edit form) — DONE**, including the `updatedRaw`/`currentEditingMapperFields`
+data-loss fix. See the mid-session update above for detail; not repeating it here.
+
+**Item 2 (`template_id` backfill) — EXECUTED (2026-09-10, user go-ahead).**
+`backfill_orphan_template_ids(dry_run=False)` run for real. Result matched the
+dry run exactly: `templates_linked_existing: 2, templates_created: 0,
+listings_updated: 5619`. Both orphan groups (`andrews_csv`, 5,204 rows;
+`demo_pe_brand_osm_restaurants`, 415 rows) now carry a resolved `template_id`.
+No new templates fabricated. Idempotent — safe to re-run, not part of the
+silver-build reconciliation loop (unlike merges, doesn't resurface).
+
+Spec detail retained below for reference.
+- Function `backfill_orphan_template_ids(dry_run=True, sample_rows_per_pair=200)` added
+  to `whitespace_tool/workflow_server.py` (after `rehash_listings_content_hash()`).
+- Re-verified live counts: 5,619 orphans, exactly 2 groups.
+- **Important finding that changes the outcome**: real, legitimate `workflow_templates`
+  rows ALREADY EXIST for both orphan pairs (`andrews_csv` and
+  `demo_pe_brand_osm_restaurants`), with zero listings currently pointing at either.
+  So the dry run does NOT fabricate any placeholder — it links both orphan groups to
+  their real existing templates. `templates_created: 0`, both `action: "link_existing_template"`.
+- Dry-run output (verbatim from the worker's run):
+  `{"templates_linked_existing": 2, "templates_created": 0, "listings_updated": 0}`
+  with the two pairs and their target template ids listed in the function's own report.
+- Also flagged: the 415-row group has NULL `ingestion_id`/`mapping_id` on every row and
+  one shared `first_observed_at` — a bulk load that bypassed `save_mapper()`. Not unique
+  to this group (the 5,204-row Andrews group has the same shape) — worth a separate look
+  at whatever loaded them, but not blocking this backfill.
+- **To execute for real: call `backfill_orphan_template_ids(dry_run=False)`.** It is
+  idempotent (a linked/created template becomes "existing" on any re-run) and does not
+  need to be part of the silver-build reconciliation loop (unlike merges, an orphan
+  linked once does not resurface).
+
+**Item 3 (map "load more / realtime") — DONE, backend applied by me, measured live.**
+- Frontend zoom-trigger machinery (debounced scoped fetch, `map_scope=full` param,
+  cache keyed by `state|filterQueryString`) was written by a worker in `ui/js/reporting.js`.
+  `node --check` + `git diff --check` clean on that file.
+- I applied the backend half myself (both workers were told never to touch
+  `workflow_server.py` concurrently, to avoid a collision — this is why it was
+  deferred rather than done by either worker directly):
+  - New `SCOPED_MAP_RECORD_LIMIT = 20000` beside `MAP_RECORD_LIMIT = 5000`.
+  - New `map_scope` request param; `map_scope_full = map_scope == "full" and (state or county or city or zip filter present)`.
+  - Threaded through BOTH map-serving paths: the BigQuery `map_query` (skips the
+    round-robin CTE when scoped, uses the higher ceiling) AND the SQLite mirror path
+    (`_reporting_data_from_mirror` → `_mirror_map_records`, same skip-and-raise-ceiling
+    logic) — the worker had correctly flagged that fixing only one path would leave the
+    other silently capped at 5,000 for cache hits.
+  - **Measured live, after a server restart**: national sample = 5,000 records spread
+    ~100/state across 59 states (1.8MB, 2.07s). Scoped fetch `state=CA&map_scope=full`
+    = **3,227 records, all California**, 1.3MB, 1.05s. Well under the 20,000 ceiling.
+  - Real per-state counts WERE measured (worker's second report, after mine above was
+    written): largest states are TX at 2,597 and CA at 2,592 — every state is well
+    under both the 5,000 national cap and the 20,000 scoped ceiling. So the round-robin
+    was never actually truncating any single state once filtered to it (with one state
+    left, `PARTITION BY state` degrades to a no-op ordering) — the scoped path is a
+    correctness/headroom improvement, not a fix for an observed truncation. If a state
+    ever exceeds 20,000, the design already has a documented next step: a county-level
+    pre-aggregation tier, same pattern as the existing state→city→listing zoom tiers.
+
+**Genuinely still open, nobody has started these:**
+1. Trend timestamps: all live listings share one date (`2026-09-09`), 5 distinct hours.
+   User chose real hourly granularity over synthesising history — do NOT spread
+   timestamps without asking again.
+2. The 415-row "bulk load bypassed save_mapper()" write-path gap noted above — nobody
+   has traced which code path produced rows with no `ingestion_id`/`mapping_id`.
+
+**Fixed (2026-09-10): "This template has no stored source columns. Parse a source file
+to remap it." — root cause was in bronze, not the message.** User asked (a) don't show
+that message when there's genuinely no data, and (b) fix it at the bronze layer with
+flags. Measured before: **461 of 461** `workflow_templates` rows had zero
+`components.source_fields` — every single template in the warehouse. **456 of those**
+are `is_sample_data = TRUE` and were created by the RULE R0 stub-creation `INSERT` in
+`_load_sample_dataset_impl()` (`whitespace_tool/workflow_server.py`, ~line 2979) with
+`components = TO_JSON(STRUCT(business_id AS brand))` — nothing else, ever. That message
+was accurate (there really was no structure) but its advice was actively wrong for these:
+they were bulk `INSERT...SELECT`'d straight into bronze and never parsed from a file, so
+"parse a source file to remap it" describes an action that cannot apply to them.
+- New `backfill_sample_template_source_structure(dry_run=True, batch_size=100)`,
+  `whitespace_tool/workflow_server.py` right after `backfill_orphan_template_ids()`.
+  For every template missing `source_fields`, derives the real column set from its own
+  listings: `CONTENT_HASH_FIELDS` (`warehouse_bigquery.py`) columns holding a non-null
+  value on any listing pointing at that template, plus any leftover `custom_fields` keys.
+  Writes `components.source_fields`, `components.unmapped_fields`, and
+  `components.structure_synthesized = True` (so nothing downstream mistakes this for a
+  mapping someone actually configured). A template with literally zero listings gets
+  `components.structure_unavailable = True` + empty `source_fields` instead of a guess.
+- **Executed live (user go-ahead)**: `templates_missing_structure: 461,
+  templates_synthesized: 460, templates_unavailable: 1`. Verified after: 460/461 templates
+  now carry real `source_fields` (36 columns for the standard sample-brand templates, 7 for
+  `andrews_csv`), 1 (`global_hotels_mixed_csv`, genuinely zero listings) carries
+  `structure_unavailable: true`. Idempotent — a re-run only touches templates still
+  missing `source_fields`.
+- `list_templates()` (line 2343) already returns the full `components` blob verbatim to
+  the frontend, and `ui/js/templates.js`'s `renderTemplateEditSourcePreview()` (line 286)
+  already reads `components.source_fields` — so populating it there was sufficient to stop
+  the message appearing for the 460 now-fixed templates; **no template list/get API change
+  was needed**, only the bronze data.
+- **Handed to Codex** (frontend, via `AGENT_SYNC.md`): the 1 genuinely-empty template now
+  carries `components.structure_unavailable = True`. `templates.js`'s "no stored source
+  columns... parse a source file" message should be conditioned on that flag — show it
+  only when `structure_unavailable` is true (truthfully "no data was ever recorded for
+  this template"), not as a generic empty-array fallback, since an empty array now means
+  something specific rather than "nobody filled this in yet."
+- **Root-cause path not yet closed**: the same stub-creation `INSERT` will produce another
+  bare `{"brand": ...}` stub the next time a *new* orphan `template_id` shows up in a
+  sample reload it hasn't seen before (unlikely with the current fixed sample set, but the
+  code path itself is unchanged). Flagged, not fixed — the low-effort fix is to call
+  `backfill_sample_template_source_structure()` once at the end of
+  `_load_sample_dataset_impl()`'s ingestion branch; not done this pass to keep the change
+  scoped to the reported bug, revisit if sample data is reloaded again with new brands.
+
+**Fixed (2026-09-10): ZIP-in-state-column bug — state count read 59 instead of ~52.**
+Root cause was in `build_silver_layer()`'s silver SQL (`whitespace_tool/workflow_server.py`,
+the `_listings_staging` CTE, ~line 3547): the `normalized_state_code` `CASE` mapped full state
+names to their 2-letter code, but its `ELSE` branch passed the raw `state_code` value through
+UPPER/TRIM **unvalidated** — so a source row with a ZIP literally in its `state` column
+(`23518`, `54136`, `77505`, `82070`, `97420`, `10509`, `22963`) or a garbage value like `"USA"`
+sailed straight through as a "state." The outer `COALESCE(l.normalized_state_code,
+NULLIF(UPPER(TRIM(l.state_code)), ''), cg.state_code, z.state_code)` compounded it: even if
+`normalized_state_code` had been fixed to reject garbage, the second fallback term repeated the
+same unfiltered raw value, so it would have won anyway ahead of the legitimate
+city/ZIP-based lookups (`cg`/`z`).
+- Fix 1: `ELSE` branch now checks the raw value against an explicit list of valid 2-letter
+  US state/territory codes; anything else becomes `NULL` instead of passing through.
+- Fix 2: dropped the redundant/unsafe `NULLIF(UPPER(TRIM(l.state_code)), '')` fallback from the
+  outer `COALESCE` entirely — state_code now falls through to `cg.state_code` (worldwide-city
+  match) or `z.state_code` (ZIP reference match) when the raw value is invalid, instead of
+  reusing the same garbage a second time.
+- Measured before: `mirror_reporting_locations.state_code` had 59 distinct values — 51 real
+  (50 states + DC) + `USA` (12 rows) + 6 ZIP-shaped values (1 row each). Confirmed via direct
+  query against `.cache/whitespace_cache.db`.
+- Verified: `python3 -m py_compile whitespace_tool/workflow_server.py` clean;
+  `unit_tests/test_silver_enrichment.py` (4 tests) updated for the new `COALESCE` shape and
+  passing. **Not yet re-verified against a live rebuild** — this only takes effect on the next
+  `build_silver_layer()` run (server restart, not taken per standing rule) and needs the
+  affected rows' garbage `state_code` values corrected at the source/bronze level too if they're
+  to stop reporting as invalid/missing-state rather than just stop polluting the state facet
+  (silver's own validity gate already requires `state_code IS NOT NULL AND state_code != ''`,
+  so these rows now correctly fall into `listings_invalid` with `missing_state` unless a
+  city/ZIP match resolves them — that's the intended behavior, not a new gap).
+
+**Fixed (2026-09-10): `/api/reporting/metric-export` now honours county/city/zip/reason/status.**
+`reporting_metric_export()` (`whitespace_tool/workflow_server.py`) previously only threaded
+brand/state/start_date/end_date into its BigQuery `query_params` — county/city/zip/reason/status
+were parsed nowhere, so a DQ card download could return rows the DQ tab itself had filtered out.
+- Extracted the DQ tab's own filter primitives out of `reporting_quality_summary()` into
+  module-level helpers (right before it, ~line 6518): `_quality_decode_json()`,
+  `_quality_raw_value()` (raw_record field lookup), `_quality_reasons_from_errors()`
+  (errors → reason-label list). `reporting_quality_summary()` now calls these instead of its
+  old locally-nested `decode`/`raw_value`/inline reason loop — same behavior, one definition.
+- `reporting_metric_export()` now parses `county`/`city`/`zip`/`reason`/`status` as the same
+  single-value, same-normalized params `reporting_quality_summary()` uses (county/city/reason
+  lowercased, zip left as-is, status defaults `"all"`).
+- Applied as a post-fetch Python filter (BigQuery has no indexed columns for these — the DQ
+  tab itself filters the same way, in Python over the decoded `raw_record`/`errors` payload)
+  on the two DQ-tab-backed query branches: `_FIX_EVENT_METRIC_TYPES` (fixed-with-ai /
+  manually-fixed cards) and `_ERROR_METRIC_PREDICATES` (review-pending / invalid-listings
+  cards) — both already select `raw_record`/`errors`. The coverage/location/ZIP/brand
+  branches are untouched; those columns don't exist there.
+- Status (`needs_review`/`ai_fixed`) is only applied on the `_ERROR_METRIC_PREDICATES` branch,
+  which carries the `is_ai_enriched` flag (selected as `fixed_with_ai`) the DQ tab's status
+  filter is defined over. The fix-events branch exports rows already resolved into an AI/manual
+  bucket by definition of the metric itself and has no such column — left as a no-op there
+  rather than inventing a mapping the DQ tab's own code doesn't have.
+- `ui/reporting-tabs.js` line ~496: the DQ card download click handler's `filterIds` map was
+  itself missing `county`/`city`/`zip` (`dqCountyFilter`/`dqCityFilter`/`dqZipFilter`) — it only
+  forwarded brand/state/reason/status/dates, so those three were never even sent to the backend.
+  Added, matching the existing `[key, id]` pairs already used for the on-page DQ filter apply
+  (~line 953).
+- Verified: `python3 -m py_compile whitespace_tool/workflow_server.py` and
+  `node --check ui/reporting-tabs.js` both clean. No dedicated `metric_export` test file
+  exists; ran `unit_tests/test_reporting_cache.py` + `unit_tests/test_bigquery_bootstrap.py`
+  (both touch `reporting_quality_summary()`/BigQuery bootstrap) — 34 passed, 1 pre-existing
+  failure (`test_prepare_zipcodes_skips_copy_when_existing_count_is_complete`, unrelated:
+  fails identically on a clean stash of this change, in `prepare_zipcodes`/brand-merge code
+  this change never touches). Not restarted — backend `.py` changed, needs a server restart
+  to take effect.
+
+### Landmines (things that cost real time this session)
+- **pytest used to wipe the live SQLite mirror.** `unit_tests/conftest.py` sets `WHITESPACE_CACHE_DB` to a temp file before any test module imports. Never bypass it.
+- **BigQuery cost is per STATEMENT, not per row** (measured: INSERT 2.36s, SELECT-by-key 1.59s, UPDATE 2.60s, DELETE 2.93s, SQLite mirror read 0.01s). Batching statements into one script helps; batching REST table deletes did NOT (9.4s vs 8.1s for parallel deletes).
+- `_ensure_gold_reporting_views()` nests `build_silver_layer()`, so `_SILVER_BUILD_LOCK` must stay an `RLock` — a plain `Lock` deadlocks the whole suite.
+- Build `SchemaField` objects lazily inside ensure-branches; constructing them up front breaks under other suites' faked bigquery module.
+- Server-side sessions: restarting the app invalidates any curl cookie jar. Re-login after every restart.
+
+
 ## Product
 Competitive Whitespace Tool: secure login, source mapping, validation/review, templates, enrichment, and US location reporting.
 
 ## Rules
+- **SQL helper adoption is DROPPED (user, 2026-09-10).** Queries are working and fast; leave the remaining `client.query()` sites alone. The helpers stay where already adopted.
+- **RULE R0 — `business_id` and `template_id` are FOREIGN KEYS on every listing.** Both are mandatory: the business the listing belongs to, and the template whose mapping produced it. The template must exist, not merely be named. Measured before this was enforced: of 28,119 live listings, **zero** had a `template_id` that resolved — 22,500 dangling (sample rows carrying the source's own ids, with no template ever created) and 5,619 missing entirely (every real user upload, because `__meta` was stamped only for sample rows). Save order is: **template first**, carrying the full structure, then listings referencing its id.
+- **The templates table stores the WHOLE source structure at business level — mapped AND unmapped.** `components.source_fields` is every column the source had; `components.unmapped_fields` is the remainder with no typed home. A definition listing only the mapped columns is not the structure, and the template editor cannot offer to map what it does not know about.
+- **A fix must be recorded as state, not applied as a one-off UPDATE.** Silver is `CREATE OR REPLACE`d from bronze on every build and a sample reload re-inserts source rows wholesale, so anything expressed only as a mutation is undone the next time either runs. Brand merges live in `brand_merges` (source -> target) and `_build_silver_layer_impl()` re-applies them on **every** build. Any future "fix" of the same shape (a dedupe, an override, a manual correction) must follow this pattern or it will come back.
+- **Layer responsibilities:** bronze keeps what was actually ingested; silver is where corrections are applied; gold/mirror are derived and must never be corrected in place. Read for display from gold, write the fix so silver re-applies it.
+- **Never call a brand a duplicate on name similarity alone.** Dice bigram overlap is dominated by a shared generic suffix - measured on the 1,000 sample brands (which draw names randomly from a shared list), similarity >=0.75 swept **315 brands into 125 "duplicate" groups** of which only **15** were genuinely the same name, while offering to irreversibly merge each. Require equal normalized keys, containment, or similarity **plus** a shared distinctive first token (`sameBrandRecord()`).
+- **A table a query JOINs must be ensured where the query runs**, not only where something writes to it - a missing table fails the whole build.
 - Active branch: `develop_new`.
 - **Do not commit or push unless explicitly requested by the user.**
 - **Do not restart the server unless the user explicitly asks** (standing instruction, 2026-09-09).
@@ -123,7 +412,326 @@ New test files added 2026-09-09 (run targeted, not the full suite, per project c
     - **Random lat/lon placeholder confirmed already randomized** (`Math.random()`-based example values on every render) — not a static hardcoded string as first assumed; if a fixed realistic example is preferred instead, that's a separate small design call, not a bug fix.
     - **Investigated, not yet fixed** (documented so the next pass doesn't re-derive this): (a) recurring "unknown source fields: X" errors - root cause is likely `MAPPER_SAMPLE_ROWS = 50` (`source_adapters/common.py`) truncating field *discovery* itself to the first 50 rows, not a hardcoding bug like the earlier lat/lon case - a field absent from the first 50 rows never reaches `sourceFields` at all, independent of any preset function; (b) "50 stores on box vs 900 on map" - not a bug per se, `total_stores` (raw `SUM(location_count)`), `active_market_locations` (distinct ZIPs with a brand), and the map's per-record markers are three genuinely different metrics that happen to all sound like "stores"/"listings" - labels exist but could be clearer; (c) Edit Brand button race (`updatePresetBrandPanel()`/`syncBrandSelection()` runs before `loadBrands()`'s async fetch resolves, so the button can stay in "create" mode briefly) and a separate hard "not working" case (the click handler no-ops entirely when `activeCsvPresetConfig` is null, i.e. for any brand not tied to a CSV demo preset); (d) `/api/learning` re-queries BigQuery's `workflow_templates` live on every mapping-workspace open with no SQLite cache layer - the user wants this (and the `MAPPER_SAMPLE_ROWS` heuristic) persisted/cached; (e) demo XLS restaurant source reportedly returns `HTTP Error 400: Bad Request` - not yet reproduced/diagnosed; (f) an unsaved-changes navigation guard ("ask to save or continue" before leaving a parsed-but-unsaved mapping) does not exist yet; (g) out-of-US coordinate handling ("Coordinates fall outside valid US boundaries") should first try worldwide enrichment data and offer a "save as non-US" action counted under AI Fixed, rather than only rejecting - not yet built; (h) a possible header visual overlap between `.top-tabs` and `.header-data-actions` after the Clear-Sample-Data-under-Load-Sample-Dataset move - user will share a screenshot before this is diagnosed further; (i) filter-panel vertical spacing (Reporting sidebar) could be tightened (concentrated in `.filter-category`'s 16px margin + 12px padding dividers) but not yet touched; (j) README.md tone/readability pass for a non-technical end-customer audience requested but not yet done.
 
+### 2026-09-10 — Server restarted; Review Queue count gap found; Template Library re-verified
+
+**Server restarted** (`scripts/restart-server.sh --yes`) to pick up the ZIP-in-state-column
+and metric-export fixes above — both Codex's and Claude's `AGENT_SYNC.md` slots were IDLE at
+the time, which the user made an explicit exception for (see that file's Standing Rules).
+
+**Review Queue shows "51", user asked why there are 20k+ records in the DB.** Investigated —
+real, measured gap, but a product-scope question, not (only) a bug:
+- `error_listings` (bronze) — **50-51 rows**. Backs the Review Queue donut/cards. These are
+  rows that failed at PARSE/MAPPING time; they never reached bronze `listings`.
+- `listings_invalid` (silver, rebuilt hourly or on `/api/silver/enrich`) — **13,745 rows**,
+  measured via a live rebuild triggered this session (`rows: 48523, invalid_rows: 13745`).
+  These DID reach bronze `listings` but fail the silver validity gate (`missing_state`,
+  `missing_zip`, `unresolved_coordinates`, etc.). The ZIP-in-state-column fix will have
+  INCREASED this count going forward (garbage state values that used to falsely pass now
+  correctly fail).
+- The Review Queue UI only ever surfaces the first population. **Flagging rather than
+  deciding**: should it also surface/count `listings_invalid`? That's a real product call
+  (two different failure modes — reject-at-import vs fail-at-enrichment — currently
+  conflated by the user's expectation that "invalid" means "invalid").
+- Secondary, smaller finding, not yet chased down: `listings_enriched` (48,523) is 79 rows
+  LARGER than bronze `listings` (48,444) — likely JOIN fan-out from the `city_geos` fuzzy
+  `EDIT_DISTANCE <= 2` match in the silver SQL producing >1 match for some rows.
+
+**Template Library "templates with no listings" — re-verified, backend already correct.**
+`list_templates()` (line 2343) already excludes zero-listing templates by default
+(`COALESCE(u.listing_count,0) > 0`), and `ui/js/templates.js` never sends
+`include_inactive`. Live check: `GET /api/templates?limit=500` → 462 templates, all with
+`listing_count > 0`; the one known zero-listing template (`global_hotels_mixed_csv`) is
+correctly absent. Not reproducible from a direct backend call as of this restart — handed
+to Codex via `AGENT_SYNC.md` in case it's a stale-frontend-cache or different-fetch-path
+issue, or was actually the (now backend-fixed) BUG-97 "no stored source columns" symptom
+being read as "no listings."
+
+**Mirror/chart refresh — mechanism confirmed working.** Manually triggered
+`/api/reporting/refresh`; `mirror_meta.synced_at` advanced and `replace_gold_mirror`
+completed in ~1 minute. A scheduled hourly background tick also exists
+(`_start_silver_gold_scheduler()`) — by design, not continuous real-time. Whether the
+reporting charts actually re-paint after a refresh completes is a frontend question, handed
+to Codex.
+
 ## Remaining Gaps
+
+### Twenty-fifth batch (2026-09-09) — the remaining open items, all closed
+
+**BB1 - one column filling several fields.** `applyMappingSelection()` enforced
+one-column-one-target for a dropdown pick; nothing enforced it for mappings
+written in BULK - presets, restored drafts, templates. The shipped instance:
+`setPizzaHutMappings()` mapped the column `address` to **both** `name` and
+`address`. New `dedupeMappingSelections()` runs from `renderMappings()`, the
+one choke point every path passes through, so it holds regardless of where a
+mapping came from; required targets keep the column, later claims are cleared,
+and the status line names what it dropped. A test scans every preset for the
+pattern.
+
+**U2 - no way back to the suggestions.** `renderMappings()` only suggests for
+target keys ABSENT from `mappingSelections`, and a cleared field leaves an
+empty-string key behind - so once everything was unmapped the suggestions
+could never return. The Auto-map button deletes those entries and re-runs the
+SAME pass via a one-shot `forceAutoMapOnce`; the test asserts it never calls
+`suggestField()` itself, so the two can't drift.
+
+**BB3 - demo preset locked the business.** `updatePresetBrandPanel()` disabled
+`#brandSelect` once the preset's brand existed, so a demo source could only
+be tested against that one business. Selector freed, brand form still locked.
+
+**BB7 follow-up - the search box still did not appear.** `syncPreParseWorkspace()`
+relocates nodes from a snapshot of the panel's children taken ONCE; an input
+created after that snapshot is not in the list that moves back, so it was
+stranded in the hidden panel. `attachSearchableSelect()` now re-homes itself
+beside its select on every call. Matching was already case-insensitive; it
+also normalises whitespace now.
+
+Suite: **576 passed**. Every user-reported bug is closed.
+
+### Twenty-fourth batch (2026-09-09) — merges made durable, and a false-duplicate rule that was destroying brands
+
+**The duplicate-brand panel was offering to merge DISTINCT brands.** This is
+why "I already merged this, why is it back": nothing was ever a duplicate.
+Dice bigram overlap is dominated by a shared generic suffix, so "Thornton
+Steakhouse" and "Clayton Steakhouse" scored over 0.75 on the strength of
+"steakhouse". Measured against the 1,000 real sample brands (which draw names
+randomly from a shared list, so near-collisions are guaranteed): the rule
+swept **315 brands into 125 "duplicate" groups**, of which only **15** were
+genuinely the same name - each offered under "This brand was added more than
+once" with an irreversible Combine button. `sameBrandRecord()` now requires
+equal normalized keys, containment, or similarity **plus** a shared
+distinctive first token: 52 groups over 108 brands, all real, with
+"Dominos Pizza" vs "Domino's Pizza Inc" still matching.
+
+**Merges are now durable across rebuilds.** The user's architectural read was
+right: a merge is not a bronze concern. It cannot live only there either -
+silver is `CREATE OR REPLACE`d from bronze on every build and a sample reload
+re-inserts source rows wholesale, so a merge expressed as a one-off UPDATE is
+undone the next time either runs. New `brand_merges` table records
+source -> target (chains flattened), and `_build_silver_layer_impl()`
+re-applies the mapping on **every** build. Proven end to end against the live
+warehouse: merge moved 20 listings, mapping recorded, silver rebuilt (24,941
+rows), and afterwards **0 rows remain under the retired brand in bronze or
+silver** while the target holds 447.
+
+Also fixed: `resetMapping()` now clears the brand selection (hiding a save
+returned a "cleared" workspace that still had the previous business selected),
+and `saveMapper()` refuses to implicitly create a brand from leftover form
+state - a record nobody asked for; "Continue Without Saving" now actually
+discards the parse; an empty Review queue renders as a green success panel
+rather than a bare line on a blank tab; failed enrichment backs off 5 minutes
+per consecutive failure to a 60-minute ceiling, cleared by the first success
+and bypassed entirely by a user pressing the button (no retry timing is ever
+shown, per explicit instruction).
+
+**Two test-isolation faults found on the way**, both order-dependent and both
+worth knowing: a leftover `REPORTING_REFRESHING` made
+`_refresh_silver_background()` skip its thread in a later test, and
+`_ensure_brand_merges_table()` built its `SchemaField` list **before** probing
+the table - the only ensure pass that did - so under the fake bigquery module
+other suites inject it raised and failed the whole silver build with rows=0.
+Both now reset/deferred; `unit_tests/conftest.py` clears the process globals
+between tests.
+
+Suite: **567 passed**.
+
+### Twenty-third batch (2026-09-09) — the server wedged itself, and why
+
+Caught while verifying the previous batch: the live server answered static
+files, `/` and `/api/session` in under 3ms while `/api/reporting` and
+`/api/reporting/quality` timed out past 180s - no error, nothing in the access
+log, 18 threads, 65MB RSS, 166 file descriptors. Not a leak, not a pile-up.
+
+`_heavy_request.__enter__` called `_HEAVY_REQUEST_SEMAPHORE.acquire()` with **no
+timeout**, and `HEAVY_REQUEST_CONCURRENCY` is 3 - so once three requests wedged
+inside, every later caller queued behind them for the life of the process.
+Bounded now by `HEAVY_REQUEST_WAIT_SECONDS = 45`, raising `TimeoutError`, which
+the existing handler already renders as "busy, refresh shortly". Verified: six
+concurrent `/api/reporting` calls all return 200 in ~10s, warm calls 10ms.
+
+Also throttled `/api/sample/status`, which spawned a background recount thread -
+six BigQuery COUNTs on a **fresh client each time**, because `_bigquery_client()`
+is a plain factory and not a cache - on every single poll.
+
+**The diagnostic is the reusable part.** When this app looks "stuck", check
+*which* endpoints are affected first. Static files and `/api/session` answering
+instantly while only the heavy reads hang points at the concurrency gate, not
+at BigQuery or SQLite. Running `reporting_summary()` out-of-process at the same
+moment returned in 1.6s cold / 0.0s cached, which is what ruled out the query.
+
+Suite: **549 passed**.
+
+### Twenty-second batch (2026-09-09) — master delete: the leak and the speed-up
+
+**The leak the user asked about.** `drop_dataset_tables()` built a brand new
+`bigquery.Client` on every call and never closed it, and the master delete
+calls it three times (bronze, silver, gold). That is exactly the pattern this
+repo already records as the cause of a prior gRPC socket/OOM leak. It now takes
+the caller's memoised client and closes only a client it created itself.
+
+**The speed-up: 4.3x, measured.** 21 objects were deleted one sequential HTTP
+round trip at a time; they now go concurrently on a bounded
+`ThreadPoolExecutor`. Benchmarked on a throwaway dataset (never the live
+warehouse): 14 objects, **7.4s -> 1.7s**.
+
+**A wrong turn worth keeping in the record.** The obvious fix looked like
+collapsing the deletes into a single multi-statement DROP script - one job
+instead of N round trips. Measured, that was *slower*: 9.4s versus 8.1s for the
+same 14 objects, because a BigQuery query job carries seconds of fixed
+scheduling overhead that a REST delete does not. Batching cheap calls into one
+expensive job made it worse; concurrency was the answer. A test asserts no
+query job is issued, so the idea does not get re-introduced on intuition.
+
+Suite: **544 passed**.
+
+### Twenty-first batch (2026-09-09) — concurrent silver builds
+
+Surfaced while verifying the sample load:
+`400 Destination deleted/expired during operation: birdeye_silver_listings._listings_staging`.
+`build_silver_layer()` writes a **fixed** staging table and DROPs it, so two
+builds running at once destroy each other's destination. Only two of its five
+call sites took `REPORTING_REFRESHING` - the sample load, the clear worker and
+the gold bootstrap did not - so clicking Load Sample Dataset while a background
+refresh was running collided, the build failed, and gold stayed stale. That is
+one of the ways reporting comes to disagree with the warehouse.
+
+Serialised on `_SILVER_BUILD_LOCK` at the single public entry point, with the
+body moved to `_build_silver_layer_impl()`. The **first** version of that fix
+used a plain `threading.Lock` and hung the entire test suite:
+`_ensure_gold_reporting_views()` calls `build_silver_layer()` in its bootstrap,
+so the nested same-thread path blocked on itself. `RLock` instead - reentrancy
+costs nothing on one thread, and the cross-thread collision is still blocked.
+The hang is what caught it, which is a good argument for running the suite
+after a concurrency change rather than reasoning about it.
+
+Suite: **538 passed**.
+
+### Twentieth batch (2026-09-09) — sample load simplified on the owner's call
+
+**The NTILE(2) half-split is gone.** The user's read was right and the
+measurement backed it: a single INSERT over all 22,500 source rows runs in
+about three seconds across 17MB, so splitting bought nothing - while costing a
+background thread that re-entered `load_sample_dataset()` itself. That
+re-entrancy is not theoretical: the second half took the reset branch and
+soft-deleted the 11,250 rows and every business the first half had just
+written (`businesses: 0 live`, measured). One statement now, no `load_half`
+parameter, no background thread, no half-loaded failure mode. The INSERT stays
+idempotent, so a load interrupted by a restart tops up instead of duplicating.
+
+**The per-load DDL waste the user spotted in the job log.**
+`ALTER TABLE ... ADD COLUMN IF NOT EXISTS is_deleted/deleted_on` ran across
+four tables on every single load at roughly four seconds each - about 30 of a
+47-second load spent proving columns exist. They are in `TABLE_SCHEMAS`, so on
+any table this app created they are already there; the ALTERs are only a
+safety net for tables that predate them. Memoised per process via
+`_ensure_soft_delete_columns()`, and cleared by `_forget_ensured_tables()` so a
+clear or master delete still re-reconciles. The `UPDATE` still runs every time.
+
+**On "mutate the sample table, then make it immutable again":** it was not
+needed, and the distinction matters. **Those ALTERs were on
+`birdeye_bronze_listings`, not `sample_locations`** - bronze is ours to mutate
+freely. `sample_locations` was never at fault: 51 columns, no type mismatches
+against the 57-column target, fully compatible. The bug was a query selecting
+a column the table does not have. **No copy table was created and the
+immutable-source guard was never lifted.**
+
+Suite: **535 passed**.
+
+### Nineteenth batch (2026-09-09) — the sample dataset had never loaded, not once
+
+Reported as "entire sample dataset is not loading". It was worse than partial:
+**none of it had ever loaded**. The INSERT selected
+`COALESCE(s.validated, FALSE)` but `sample_locations.listings` has no
+`validated` column, so BigQuery rejected the whole statement
+(`Name validated not found inside s at [17:43]`) and the `except` around it
+fell through to the in-memory generator and returned success.
+
+The two datasets have **nothing in common**, which is how the substitution
+went unnoticed: bronze held `sample_business_crimson_slice_csv` /
+"Crimson Slice Austin 12" (15 demo brands) while the source holds
+`biz_brand_0887` / "Brewer Roastery #18447" (1,000 synthetic brands), and all
+22,500 source `listing_id`s were absent from bronze. What looked like a
+41%-loaded sample (9,295 of 22,500) was a different 9,295-row generated set
+standing in for it.
+
+Fixes: `FALSE AS validated` (the source carries no validation state, and
+freshly ingested rows being unvalidated is the honest value); the fallback now
+logs at ERROR and carries the reason out on `sample_ingestion_error`, because
+a silent fallback that substitutes different data is indistinguishable from
+the real thing; a `verify_sample_source_schema()` preflight names missing
+columns up front; "already loaded" now means the SOURCE's rows are present
+rather than "some sample rows exist" (the generator's own rows were making the
+loader skip ingestion entirely); and the INSERT skips source `listing_id`s
+already in bronze so a re-run tops up instead of duplicating.
+
+**A bug I introduced and then fixed, worth recording.** Making "already
+loaded" source-aware had a consequence I did not anticipate: half 2 re-enters
+`load_sample_dataset()` from its own background thread and can never look
+complete either, so it took the reset branch and soft-deleted the 11,250 rows
+*and every business* half 1 had just written - businesses went to 0 live.
+The reset is now guarded to `load_half == 1`; a top-up needs no reset at all
+because the INSERT is idempotent. Caught by measuring the warehouse after the
+load rather than trusting the load's own success response.
+
+**Schema compliance verified both directions** (user asked): 51 source columns
+vs 57 target, no type mismatches on any shared column; the 6 target-only
+columns are defaulted or left NULL. Permission to modify `sample_locations`
+was offered and proved unnecessary - the fault was in the query, not the
+table - so the immutable-source safety rule stays intact.
+
+Suite: **531 passed**.
+
+### Eighteenth batch (2026-09-09) — the real cause of "0 data": pytest was wiping the live mirror
+
+`sqlite_cache.DB_PATH` was a bare constant pointing at
+`.cache/whitespace_cache.db` **with no test override**, and the suite
+exercises `clear_sample_reporting_mirror()`, `clear_local_cache_db()` and the
+gold-mirror swap for real. Every `pytest unit_tests/` run therefore mutated
+the **live application cache**. That is why reporting kept collapsing to zero
+with nothing in the server log to explain it: the wipes were not coming from
+the server.
+
+How it was pinned down, rather than guessed: `mirror_meta.synced_at` was in
+`CURRENT_TIMESTAMP` format (`2026-09-09 16:07:08`), which only
+`clear_sample_reporting_mirror()` writes - `replace_gold_mirror()` writes
+ISO-8601 with a `T`. The deltas matched a sample-brand deletion exactly
+(zip-brand 41,882->41,585, i.e. -297 brand rows; businesses 1,013->998, i.e.
+-15 sample brands). `lsof` then showed **five orphaned pytest processes**
+holding the database open, the oldest from 12:56.
+
+Fixed with `WHITESPACE_CACHE_DB` plus `unit_tests/conftest.py`, resolved once
+at import so the ~10 tests that already isolate themselves with
+`patch.object(sqlite_cache, "DB_PATH", tmp)` are unaffected. Verified end to
+end: live mirror 13,803 rows before a full suite run, 13,803 after, identical
+`synced_at`. A guard test asserts the suite can never point back at `.cache/`.
+
+Two real bugs were found and fixed on the way there, both genuine:
+
+- **The gold-mirror wipe guard was unreachable for locations.** It read
+  `if had_real_data and not force and not zip_brand_rows and not location_rows:`
+  - only skipping when BOTH collections were empty. But
+  `vw_zip_brand_activity` is a LEFT JOIN off the ZIP reference and returns
+  ~41.5k rows whether or not any brand has activity, so it is never empty and
+  the conjunction could never be true. Each collection is now judged on its
+  own collapse, and a row count is no longer mistaken for health.
+- **A slow sync could commit its empty result over a newer good mirror.** The
+  three gold reads take a minute or more; the original guard compares against
+  the mirror at read time, so a second check now compares at write time,
+  immediately before the swap.
+
+Also in this batch: sample status mirrored in `app_settings` (not
+`query_cache`, which `invalidate_cache()` wipes) so a status hiccup can no
+longer render "Load Sample Dataset" over a loaded warehouse; half-vs-complete
+distinguished by comparing against the source's own row count (measured live:
+9,295 of 22,500); Clear now cancels an in-flight load instead of racing it and
+runs against BigQuery before the mirror; `/api/sample/load` refuses a
+concurrent second load; and the trailing-"..." progress text is gone in favour
+of the spinner.
+
+**Not a bug:** the review count of 118 is correct - `error_listings` holds 395
+rows total and 118 live against 14,499 live listings. 118 is still-open
+validation errors; 395 is every listing that was ever invalid.
+
+Suite: **528 passed**.
 
 ### Seventeenth batch (2026-09-09) — nine live-reported bugs, plus brand-independent content_hash
 

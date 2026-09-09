@@ -2,10 +2,39 @@ from __future__ import annotations
 
 import unittest
 import inspect
+import json
 import re
+import threading
 from unittest.mock import patch
 
 import whitespace_tool.workflow_server as workflow_server
+
+
+class _RecordedThreads:
+    """Stand-in for workflow_server's `threading` module.
+
+    _cumulative_fix_states() kicks off a BigQuery recount in a daemon thread
+    on every call. That recount is not what these tests are about, and letting
+    it run would open a real warehouse connection from a thread that outlives
+    the patch context - so threads are recorded by name and never started.
+    """
+
+    def __init__(self) -> None:
+        self.started: list[str] = []
+        # workflow_server also reads threading.Lock/Event off this module.
+        self.Lock = threading.Lock
+        self.Event = threading.Event
+
+    def Thread(self, *args, target=None, name="", **kwargs):
+        recorder = self
+
+        class _Fake:
+            daemon = True
+
+            def start(self) -> None:
+                recorder.started.append(name)
+
+        return _Fake()
 
 
 class ReportingCacheTests(unittest.TestCase):
@@ -85,6 +114,104 @@ class ReportingCacheTests(unittest.TestCase):
         source = inspect.getsource(workflow_server.reporting_quality_summary)
         self.assertIn("if not cached_quality and not _skip_cache and not force_refresh:", source)
 
+    def test_a_stale_cached_payload_cannot_pin_the_fix_state_cards_to_dashes(self) -> None:
+        """Live-reported: "critical bug - no data showing on chart on left side".
+
+        The five fix-state cards ("Fixed by AI", "Fixed from AI suggestion",
+        "Fixed manually", "AI suggestion awaiting review", "Awaiting manual
+        review") plus "Ever invalid (all time)" all rendered as "-" while the
+        donut and brand table beside them showed real data.
+
+        fix_states is a GLOBAL, mirror-backed figure - it counts every listing
+        that was ever invalid, across all brands - and does NOT vary with the
+        filter params that key this cache. Baking it into the per-filter
+        cached payload meant any filter combination whose payload happened to
+        be built while the fix-state mirror was still cold (the first page
+        load after a restart, say) cached {"computed": false} and then served
+        that FOREVER. The counts were correct in the mirror and correct for an
+        unfiltered request - wrong only on the specific cached view the user
+        was sitting on, which is why it looked like a mapping failure.
+
+        So: a cache HIT must re-read fix_states on the way out.
+        """
+        params = {"status": ["all"]}
+        cache_key = f"reporting_quality:v1:{json.dumps(params, sort_keys=True)}"
+        # The poisoned entry, exactly as the cold mirror wrote it.
+        cached = {
+            "scope": "invalid_listings",
+            "metrics": {"invalid_listings": 50, "needs_manual_review": 50},
+            "reasons": [{"reason": "missing_zip", "count": 50}],
+            "brands": [{"brand": "Acme", "count": 50}],
+            "states": [], "cities": [], "history": [],
+            "fix_states": {"computed": False, "refreshing": True},
+        }
+        # ...and what the mirror actually holds by the time the user looks.
+        mirror = {
+            "ai_fixed": 172, "ai_suggested_fixed": 7, "manual_fixed": 160,
+            "ai_suggested_pending": 21, "manual_pending": 109,
+            "total_ever_invalid": 469, "updated_at": "2026-09-10 00:00:00",
+        }
+        threads = _RecordedThreads()
+
+        # Pre-claim the key so the cache-hit path does not also schedule the
+        # quality recount - the fix-state thread is then the only one, which
+        # makes "_cumulative_fix_states() really ran" unambiguous.
+        with workflow_server._QUALITY_REFRESH_LOCK:
+            workflow_server._QUALITY_REFRESH_KEYS.add(cache_key)
+        try:
+            with patch.object(workflow_server, "get_cached_query", return_value=cached), \
+                    patch.object(workflow_server, "get_fix_state_counts", return_value=mirror), \
+                    patch.object(workflow_server, "threading", threads), \
+                    patch.object(workflow_server, "_warehouse_settings",
+                                 side_effect=AssertionError("a cache hit must not open the warehouse")):
+                result = workflow_server.reporting_quality_summary(params)
+        finally:
+            with workflow_server._QUALITY_REFRESH_LOCK:
+                workflow_server._QUALITY_REFRESH_KEYS.discard(cache_key)
+
+        # It really was the stale cached entry that got served - otherwise
+        # this test would be proving nothing about the cache path.
+        self.assertEqual(result["quality_cache"], "sqlite")
+        self.assertEqual(result["metrics"]["invalid_listings"], 50)
+        # ...but the fix states came from the CURRENT mirror, not the stub.
+        self.assertTrue(
+            result["fix_states"]["computed"],
+            "a stale cached payload still pins the fix-state cards to '-'",
+        )
+        self.assertEqual(result["fix_states"]["ai_fixed"], 172)
+        self.assertEqual(result["fix_states"]["manual_fixed"], 160)
+        self.assertEqual(result["fix_states"]["total_ever_invalid"], 469)
+        # Every card the UI reads has a real number behind it.
+        for key in workflow_server.FIX_STATE_KEYS:
+            self.assertEqual(result["fix_states"][key], mirror[key], key)
+        # And the recount was still scheduled, so the mirror keeps moving.
+        self.assertIn("fix-state-refresh", threads.started)
+
+    def test_the_cold_warming_placeholder_still_carries_real_fix_state_counts(self) -> None:
+        # This replaces an earlier assertion that the warming placeholder must
+        # carry NO fix_states at all. That rule was written to stop the
+        # placeholder being mistaken for a finished answer - a good instinct,
+        # but aimed at the wrong field.
+        #
+        # fix_states is not part of what this placeholder is standing in for.
+        # It counts every listing that was ever invalid, across all brands,
+        # and is read from the SQLite mirror; it does not depend on the
+        # per-filter aggregation being computed in the background. Withholding
+        # it was the last remaining path that could hand the UI a payload with
+        # no fix_states, which renders the five cards as "-" next to a donut
+        # showing real data - the exact bug reported.
+        #
+        # "quality_cache": "warming" is still what tells the UI the FILTERED
+        # numbers are not final, so nothing is lost by including counts that
+        # were never filtered in the first place.
+        source = inspect.getsource(workflow_server.reporting_quality_summary)
+        cold_branch = source.split("if not cached_quality and not _skip_cache and not force_refresh:", 1)[1].split(
+            "\n    project_id, dataset_id, credentials_json = _warehouse_settings()", 1)[0]
+        self.assertIn('"quality_cache": "warming"', cold_branch)
+        # The real mirror read, not a {"computed": false} stub.
+        self.assertIn("_cumulative_fix_states()", cold_branch)
+        self.assertNotIn('"computed": False', cold_branch)
+
     def test_coverage_query_only_references_columns_that_exist_on_listings(self) -> None:
         # Live-verified bug: the coverage query selected event_id,
         # coordinate_source, coordinate_confidence and state - none of which
@@ -144,7 +271,11 @@ class ReportingCacheTests(unittest.TestCase):
         # without a bypass the guard keeps the just-deleted rows visible.
         source = inspect.getsource(workflow_server.sync_gold_mirror)
         self.assertIn("def sync_gold_mirror(force: bool = False)", source)
-        self.assertIn("if had_real_data and not force and not zip_brand_rows and not location_rows:", source)
+        # The guard now judges each collection's own collapse rather than
+        # requiring both to be empty - see
+        # test_a_collapse_in_either_collection_blocks_the_swap in
+        # test_gold_mirror.py for why the old conjunction was unreachable.
+        self.assertIn("if had_real_data and not force and collapsed:", source)
         rebuild = inspect.getsource(workflow_server._rebuild_gold_and_mirror)
         self.assertIn("sync_gold_mirror(force=force_mirror)", rebuild)
 

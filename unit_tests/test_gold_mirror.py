@@ -304,3 +304,53 @@ class SyncGoldMirrorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_a_collapse_in_either_collection_blocks_the_swap():
+    """The guard used to require BOTH collections to be empty:
+
+        if had_real_data and not force and not zip_brand_rows and not location_rows
+
+    vw_zip_brand_activity is a LEFT JOIN off the ZIP reference, so it returns
+    ~41.5k rows whether or not any brand has activity - it is never empty.
+    That made the condition unreachable for locations, so a gold read landing
+    during a silver rebuild's drop-then-recreate window swapped 0 locations
+    straight in. Observed live: 13,803 location rows replaced by 0 while
+    41,585 zip rows "looked fine", after which reporting served 0 listings and
+    0 brands as a legitimate answer.
+    """
+    import inspect
+    import whitespace_tool.workflow_server as ws
+
+    source = inspect.getsource(ws.sync_gold_mirror)
+    # The unreachable conjunction must be gone from the CODE (it survives in
+    # the comment explaining why, so match the whole statement).
+    assert "if had_real_data and not force and not zip_brand_rows and not location_rows:" not in source
+    # Each collection is judged on its own collapse from non-empty to empty.
+    assert "if previous_locations > 0 and not location_rows:" in source
+    assert "if previous_zip_brand > 0 and not zip_brand_rows:" in source
+    assert "if had_real_data and not force and collapsed:" in source
+    # Row count alone cannot tell a healthy zip-brand read from an empty one.
+    assert 'zip_brand_has_activity = any(row.get("brand_name") for row in zip_brand_rows)' in source
+    # A deliberate clear must still be able to empty the mirror.
+    assert "not force" in source
+
+
+def test_a_slow_sync_cannot_commit_its_empty_result_over_a_newer_good_mirror():
+    """The three gold reads can take over a minute. Another sync (or a manual
+    rebuild) can land a good mirror in that window, and committing this
+    thread's older empty result over it is a lost update - which is how a
+    freshly rebuilt 13,803-row mirror went back to 0 about sixty seconds
+    later. The first guard compares against the mirror at READ time; this one
+    compares against it at WRITE time, which is the state that matters."""
+    import inspect
+    import whitespace_tool.workflow_server as ws
+
+    source = inspect.getsource(ws.sync_gold_mirror)
+    swap_at = source.index("replace_gold_mirror(zip_brand_rows, location_rows, business_rows)")
+    recheck = source[:swap_at]
+    assert "if not force and not location_rows:" in recheck
+    assert "current = get_mirror_status()" in recheck
+    assert "gold_mirror_sync_stale_empty_write" in recheck
+    # A deliberate clear must still be able to empty the mirror.
+    assert recheck.index("if not force and not location_rows:") < swap_at

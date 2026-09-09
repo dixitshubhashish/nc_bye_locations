@@ -542,7 +542,10 @@ def test_custom_fields_flows_bronze_to_silver_to_gold_to_mirror():
     import whitespace_tool.workflow_server as ws
     from whitespace_tool.sqlite_cache import MIRROR_LOCATION_COLUMNS
 
-    silver = inspect.getsource(ws.build_silver_layer)
+    # build_silver_layer is now a thin lock wrapper (one build at a time,
+    # because the shared _listings_staging table cannot survive two); the
+    # query body lives in the _impl.
+    silver = inspect.getsource(ws._build_silver_layer_impl)
     # Silver staging: listings_enriched/listings_invalid are SELECT * off it.
     assert "l.custom_fields," in silver
     assert "SELECT * FROM `{staging_table}`" in silver
@@ -607,15 +610,50 @@ def test_recreating_an_archived_custom_field_revives_it():
 
 
 def test_edited_records_round_trip_unmapped_columns():
-    # The review edit form is built from Object.entries(rawObj) - every raw
-    # key, not just mapped ones - so an edit resubmits unmapped columns
-    # rather than silently dropping them. reprocess then re-derives extras
-    # from that full record via normalize_location().
+    # A retry must resubmit the WHOLE original row with only the edited boxes
+    # overlaid, not just the boxes the form happened to render - /api/reprocess
+    # takes `rows` verbatim (reprocess_rejected: `rows = [normalize_reprocess_row(row)
+    # for row in data["rows"]]`, no merge against the stored raw_record), so any
+    # raw column the form did not render is silently dropped from the record.
+    #
+    # The form used to be built from Object.entries(rawObj), which made that
+    # automatic. It is now built from the record's own template field list
+    # (core fields + mapped targets + declared unmapped fields), which is a
+    # better form but no longer covers every raw key - a column outside the
+    # template, or every column at all when the template lookup fails or
+    # business_id is null, has no box and so disappears on retry.
+    #
+    # review.js already declares the two module-level slots for the fix and
+    # documents exactly this contract at the top of the file ("the raw record
+    # so the submitted row starts from the original (nested objects and __meta
+    # intact) with only the edited boxes overlaid on top"), but the submit
+    # handler never reads them - see the assertions below.
     from pathlib import Path
 
     review_js = (Path(__file__).resolve().parents[1] / "ui" / "js" / "review.js").read_text()
-    assert "Object.entries(rawObj).filter(" in review_js
+    # The edited boxes still overlay by raw key.
     assert "updatedRaw[rawKey] = input.value;" in review_js
+    # ...but they must overlay the ORIGINAL row, not an empty object.
+    assert "const updatedRaw = {};" not in review_js, \
+        "the retry row starts empty - every unrendered raw column is dropped"
+    assert "const updatedRaw = { ...currentEditingRawRecord };" in review_js
+    # And the retry must be validated with the record's own mapping, which is
+    # captured into currentEditingMapperFields and likewise never read back.
+    # The record's own template mapping must be READ, not merely assigned.
+    # It is allowed to be guarded (fall back when the capture came back
+    # empty); what must never happen is the submit path ignoring it and
+    # dropping through to the hardcoded 8-field default, which is the
+    # regression this guards. So: it appears in the retry mapper's `fields`.
+    # It must be READ, not only assigned. It is allowed to be guarded (fall
+    # back when the capture came back empty); what must never happen is the
+    # submit path ignoring it and dropping through to the hardcoded 8-field
+    # default, which is the regression this guards. One occurrence means
+    # write-only, which is exactly the state the bug was in.
+    assert review_js.count("currentEditingMapperFields") >= 2, \
+        "currentEditingMapperFields is assigned but never read"
+    retry_block = review_js.split("source_name: activeMapper.source_name", 1)[-1][:900]
+    assert "currentEditingMapperFields" in retry_block, \
+        "retryMapper.fields must use the record's captured template mapping"
 
 
 def test_mapping_confidence_is_mirrored_to_bigquery_and_survives_a_clear():
@@ -658,7 +696,7 @@ def test_sample_load_records_phase_timings():
     import inspect
     import whitespace_tool.workflow_server as ws
 
-    source = inspect.getsource(ws.load_sample_dataset)
+    source = inspect.getsource(ws._load_sample_dataset_impl)
     assert "phase_started = perf_counter()" in source
     assert "sample_brand_loaded brand=%s rows=%d elapsed_s=%.2f" in source
     assert "sample_load_timing total_s=%.2f brands=%d skipped=%d slowest=%s" in source

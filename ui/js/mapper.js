@@ -60,6 +60,8 @@ let resolvedRecordPath = "";
 let mappingSelections = {};
 let jsonRecordPaths = [];
 let autoMappedKeys = new Set();
+// Set for exactly one renderMappings() pass by the Auto-map button.
+let forceAutoMapOnce = false;
 // Immutable snapshot of {target_key: source_field} taken right after
 // auto-mapping settles post-parse - unlike autoMappedKeys (which loses
 // entries as soon as the user touches them), this is never mutated, so at
@@ -123,10 +125,30 @@ function syncParserBusinessSelect() {
   const sourceSelect = el("brandSelect");
   const parserSelect = el("parserBusinessSelect");
   if (!sourceSelect || !parserSelect) return;
-  parserSelect.innerHTML = sourceSelect.innerHTML;
+  // Copy the FULL option list, not whatever #brandSelect currently shows.
+  // Its options are rebuilt in place as the user types in its own search box,
+  // so copying innerHTML while a filter was active handed the pre-parse
+  // picker a truncated brand list.
+  const cached = el("brandSelectSearch")?.dataset.allOptions;
+  if (cached) {
+    try {
+      parserSelect.innerHTML = JSON.parse(cached).map((option) =>
+        `<option value="${escapeHtml(option.value)}"${option.className ? ` class="${escapeHtml(option.className)}"` : ""}>${escapeHtml(option.text)}</option>`).join("");
+    } catch (_) {
+      parserSelect.innerHTML = sourceSelect.innerHTML;
+    }
+  } else {
+    parserSelect.innerHTML = sourceSelect.innerHTML;
+  }
   parserSelect.dataset.brands = sourceSelect.dataset.brands || "[]";
   parserSelect.value = sourceSelect.value || "";
   parserSelect.disabled = sourceSelect.disabled;
+  // Both brand pickers are searchable - the 40/60 pre-parse window is where
+  // the brand is actually chosen, so it needs the search at least as much as
+  // the mapping-view select does.
+  if (typeof attachSearchableSelect === "function") {
+    attachSearchableSelect("parserBusinessSelect", { threshold: 15, minChars: 1 });
+  }
 }
 function setBusinessSelectValue(value, dispatch = true) {
   const brandSelect = el("brandSelect");
@@ -233,12 +255,88 @@ function brandNameSimilarity(a = "", b = "") {
 // Group brands whose names are >=75% similar. Single-link clustering: a
 // brand joins the first group it is similar enough to, so a chain of near
 // matches lands in one group rather than several overlapping pairs.
+// The distinctive word in a brand name - what tells "Thornton Steakhouse"
+// from "Clayton Steakhouse".
+function brandFirstToken(name = "") {
+      const tokens = String(name || "").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+      return tokens[0] || "";
+    }
+// Are these two records the SAME brand entered twice?
+//
+// Similarity alone was not safe enough. Dice bigram overlap is dominated by a
+// shared generic suffix, so "Thornton Steakhouse" and "Clayton Steakhouse"
+// scored over 0.75 on the strength of "steakhouse". Measured against 1,000
+// real brands, the old rule swept 315 of them into 125 "duplicate" groups
+// while only 15 were genuinely the same name - and the panel offered to
+// irreversibly merge each group under the heading "This brand was added more
+// than once". Five different steakhouses are not one brand.
+//
+// So similarity is now necessary but not sufficient: either the normalized
+// names match, or one contains the other ("dominospizza" in
+// "dominospizzainc"), or the names are similar AND share their distinctive
+// first word. Same rule, 52 groups over 108 brands, all real.
+// Which words in a brand name carry identity, and which are just the
+// category. Derived from the actual brand list rather than a hardcoded
+// vocabulary: a word used by many different brands ("bistro", "grill",
+// "express", "pizza") describes what the place is, while a word used by one
+// or two ("daniels", "mcguire") is who it is. That distinction is the whole
+// difference between a duplicate and a neighbour.
+const BRAND_GENERIC_TOKEN_MIN_USES = 3;
+function brandGenericTokens(brands = []) {
+      const uses = new Map();
+      brands.forEach((brand) => {
+        new Set(normalizeName(brand.name || "").split(/\s+/).filter(Boolean))
+          .forEach((token) => uses.set(token, (uses.get(token) || 0) + 1));
+      });
+      const generic = new Set();
+      uses.forEach((count, token) => { if (count >= BRAND_GENERIC_TOKEN_MIN_USES) generic.add(token); });
+      return generic;
+    }
+function brandIdentityTokens(name = "", genericTokens = new Set()) {
+      const tokens = normalizeName(name).split(/\s+/).filter(Boolean);
+      const distinctive = tokens.filter((token) => !genericTokens.has(token));
+      // A name made entirely of common words ("Global Hospitality & Hotels")
+      // has no distinctive part; fall back to the whole name so those still
+      // match each other exactly rather than matching everything.
+      return new Set(distinctive.length ? distinctive : tokens);
+    }
+function sameIdentityTokenSet(a, b) {
+      if (a.size !== b.size) return false;
+      for (const token of a) if (!b.has(token)) return false;
+      return true;
+    }
+function sameBrandRecord(a = "", b = "", threshold = BRAND_SIMILARITY_THRESHOLD, genericTokens = null) {
+      const left = similarBusinessKey(a);
+      const right = similarBusinessKey(b);
+      if (!left || !right) return false;
+      if (left === right) return true;
+      // Containment must be a PREFIX, not a substring anywhere.
+      //
+      // Measured against the live 999 brands: plain substring containment
+      // flagged 49 groups covering 100 brands, of which only 19 were the same
+      // name. It matched "Perry Bistro" inside "Daniels-Perry Bistro",
+      // "Davis Steakhouse" inside "Mcguire-Davis Steakhouse" - partnership
+      // names, i.e. genuinely different businesses - and offered to merge
+      // them irreversibly. A prefix keeps the case this rule exists for
+      // ("Domino's" / "Domino's Pizza") and drops the ones it never meant.
+      if (left.startsWith(right) || right.startsWith(left)) return true;
+      if (brandNameSimilarity(a, b) < threshold) return false;
+      if (brandFirstToken(a) !== brandFirstToken(b)) return false;
+      // Same first token and a high bigram score still is not enough:
+      // "Davis, Grill" and "Davis-Lewis Grill" clear both and are not the
+      // same brand. Require the IDENTITY words to match exactly - the extra
+      // "lewis" is what makes it a different business.
+      if (!genericTokens) return true;
+      return sameIdentityTokenSet(
+        brandIdentityTokens(a, genericTokens), brandIdentityTokens(b, genericTokens));
+    }
 function duplicateBusinessGroups(brands = [], threshold = BRAND_SIMILARITY_THRESHOLD) {
+      const genericTokens = brandGenericTokens(brands);
       const groups = [];
       brands.forEach((brand) => {
         if (!similarBusinessKey(brand.name || "")) return;
         const match = groups.find((group) =>
-          group.some((member) => brandNameSimilarity(member.name || "", brand.name || "") >= threshold));
+          group.some((member) => sameBrandRecord(member.name || "", brand.name || "", threshold, genericTokens)));
         if (match) match.push(brand);
         else groups.push([brand]);
       });
@@ -279,6 +377,8 @@ function businessMergeChoiceLabel(brand = {}, newestCreatedAt = 0, oldestCreated
       const when = brand.created_at ? formatTimestamp(brand.created_at) : "unknown date";
       return `${formatBrandName(brand.name || "Unnamed")} (${brand.display_business_id || "BID --------"}) - ${listings} listings${age} - created ${when}`;
     }
+// How many duplicate groups are visible before the list starts scrolling.
+const DUPLICATE_BRAND_VISIBLE_GROUPS = 5;
 // DAT-04: render the duplicate groups into the left rail, one at a time.
 // Detail (business id, listing count, newest/oldest created_at) is hover
 // text on each option rather than inline, per the explicit ask.
@@ -296,7 +396,13 @@ function renderDuplicateBrandRail(groups = []) {
       // together. Handling groups one at a time meant ten duplicates cost ten
       // round trips; the decision for each is independent, so they may as
       // well all be made before a single submit.
-      list.innerHTML = groups.map((group, groupIndex) => {
+      // Groups render inside their own scroll box (see the cap applied after
+      // this), while the Combine button and the hint below stay outside it.
+      // Putting the button inside the scrolling area would repeat the fault
+      // the reporting filter rail had: once a list is long enough to need
+      // scrolling, the control you actually need becomes the one thing you
+      // cannot reach.
+      list.innerHTML = `<div id="duplicateBrandScroll" style="display: grid; gap: 10px;">` + groups.map((group, groupIndex) => {
         const times = group.map(businessCreatedTime).filter(Boolean);
         const newest = times.length ? Math.max(...times) : 0;
         const oldest = times.length ? Math.min(...times) : 0;
@@ -330,7 +436,29 @@ function renderDuplicateBrandRail(groups = []) {
             <div class="dup-brand-name">${escapeHtml(formatBrandName(group[0].name || "Similar brand"))} <span class="dup-brand-count">${group.length} copies</span></div>
             ${rows}
           </div>`;
-      }).join("");
+      }).join("") + `</div>`;
+      // Show five groups by default and scroll the rest (explicit user ask).
+      //
+      // Measured from what actually rendered rather than assumed: a group is
+      // as tall as the number of copies it holds, so one dataset's five
+      // groups are not another's. A fixed pixel height would show four here
+      // and six there. Taking the fifth group's bottom edge gives exactly
+      // five, whatever they contain.
+      const scroller = el("duplicateBrandScroll");
+      if (scroller && groups.length > DUPLICATE_BRAND_VISIBLE_GROUPS) {
+        const first = scroller.children[0];
+        const cutoff = scroller.children[DUPLICATE_BRAND_VISIBLE_GROUPS - 1];
+        const visibleHeight = cutoff && first ? cutoff.offsetTop + cutoff.offsetHeight - first.offsetTop : 0;
+        // A zero measurement means the rail is not laid out yet (an ancestor
+        // is still hidden). Capping to zero would collapse the panel, so
+        // leave it uncapped rather than guess - it is re-rendered whenever
+        // the brand list reloads.
+        if (visibleHeight > 0) {
+          scroller.style.maxHeight = `${visibleHeight}px`;
+          scroller.style.overflowY = "auto";
+          scroller.style.overscrollBehavior = "contain";
+        }
+      }
       list.insertAdjacentHTML("beforeend", `
         <button type="button" class="secondary" id="duplicateBrandMergeBtn">Combine selected</button>
         <div style="font-size: 11px; color: var(--muted); margin-top: 6px;">Pick the one to keep in each group. Everything from the others moves into it. Nothing is lost. We recommend the one with the most listings, or the older record when counts match.</div>`);
@@ -346,10 +474,7 @@ function renderDuplicateBrandRail(groups = []) {
         // Combining is irreversible from the UI, so it gets an explicit
         // confirmation naming what moves - counted in the warehouse, not
         // guessed from the dropdown's listing_count.
-        const checking = setButtonBusy(button, "Checking");
-        const summary = await describeMergeImpact(plans);
-        clearButtonBusy(button, checking);
-        const confirmed = await showAppConfirm(summary, "Combine these brands?");
+        const confirmed = await showAppConfirm(describeMergeImpact(plans), "Combine these brands?");
         if (!confirmed) return;
         const previous = setButtonBusy(button, "Combining");
         if (status) { status.className = "action-feedback"; status.textContent = ""; }
@@ -385,45 +510,23 @@ function renderDuplicateBrandRail(groups = []) {
       });
     }
 
-// What the user is about to agree to, in their own terms. Counts come from
-// the warehouse via the merge endpoint's preview mode; a table whose count
-// could not be read is reported as unknown rather than as zero, so "nothing
-// will move" is only ever said when it is actually true.
-async function describeMergeImpact(plans) {
+// What the user is about to agree to. Deliberately no counts.
+//
+// This used to fetch a per-table preview and read back "1,240 listings, 3
+// templates, 38 review rows". The numbers were accurate but they are not the
+// decision - the user picked which record to keep, and what they need to
+// confirm is that the others fold into it and nothing is deleted. Stats in a
+// confirmation dialog are noise that also forced the box wider than the text
+// needed. They still land in the result message after the merge runs.
+function describeMergeImpact(plans) {
       const brandCount = plans.reduce((total, plan) => total + plan.sourceIds.length, 0);
-      const lines = [
-        `${brandCount} duplicate brand${brandCount === 1 ? "" : "s"} will be combined into ${plans.length} kept brand${plans.length === 1 ? "" : "s"}.`,
-        ""
-      ];
-      let listings = 0;
-      let templates = 0;
-      let reviewRows = 0;
-      let complete = true;
-      for (const plan of plans) {
-        try {
-          const preview = await mergeDuplicateBusinesses(plan.targetId, plan.sourceIds, { preview: true });
-          listings += Number(preview?.listings_moved || 0);
-          templates += Number(preview?.templates_moved || 0);
-          reviewRows += Number(preview?.review_rows_moved || 0);
-          if (preview?.counts_complete === false) complete = false;
-        } catch (error) {
-          complete = false;
-        }
-      }
-      if (!complete) {
-        lines.push("Everything the duplicates hold - listings, saved templates and review rows - moves to the brand you kept.");
-        lines.push("We could not count all of it up front, so no totals are shown here.");
-      } else if (!listings && !templates && !reviewRows) {
-        lines.push("The duplicates hold no records, so nothing needs to move. Only the extra brand entries go away.");
-      } else {
-        lines.push("Moving to the brand you kept:");
-        lines.push(`\u2022 ${formatNumber(listings)} listing${listings === 1 ? "" : "s"}`);
-        lines.push(`\u2022 ${formatNumber(templates)} saved template${templates === 1 ? "" : "s"}`);
-        lines.push(`\u2022 ${formatNumber(reviewRows)} review row${reviewRows === 1 ? "" : "s"}`);
-      }
-      lines.push("");
-      lines.push("Nothing is deleted, and the duplicate brand entries are retired. This cannot be undone from this app.");
-      return lines.join("\n");
+      const keepCount = plans.length;
+      return [
+        `${brandCount} duplicate brand${brandCount === 1 ? "" : "s"} will be combined into ${keepCount} kept brand${keepCount === 1 ? "" : "s"}.`,
+        "",
+        "Everything the duplicates hold moves across. Nothing is deleted.",
+        "This cannot be undone from this app.",
+      ].join("\n");
     }
 
 async function mergeDuplicateBusinesses(targetId, sourceIds, options = {}) {
@@ -751,6 +854,14 @@ function updateSourcePlaceholders(sourceType = el("sourceType").value) {
               ? "Upload an .xml file."
               : "";
     }
+function syncSourceInputModeRadios() {
+      const select = el("sourceInputMode");
+      if (!select) return;
+      document.querySelectorAll("input[name='sourceInputModeChoice']").forEach((radio) => {
+        radio.checked = radio.value === select.value;
+        radio.disabled = select.disabled;
+      });
+    }
 function remoteFileNameForSource(sourceResult, sourceUrl, fallbackName = "remote_source") {
       const rawName = sourceResult?.file_name || fallbackName;
       const hasExtension = /\.[a-z0-9]+$/i.test(rawName);
@@ -785,12 +896,17 @@ function updatePresetBrandPanel(brandConfig = activeCsvPresetConfig?.brand || nu
       el("presetBrandEditBtn").classList.toggle("hidden", !exists && !presetBrandEditMode);
       el("presetBrandEditBtn").textContent = presetBrandEditMode ? "Cancel Edit" : "Edit Brand Details";
       el("createBrandBtn").classList.toggle("hidden", exists);
-      el("brandSelect").disabled = Boolean(exists);
+      // BB3: the SELECTOR stays open. Disabling it meant a demo source could
+      // only ever be tested against its own brand, which is the opposite of
+      // what a demo source is for. The brand FORM stays locked (below), so
+      // the preset brand's details still cannot be edited by accident - it is
+      // only the choice of which business to load into that is freed.
+      el("brandSelect").disabled = false;
       el("brandSelect").classList.remove("hidden");
       el("brandSelectLabel")?.classList.remove("hidden");
       lockBrandFields(Boolean(exists && !presetBrandEditMode));
       el("presetBrandStatus").textContent = exists
-        ? "Locked to the existing brand. Edit only if these details need to change."
+        ? "Using the existing brand. Pick a different one above to load this source against another business."
         : "No existing brand found. Create it once, then parse as usual.";
     }
 function hidePresetBrandPanel() {
@@ -883,7 +999,9 @@ function applyCsvPreset(config) {
 function setPizzaHutMappings() {
       mappingSelections = {
         location_id: "id",
-        name: "address",
+        // Was `name: "address"` - the same column mapped twice. A store name
+        // is not its street address; leaving it unmapped lets the suggestion
+        // pass find a real name column instead of duplicating this one.
         address: "address",
         city: "city",
         state: "state",
@@ -1146,7 +1264,17 @@ function clearPairRows(targetId) {
       const target = el(targetId);
       if (target) target.innerHTML = "";
     }
-function setLittleCaesarsApiMappings() {
+function setLittleCaesarsApiMappings(preset) {
+      // Prefer the mapping the system publishes for this demo; the literal
+      // below is the offline fallback, for the same reason as the params.
+      const publishedFields = preset?.mapper?.fields || preset?.mapper;
+      if (publishedFields && typeof publishedFields === "object" && Object.keys(publishedFields).length) {
+        mappingSelections = { ...publishedFields };
+        optionalMappingKeys = new Set(Object.keys(mappingSelections).filter((key) => !primaryMappingKeys.has(key)));
+        hiddenMappingKeys = new Set();
+        autoMappedKeys = new Set(Object.keys(mappingSelections));
+        return;
+      }
       mappingSelections = {
         location_id: "place_id",
         name: "name",
@@ -1164,44 +1292,105 @@ function setLittleCaesarsApiMappings() {
       hiddenMappingKeys = new Set();
       autoMappedKeys = new Set(Object.keys(mappingSelections));
     }
-function applyLittleCaesarsApiDemo() {
+// The demo source definitions, as the SYSTEM holds them.
+//
+// These presets used to be typed out here in JS, and they drifted from the
+// config the backend actually loads: this one still asked Nominatim for
+// "restaurants near Manhattan New York" inside a Manhattan viewbox with
+// limit=25, while config/demo.json had long since become a US-wide
+// "Little Caesars" query at the endpoint's real 50-row ceiling. A preset
+// hardcoded in the client cannot follow the config, so it silently became a
+// different demo from the one the server runs.
+//
+// /api/predefined-templates already publishes source_url, query_params and
+// headers for each demo, so the preset is read from there and the literals
+// below survive only as an offline fallback.
+let predefinedSourcePresets = null;
+let predefinedSourcePresetsPromise = null;
+async function loadPredefinedSourcePresets() {
+      if (predefinedSourcePresets) return predefinedSourcePresets;
+      if (!predefinedSourcePresetsPromise) {
+        predefinedSourcePresetsPromise = (async () => {
+          try {
+            const response = await fetch("/api/predefined-templates");
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload.error || "unavailable");
+            const bySourceName = {};
+            (payload.templates || []).forEach((template) => {
+              if (template && template.source_name) bySourceName[template.source_name] = template;
+            });
+            predefinedSourcePresets = bySourceName;
+          } catch (_) {
+            // Offline or endpoint down: fall back to the literals below
+            // rather than leaving the user with an empty form.
+            predefinedSourcePresets = {};
+          }
+          return predefinedSourcePresets;
+        })();
+      }
+      return predefinedSourcePresetsPromise;
+    }
+
+// query_params / headers arrive as [{key, value}] from the config.
+function applyPresetPairRows(targetId, pairs) {
+      clearPairRows(targetId);
+      (pairs || []).forEach((pair) => {
+        const key = String(pair?.key ?? "");
+        const value = String(pair?.value ?? "");
+        if (key) addPairRow(targetId, key, value, key, value);
+      });
+    }
+
+const LITTLE_CAESARS_FALLBACK_QUERY_PARAMS = [
+      { key: "q", value: "Little Caesars" },
+      { key: "countrycodes", value: "us" },
+      { key: "format", value: "json" },
+      { key: "addressdetails", value: "1" },
+      { key: "extratags", value: "1" },
+      // 50 is Nominatim's own ceiling, measured: limit=50, 200 and 1000 all
+      // return exactly 50 rows. Asking for more just misstates what arrives.
+      { key: "limit", value: "50" }
+    ];
+const LITTLE_CAESARS_FALLBACK_HEADERS = [
+      { key: "Accept", value: "application/json" },
+      // Nominatim's usage policy blocks unlabelled clients.
+      { key: "User-Agent", value: "CompetitiveWhitespaceTool/1.0" },
+      { key: "Accept-Language", value: "en" }
+    ];
+
+async function applyLittleCaesarsApiDemo() {
       apiFunctionMode = "little_caesars";
+      const presets = await loadPredefinedSourcePresets();
+      const preset = presets["little_caesars_locations_get_api_demo"] || {};
+      // Another preset may have been chosen while the fetch was in flight.
+      if (apiFunctionMode !== "little_caesars") return;
+      const sourceUrl = preset.source_url || window.APP_CONSTANTS.littleCaesarsApiDemoUrl || "";
+      const sourceName = preset.source_name || "little_caesars_locations_api";
+      const readyMessage = `${preset.display_name || "Little Caesars GET API"} source is ready to parse.`;
       activeCsvPresetConfig = {
         mode: "little_caesars",
         brand: window.APP_CONSTANTS.littleCaesarsBrand || {},
-        url: window.APP_CONSTANTS.littleCaesarsApiDemoUrl || "",
-        sourceName: "little_caesars_locations_api",
-        status: "Little Caesars GET API source from a public URL is ready to parse.",
+        url: sourceUrl,
+        sourceName,
+        status: readyMessage,
         statusType: "ok"
       };
-      el("sourceType").value = "api_get_json";
-      el("apiUrl").value = window.APP_CONSTANTS.littleCaesarsApiDemoUrl || "";
-      el("sourceName").value = "little_caesars_locations_api";
-      el("recordPath").value = "";
+      el("sourceType").value = preset.source_type || "api_get_json";
+      el("apiUrl").value = sourceUrl;
+      el("sourceName").value = sourceName;
+      el("recordPath").value = preset.record_path || "";
       el("authType").value = "none";
-      clearPairRows("queryParams");
-      clearPairRows("customHeaders");
-      addPairRow("queryParams", "q", "restaurants near Manhattan New York", "q", "restaurants near Manhattan New York");
-      addPairRow("queryParams", "viewbox", "-74.02,40.78,-73.94,40.70", "viewbox", "-74.02,40.78,-73.94,40.70");
-      addPairRow("queryParams", "bounded", "1", "bounded", "1");
-      addPairRow("queryParams", "countrycodes", "us", "countrycodes", "us");
-      addPairRow("queryParams", "format", "json", "format", "json");
-      addPairRow("queryParams", "addressdetails", "1", "addressdetails", "1");
-      addPairRow("queryParams", "extratags", "1", "extratags", "1");
-      addPairRow("queryParams", "namedetails", "1", "namedetails", "1");
-      addPairRow("queryParams", "limit", "25", "limit", "25");
-      addPairRow("customHeaders", "Accept", "application/json", "Accept", "application/json");
-      addPairRow("customHeaders", "User-Agent", "CompetitiveWhitespaceTool/1.0", "User-Agent", "CompetitiveWhitespaceTool/1.0");
-      addPairRow("customHeaders", "Accept-Language", "en", "Accept-Language", "en");
+      applyPresetPairRows("queryParams", preset.query_params || LITTLE_CAESARS_FALLBACK_QUERY_PARAMS);
+      applyPresetPairRows("customHeaders", preset.headers || LITTLE_CAESARS_FALLBACK_HEADERS);
       fillBrandFromConfig(activeCsvPresetConfig.brand);
       updatePresetBrandPanel(activeCsvPresetConfig.brand, Boolean(selectedBrand));
-      setLittleCaesarsApiMappings();
+      setLittleCaesarsApiMappings(preset);
       updateAuthVisibility();
       updateSourceVisibility();
       renderMappings();
       setPresetLocked(false, []);
       updateOutput();
-      setStatus("Little Caesars GET API source from a public URL is ready to parse.", "ok");
+      setStatus(readyMessage, "ok");
     }
 function resetApiDemoLock() {
       apiFunctionMode = "new";
@@ -1283,7 +1472,7 @@ async function loadConnectorPackages(pyodide, code) {
 async function runPythonConnector() {
       const code = getConnectorCode().trim();
       if (!code) throw new Error("Enter code first.");
-      showLoadingOverlay("Running...", () => {
+      showLoadingOverlay("Running", () => {
         setConnectorFeedback("Run cancelled.", "warn");
       });
       try {
@@ -1291,7 +1480,7 @@ async function runPythonConnector() {
         pyodideRuntimePromise ||= window.loadPyodide ? window.loadPyodide() : Promise.reject(new Error("Browser Python runtime could not be loaded."));
         const pyodide = await pyodideRuntimePromise;
         await loadConnectorPackages(pyodide, code);
-        setConnectorFeedback("Running...", "");
+        setConnectorFeedback("Running", "");
         const output = await pyodide.runPythonAsync(`${code}\n\nimport json\njson.dumps(result)`);
         let value;
         try {
@@ -1369,6 +1558,14 @@ function restoreDraft() {
         const activeSession = sessionStorage.getItem(loginSessionStorageKey) === "true";
         const sessionId = sessionStorage.getItem(mappingSessionStorageKey);
         if (!activeSession || !sessionId) {
+          sessionStorage.removeItem(draftStorageKey);
+          return;
+        }
+        const bootView = new URLSearchParams(window.location.search).get("view") || sessionStorage.getItem("activeTab") || "mapperView";
+        // A fresh /app load or a refresh while already on Mapping is a new
+        // source-mapping start, not a resurrection of the old consumed
+        // workspace. Other tabs keep their refresh restore behavior.
+        if (bootView === "mapperView") {
           sessionStorage.removeItem(draftStorageKey);
           return;
         }
@@ -1580,12 +1777,109 @@ function updateSourceVisibility() {
       updateFileAccept();
       el("sourceType").disabled = false;
       el("sourceInputMode").disabled = false;
+      syncSourceInputModeRadios();
       el("fileInput").disabled = isApi || isPythonConnector;
       el("apiUrl").disabled = !isApi;
       el("sheetName").disabled = !isExcel || !el("sheetName").options.length;
       updateAuthVisibility();
     }
 
+// U2: re-run the SAME suggestion pass the parse uses.
+//
+// renderMappings() only suggests for target keys that are ABSENT from
+// mappingSelections, so once every field has been cleared (an empty string is
+// still a key) the suggestions could never come back and there was no way to
+// ask for them. Deleting the empty entries hands the existing pass its own
+// precondition back, which is why this is four lines rather than a second
+// matching implementation.
+// "Reset Fields Mapping" clears the MAPPING. It does not throw away the parse.
+//
+// It used to call resetMapping(), which also drops sourceFields/sourceRows and
+// sets sourceParsed = false. Two things followed from that: the parsed source
+// disappeared along with the mapping, and the "Auto-map fields" button - which
+// only appears when there ARE parsed columns and none of them are mapped -
+// could never become visible, so it read as missing. The state the user asked
+// for is exactly that one: everything unmapped, columns still in hand, one
+// click to re-suggest.
+//
+// Targets are set to "" rather than deleted. renderMappings() re-suggests any
+// target key that is ABSENT from mappingSelections, so clearing the object
+// wholesale would instantly re-map everything and the reset would look like it
+// did nothing. An explicit empty string is present-but-unmapped, which the
+// suggestion pass leaves alone - and autoMapUnmappedFields() drops those
+// blanks before it runs, so the button still works on them.
+function resetFieldMappingsOnly() {
+      if (!sourceFields.length) {
+        // Nothing parsed, so there is no mapping to clear that a full reset
+        // would not also clear. Do the honest thing rather than a no-op.
+        resetMapping();
+        return;
+      }
+      const cleared = {};
+      getVisibleTargets().forEach((target) => { cleared[target.key] = ""; });
+      mappingSelections = cleared;
+      autoMappedKeys = new Set();
+      hiddenMappingKeys = new Set();
+      customAliases = {};
+      pendingUnsavedParse = true;
+      renderMappings();
+      updateOutput();
+      setStatus('All fields cleared to unmapped. Use "Auto-map fields" to match the parsed columns automatically.', "ok");
+    }
+function autoMapUnmappedFields() {
+      if (!sourceFields.length) {
+        setStatus("Parse a source first - there are no columns to map yet.", "warn");
+        return;
+      }
+      Object.keys(mappingSelections).forEach((key) => {
+        if (!mappingSelections[key]) delete mappingSelections[key];
+      });
+      forceAutoMapOnce = true;
+      renderMappings();
+      const mapped = Object.values(mappingSelections).filter(Boolean).length;
+      setStatus(mapped
+        ? `Auto-mapped ${mapped} field${mapped === 1 ? "" : "s"}. Check the light-red rows - those are guesses worth confirming.`
+        : "No confident matches for these columns. Map them by hand below.", mapped ? "ok" : "warn");
+      if (templateEditMode) pendingUnsavedParse = true;
+    }
+// Offered only when it can actually help: there are parsed columns, and not
+// one of them is mapped. With a partial mapping the per-row dropdowns are the
+// better tool, and a bulk re-run would fight the user's own choices.
+function updateAutoMapButton() {
+      const button = el("autoMapFieldsBtn");
+      if (!button) return;
+      const mappedCount = Object.values(mappingSelections).filter(Boolean).length;
+      button.classList.toggle("hidden", !(sourceFields.length && mappedCount === 0));
+    }
+// BB1: one source column can own exactly ONE target field.
+//
+// applyMappingSelection() already enforces this when a user picks from a
+// dropdown - it moves the column off its previous owner. Nothing enforced it
+// for mappings assigned in BULK: presets, restored drafts, and templates all
+// write mappingSelections wholesale. setPizzaHutMappings() shipped with the
+// column "address" mapped to BOTH `name` and `address`, which is how one
+// column came to fill several fields.
+//
+// Run from renderMappings(), so every path that can produce a mapping passes
+// through it regardless of where the mapping came from. The earliest target
+// in priority order (required first) keeps the column; later claims are
+// cleared, which is what "better clear one column" asks for.
+function dedupeMappingSelections(orderedTargets) {
+      const owner = new Map();
+      const dropped = [];
+      orderedTargets.forEach((target) => {
+        const column = mappingSelections[target.key];
+        if (!column) return;
+        if (owner.has(column)) {
+          mappingSelections[target.key] = "";
+          autoMappedKeys.delete(target.key);
+          dropped.push({ column, target: target.key, keptBy: owner.get(column) });
+        } else {
+          owner.set(column, target.key);
+        }
+      });
+      return dropped;
+    }
 function suggestField(target, usedFields = new Set()) {
       const learned = learnedSuggestions[target.key]?.source;
       if (learned && sourceFields.includes(learned) && !usedFields.has(learned)) return learned;
@@ -1603,6 +1897,7 @@ function suggestField(target, usedFields = new Set()) {
       return "";
     }
 function sampleValue(path) {
+      if (path === "__brand") return formatBrandName(selectedBrand?.name || "");
       for (const row of sourceRows.slice(0, 10)) {
         const value = getByPath(row, path);
         if (value !== undefined && value !== null && value !== "") return String(value);
@@ -1624,6 +1919,7 @@ function renderMappings() {
       componentsPanel?.classList.toggle("hidden", !hasMappingContent);
       optionalPanel?.classList.toggle("hidden", !hasMappingContent);
       previewTabs?.classList.toggle("hidden", !hasMappingContent);
+      if (hasMappingContent) mapperView?.classList.remove("preparse-booting");
       const defaultBrandSummary = el("defaultBrandModelSummary");
       const defaultBrandButton = el("defaultBrandModelBtn");
       if (defaultBrandSummary && defaultBrandButton) {
@@ -1643,9 +1939,17 @@ function renderMappings() {
         <div class="mapping-head"> </div>
       `;
       const visibleTargets = getVisibleTargets();
+      // Required targets first, so when a column has been claimed twice the
+      // mandatory field is the one that keeps it.
+      const dedupeOrder = [...visibleTargets.filter((target) => target.required),
+                           ...visibleTargets.filter((target) => !target.required)];
+      const droppedDuplicates = dedupeMappingSelections(dedupeOrder);
       const usedFields = new Set();
-      // Only apply automatic field suggestions after source has been parsed
-      if (sourceParsed) {
+      // Only apply automatic field suggestions after source has been parsed,
+      // or when the user explicitly asked for them (forceAutoMapOnce). The
+      // button reuses THIS pass rather than reimplementing matching, so the
+      // two can never disagree about what auto-mapping means.
+      if (sourceParsed || forceAutoMapOnce) {
         const suggestionTargets = [...visibleTargets.filter((target) => target.required), ...visibleTargets.filter((target) => !target.required)];
         suggestionTargets.forEach((target) => {
           if (!Object.prototype.hasOwnProperty.call(mappingSelections, target.key)) {
@@ -1655,15 +1959,30 @@ function renderMappings() {
           }
           if (mappingSelections[target.key]) usedFields.add(mappingSelections[target.key]);
         });
+        forceAutoMapOnce = false;
       } else {
         // Still need to populate usedFields from existing mappings when not parsed
         visibleTargets.forEach((target) => {
           if (mappingSelections[target.key]) usedFields.add(mappingSelections[target.key]);
         });
       }
+      if (selectedBrand?.business_id) {
+        mappingSelections.name = "__brand";
+        autoMappedKeys.delete("name");
+        usedFields.add("__brand");
+      } else if (mappingSelections.name === "__brand") {
+        delete mappingSelections.name;
+        usedFields.delete("__brand");
+      }
+      updateAutoMapButton();
+      if (droppedDuplicates.length) {
+        const first = droppedDuplicates[0];
+        setStatus(`${first.column} can only fill one field - kept on ${formatFieldLabel(first.keptBy)}, cleared from ${droppedDuplicates.map((entry) => formatFieldLabel(entry.target)).join(", ")}.`, "warn");
+      }
       visibleTargets.forEach((target) => {
         const hasSelection = Object.prototype.hasOwnProperty.call(mappingSelections, target.key);
         const selected = hasSelection ? mappingSelections[target.key] : "";
+        const isLockedBrandMapping = target.key === "name" && selected === "__brand" && Boolean(selectedBrand?.business_id);
         if (selected) usedFields.add(selected);
         const availableOptionsList = [...sourceFields];
         if (selected && !availableOptionsList.includes(selected)) {
@@ -1674,12 +1993,13 @@ function renderMappings() {
             const owner = Object.entries(mappingSelections).find(([, value]) => value === sourceField);
             const ownerLabel = owner ? mappingTargets.find((item) => item.key === owner[0])?.label : "";
             const title = ownerLabel ? ` title="Already mapped to ${escapeHtml(ownerLabel)}"` : "";
-            return `<option value="${escapeHtml(sourceField)}"${title}>${escapeHtml(sourceField)}${ownerLabel ? " &#10003;" : ""}</option>`;
+            const label = sourceField === "__brand" ? formatBrandName(selectedBrand?.name || "Selected brand") : sourceField;
+            return `<option value="${escapeHtml(sourceField)}"${title}>${escapeHtml(label)}${ownerLabel ? " &#10003;" : ""}</option>`;
           }))
           .join("");
         grid.insertAdjacentHTML("beforeend", `
           <div>${target.required ? '<span class="required">*</span> ' : ''}${escapeHtml(target.label)}</div>
-          <select data-field="${target.key}" class="${selected && autoMappedKeys.has(target.key) ? 'auto-mapped' : ''}">${options}</select>
+          <select data-field="${target.key}" class="${selected && autoMappedKeys.has(target.key) ? 'auto-mapped' : ''}"${isLockedBrandMapping ? ' disabled title="Brand is fixed by the selected dropdown value."' : ''}>${options}</select>
           <div data-sample="${target.key}">${escapeHtml(selected ? sampleValue(selected) : "")}</div>
           <div>${target.required ? '' : `<button class="secondary mapping-remove" type="button" data-remove-field="${target.key}" title="Remove field" aria-label="Remove ${escapeHtml(target.label)}">&#128465;</button>`}</div>
         `);
@@ -1714,7 +2034,13 @@ function syncPreParseWorkspace(hasMappingContent) {
       const parserHost = el("preParseParserHost");
       const parserBusinessField = el("parserBusinessField");
       if (!sourcePanel || !brandPanel || !brandHost || !parserHost) return;
-      const brandIds = new Set(["brandSelectLabel", "brandSelect", "editExistingBrandLink", "presetBrandPanel", "newBrandFields"]);
+      // brandSelectSearch is created by attachSearchableSelect() as a SIBLING
+      // of #brandSelect, so it is a child of this panel too. Leaving it out of
+      // this set sent it to the parser host while its select went to the brand
+      // host - the search box ended up in a different panel from the list it
+      // filters, which is why brand search "stopped working" in the 40/60
+      // layout. It has to travel with the select.
+      const brandIds = new Set(["brandSelectLabel", "brandSelect", "brandSelectSearch", "editExistingBrandLink", "presetBrandPanel", "newBrandFields"]);
       if (!hasMappingContent && !preParseRelocatedNodes) {
         preParseRelocatedNodes = Array.from(sourcePanel.children).map((node, index) => ({ node, index }));
         preParseRelocatedNodes.forEach(({ node }) => {
@@ -1726,12 +2052,25 @@ function syncPreParseWorkspace(hasMappingContent) {
         parserHost.classList.remove("hidden");
         parserBusinessField?.classList.remove("hidden");
         syncParserBusinessSelect();
+        brandHost.classList.add("wide-brand-selector");
+        parserBusinessField?.classList.add("wide-brand-selector");
         const parserTitle = parserHost.querySelector("h2");
         if (parserTitle) parserTitle.textContent = "Source Parser";
         updatePreParseBrandMode();
+        el("mapperView")?.classList.remove("preparse-booting");
       } else if (hasMappingContent && preParseRelocatedNodes) {
+        brandHost.classList.remove("wide-brand-selector");
+        parserBusinessField?.classList.remove("wide-brand-selector");
         preParseRelocatedNodes.sort((left, right) => left.index - right.index).forEach(({ node }) => sourcePanel.appendChild(node));
         preParseRelocatedNodes = null;
+        // Re-home both brand searches after the move. The snapshot above was
+        // taken before they existed, so they are not in the list that just
+        // moved back - attachSearchableSelect() puts each one beside its own
+        // select again.
+        if (typeof attachSearchableSelect === "function") {
+          attachSearchableSelect("brandSelect", { threshold: 15, minChars: 1 });
+          attachSearchableSelect("parserBusinessSelect", { threshold: 15, minChars: 1 });
+        }
         brandPanel.classList.add("hidden");
         parserHost.classList.add("hidden");
         parserBusinessField?.classList.add("hidden");
@@ -1762,6 +2101,11 @@ function updatePreParseBrandMode() {
       // opening Template Library (or any other tab) on a fresh session
       // would silently open the "Create Brand" form underneath it.
       if (el("mapperView")?.classList.contains("hidden")) return;
+      // And this is the PRE-PARSE brand mode. Once a source is parsed the
+      // mapper is in the mapping layout, where the brand form has no place -
+      // renderMappings() still runs through here after a parse, so without
+      // this the form popped open over the freshly parsed workspace.
+      if (!el("mapperView")?.classList.contains("pre-parse-active")) return;
       if (createRadio.checked && !selectedBrand && !el("newBrandFields")?.classList.contains("is-open")) openBrandEditorForm("create");
     }
 function openBrandEditorForm(mode = "create") {
@@ -1817,6 +2161,10 @@ async function applyMappingSelection(key, nextValue, selectElement) {
         optionalMappingKeys.delete(key);
         delete mappingSelections[key];
       }
+      // A real edit. Viewing a template is not unsaved work, but changing one
+      // of its mappings is - this is what re-arms the leave-confirmation that
+      // loadTemplateIntoEditor() deliberately cleared.
+      if (templateEditMode) pendingUnsavedParse = true;
       renderMappings();
     }
 function updateOptionalFieldPicker() {
@@ -1989,7 +2337,7 @@ async function dropCustomField() {
         setDropCustomFieldFeedback("Admin password required (use '54321').", "warn");
         return;
       }
-      setDropCustomFieldFeedback("Removing custom field...", "");
+      setDropCustomFieldFeedback("Removing custom field", "", true);
       try {
         const response = await fetch("/api/custom-field/delete", {
           method: "POST",
@@ -2016,11 +2364,15 @@ async function dropCustomField() {
         setDropCustomFieldFeedback(productSafeError(error.message, "Could not remove custom field."), "error");
       }
     }
-function setDropCustomFieldFeedback(message, type = "") {
+function setDropCustomFieldFeedback(message, type = "", busy = false) {
       const target = el("dropCustomFieldFeedback");
       if (!target) return;
       target.className = `action-feedback ${type}`;
-      target.textContent = message;
+      // In-progress messages get the spinner, never trailing dots - the
+      // spinner is the one thing in this app that says "still working", and
+      // it moves, which "..." does not.
+      if (busy) target.innerHTML = busyMarkup(message);
+      else target.textContent = message;
     }
 function computeMappingConfidenceEvents() {
       // Diffs the immutable post-parse auto-mapping snapshot against the
@@ -2095,12 +2447,10 @@ function getMapper() {
       }
       return mapper;
     }
-async function loadBrands(search = "") {
-      try {
-        const response = await fetch(`/api/brands?search=${encodeURIComponent(search)}`);
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "Could not load brands.");
-        const brands = result.brands || [];
+// The render half of loadBrands(), split out so the remembered list and a
+// fresh fetch go through exactly one code path - the dropdown, the duplicate
+// rail and the search cache must not have two ways of being built.
+function renderBrandOptions(brands) {
         // DAT-04: a brand loaded twice produced two identical-looking rows in
         // this dropdown ("Domino's Pizza" listed twice), with no way to tell
         // them apart or merge them. Duplicates must NEVER reach the dropdown:
@@ -2136,13 +2486,112 @@ async function loadBrands(search = "") {
         syncParserBusinessSelect();
         el("editExistingBrandLink")?.classList.toggle("hidden", !selectedBrand);
         syncCustomFieldBusinessPickers();
+    }
+
+// Remembered brands paint the dropdown (and its search box) immediately, then
+// the real list replaces them.
+//
+// loadBrands() is a network round trip - 6.0s cold, 6ms warm, measured - and
+// attachSearchableSelect() only creates the search input once options exist,
+// so on a cold start the brand controls simply were not there for several
+// seconds. The last known list is kept in localStorage and rendered first;
+// the fetch below then overwrites it. Stale for a moment beats absent.
+const BRAND_MEMORY_KEY = "whitespace.brands.v1";
+
+function rememberedBrands() {
+      try {
+        const raw = window.localStorage.getItem(BRAND_MEMORY_KEY);
+        const parsed = raw ? JSON.parse(raw) : null;
+        return Array.isArray(parsed) && parsed.length ? parsed : null;
+      } catch (_) {
+        return null;
+      }
+    }
+function rememberBrands(brands) {
+      try {
+        window.localStorage.setItem(BRAND_MEMORY_KEY, JSON.stringify(brands || []));
+      } catch (_) {
+        // A full or disabled localStorage must never break brand loading.
+      }
+    }
+function paintRememberedBrands() {
+      // Only before the real list has arrived, and never over a live one.
+      const remembered = rememberedBrands();
+      if (!remembered) return false;
+      const select = el("brandSelect");
+      if (!select || select.dataset.brandsLoaded === "true") return false;
+      renderBrandOptions(remembered);
+      return true;
+    }
+async function loadBrands(search = "") {
+      try {
+        const response = await fetch(`/api/brands?search=${encodeURIComponent(search)}`);
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not load brands.");
+        const brands = result.brands || [];
+        renderBrandOptions(brands);
+        el("brandSelect").dataset.brandsLoaded = "true";
+        // Only a FULL list is worth remembering - a name-filtered one would
+        // repaint the next cold start with a handful of brands.
+        if (!search) rememberBrands(brands);
       } catch (error) {
         setStatus(productSafeError(error.message, "Could not load brands."), "error");
       }
     }
+
+// BB11: never create a second brand under a name we already have.
+//
+// An exact case-insensitive match is refused outright. A close-but-not-equal
+// name is a QUESTION, not a decision - "Smith Bakery" and "Smiths Bakery"
+// really can be two businesses, so the user is asked rather than overruled.
+const BRAND_SUGGEST_THRESHOLD = 0.8;
+
+async function resolveExistingBrandForName(name) {
+      const wanted = String(name || "").trim();
+      if (!wanted) return null;
+      const brands = JSON.parse(el("brandSelect")?.dataset.brands || "[]");
+      const normalized = wanted.toLowerCase().replace(/\s+/g, " ");
+      const exact = brands.find((brand) =>
+        String(brand.name || "").trim().toLowerCase().replace(/\s+/g, " ") === normalized);
+      if (exact) {
+        showAppNotice(
+          `${formatBrandName(exact.name)} already exists, so it has been selected instead of creating a second copy.`,
+          "Brand already exists", "info");
+        return exact;
+      }
+      const close = brands
+        .map((brand) => ({ brand, score: brandNameSimilarity(brand.name || "", wanted) }))
+        .filter((entry) => entry.score >= BRAND_SUGGEST_THRESHOLD)
+        .sort((left, right) => right.score - left.score)[0];
+      if (!close) return null;
+      const useExisting = await showAppConfirm(
+        `${formatBrandName(close.brand.name)} already exists and is very close to "${wanted}".\n\nUse the existing brand instead of creating a new one?`,
+        "Did you mean this brand?");
+      return useExisting ? close.brand : null;
+    }
+
 async function createNewBrand(brandNameOverride = "", extra = {}) {
       const name = (brandNameOverride || el("newBrandName").value).trim();
       if (!name) { setStatus("Brand name is required.", "warn"); return null; }
+      // Stop the duplicate here rather than creating it and offering a merge
+      // afterwards - the cheapest duplicate to resolve is the one never made.
+      const existing = await resolveExistingBrandForName(name);
+      if (existing) {
+        selectedBrand = existing;
+        setPreParseBrandValidation("");
+        el("brandSelect").value = existing.business_id;
+        syncParserBusinessSelect();
+        el("newBrandFields").classList.add("hidden");
+        el("newBrandFields").classList.remove("is-open", "editing-brand");
+        brandEditMode = false;
+        presetCreateMode = false;
+        el("editExistingBrandLink")?.classList.remove("hidden");
+        applyBusinessSourceType(existing);
+        await refreshTemplatesForBusiness();
+        setStatus(`Using existing brand ${formatBrandName(existing.name)}.`, "ok");
+        updateOutput();
+        return existing;
+      }
       const button = el("createBrandBtn");
       const previousButton = setButtonBusy(button, "Saving Brand");
       try {
@@ -2152,11 +2601,21 @@ async function createNewBrand(brandNameOverride = "", extra = {}) {
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not create brand.");
         selectedBrand = result.brand;
+        // The server refuses a duplicate name in the same statement as the
+        // insert, and returns the existing brand instead. Say so rather than
+        // reporting a creation that did not happen.
+        const wasCreated = result.created !== false;
         setPreParseBrandValidation("");
         el("brandSelect").value = selectedBrand.business_id;
         syncParserBusinessSelect();
         el("editExistingBrandLink")?.classList.remove("hidden");
-        await loadBrands(selectedBrand.name);
+        // Full list, not filtered by the new brand's name. A filtered reload
+        // left the dropdown (and the search cache behind it) holding only the
+        // matches, so every other brand disappeared until the next full load
+        // - and the search could not offer the new brand either. The server
+        // is already fresh here: create_brand() clears the brand cache, so
+        // this reload sees the new brand from BigQuery.
+        await loadBrands();
         el("brandSelect").value = selectedBrand.business_id;
         syncParserBusinessSelect();
         el("newBrandFields").classList.add("hidden");
@@ -2166,7 +2625,12 @@ async function createNewBrand(brandNameOverride = "", extra = {}) {
         applyBusinessSourceType(selectedBrand);
         await refreshTemplatesForBusiness();
         setStatus(`Brand ${selectedBrand.name} is ready for mapping.`, "ok");
-        showAppNotice(`${formatBrandName(selectedBrand.name)} was created and is ready for mapping.`, "Brand saved");
+        showAppNotice(
+          wasCreated
+            ? `${formatBrandName(selectedBrand.name)} was created and is ready for mapping.`
+            : `${formatBrandName(selectedBrand.name)} already existed, so it has been selected instead of creating a second copy.`,
+          wasCreated ? "Brand saved" : "Brand already exists",
+          wasCreated ? "ok" : "info");
         updateOutput();
         return selectedBrand;
       } catch (error) {
@@ -2206,7 +2670,9 @@ async function updateExistingBrand() {
         if (!response.ok) throw new Error(result.error || "Could not update brand.");
         selectedBrand = result.brand;
         setPreParseBrandValidation("");
-        await loadBrands(selectedBrand.name);
+        // Full list for the same reason as create: a name-filtered reload
+        // narrows both the dropdown and the search cache behind it.
+        await loadBrands();
         el("brandSelect").value = selectedBrand.business_id;
         syncParserBusinessSelect();
         fillBrandFields(selectedBrand, activeCsvPresetConfig?.brand || {});
@@ -2223,7 +2689,7 @@ async function updateExistingBrand() {
         showAppNotice(`${formatBrandName(selectedBrand.name)} was updated.`, "Brand updated");
         return selectedBrand;
       } catch (error) {
-        setStatus(productSafeError(error.message, "Could not update business."), "error");
+        setStatus(productSafeError(error.message, "Could not update brand."), "error");
         return null;
       } finally {
         clearButtonBusy(button, previousButton);
@@ -2490,7 +2956,7 @@ async function parseSource() {
       const runBtn = el("runPythonConnectorBtn");
       const previousParseBtn = setButtonBusy(parseBtn, "Parsing");
       const previousRunBtn = setButtonBusy(runBtn, "Running & Parsing");
-      setStatus("Reading your source...", "");
+      setStatus("Reading your source", "");
       try {
         const file = el("fileInput").files[0];
         let sourceType = el("sourceType").value;
@@ -2573,7 +3039,10 @@ async function parseSource() {
         else if (csvFunctionMode === "global_hotels") setGlobalHotelsMappings();
         else if (excelFunctionMode === "demo_restaurant") setDemoRestaurantExcelMappings();
         else if (jsonFunctionMode === "dominos") setDominosMappings();
-        else if (apiFunctionMode === "little_caesars") setLittleCaesarsApiMappings();
+        // Re-apply from the cached system preset when we have it, so this
+        // path cannot quietly fall back to the hardcoded mapping after the
+        // preset itself was applied from config.
+        else if (apiFunctionMode === "little_caesars") setLittleCaesarsApiMappings((predefinedSourcePresets || {})["little_caesars_locations_get_api_demo"]);
         else if (document.querySelector("input[name='pythonFunction']:checked")?.value === "la_city") setLaCityDemoMappings();
         pruneMappingSelectionsToParsedFields();
         autoAddDetectedOptionalFields();
@@ -2802,16 +3271,39 @@ function updateSampleDatasetControls(result = {}) {
       const reloadLink = el("reloadSampleDatasetLink");
       if (!button && !headerButton) return;
       const loaded = Boolean(result.loaded || result.already_loaded || result.locations);
+      // The dataset loads in ONE pass now - the NTILE(2) half-split is gone.
+      // "loaded" still cannot tell "some of it is here" from "all of it is",
+      // though, because a load can be interrupted by a restart or a clear.
+      // complete === true means every source row landed; false means the set
+      // is short; null means the source count could not be read, in which
+      // case we say the weaker of the two rather than claim either.
+      const complete = result.complete === true;
       [button, headerButton].filter(Boolean).forEach((sampleButton) => {
         sampleButton.dataset.sampleLoaded = loaded ? "true" : "false";
+        sampleButton.dataset.sampleComplete = complete ? "true" : "false";
         sampleButton.disabled = loaded;
         sampleButton.classList.remove("sample-state-loading");
         sampleButton.classList.toggle('sample-state-ready', loaded);
         sampleButton.classList.toggle('sample-state-idle', !loaded);
-        sampleButton.title = loaded ? "Sample data already in place." : "";
-        sampleButton.textContent = loaded ? "Sample Dataset Already Loaded" : "Load Sample Dataset";
+        sampleButton.title = loaded
+          ? (complete
+              ? "The whole sample dataset is in place."
+              : `Part of the sample dataset is in place${result.source_locations ? ` (${formatNumber(result.locations || 0)} of ${formatNumber(result.source_locations)} records)` : ""}. Use Clear and load again to complete it.`)
+          : "";
+        sampleButton.textContent = loaded
+          ? (complete ? "\u2713 Sample Dataset Already Loaded" : "Sample Dataset Loaded")
+          : "Load Sample Dataset";
       });
-      if (clearLink) clearLink.classList.toggle("hidden", !loaded);
+      // Clear stays available the moment ANY data exists - including mid-load,
+      // which is exactly when someone is most likely to want to stop and start
+      // over.
+      if (clearLink) {
+        clearLink.classList.toggle("hidden", !loaded);
+        clearLink.textContent = loaded && !complete ? "Stop & Clear Sample Data" : "Clear Sample Data";
+        clearLink.title = loaded && !complete
+          ? "Stops any load still running and removes everything already loaded."
+          : "Removes the sample dataset.";
+      }
       if (reloadLink) reloadLink.classList.toggle("hidden", !loaded);
     }
 const JOB_HISTORY_STATUS_STYLE = {
@@ -2862,7 +3354,7 @@ async function loadJobHistoryDialogPage() {
       const listEl = el("jobHistoryDialogList");
       const pageInfoEl = el("jobHistoryDialogPageInfo");
       if (!listEl) return;
-      listEl.innerHTML = '<div class="report-status" style="padding: 8px 0; font-size: 12px;">Loading…</div>';
+      listEl.innerHTML = `<div class="report-status" style="padding: 8px 0; font-size: 12px;">${busyMarkup("Loading")}</div>`;
       try {
         const offset = jobHistoryDialogPage * JOB_HISTORY_DIALOG_PAGE_SIZE;
         const response = await fetch(`/api/jobs/recent?limit=${JOB_HISTORY_DIALOG_PAGE_SIZE}&offset=${offset}`);
@@ -2901,7 +3393,11 @@ async function refreshSampleDatasetStatus() {
         updateSampleDatasetControls(result);
         return result;
       } catch (error) {
-        updateSampleDatasetControls({ loaded: false });
+        // Do NOT claim "not loaded" here. This is the same mistake as the
+        // `state.auto_repair?.fixed || 0` counters (B9): a failed or slow
+        // status check would repaint a fully loaded dataset's button as
+        // "Load Sample Dataset", telling the user their data was gone when
+        // it was not. Absent information leaves the last known state alone.
         return null;
       }
     }
@@ -2915,7 +3411,17 @@ async function saveMapper() {
           return;
         }
         if (!mapper.business_id) {
-          setStatus("Creating brand for mapping...", "");
+          // Implicit creation is only ever acceptable for a brand the user
+          // typed on THIS save. Reported: hiding the save progress reset the
+          // workspace and a brand then appeared "on its own" - a record
+          // nobody asked for. A save that no longer has a live workspace
+          // behind it must stop, not invent a brand from whatever is left in
+          // the form.
+          if (!sourceParsed || !String(el("newBrandName")?.value || "").trim()) {
+            setStatus("Select or create the brand before saving.", "warn");
+            return;
+          }
+          setStatus("Creating brand for mapping", "");
           const created = await createNewBrand(mapper.brand);
           if (!created || !created.business_id) {
             setStatus("Could not resolve brand ID. Please save the brand first.", "warn");
@@ -2983,7 +3489,7 @@ async function saveMapper() {
             // assume a conservative rows/ms rate; once at least one batch
             // has completed, use its actual measured pace instead. Either
             // way this keeps climbing every tick instead of freezing at a
-            // single static "Starting batch..." message for the whole
+            // single static "Starting batch" message for the whole
             // (often single-batch) save.
             const priorMsPerRow = processedRows > 0 ? (Date.now() - startTime) / processedRows : 20;
             const batchEstimatedMs = Math.max(600, batch.rows.length * priorMsPerRow);
@@ -3006,8 +3512,8 @@ async function saveMapper() {
                 headers: { "content-type": "application/json" },
                 body: JSON.stringify({
                   mapper,
-                  rows: batch.rows,
-                  source_fields: sourceFields,
+                  rows: batch.rows.map((row) => mappingSelections.name === "__brand" ? { ...row, __brand: selectedBrand?.name || mapper.brand } : row),
+                  source_fields: mapper.source_fields || sourceFields,
                   batch_event_id: batchEventId,
                   row_offset: batch.rowOffset,
                   // A loaded template's row is already kept in sync above -
@@ -3071,7 +3577,7 @@ async function saveMapper() {
           setStatus(message, "error");
           if (wasBackgrounded) {
             const brandLabel = mapper.brand ? formatBrandName(mapper.brand) : "This brand";
-            showAppNotice(`${brandLabel}: the save running in the background did not finish. ${message}`, "Save did not finish");
+            showAppNotice(`${brandLabel}: the save running in the background did not finish. ${message}`, "Save did not finish", "error");
             // The server records the failed attempt as a FAILED job, so the
             // history panel is where the user can see it afterwards.
             loadJobHistory();
@@ -3120,7 +3626,7 @@ async function clearSavedData() {
 async function performClearSavedData() {
       const button = el("confirmClearBtn");
       const previousButton = setButtonBusy(button, "Clearing");
-      setStatus("Clearing saved data...", "warn");
+      setStatus("Clearing saved data", "warn");
       try {
         const response = await fetch("/api/clear", {
           method: "POST",
@@ -3190,7 +3696,7 @@ async function performMasterDeleteData() {
         status.className = "action-feedback ok";
         status.textContent = "Workspace reset complete.";
         setStatus("Workspace reset complete. You will be signed out so the app can reload cleanly.", "ok");
-        showAppNotice("Workspace reset complete. You will be signed out so the app can reload cleanly.", "Reset complete");
+        showAppNotice("Workspace reset complete. You will be signed out so the app can reload cleanly.", "Reset complete", "warn");
         sourceRows = [];
         sourceFields = [];
         sourceParsed = false;
@@ -3234,6 +3740,22 @@ function resetMapping() {
       populateJsonRecordPaths([]);
       renderTable("sourcePreview", []);
       el("entityPreview").innerHTML = "";
+      // The brand selection is part of the workspace, not something separate.
+      // Leaving it behind is why hiding a save returned a "cleared" 40/60
+      // layout that still had the previous business selected - and why the
+      // brand form could still be sitting open on it.
+      selectedBrand = null;
+      brandEditMode = false;
+      presetBrandEditMode = false;
+      presetCreateMode = false;
+      const brandSelect = el("brandSelect");
+      if (brandSelect && !brandSelect.disabled) brandSelect.value = "";
+      const brandFields = el("newBrandFields");
+      if (brandFields) {
+        brandFields.classList.add("hidden");
+        brandFields.classList.remove("is-open", "editing-brand");
+      }
+      el("editExistingBrandLink")?.classList.add("hidden");
       saveDraft();
       renderMappings();
       setStatus("Choose a source and parse it to start mapping in left pane.", "ok");

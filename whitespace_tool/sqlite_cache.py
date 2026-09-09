@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import functools
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -15,7 +16,22 @@ from whitespace_tool.paths import project_path
 
 LOGGER = logging.getLogger("whitespace_tool.sqlite_cache")
 
-DB_PATH = project_path(".cache/whitespace_cache.db")
+# WHITESPACE_CACHE_DB redirects the mirror to another file. This exists for
+# ONE reason: the test suite must never touch the running app's cache.
+#
+# It used to. DB_PATH pointed unconditionally at .cache/whitespace_cache.db,
+# and the suite exercises clear_sample_reporting_mirror(),
+# clear_local_cache_db() and the gold-mirror swap for real - so a
+# `pytest unit_tests/` run wiped the LIVE reporting mirror. That is why the
+# dashboard kept collapsing to "0 data" with nothing in the server logs to
+# explain it: the wipes were not coming from the server. Five orphaned pytest
+# processes were still doing it hours after their runs had "finished".
+#
+# Resolved once at import, not per call, so the existing tests that isolate
+# themselves with patch.object(sqlite_cache, "DB_PATH", tmp) keep working
+# exactly as before - the env var only changes the DEFAULT.
+_CACHE_DB_OVERRIDE = os.environ.get("WHITESPACE_CACHE_DB", "").strip()
+DB_PATH = Path(_CACHE_DB_OVERRIDE) if _CACHE_DB_OVERRIDE else project_path(".cache/whitespace_cache.db")
 
 # Columns mirrored locally from the gold layer's two master views, so
 # reporting can filter/aggregate against SQLite instead of a live BigQuery
@@ -887,7 +903,47 @@ def invalidate_cache(cache_key: str | None = None) -> None:
             # Intelligence's tab, which reads dedicated gold-mirror tables
             # untouched by this delete. Exempting it keeps quality numbers
             # fast (self-healing within a read or two) the same way.
-            conn.execute("DELETE FROM query_cache WHERE cache_key NOT LIKE 'reporting_quality:%';")
+            # list_brands:* is spared for the same reason reporting_quality:*
+            # is: brands change only when a brand is created, edited, merged
+            # or cleared, and every one of those paths clears this key
+            # explicitly (invalidate_brand_cache()). Leaving it in the blanket
+            # wipe meant an ordinary save - or any background pass - threw
+            # away the brand list, and the next time the dropdown opened it
+            # paid a full BigQuery read. Measured: 6.0s cold versus 6ms warm
+            # for 1,000 brands.
+            conn.execute(
+                "DELETE FROM query_cache "
+                "WHERE cache_key NOT LIKE 'reporting_quality:%' "
+                "AND cache_key NOT LIKE 'list_brands:%';")
+        conn.commit()
+
+
+def invalidate_brand_cache() -> None:
+    """Drop the list_brands:* payloads that invalidate_cache() spares.
+
+    Called from the paths that genuinely change the brand list - create,
+    update, merge, clear, master delete - so the dropdown is fresh the moment
+    it matters and untouched the rest of the time.
+    """
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        conn.execute("DELETE FROM query_cache WHERE cache_key LIKE 'list_brands:%';")
+        conn.commit()
+
+
+def invalidate_template_cache() -> None:
+    """Drop the list_templates:* payloads.
+
+    The Template Library list is BigQuery-backed with no mirror of its own -
+    measured at 2.4-3.6s per call, never faster, for a ~1.6KB payload - and it
+    is on the critical path of opening a Review row, which has to resolve the
+    record's template before it can render the edit form. Called from the
+    paths that actually change a template, so the list is fresh when it
+    matters and free the rest of the time.
+    """
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        conn.execute("DELETE FROM query_cache WHERE cache_key LIKE 'list_templates:%';")
         conn.commit()
 
 
@@ -1260,7 +1316,7 @@ for _action_name in (
     "lookup_cached_city_state", "get_cached_zipcode_count", "cache_worldwide_cities",
     "get_cached_worldwide_city_count", "get_zip_reference_status", "set_zip_reference_status",
     "get_auto_repair_stats", "set_auto_repair_stats", "increment_manual_fixed_count",
-    "get_cached_query", "set_cached_query", "invalidate_cache", "clear_local_cache_db",
+    "get_cached_query", "set_cached_query", "invalidate_cache", "invalidate_brand_cache", "clear_local_cache_db",
     "get_error_count", "set_error_count", "replace_gold_mirror", "get_mirror_status",
     "fetch_mirror_zip_brand_activity", "fetch_mirror_reporting_locations",
     "fetch_mirror_reporting_locations_by_brand", "fetch_mirror_businesses",

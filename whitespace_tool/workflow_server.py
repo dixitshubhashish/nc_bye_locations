@@ -50,7 +50,7 @@ from whitespace_tool.sqlite_cache import (
     seed_enrichment_cycle, claim_enrichment_batch, complete_enrichment_claim, enrichment_cycle_counts,
     get_cached_worldwide_city_count, cache_worldwide_cities,
     record_save_event, get_recent_save_events, count_save_events,
-    get_app_setting, set_app_setting, get_stale_after_days, invalidate_quality_cache, DEFAULT_STALE_AFTER_DAYS,
+    get_app_setting, set_app_setting, get_stale_after_days, invalidate_quality_cache, invalidate_brand_cache, invalidate_template_cache, DEFAULT_STALE_AFTER_DAYS,
     record_field_discovery_gap,
     record_mapping_confidence_events, get_mapping_confidence,
 )
@@ -70,6 +70,13 @@ _QUALITY_FIX_METRICS_REFRESHING = False
 _QUALITY_FIX_METRICS_LAST_REFRESH = 0.0
 _SAMPLE_CLEAR_LOCK = threading.Lock()
 _SAMPLE_CLEAR_RUNNING = False
+# Clearing has to be able to STOP a load, not race it. load_sample_dataset()
+# returns after NTILE(2) half 1 and continues half 2 on a background thread,
+# so without this, "Clear" would delete what was there and the still-running
+# loader would immediately write half 2 back in - leaving the user staring at
+# data they just cleared.
+SAMPLE_LOAD_CANCELLED = threading.Event()
+_SAMPLE_LOAD_RUNNING = threading.Event()
 _ZIP_REFERENCE_LOCK = threading.Lock()
 _ZIP_REFERENCE_THREAD: threading.Thread | None = None
 _WORLDWIDE_REFERENCE_LOCK = threading.Lock()
@@ -102,6 +109,17 @@ ZIP_REFERENCE_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 REPORTING_REFRESH_LOCK = threading.Lock()
 REPORTING_REFRESHING = False
 ENRICHMENT_STOP_REQUESTED = threading.Event()
+# The user-facing button eases enrichment off; it does not kill it.
+#
+# Killing it outright was the wrong shape: the queue still had rows that
+# needed fixing, so the work simply had to be started again later, and in the
+# meantime the review counts drifted. What the button is actually for is "you
+# are using too much of the machine right now" - so it drops the loop to a
+# couple of rows at a time with a long pause between them, which keeps the
+# queue draining without competing for the warehouse client or the CPU.
+# ENRICHMENT_STOP_REQUESTED remains the genuine abort, used on shutdown and
+# on destructive data operations where continuing would be wrong.
+ENRICHMENT_THROTTLED = threading.Event()
 ENRICHMENT_STATUS: dict[str, Any] = {"state": "idle", "current_id": "", "processed": 0, "updated_at": ""}
 AUTO_REPAIR_THREAD: threading.Thread | None = None
 AUTO_REPAIR_LOCK = threading.Lock()
@@ -124,9 +142,91 @@ SERVER_LAUNCH_ID = uuid4().hex
 load_dotenv()
 
 
+# Raw exception text that the browser must never see.
+#
+# A user reported the app showing them, verbatim:
+#   "400 Query without FROM clause cannot have a WHERE clause at [8:5];
+#    reason: invalidQuery, location: query, ... Job ID: 63aa8d00-..."
+# That is a warehouse job diagnostic. It tells the user nothing they can act
+# on, and it leaks the shape of the backend. The UI already had a filter
+# (productSafeError in common.js) but it works off a list of vendor words -
+# and that message contains none of them, so it sailed through. A denylist of
+# words is the wrong instrument: the giveaway is the SHAPE of a machine
+# diagnostic, not any particular noun.
+#
+# These patterns match that shape.
+_DIAGNOSTIC_ERROR_MARKERS = (
+    "job id:",          # warehouse job handles
+    "reason:",          # "reason: invalidQuery"
+    "location: query",
+    "traceback",        # a Python stack made it into the payload
+    "at [",             # "... at [8:5]" - a line:column into generated SQL
+)
+# Vendor/infra nouns, kept in step with productSafeError() in ui/js/common.js
+# so the two layers agree on what counts as internal.
+_INTERNAL_ERROR_TERMS = (
+    "bigquery", "dataset", "project_id", "dataset_id", "credentials",
+    "service account", "google", "sql", "warehouse", "bronze", "silver",
+    "module named", "traceback",
+)
+
+
+def _is_diagnostic_error_text(text: str) -> bool:
+    lowered = text.lower()
+    if any(marker in lowered for marker in _DIAGNOSTIC_ERROR_MARKERS):
+        return True
+    if any(term in lowered for term in _INTERNAL_ERROR_TERMS):
+        return True
+    # "400 Query without FROM clause..." - an HTTP status the client did not
+    # ask about, pasted onto the front of a message.
+    if re.match(r"^\s*[45]\d\d\s", text):
+        return True
+    # Nothing written for a person runs this long.
+    return len(text) > 300
+
+
+def _safe_error_payload_text(text: str) -> str:
+    """Swap a machine diagnostic for something a user can act on.
+
+    The real text is not discarded - it is logged with a short reference that
+    is also shown to the user, so a support request stays traceable without
+    putting the warehouse's internals on screen. Messages we wrote ourselves
+    (validation like "Brand name is required") match none of the patterns
+    above and are returned untouched, which is the point: this filters
+    diagnostics, not all errors.
+    """
+    if not text or not _is_diagnostic_error_text(text):
+        return text
+    reference = uuid4().hex[:8]
+    LOGGER.error("client_error_sanitized reference=%s detail=%s", reference, text)
+    return (f"Something went wrong on our side and the action did not complete. "
+            f"Please try again. If it keeps happening, quote reference {reference}.")
+
+
+def _sanitize_error_fields(payload: Any, depth: int = 0) -> Any:
+    """Rewrite every string under an "error" key, at any nesting depth.
+
+    Applied centrally in _json_response rather than at the ~40 individual
+    `except Exception as exc: _json_response(self, 400, {"error": str(exc)})`
+    sites, so no route can be missed and new routes are covered by default.
+    Only values under an "error" key are touched, so ordinary payload content
+    cannot be altered by this.
+    """
+    if depth > 4:
+        return payload
+    if isinstance(payload, dict):
+        return {key: (_safe_error_payload_text(value)
+                      if key == "error" and isinstance(value, str)
+                      else _sanitize_error_fields(value, depth + 1))
+                for key, value in payload.items()}
+    if isinstance(payload, list):
+        return [_sanitize_error_fields(item, depth + 1) for item in payload]
+    return payload
+
+
 def _json_response(handler: http.server.BaseHTTPRequestHandler, status: int, payload: dict[str, Any],
                    extra_headers: list[tuple[str, str]] | None = None) -> None:
-    body = json.dumps(payload).encode("utf-8")
+    body = json.dumps(_sanitize_error_fields(payload)).encode("utf-8")
     handler.send_response(status)
     handler.send_header("content-type", "application/json")
     handler.send_header("content-length", str(len(body)))
@@ -1247,20 +1347,20 @@ def run_sql(client: Any, sql: str, params: dict[str, Any] | None = None, *,
 
 
 def run_sql_rows(client: Any, sql: str, params: dict[str, Any] | None = None, *,
-                 label: str = "") -> list[dict[str, Any]]:
+                 label: str = "", low_priority: bool = False) -> list[dict[str, Any]]:
     """Run a query and return its rows as plain dicts."""
-    return [dict(row) for row in run_sql(client, sql, params, label=label).result()]
+    return [dict(row) for row in run_sql(client, sql, params, label=label, low_priority=low_priority).result()]
 
 
 def run_sql_dml(client: Any, sql: str, params: dict[str, Any] | None = None, *,
-                label: str = "") -> int:
+                label: str = "", low_priority: bool = False) -> int:
     """Run a mutation and return the number of rows it actually affected.
 
     Returning the count (rather than discarding it) is what lets a caller say
     "moved 1,240 listings" instead of "done" - and tells a no-op apart from a
     real change.
     """
-    job = run_sql(client, sql, params, label=label)
+    job = run_sql(client, sql, params, label=label, low_priority=low_priority)
     return int(getattr(job, "num_dml_affected_rows", 0) or 0)
 
 
@@ -1444,6 +1544,8 @@ def _forget_ensured_tables() -> None:
     (a clear, a master delete) so the next write re-reconciles."""
     with _ENSURED_TABLES_LOCK:
         _ENSURED_TABLES.clear()
+    with _SOFT_DELETE_COLUMNS_LOCK:
+        _SOFT_DELETE_COLUMNS_ENSURED.clear()
 
 
 def _ensure_error_listings_table(client: Any, project_id: str, dataset_id: str) -> None:
@@ -1485,6 +1587,32 @@ def _ensure_error_listings_table(client: Any, project_id: str, dataset_id: str) 
         existing.schema = list(existing_schema) + missing_fields
         client.update_table(existing, ["schema"])
         LOGGER.info("error_listings_schema_extended columns=%s", [f.name for f in missing_fields])
+
+
+# How many brands the dropdown can ever see.
+#
+# This was 100 while the warehouse held 1,002 - so 902 brands were simply
+# unreachable. The search compounds it: the UI filters the options it was
+# GIVEN, so a brand outside the first 100 alphabetically could not be found by
+# typing its name either. The list is served from the SQLite cache after the
+# first read (measured: 6.0s cold, 6ms warm), so the cost of carrying the full
+# set is payload size, not query time.
+BRAND_LIST_LIMIT = 5000
+# How many listing markers the reporting map receives. This is a browser
+# budget, not a data limit - the sample it caps is now spread across states
+# (see map_query) so the cut no longer decides which part of the country the
+# user can see.
+MAP_RECORD_LIMIT = 5000
+# Ceiling for a SCOPED fetch (a single state, or narrower) requested when the
+# user has zoomed in - see map_scope below. Sampling only exists to spread a
+# national view across every state; once the view is already narrowed to one
+# state there is nothing to spread, so this skips the round-robin CTE and
+# just raises the cap. 20,000 is a judgement call: generous versus the 5,000
+# national cap, bounded so one pathological state can't blow up the payload,
+# with room for a future county-level tier if a state's real count exceeds
+# it. Real per-state counts were not available when this was chosen - measure
+# before raising further.
+SCOPED_MAP_RECORD_LIMIT = 20000
 
 
 def list_brands(search: str = "") -> dict[str, Any]:
@@ -1543,7 +1671,7 @@ def list_brands(search: str = "") -> dict[str, Any]:
       AND (@search = '' OR LOWER(b.name) LIKE CONCAT('%', LOWER(@search), '%'))
     QUALIFY ROW_NUMBER() OVER (PARTITION BY b.business_id ORDER BY t.updated_at DESC NULLS LAST) = 1
     ORDER BY b.name
-    LIMIT 100
+    LIMIT {BRAND_LIST_LIMIT}
     """
     config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("search", "STRING", search)])
     brands = [dict(row) for row in client.query(query, job_config=config).result()]
@@ -1663,13 +1791,42 @@ def create_brand(data: dict[str, Any]) -> dict[str, Any]:
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
     _ensure_businesses_table(client, project_id, dataset_id)
+    # BB11, server side. The UI asks first and offers the existing brand, but
+    # this endpoint is the one that actually creates rows - a duplicate that
+    # arrives from a retry, a second tab, or any caller that skipped the
+    # prompt must still be refused here. Case- and whitespace-insensitive,
+    # because "Casa Verde" and "casa  verde" are the same brand.
+    # The duplicate check is FOLDED INTO the insert below (INSERT ... SELECT
+    # ... WHERE NOT EXISTS) rather than run as its own statement.
+    #
+    # Measured on this warehouse: a single-row SELECT by key costs 1.59s and a
+    # single-row INSERT 2.36s, because BigQuery schedules every statement as a
+    # query job - the cost is per STATEMENT, not per row. A separate check
+    # would have made every brand create ~4s instead of ~2.4s for no added
+    # safety, since the guard is in the same statement as the write and cannot
+    # race it.
+    normalized_name = " ".join(name.lower().split())
     query = f"""
     INSERT INTO `{project_id}.{dataset_id}.businesses`
       (name, slug, source_type_id, description, logo_url, website_url, status, created_at, updated_at, meta_title, meta_description, country_of_origin, is_reference_data, reference_key, default_source_url, default_source_name)
-    VALUES (@name, @slug, @source_type_id, @description, @logo_url, @website_url, @status, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), @meta_title, @meta_description, @country_of_origin, @is_reference_data, @reference_key, @default_source_url, @default_source_name)
+    SELECT @name, @slug, @source_type_id, @description, @logo_url, @website_url, @status, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), @meta_title, @meta_description, @country_of_origin, @is_reference_data, @reference_key, @default_source_url, @default_source_name
+    -- One-row source. BigQuery rejects a WHERE on a SELECT that has no FROM
+    -- ("Query without FROM clause cannot have a WHERE clause"), so the guard
+    -- below needs something to filter, even though every selected value is a
+    -- literal parameter. UNNEST([1]) is the cheapest such row.
+    FROM UNNEST([1])
+    -- BB11: no second brand under a name we already have, case- and
+    -- whitespace-insensitively. In the same statement as the write, so it
+    -- cannot race a concurrent create and costs no extra round trip.
+    WHERE NOT EXISTS (
+      SELECT 1 FROM `{project_id}.{dataset_id}.businesses`
+      WHERE is_deleted IS NOT TRUE
+        AND LOWER(TRIM(REGEXP_REPLACE(name, r'\\s+', ' '))) = @normalized_name
+    )
     """
     params = [
         bigquery.ScalarQueryParameter("name", "STRING", name), bigquery.ScalarQueryParameter("slug", "STRING", slug),
+        bigquery.ScalarQueryParameter("normalized_name", "STRING", normalized_name),
         bigquery.ScalarQueryParameter("source_type_id", "STRING", source_type_id),
         bigquery.ScalarQueryParameter("description", "STRING", data.get("description")), bigquery.ScalarQueryParameter("logo_url", "STRING", data.get("logo_url")),
         bigquery.ScalarQueryParameter("website_url", "STRING", data.get("website_url")), bigquery.ScalarQueryParameter("status", "STRING", data.get("status") or "active"),
@@ -1680,7 +1837,16 @@ def create_brand(data: dict[str, Any]) -> dict[str, Any]:
         bigquery.ScalarQueryParameter("default_source_url", "STRING", data.get("default_source_url")),
         bigquery.ScalarQueryParameter("default_source_name", "STRING", data.get("default_source_name")),
     ]
-    client.query(query, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+    insert_job = client.query(query, job_config=bigquery.QueryJobConfig(query_parameters=params))
+    insert_job.result()
+    # 0 rows means the WHERE NOT EXISTS matched: a brand of this name already
+    # exists. The lookup below then returns THAT brand, which is the right
+    # outcome for the caller (use it, do not make a second one) - but the
+    # response says which happened, so the UI is never left implying it
+    # created something it did not.
+    created = int(getattr(insert_job, "num_dml_affected_rows", 0) or 0) > 0
+    if not created:
+        LOGGER.info("create_brand_reused_existing name=%s", name)
     lookup = f"""
     SELECT b.business_id, b.name, b.slug, b.description, b.logo_url, b.website_url, b.status,
       b.created_at, b.updated_at,
@@ -1698,11 +1864,16 @@ def create_brand(data: dict[str, Any]) -> dict[str, Any]:
     if not result:
         raise RuntimeError("Brand was created but its database-generated ID could not be read back")
     invalidate_cache()
+    # The brand list is spared by the blanket wipe, so the paths that do
+    # change it clear it themselves.
+    invalidate_brand_cache()
     brand = dict(result[0])
     brand["display_business_id"] = _display_business_id(brand)
     brand = _serialize_for_json(brand)
     _sync_gold_mirror_best_effort()
-    return {"brand": brand}
+    # created=False means an existing brand of this name was returned instead
+    # of a new one being made (BB11).
+    return {"brand": brand, "created": created}
 
 
 def update_brand(data: dict[str, Any]) -> dict[str, Any]:
@@ -1769,11 +1940,208 @@ def update_brand(data: dict[str, Any]) -> dict[str, Any]:
     if not result:
         raise RuntimeError("Brand update did not return a matching active business")
     invalidate_cache()
+    # The brand list is spared by the blanket wipe, so the paths that do
+    # change it clear it themselves.
+    invalidate_brand_cache()
     brand = dict(result[0])
     brand["display_business_id"] = _display_business_id(brand)
     brand = _serialize_for_json(brand)
     _sync_gold_mirror_best_effort()
     return {"brand": brand}
+
+
+def _ensure_brand_merges_table(client: Any, project_id: str, dataset_id: str) -> None:
+    """Create brand_merges, or add any column TABLE_SCHEMAS has gained."""
+    from google.cloud import bigquery
+
+    # Via _ensure_dataset, like every other ensure pass - constructing
+    # bigquery.Dataset here directly bypassed it and broke under the faked
+    # bigquery module other suites inject.
+    _ensure_dataset(client, project_id, dataset_id)
+    table_ref = f"{project_id}.{dataset_id}.brand_merges"
+
+    # Built lazily, inside the branches that need it. Constructing
+    # SchemaField up front made this the ONLY ensure pass that touched the
+    # bigquery module before probing the table - so under the fake module
+    # other suites inject (which has no SchemaField) it raised, and the whole
+    # silver build failed with rows=0. The existing ensures all defer it; so
+    # does this one now.
+    def managed_schema():
+        return [
+            bigquery.SchemaField(field["name"], field["type"], mode=field["mode"])
+            for field in TABLE_SCHEMAS["brand_merges"]
+        ]
+
+    try:
+        existing = client.get_table(table_ref)
+    except Exception as exc:
+        if getattr(exc, "code", None) != 404:
+            raise
+        client.create_table(bigquery.Table(table_ref, schema=managed_schema()))
+        return
+    # Same guard the other ensure passes use: a table object without a
+    # readable schema (a stub, a client that does not expose one) means there
+    # is nothing to reconcile, not that the build should fail.
+    existing_schema = getattr(existing, "schema", None)
+    if existing_schema is None:
+        return
+    existing_names = {field.name for field in existing_schema}
+    missing = [
+        bigquery.SchemaField(field.name, field.field_type, mode="NULLABLE")
+        for field in managed_schema() if field.name not in existing_names
+    ]
+    if missing:
+        existing.schema = list(existing_schema) + missing
+        client.update_table(existing, ["schema"])
+
+
+def _record_brand_merges(client: Any, project_id: str, dataset_id: str,
+                         target_business_id: str, source_business_ids: list[str]) -> None:
+    """Persist source -> target so every silver rebuild re-applies the merge.
+
+    Chained merges are flattened: if B was already merged into C and A is now
+    merged into B, A must point at C, or a rebuild would resurrect B.
+    """
+    _ensure_once("brand_merges", _ensure_brand_merges_table, client, project_id, dataset_id)
+    rows = run_sql_rows(client, f"""
+    SELECT target_business_id FROM `{project_id}.{dataset_id}.brand_merges`
+    WHERE source_business_id = @target_business_id LIMIT 1
+    """, {"target_business_id": target_business_id}, label="merge_brands:resolve_target")
+    final_target = str(rows[0]["target_business_id"]) if rows else target_business_id
+
+    run_sql(client, f"""
+    MERGE `{project_id}.{dataset_id}.brand_merges` AS target
+    USING (
+      SELECT source_id AS source_business_id FROM UNNEST(@source_business_ids) AS source_id
+    ) AS source
+    ON target.source_business_id = source.source_business_id
+    WHEN MATCHED THEN UPDATE SET
+      target_business_id = @final_target, merged_at = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN INSERT
+      (source_business_id, target_business_id, merged_at, content_hash)
+      VALUES (source.source_business_id, @final_target, CURRENT_TIMESTAMP(), NULL)
+    """, {"source_business_ids": source_business_ids, "final_target": final_target},
+        label="merge_brands:record_mapping")
+    # Anything that previously pointed at one of these sources now points at
+    # the same final target, so a chain never survives as an indirection.
+    run_sql_dml(client, f"""
+    UPDATE `{project_id}.{dataset_id}.brand_merges`
+    SET target_business_id = @final_target, merged_at = CURRENT_TIMESTAMP()
+    WHERE target_business_id IN UNNEST(@source_business_ids)
+    """, {"source_business_ids": source_business_ids, "final_target": final_target},
+        label="merge_brands:flatten_chain")
+    LOGGER.info("brand_merge_mapping_recorded target=%s sources=%d", final_target, len(source_business_ids))
+
+
+def _apply_brand_merges_to_bronze(client: Any, project_id: str, dataset_id: str, *,
+                                  low_priority: bool = False) -> dict[str, int]:
+    """Make bronze agree with every merge decision ever recorded.
+
+    Why this exists, in full, because it is not obvious:
+
+    merge_brands() UPDATEs bronze at the moment of the merge, and that fixes
+    bronze *as it stands that second*. It cannot fix bronze as it will stand
+    later. Anything that re-inserts rows carrying the original business_id -
+    a sample reload, a re-save of the same source, a re-parse of a file that
+    was mapped before the merge - resurrects the retired brand in bronze. The
+    silver build hides it (its merged_listings CTE re-applies the mapping on
+    every build), so reporting looks right, but the duplicate-brand rail reads
+    bronze and offers the merge again. That is the "I already merged this, why
+    is it back" report.
+
+    So the merge decision has to be re-applied to bronze itself, not only
+    projected over it downstream. brand_merges is the durable record and it is
+    always flattened to final targets (see _record_brand_merges), so this is a
+    straight join with no chain-following.
+
+    Everything carrying business_id moves, which is the point: the listings,
+    the review rows, the templates that hold the mapped AND unmapped structure,
+    and the custom-field catalog. After this runs, the retired brand owns
+    nothing and stays soft-deleted.
+    """
+    _ensure_once("brand_merges", _ensure_brand_merges_table, client, project_id, dataset_id)
+    bronze = f"{project_id}.{dataset_id}"
+    try:
+        pending = run_sql_rows(client, f"""
+        SELECT COUNT(*) AS row_count FROM `{bronze}.brand_merges`
+        """, {}, label="brand_merge_reconcile:count", low_priority=low_priority)
+    except Exception as exc:
+        LOGGER.warning("brand_merge_reconcile_count_failed error=%s", exc)
+        return {"merges": 0, "applied": False}
+    merge_count = int(pending[0].get("row_count", 0)) if pending else 0
+    if merge_count <= 0:
+        # Nothing has ever been merged on this warehouse. Skip the whole
+        # script rather than run six no-op statements on every silver build.
+        return {"merges": 0, "applied": False}
+
+    # One multi-statement script: these are all query jobs, and BigQuery
+    # charges seconds of scheduling per job, so six statements in one job
+    # costs far less wall clock than six jobs.
+    script = f"""
+    -- Listings follow the brand they were merged into.
+    UPDATE `{bronze}.listings` l
+    SET business_id = m.target_business_id
+    FROM `{bronze}.brand_merges` m
+    WHERE l.business_id = m.source_business_id;
+
+    -- Review rows too, or the review queue keeps showing the retired brand.
+    UPDATE `{bronze}.error_listings` e
+    SET business_id = m.target_business_id
+    FROM `{bronze}.brand_merges` m
+    WHERE e.business_id = m.source_business_id;
+
+    -- Templates carry the mapped AND unmapped field structure at brand level,
+    -- so moving them is what makes "all listing data, mapped and unmapped,
+    -- moves to the target" actually true. A listing's template_id keeps
+    -- pointing at the same template row; that row now belongs to the target.
+    UPDATE `{bronze}.workflow_templates` t
+    SET business_id = m.target_business_id
+    FROM `{bronze}.brand_merges` m
+    WHERE t.business_id = m.source_business_id;
+
+    -- Custom-field definitions move as well, but slug is the natural key per
+    -- brand: if the target already defines the same slug, moving the source's
+    -- copy would leave the target owning two definitions of one field. Move
+    -- only the slugs the target does not already have. The subquery is
+    -- deliberately uncorrelated - BigQuery will not take a correlated
+    -- reference to the UPDATE target inside EXISTS here.
+    UPDATE `{bronze}.field_catalogs` fc
+    SET business_id = m.target_business_id
+    FROM `{bronze}.brand_merges` m
+    WHERE fc.business_id = m.source_business_id
+      AND CONCAT(m.target_business_id, '::', fc.slug) NOT IN (
+        SELECT CONCAT(business_id, '::', slug)
+        FROM `{bronze}.field_catalogs`
+        WHERE business_id IS NOT NULL
+      );
+
+    -- Whatever could not move because the target already defined that slug is
+    -- archived rather than left attached to a retired brand. Nothing is
+    -- deleted: the definition stays readable, it just stops being offered.
+    UPDATE `{bronze}.field_catalogs` fc
+    SET is_archived = TRUE, archived_at = CURRENT_TIMESTAMP()
+    FROM `{bronze}.brand_merges` m
+    WHERE fc.business_id = m.source_business_id
+      AND fc.is_archived IS NOT TRUE;
+
+    -- And the retired brand stays retired. A sample reload re-inserts
+    -- businesses with is_deleted = FALSE, which is precisely how a merged-away
+    -- brand came back to life in the dropdown.
+    UPDATE `{bronze}.businesses` bus
+    SET is_deleted = TRUE,
+        deleted_on = COALESCE(bus.deleted_on, CURRENT_TIMESTAMP()),
+        updated_at = CURRENT_TIMESTAMP()
+    FROM `{bronze}.brand_merges` m
+    WHERE bus.business_id = m.source_business_id
+      AND bus.is_deleted IS NOT TRUE;
+    """
+    try:
+        run_sql(client, script, label="brand_merge_reconcile:apply", low_priority=low_priority)
+    except Exception as exc:
+        LOGGER.warning("brand_merge_reconcile_failed merges=%d error=%s", merge_count, exc)
+        return {"merges": merge_count, "applied": False}
+    LOGGER.info("brand_merge_reconcile_applied merges=%d", merge_count)
+    return {"merges": merge_count, "applied": True}
 
 
 def merge_brands(data: dict[str, Any]) -> dict[str, Any]:
@@ -1848,7 +2216,29 @@ def merge_brands(data: dict[str, Any]) -> dict[str, Any]:
     SET is_deleted = TRUE, deleted_on = CURRENT_TIMESTAMP(), updated_at = CURRENT_TIMESTAMP()
     WHERE business_id IN UNNEST(@source_business_ids)
     """, merge_params, label="merge_brands:retire_sources")
+    # Record the decision, not just its effect.
+    #
+    # The UPDATEs above fix bronze as it stands today, and that is all they
+    # can do: silver is CREATE OR REPLACE'd from bronze on every rebuild and a
+    # sample reload re-inserts the source rows wholesale, so a merge expressed
+    # only as a one-off UPDATE is undone the next time either happens - which
+    # is exactly the "I already merged this, why is it back" this fixes. The
+    # mapping is durable state that _build_silver_layer_impl() re-applies on
+    # every single build, so a merged pair cannot reappear downstream.
+    try:
+        _record_brand_merges(client, project_id, dataset_id, target_business_id, source_business_ids)
+        # Converge the rest of bronze through the SAME path a rebuild uses,
+        # so merge-time and rebuild-time behaviour cannot drift apart. The
+        # counted UPDATEs above exist to report what moved; this one exists to
+        # guarantee nothing is left behind (custom-field catalogs, and any
+        # row a chained merge left pointing at an intermediate brand).
+        _apply_brand_merges_to_bronze(client, project_id, dataset_id)
+    except Exception as exc:
+        LOGGER.warning("brand_merge_mapping_write_failed target=%s error=%s", target_business_id, exc)
     invalidate_cache()
+    # The brand list is spared by the blanket wipe, so the paths that do
+    # change it clear it themselves.
+    invalidate_brand_cache()
     _sync_gold_mirror_best_effort()
     total_moved = sum(moved.values())
     LOGGER.info("brands_merged target=%s sources=%d listings=%d templates=%d review_rows=%d",
@@ -1950,31 +2340,67 @@ def learn_mappings(data: dict[str, Any]) -> dict[str, Any]:
     return {"suggestions": suggestions}
 
 
-def list_templates(search: str = "", business_id: str = "", source_type_id: str = "", limit: int = 500, offset: int = 0, *, client: Any = None) -> dict[str, Any]:
+def list_templates(search: str = "", business_id: str = "", source_type_id: str = "", limit: int = 500, offset: int = 0, include_inactive: bool = False, *, client: Any = None) -> dict[str, Any]:
     from google.cloud import bigquery
 
     project_id, dataset_id, credentials_json = _warehouse_settings()
     if client is None:
         client = _bigquery_client(project_id, credentials_json)
-    _ensure_workflow_templates_table(client, project_id, dataset_id)
     safe_limit = max(1, min(int(limit or 500), 5000))
     safe_offset = max(0, int(offset or 0))
+    # Mirror-first, like list_brands and the ZIP search already are.
+    #
+    # Measured: this query costs 2.36-3.63s across ten consecutive calls and
+    # is never faster, because every call schedules a BigQuery job - for a
+    # ~1.6KB payload. It sits on the critical path of opening a Review row
+    # (the record's template has to resolve before the edit form can render),
+    # so that cost was being paid on a click the user is waiting on. Templates
+    # change only when someone saves one, and those paths call
+    # invalidate_template_cache().
+    template_cache_key = f"list_templates:v2:{search}|{business_id}|{source_type_id}|{safe_limit}|{safe_offset}|{int(bool(include_inactive))}"
+    cached_templates = get_cached_query(template_cache_key)
+    if cached_templates:
+        return cached_templates
+    _ensure_workflow_templates_table(client, project_id, dataset_id)
+    # A template nothing is mapped to is not a library entry, it is debris.
+    #
+    # Deleted templates were already excluded; templates with zero listings
+    # were not, and a merge is exactly how they appear: the retired brand's
+    # templates move to the target, which can leave the target holding several
+    # that no listing has ever pointed at. Usage is counted in ONE grouped
+    # scan of listings and joined, rather than a correlated subquery per
+    # template, so this stays a single cheap pass - and the whole result is
+    # mirrored in SQLite anyway.
+    #
+    # Inactive templates are marked rather than hidden outright: they are
+    # excluded from the library by default, and include_inactive returns them
+    # carrying status "inactive", so nothing is silently unreachable.
     query = f"""
-    SELECT workflow_template_id, business_id, source_type_id, name, components, created_at, updated_at
-    FROM `{project_id}.{dataset_id}.workflow_templates`
-    WHERE is_deleted IS NOT TRUE
-      AND (@search = '' OR LOWER(name) LIKE CONCAT('%', LOWER(@search), '%'))
-      AND (@business_id = '' OR business_id = @business_id)
+    WITH template_usage AS (
+      SELECT template_id, COUNT(*) AS listing_count
+      FROM `{project_id}.{dataset_id}.listings`
+      WHERE is_deleted IS NOT TRUE AND template_id IS NOT NULL AND template_id != ''
+      GROUP BY template_id
+    )
+    SELECT t.workflow_template_id, t.business_id, t.source_type_id, t.name, t.components,
+           t.created_at, t.updated_at,
+           COALESCE(u.listing_count, 0) AS listing_count
+    FROM `{project_id}.{dataset_id}.workflow_templates` t
+    LEFT JOIN template_usage u ON u.template_id = t.workflow_template_id
+    WHERE t.is_deleted IS NOT TRUE
+      AND (@include_inactive OR COALESCE(u.listing_count, 0) > 0)
+      AND (@search = '' OR LOWER(t.name) LIKE CONCAT('%', LOWER(@search), '%'))
+      AND (@business_id = '' OR t.business_id = @business_id)
       AND (
         @source_type_id = ''
-        OR source_type_id = @source_type_id
-        OR JSON_VALUE(components, '$.source_type_id') = @source_type_id
-        OR JSON_VALUE(components, '$.mapper.source_type_id') = @source_type_id
+        OR t.source_type_id = @source_type_id
+        OR JSON_VALUE(t.components, '$.source_type_id') = @source_type_id
+        OR JSON_VALUE(t.components, '$.mapper.source_type_id') = @source_type_id
       )
-    ORDER BY updated_at DESC
+    ORDER BY t.updated_at DESC
     LIMIT {safe_limit} OFFSET {safe_offset}
     """
-    config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("search", "STRING", search), bigquery.ScalarQueryParameter("business_id", "STRING", business_id), bigquery.ScalarQueryParameter("source_type_id", "STRING", source_type_id)])
+    config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("search", "STRING", search), bigquery.ScalarQueryParameter("business_id", "STRING", business_id), bigquery.ScalarQueryParameter("source_type_id", "STRING", source_type_id), bigquery.ScalarQueryParameter("include_inactive", "BOOL", bool(include_inactive))])
     templates = []
     for row in client.query(query, job_config=config).result():
         item = dict(row)
@@ -1990,9 +2416,15 @@ def list_templates(search: str = "", business_id: str = "", source_type_id: str 
         item["template_name"] = item.get("name")
         item["source_type_id"] = item.get("source_type_id") or components.get("source_type_id") or mapper.get("source_type_id")
         item["source_type"] = mapper.get("source_type")
-        item["status"] = item.get("status", "active")
+        # "inactive" means no listing points at this template - after a merge
+        # that is a real and common state, and the library should say so
+        # rather than offer it as if it were in use.
+        item["listing_count"] = int(item.get("listing_count") or 0)
+        item["status"] = "active" if item["listing_count"] > 0 else "inactive"
         templates.append(item)
-    return {"templates": templates, "limit": safe_limit, "offset": safe_offset}
+    result = {"templates": templates, "limit": safe_limit, "offset": safe_offset}
+    set_cached_query(template_cache_key, result)
+    return result
 
 
 def list_source_types() -> dict[str, Any]:
@@ -2035,16 +2467,40 @@ def _sample_data_status(client: Any, project_id: str, dataset_id: str) -> dict[s
     return counts
 
 
+# Soft-delete columns are part of TABLE_SCHEMAS, so on any table this app has
+# created they already exist. The ALTERs below are only a safety net for a
+# table that predates them - and re-running them on EVERY sample load meant 4
+# tables x 2 statements of DDL, measured at roughly 4 seconds each: about 30
+# of a 47-second load spent proving columns exist that were already there.
+# Memoised per process, like _ensure_once() does for the table ensures.
+_SOFT_DELETE_COLUMNS_ENSURED: set[str] = set()
+_SOFT_DELETE_COLUMNS_LOCK = threading.Lock()
+
+
+def _ensure_soft_delete_columns(client: Any, table_ref: str) -> None:
+    """Add is_deleted/deleted_on if missing, at most once per process."""
+    with _SOFT_DELETE_COLUMNS_LOCK:
+        if table_ref in _SOFT_DELETE_COLUMNS_ENSURED:
+            return
+    client.query(
+        f"""
+        ALTER TABLE `{table_ref}` ADD COLUMN IF NOT EXISTS is_deleted BOOL;
+        ALTER TABLE `{table_ref}` ADD COLUMN IF NOT EXISTS deleted_on TIMESTAMP;
+        """
+    ).result()
+    with _SOFT_DELETE_COLUMNS_LOCK:
+        _SOFT_DELETE_COLUMNS_ENSURED.add(table_ref)
+
+
 def _reset_sample_data(client: Any, project_id: str, dataset_id: str) -> None:
     if str(dataset_id).strip().lower() == "sample_locations":
         raise PermissionError("CRITICAL SAFETY RULE: 'sample_locations' is an immutable source dataset. Cannot reset or delete.")
     for table_name in ("businesses", "listings", "workflow_templates", "error_listings"):
         table_ref = f"{project_id}.{dataset_id}.{table_name}"
         try:
+            _ensure_soft_delete_columns(client, table_ref)
             client.query(
                 f"""
-                ALTER TABLE `{table_ref}` ADD COLUMN IF NOT EXISTS is_deleted BOOL;
-                ALTER TABLE `{table_ref}` ADD COLUMN IF NOT EXISTS deleted_on TIMESTAMP;
                 UPDATE `{table_ref}`
                 SET is_deleted = TRUE, deleted_on = CURRENT_TIMESTAMP()
                 WHERE is_sample_data IS TRUE AND is_deleted IS NOT TRUE
@@ -2070,14 +2526,33 @@ def clear_sample_dataset() -> dict[str, Any]:
                 "background": True,
         }
         _SAMPLE_CLEAR_RUNNING = True
+    # Raise the stop flag BEFORE deleting anything. The background loader
+    # checks it between statements, so anything it has not written yet is
+    # abandoned rather than landing after the delete.
+    SAMPLE_LOAD_CANCELLED.set()
+    if _SAMPLE_LOAD_RUNNING.is_set():
+        LOGGER.info("sample_clear_cancelling_in_flight_load")
+        # A short, bounded wait: long enough for the loader to reach its next
+        # checkpoint, short enough that Clear still feels immediate. If it is
+        # mid-INSERT we do not block on it - _reset_sample_data() soft-deletes
+        # by is_sample_data, so a late-landing row is caught by the sweep below.
+        for _ in range(20):
+            if not _SAMPLE_LOAD_RUNNING.is_set():
+                break
+            sleep(0.25)
     invalidate_cache()
+    # The brand list is spared by the blanket wipe, so the paths that do
+    # change it clear it themselves.
+    invalidate_brand_cache()
     ZIP_REFERENCE_CACHE.pop((project_id, dataset_id), None)
     sample_business_ids = [stable_business_id(brand.key) for brand in SAMPLE_BRANDS]
     sample_brand_names = [brand.business_name for brand in SAMPLE_BRANDS]
-    try:
-        clear_sample_reporting_mirror(sample_business_ids, sample_brand_names)
-    except Exception as exc:
-        LOGGER.warning("sample_reporting_mirror_clear_failed error=%s", exc)
+    # BigQuery FIRST, mirror second. The mirror used to be emptied before the
+    # warehouse, so a BigQuery failure left the app in its worst possible
+    # state: 14,499 live listings still in bronze, 13,803 rows still in the
+    # gold view, and a local mirror holding nothing - which reporting then
+    # served as a legitimate zero. Clearing the authoritative store first
+    # means a failure leaves the mirror untouched and still correct.
     try:
         client = _bigquery_client(project_id, credentials_json)
         _reset_sample_data(client, project_id, dataset_id)
@@ -2085,6 +2560,10 @@ def clear_sample_dataset() -> dict[str, Any]:
         with _SAMPLE_CLEAR_LOCK:
             _SAMPLE_CLEAR_RUNNING = False
         raise
+    try:
+        clear_sample_reporting_mirror(sample_business_ids, sample_brand_names)
+    except Exception as exc:
+        LOGGER.warning("sample_reporting_mirror_clear_failed error=%s", exc)
 
     silver_result = _background_medallion_refresh_status()
 
@@ -2129,9 +2608,78 @@ def clear_sample_dataset() -> dict[str, Any]:
 
 
 
-def sample_dataset_status() -> dict[str, Any]:
+# Persisted in app_settings, NOT query_cache: invalidate_cache() wipes the
+# query cache wholesale, and this is precisely the value that must survive
+# that. Without it, /api/sample/status had to do six BigQuery COUNT queries on
+# every page load, and any hiccup there flipped a loaded dataset's button back
+# to "Load Sample Dataset" - telling the user their data was gone when it was
+# not.
+SAMPLE_STATUS_MIRROR_KEY = "sample_status_mirror:v1"
+
+
+# At most one background sample-status recount per this many seconds.
+SAMPLE_STATUS_RECOUNT_INTERVAL_SECONDS = 60.0
+_LAST_SAMPLE_STATUS_RECOUNT_AT: float = 0.0
+_SAMPLE_STATUS_RECOUNT_LOCK = threading.Lock()
+
+
+def _claim_sample_status_recount() -> bool:
+    """True at most once per interval, so a polled endpoint cannot spawn a
+    recount thread (and a fresh BigQuery client) on every single call."""
+    global _LAST_SAMPLE_STATUS_RECOUNT_AT
+    with _SAMPLE_STATUS_RECOUNT_LOCK:
+        now = wall_clock_time()
+        if now - _LAST_SAMPLE_STATUS_RECOUNT_AT < SAMPLE_STATUS_RECOUNT_INTERVAL_SECONDS:
+            return False
+        _LAST_SAMPLE_STATUS_RECOUNT_AT = now
+        return True
+
+
+def _read_sample_status_mirror() -> dict[str, Any] | None:
+    try:
+        raw = get_app_setting(SAMPLE_STATUS_MIRROR_KEY, "")
+        return json.loads(raw) if raw else None
+    except Exception as exc:
+        LOGGER.info("sample_status_mirror_read_failed error=%s", exc)
+        return None
+
+
+def _write_sample_status_mirror(payload: dict[str, Any]) -> None:
+    try:
+        set_app_setting(SAMPLE_STATUS_MIRROR_KEY, json.dumps(payload, sort_keys=True))
+    except Exception as exc:
+        LOGGER.warning("sample_status_mirror_write_failed error=%s", exc)
+
+
+def sample_dataset_status(*, refresh: bool = False) -> dict[str, Any]:
+    """Is the sample dataset loaded, and is all of it here?
+
+    Mirror-first, like every other hot read in this app. A cached answer is
+    returned immediately and BigQuery is re-counted in the background, because
+    the alternative - six COUNT queries inline on every page load - is both
+    slow and fragile: one failure used to render "Load Sample Dataset" over a
+    fully loaded warehouse.
+    """
     if not _sample_loader_enabled():
         return {"enabled": False, "loaded": False, "message": "Sample dataset loader is disabled for this environment"}
+
+    mirror = _read_sample_status_mirror()
+    if mirror and not refresh:
+        # Throttled. The UI polls this endpoint, and an unconditional thread
+        # per call meant a background recount - six BigQuery COUNTs, each on
+        # its own new client - every few seconds. The mirror does not go stale
+        # that fast, and the recount is only ever a refresh of a value we are
+        # already returning.
+        if _claim_sample_status_recount():
+            def _recount() -> None:
+                try:
+                    sample_dataset_status(refresh=True)
+                except Exception as exc:
+                    LOGGER.info("sample_status_background_recount_failed error=%s", exc)
+
+            threading.Thread(target=_recount, name="sample-status-recount", daemon=True).start()
+        return {**mirror, "source": "mirror"}
+
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
     try:
@@ -2139,18 +2687,46 @@ def sample_dataset_status() -> dict[str, Any]:
     except Exception as exc:
         if getattr(exc, "code", None) == 404:
             counts = {"businesses": 0, "listings": 0, "workflow_templates": 0, "error_listings": 0}
+        elif mirror:
+            # BigQuery is unreachable but we know what was there a moment ago.
+            # Reporting "not loaded" here would be a claim, not a measurement.
+            LOGGER.warning("sample_status_bigquery_failed_serving_mirror error=%s", exc)
+            return {**mirror, "source": "mirror_stale"}
         else:
             raise
     loaded = bool(counts["businesses"] and counts["listings"])
-    return {
+    # "loaded" on its own cannot tell "some of it is here" from "all of it is"
+    # - a load interrupted by a restart or a clear leaves a partial set. The
+    # only honest measure is the source's own row count.
+    source_total = 0
+    try:
+        source_row = next(iter(client.query(
+            f"SELECT COUNT(1) AS total FROM `{project_id}.sample_locations.listings`"
+        ).result()), None)
+        source_total = int(source_row["total"]) if source_row else 0
+    except Exception as exc:
+        # Source unreachable: we genuinely cannot say whether this is
+        # complete, so `complete` stays None and the UI must not claim either.
+        LOGGER.info("sample_source_total_unavailable error=%s", exc)
+    complete: bool | None = None
+    if loaded and source_total:
+        complete = counts["listings"] >= source_total
+    payload = {
         "enabled": True,
         "loaded": loaded,
+        # True = every source row is here. False = a half is still landing.
+        # None = the source count could not be read, so neither is claimed.
+        "complete": complete,
+        "source_locations": source_total,
         "sample_batch_id": SAMPLE_BATCH_ID,
         "businesses": counts["businesses"],
         "locations": counts["listings"],
         "templates": counts.get("workflow_templates", 0),
         "errors": counts.get("error_listings", 0),
+        "checked_at": utc_now_iso(),
     }
+    _write_sample_status_mirror(payload)
+    return {**payload, "source": "bigquery"}
 
 
 def _background_medallion_refresh_status() -> dict[str, Any]:
@@ -2160,20 +2736,83 @@ def _background_medallion_refresh_status() -> dict[str, Any]:
     return {"status": "refreshing", "background": True, "started": started}
 
 
-def load_sample_dataset(reset: bool = False, load_half: int = 1) -> dict[str, Any]:
-    """Load the sample dataset. `load_half` selects one NTILE(2) slice.
+def load_sample_dataset(reset: bool = False) -> dict[str, Any]:
+    """Load the sample dataset, guaranteeing the in-flight flag is released.
 
-    The source listings are split in SQL with NTILE(2) rather than orchestrated
-    in Python: half 1 lands fast, the caller gets a usable dataset immediately
-    and the button can flip to "loaded", and half 2 is filled in behind it.
-    Splitting in the query means each half is a single bounded INSERT, so a
-    slow row cannot hold the whole load hostage - the previous version ran
-    everything as one statement and appeared to hang at "94%".
+    The implementation below has eleven return statements across ~340 lines,
+    so clearing _SAMPLE_LOAD_RUNNING at each one would be a standing invitation
+    to miss one - and a stuck flag would make Clear wait its full timeout on
+    every single call, forever. One try/finally instead.
+    """
+    try:
+        return _load_sample_dataset_impl(reset=reset)
+    finally:
+        _SAMPLE_LOAD_RUNNING.clear()
+
+
+
+# Columns the sample INSERT reads off the source table. Kept beside the
+# preflight below so the two cannot drift apart.
+SAMPLE_SOURCE_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "listing_id", "business_id", "source_type_id", "location_key", "name", "address",
+    "city_name", "town", "state_code", "province", "zip_code", "country", "latitude",
+    "longitude", "template_id", "ingestion_id", "mapping_id", "validation_status",
+    "franchise_name", "concept_type", "cuisine_type", "neighborhood", "district",
+    "phone_number", "website_url", "google_maps_link", "social_media_handles",
+    "operating_hours", "seating_capacity", "service_types", "opening_date", "status",
+    "annual_revenue", "average_ticket_size", "daily_footfall", "monthly_footfall",
+    "rental_cost", "lease_cost", "population_density", "average_household_income",
+    "competitor_count", "foot_traffic_score", "parking_availability", "ratings",
+    "content_hash", "deleted_on",
+)
+
+
+def verify_sample_source_schema(client: Any, project_id: str,
+                                source_dataset: str = "sample_locations") -> list[str]:
+    """Column names the INSERT needs that the source table does not have.
+
+    Exists because ONE missing column (`validated`) failed the entire sample
+    INSERT with "Name validated not found inside s", and the except around it
+    fell through to the in-memory generator and reported success - so the real
+    22,500-row dataset never loaded once, and a different 9,295-row generated
+    set stood in for it undetected. A schema gap must be named up front, not
+    discovered as an opaque SQL error mid-statement.
+
+    Returns an empty list when the source is compatible. A source that cannot
+    be inspected at all returns [] too: that is a connectivity problem for the
+    INSERT itself to report, not a schema verdict we can honestly give.
+    """
+    try:
+        table = client.get_table(f"{project_id}.{source_dataset}.listings")
+        available = {field.name for field in table.schema}
+    except Exception as exc:
+        LOGGER.info("sample_source_schema_unreadable error=%s", exc)
+        return []
+    return sorted(set(SAMPLE_SOURCE_REQUIRED_COLUMNS) - available)
+
+
+def _load_sample_dataset_impl(reset: bool = False) -> dict[str, Any]:
+    """Load the whole sample dataset in one statement.
+
+    This previously split the source into two NTILE(2) halves, returning after
+    the first and filling the second in on a background thread. Measured, that
+    bought nothing: a single INSERT over all 22,500 rows runs in about three
+    seconds across 17MB. It cost a great deal - the background half re-entered
+    this same function, and on one run its reset soft-deleted the 11,250 rows
+    and every business the first half had just written.
+
+    The INSERT is idempotent (it skips source rows already in bronze), so a
+    load interrupted by a restart or a clear tops up what is missing on the
+    next run rather than duplicating what already landed.
     """
     from google.cloud import bigquery
 
     if not _sample_loader_enabled():
         raise ValueError("Sample dataset loader is disabled for this environment")
+
+    # A fresh user-initiated load clears any stop left by a previous Clear.
+    SAMPLE_LOAD_CANCELLED.clear()
+    _SAMPLE_LOAD_RUNNING.set()
 
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
@@ -2189,7 +2828,26 @@ def load_sample_dataset(reset: bool = False, load_half: int = 1) -> dict[str, An
         _reset_sample_data(client, project_id, dataset_id)
     else:
         sample_status = _sample_data_status(client, project_id, dataset_id)
-        if sample_status.get("businesses", 0) > 0 and sample_status.get("listings", 0) > 0:
+        # "Already loaded" used to mean "some sample rows exist", which was
+        # written when the in-memory generator was the only source. It is not
+        # good enough now: the generator's rows made the loader declare itself
+        # loaded and skip ingestion entirely, so the real sample_locations
+        # dataset could never get in even once the SQL was fixed. Loaded means
+        # the SOURCE's rows are actually present.
+        source_total = 0
+        try:
+            source_row = next(iter(client.query(
+                f"SELECT COUNT(1) AS total FROM `{source_project_id}.{source_sample_dataset}.listings`"
+            ).result()), None)
+            source_total = int(source_row["total"]) if source_row else 0
+        except Exception as exc:
+            LOGGER.info("sample_source_count_unavailable error=%s", exc)
+        already_complete = (
+            sample_status.get("businesses", 0) > 0
+            and sample_status.get("listings", 0) > 0
+            and (not source_total or sample_status.get("listings", 0) >= source_total)
+        )
+        if already_complete:
             silver_result = _background_medallion_refresh_status()
             return {
                 "already_loaded": True,
@@ -2201,11 +2859,23 @@ def load_sample_dataset(reset: bool = False, load_half: int = 1) -> dict[str, An
                 "zips": zip_result,
                 "silver": silver_result,
             }
+        # ONLY on half 1. Half 2 re-enters this same function from its
+        # background thread, and it will never look "complete" either - so
+        # without this guard it reset the warehouse and soft-deleted the
+        # 11,250 rows (and every business) that half 1 had just written,
+        # leaving businesses at 0 live. A top-up does not need a reset at
+        # all: the INSERT skips source rows already present.
         if sample_status.get("businesses", 0) > 0 or sample_status.get("listings", 0) > 0:
             _reset_sample_data(client, project_id, dataset_id)
 
     # Ingest from sample_locations into bronze layer
     ingested_from_sample_locations = False
+    sample_ingestion_error = ""
+    missing_source_columns = verify_sample_source_schema(client, source_project_id, source_sample_dataset)
+    if missing_source_columns:
+        # Named loudly rather than left to fail as an opaque SQL error that a
+        # silent fallback then papers over with different data.
+        LOGGER.error("sample_source_schema_incompatible missing=%s", ", ".join(missing_source_columns))
     businesses_count = 0
     listings_count = 0
     try:
@@ -2213,11 +2883,11 @@ def load_sample_dataset(reset: bool = False, load_half: int = 1) -> dict[str, An
         src_table_ref = f"{source_project_id}.{source_sample_dataset}.listings"
         client.get_table(src_table_ref)
 
-        # Only on the first half: half 2 must add to what half 1 inserted,
-        # not wipe it.
-        if load_half == 1:
-            client.query(f"DELETE FROM `{project_id}.{dataset_id}.listings` WHERE is_sample_data IS TRUE").result()
-            client.query(f"DELETE FROM `{project_id}.{dataset_id}.businesses` WHERE is_sample_data IS TRUE").result()
+        # One load, one clean slate. This used to be guarded to "half 1 only"
+        # so the second half would not wipe the first; with the split gone
+        # there is no second pass to protect against.
+        client.query(f"DELETE FROM `{project_id}.{dataset_id}.listings` WHERE is_sample_data IS TRUE").result()
+        client.query(f"DELETE FROM `{project_id}.{dataset_id}.businesses` WHERE is_sample_data IS TRUE").result()
 
         # 1. Copy source_types (preserving reference integrity)
         client.query(f"""
@@ -2243,8 +2913,7 @@ def load_sample_dataset(reset: bool = False, load_half: int = 1) -> dict[str, An
           COALESCE(s.is_reference_data, FALSE), s.reference_key, s.default_source_url, s.default_source_name,
           TRUE AS is_sample_data, '{SAMPLE_BATCH_ID}' AS sample_batch_id, s.content_hash, FALSE AS is_deleted, s.deleted_on
         FROM `{source_project_id}.{source_sample_dataset}.businesses` s
-        WHERE {"TRUE" if load_half == 1 else "FALSE"}
-          AND NOT EXISTS (
+        WHERE NOT EXISTS (
             SELECT 1 FROM `{project_id}.{dataset_id}.businesses` b
             WHERE b.business_id = s.business_id AND b.is_sample_data IS TRUE
           )
@@ -2268,44 +2937,88 @@ def load_sample_dataset(reset: bool = False, load_half: int = 1) -> dict[str, An
           s.listing_id, s.business_id, s.source_type_id, s.location_key, s.name, s.address, s.city_name,
           s.town, s.state_code, s.province, s.zip_code, s.country, s.latitude, s.longitude,
           CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), s.template_id, s.ingestion_id, s.mapping_id,
-          s.validation_status, COALESCE(s.validated, FALSE) AS validated, CAST(NULL AS TIMESTAMP) AS enriched_at, TRUE AS is_sample_data, '{SAMPLE_BATCH_ID}' AS sample_batch_id, s.franchise_name, s.concept_type,
+          -- NOT s.validated: the source table has no such column, and
+          -- referencing it failed the ENTIRE statement with
+          -- "Name validated not found inside s". Every sample load since has
+          -- silently fallen through to the in-memory generator, so the real
+          -- 22,500-row dataset never landed once - what looked like a
+          -- half-loaded sample was a different 9,295-row generated set
+          -- standing in for it. Rows arrive unvalidated, which is the honest
+          -- state for freshly ingested data.
+          s.validation_status, FALSE AS validated, CAST(NULL AS TIMESTAMP) AS enriched_at, TRUE AS is_sample_data, '{SAMPLE_BATCH_ID}' AS sample_batch_id, s.franchise_name, s.concept_type,
           s.cuisine_type, s.neighborhood, s.district, s.phone_number, s.website_url, s.google_maps_link,
           s.social_media_handles, s.operating_hours, s.seating_capacity, s.service_types, s.opening_date,
           s.status, s.annual_revenue, s.average_ticket_size, s.daily_footfall, s.monthly_footfall,
           s.rental_cost, s.lease_cost, s.population_density, s.average_household_income,
           s.competitor_count, s.foot_traffic_score, s.parking_availability, s.ratings,
           s.content_hash, FALSE AS is_deleted, s.deleted_on
-        FROM (
-          SELECT *, NTILE(2) OVER (ORDER BY listing_id) AS load_half
-          FROM `{source_project_id}.{source_sample_dataset}.listings`
-        ) s
-        WHERE s.load_half = @load_half
-        """, job_config=bigquery.QueryJobConfig(query_parameters=[
-            bigquery.ScalarQueryParameter("load_half", "INT64", load_half),
-        ])).result()
+        FROM `{source_project_id}.{source_sample_dataset}.listings` s
+        -- One statement for the whole dataset. The NTILE(2) split it replaced
+        -- bought nothing measurable - the full INSERT runs in ~3s over 17MB -
+        -- while costing a background thread that re-entered this very
+        -- function, which is how a reset in the second half came to
+        -- soft-delete everything the first had just written.
+        --
+        -- Idempotent: a source row already in bronze is skipped rather than
+        -- inserted twice, so a re-run (or a load that died on a restart) tops
+        -- up what is missing instead of duplicating what made it.
+        WHERE NOT EXISTS (
+            SELECT 1 FROM `{project_id}.{dataset_id}.listings` existing
+            WHERE existing.listing_id = s.listing_id
+          )
+        """).result()
+
+        # RULE R0: every listing names the business AND the template that
+        # produced it, and that template must actually exist. The sample
+        # listings arrive carrying the source's own template ids
+        # (`tmpl_john_standard` and friends) while nothing ever created the
+        # matching workflow_templates rows - so all 22,500 pointed at
+        # templates that did not exist, and the template editor could never
+        # find the rows any template produced. Backfill one row per referenced
+        # id so the reference resolves.
+        client.query(f"""
+        INSERT INTO `{project_id}.{dataset_id}.workflow_templates`
+          (workflow_template_id, business_id, source_type_id, name, components,
+           archived_components, source_configuration, is_sample_data,
+           sample_batch_id, is_deleted, deleted_on, created_at, updated_at)
+        SELECT
+          l.template_id,
+          ANY_VALUE(l.business_id),
+          ANY_VALUE(l.source_type_id),
+          l.template_id AS name,
+          -- components is a JSON column, not STRING: TO_JSON_STRING here is
+          -- rejected outright ("has type STRING which cannot be inserted
+          -- into column components, which has type JSON").
+          TO_JSON(STRUCT(ANY_VALUE(l.business_id) AS brand)) AS components,
+          NULL, NULL, TRUE, '{SAMPLE_BATCH_ID}', FALSE, NULL,
+          CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()
+        FROM `{project_id}.{dataset_id}.listings` l
+        WHERE l.is_sample_data IS TRUE
+          AND l.is_deleted IS NOT TRUE
+          AND l.template_id IS NOT NULL AND l.template_id != ''
+          AND NOT EXISTS (
+            SELECT 1 FROM `{project_id}.{dataset_id}.workflow_templates` t
+            WHERE t.workflow_template_id = l.template_id
+          )
+        GROUP BY l.template_id
+        """).result()
 
         biz_row = next(iter(client.query(f"SELECT COUNT(DISTINCT business_id) AS cnt FROM `{project_id}.{dataset_id}.businesses` WHERE is_sample_data IS TRUE AND is_deleted IS NOT TRUE").result()))
         list_row = next(iter(client.query(f"SELECT COUNT(1) AS cnt FROM `{project_id}.{dataset_id}.listings` WHERE is_sample_data IS TRUE AND is_deleted IS NOT TRUE").result()))
         businesses_count = int(biz_row["cnt"])
         listings_count = int(list_row["cnt"])
         ingested_from_sample_locations = True
-        LOGGER.info("sample_locations_ingested_to_bronze half=%d businesses=%d listings=%d",
-                    load_half, businesses_count, listings_count)
-        if load_half == 1:
-            # Hand back a usable dataset now - the button flips to "loaded"
-            # and the user can start working - while the second half fills in
-            # behind them. A failure here leaves half the data loaded and
-            # says so, rather than rolling back work that is already useful.
-            def load_second_half() -> None:
-                try:
-                    result = load_sample_dataset(reset=False, load_half=2)
-                    LOGGER.info("sample_second_half_loaded listings=%d", result.get("locations", 0))
-                except Exception as exc:
-                    LOGGER.warning("sample_second_half_failed error=%s", exc)
-
-            threading.Thread(target=load_second_half, name="sample-second-half", daemon=True).start()
+        LOGGER.info("sample_locations_ingested_to_bronze businesses=%d listings=%d",
+                    businesses_count, listings_count)
     except Exception as exc:
-        LOGGER.warning("sample_locations_ingestion_error error=%s", exc)
+        # ERROR, not warning, and the reason is carried out to the caller.
+        # This except swallowed a hard SQL error for the entire life of the
+        # feature: the statement referenced a column the source does not have,
+        # so every load failed here, fell through to the generator below, and
+        # reported success. A silent fallback that substitutes different data
+        # is indistinguishable from the real thing on screen.
+        sample_ingestion_error = str(exc)
+        LOGGER.error("sample_locations_ingestion_failed falling_back_to_generator error=%s", exc)
 
     # Fallback to in-memory generator if sample_locations was unavailable (e.g. mock test suite)
     if not ingested_from_sample_locations:
@@ -2554,7 +3267,36 @@ def _safe_query(client: Any, query: str, low_priority: bool = False) -> Any:
         raise
 
 
+# One silver build at a time, process-wide.
+#
+# build_silver_layer() writes a fixed staging table (`_listings_staging`) and
+# DROPs it, so two builds running at once destroy each other's destination:
+# "Destination deleted/expired during operation" - observed live. Two of the
+# five call sites took REPORTING_REFRESHING, three did not (the sample load,
+# the clear worker, and the hourly tick's neighbours), so a user clicking
+# "Load Sample Dataset" while a background refresh was running could collide.
+# The failed build leaves gold stale, which is one of the ways reporting ends
+# up showing numbers that do not match the warehouse.
+#
+# A lock rather than a skip: every caller is either a background thread or an
+# already-long operation, and the second caller genuinely wants a fresh build -
+# it should wait, not be silently dropped.
+#
+# REENTRANT, because a same-thread nested call already exists:
+# _ensure_gold_reporting_views() calls build_silver_layer() as part of its
+# bootstrap. A plain Lock would deadlock that path against itself. Reentrancy
+# costs nothing here - a nested call on one thread is already serialised - and
+# the cross-thread collision this exists to stop is still blocked.
+_SILVER_BUILD_LOCK = threading.RLock()
+
+
 def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
+    with _SILVER_BUILD_LOCK:
+        return _build_silver_layer_impl(low_priority=low_priority)
+
+
+
+def _build_silver_layer_impl(low_priority: bool = False) -> dict[str, Any]:
     project_id, bronze_dataset_id, silver_dataset_id, _gold_dataset_id, credentials_json = _medallion_settings()
     client = _bigquery_client(project_id, credentials_json)
     try:
@@ -2563,6 +3305,22 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
         _ensure_dataset(client, project_id, silver_dataset_id)
         _ensure_businesses_table(client, project_id, bronze_dataset_id)
         _ensure_listings_table(client, project_id, bronze_dataset_id)
+        # The build below LEFT JOINs brand_merges to re-apply merges. On a
+        # warehouse where nobody has merged yet the table does not exist, and
+        # a missing table fails the whole silver build - so it is ensured
+        # here, not only where a merge writes to it.
+        _ensure_once("brand_merges", _ensure_brand_merges_table, client, project_id, bronze_dataset_id)
+        # Reconcile bronze BEFORE reading it. The merged_listings CTE below
+        # projects merges over silver, which keeps reporting correct, but
+        # bronze itself is what the brand list and the duplicate-brand rail
+        # read - so a merge that is only projected downstream comes back as a
+        # duplicate suggestion the moment anything re-inserts the old rows.
+        # Best-effort: a failure here must not fail the silver build, since
+        # the CTE still produces correct silver output either way.
+        try:
+            _apply_brand_merges_to_bronze(client, project_id, bronze_dataset_id, low_priority=low_priority)
+        except Exception as exc:
+            LOGGER.warning("silver_build_brand_merge_reconcile_failed error=%s", exc)
         bronze_ref = f"{project_id}.{bronze_dataset_id}"
         silver_ref = f"{project_id}.{silver_dataset_id}"
         zip_reference_table = f"{silver_ref}.zip_reference"
@@ -2801,10 +3559,36 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
               WHEN 'VERMONT' THEN 'VT' WHEN 'VIRGINIA' THEN 'VA' WHEN 'WASHINGTON' THEN 'WA' WHEN 'WEST VIRGINIA' THEN 'WV'
               WHEN 'WISCONSIN' THEN 'WI' WHEN 'WYOMING' THEN 'WY' WHEN 'DISTRICT OF COLUMBIA' THEN 'DC'
               WHEN 'PUERTO RICO' THEN 'PR' WHEN 'GUAM' THEN 'GU' WHEN 'VIRGIN ISLANDS' THEN 'VI'
-              ELSE NULLIF(UPPER(TRIM(COALESCE(state_code, ''))), '')
+              ELSE CASE
+                WHEN UPPER(TRIM(COALESCE(state_code, ''))) IN (
+                  'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA',
+                  'KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ',
+                  'NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN','TX','UT','VT',
+                  'VA','WA','WV','WI','WY','DC','PR','GU','VI','MP','AS'
+                ) THEN UPPER(TRIM(state_code))
+                ELSE NULL
+              END
             END AS normalized_state_code
           FROM `{bronze_ref}.listings`
           WHERE is_deleted IS NOT TRUE
+        ),
+        -- Brand merges are RE-APPLIED here on every build, deliberately.
+        --
+        -- A merge cannot be a one-off UPDATE on bronze: this table is
+        -- CREATE OR REPLACE'd from bronze every run, and a sample reload
+        -- re-inserts the source rows wholesale - so the merge would be undone
+        -- the next time either happened, and the "duplicate" the user already
+        -- resolved would come straight back. Reading the durable mapping
+        -- instead means a merged brand collapses into its target on every
+        -- single build, so it cannot reappear in silver, gold, the mirror or
+        -- the UI. Bronze keeps what was actually ingested.
+        merged_listings AS (
+          SELECT
+            l.* EXCEPT (business_id),
+            COALESCE(m.target_business_id, l.business_id) AS business_id
+          FROM normalized_listings l
+          LEFT JOIN `{bronze_ref}.brand_merges` m
+            ON m.source_business_id = l.business_id
         ),
         unique_zips AS (
           SELECT * FROM `{zip_reference_table}`
@@ -2841,7 +3625,7 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
           l.address,
           {city_name_case} AS city_name,
           {county_case} AS county,
-          COALESCE(l.normalized_state_code, NULLIF(UPPER(TRIM(l.state_code)), ''), cg.state_code, z.state_code) AS state_code,
+          COALESCE(l.normalized_state_code, cg.state_code, z.state_code) AS state_code,
           {state_name_case} AS state_name,
           COALESCE(
             CASE WHEN l.unswapped_latitude IS NOT NULL AND l.unswapped_longitude IS NOT NULL
@@ -2905,7 +3689,7 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
           z.income_per_capita,
           COUNT(*) OVER (PARTITION BY COALESCE(l.normalized_zip_code, cg.representative_zip), LOWER(TRIM(l.address))) AS similar_address_count,
           CURRENT_TIMESTAMP() AS silver_updated_at
-        FROM normalized_listings l
+        FROM merged_listings l
         LEFT JOIN `{bronze_ref}.businesses` b
           ON l.business_id = b.business_id
           AND b.is_deleted IS NOT TRUE
@@ -3006,7 +3790,13 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
 
         table = client.get_table(enriched_table)
         invalid_rows = client.get_table(invalid_table)
-        invalidate_cache()
+        # Throttled. This rebuild runs on EVERY reporting refresh, and a
+        # blanket wipe here destroyed every derived cache each time -
+        # measured: all five reporting_timeseries:* entries gone, so the
+        # Trends chart re-queried BigQuery (6-8s) on every visit even though
+        # nothing about the data had changed. Rebuilding silver from unchanged
+        # bronze produces identical rows; the caches need not clear that often.
+        _invalidate_cache_background()
         return {
             "bronze_dataset": bronze_ref,
             "silver_dataset": silver_ref,
@@ -3041,7 +3831,7 @@ def build_silver_layer(low_priority: bool = False) -> dict[str, Any]:
 # one got the new SQL. That is the same drift class as error_listings missing
 # has_ai_suggestion. The version is stamped on each view's description at
 # build time and compared on every ensure.
-GOLD_VIEW_DEFINITION_VERSION = "2026-09-09.custom-fields"
+GOLD_VIEW_DEFINITION_VERSION = "2026-09-10.needs-review-view"
 
 
 def build_gold_layer() -> dict[str, Any]:
@@ -3201,8 +3991,35 @@ def build_gold_layer() -> dict[str, Any]:
     LEFT JOIN `{zip_brand_view}` a ON z.zip_code = a.zip_code
     """).result()
 
-    invalidate_cache()
-    views = [zip_brand_view, brand_view, location_view, filters_view, gap_base_view]
+    # Rows that reached bronze `listings` but fail the silver validity gate
+    # (missing_state, unresolved_coordinates, etc.) - a DIFFERENT population
+    # from bronze `error_listings` (rows rejected at parse/mapping time,
+    # never reaching `listings` at all). Before this view, nothing in the
+    # app surfaced these 13k+ rows anywhere: the Review Queue and the DQ tab
+    # both only ever read `error_listings`. Record-level (not aggregated,
+    # unlike the other gold views here) because the review UI needs to list
+    # and edit individual rows, not a rollup. `user_reviewed` flows straight
+    # through from bronze `listings` - set by the (forthcoming) review-edit
+    # endpoint when a person corrects a row there, per the project's "fix
+    # must be recorded as state" rule (silver/gold are rebuilt from bronze,
+    # so the flag has to live upstream of both to survive a rebuild).
+    needs_review_view = f"{gold_ref}.vw_listings_needs_review"
+    client.query(f"""
+    CREATE OR REPLACE VIEW `{needs_review_view}` AS
+    SELECT
+      listing_id, business_id, brand_name, source_type_id, template_id,
+      name, address, city_name, county, state_code, state_name, zip_code,
+      country, latitude, longitude, phone_number,
+      rejection_reason, COALESCE(user_reviewed, FALSE) AS user_reviewed,
+      first_observed_at, last_observed_at
+    FROM `{silver_ref}.listings_invalid`
+    """).result()
+
+    # Same reasoning as build_silver_layer's: this runs on every reporting
+    # refresh, and a blanket wipe per run is what kept the Trends chart (and
+    # the summary) permanently cold.
+    _invalidate_cache_background()
+    views = [zip_brand_view, brand_view, location_view, filters_view, gap_base_view, needs_review_view]
     # Stamp the definition version so _ensure_gold_reporting_views() can tell
     # a current view from a stale one that merely exists.
     for view_ref in views:
@@ -3273,20 +4090,60 @@ def sync_gold_mirror(force: bool = False) -> dict[str, Any]:
     # has ever held real data, a sync that comes back empty is treated as
     # suspicious and skipped - the previous good mirror is left in place.
     previous_status = get_mirror_status()
-    had_real_data = bool(previous_status and (
-        (previous_status.get("zip_brand_rows") or 0) > 0
-        or (previous_status.get("location_rows") or 0) > 0
-    ))
+    previous_zip_brand = int((previous_status or {}).get("zip_brand_rows") or 0)
+    previous_locations = int((previous_status or {}).get("location_rows") or 0)
+    had_real_data = bool(previous_zip_brand > 0 or previous_locations > 0)
+    # vw_zip_brand_activity is a LEFT JOIN off the ZIP reference, so it comes
+    # back with ~41.5k rows whether or not a single brand has any activity.
+    # Counting its ROWS therefore says nothing about whether the sync is
+    # healthy; only the presence of an actual brand does.
+    zip_brand_has_activity = any(row.get("brand_name") for row in zip_brand_rows)
     # force=True is used by the deliberate clear paths, where an empty gold
     # result is the correct new truth rather than a transient hiccup - without
     # it the guard below keeps the just-deleted rows in the mirror and
     # reporting keeps showing data the user has cleared.
-    if had_real_data and not force and not zip_brand_rows and not location_rows:
+    # Each collection is judged on its OWN collapse, not on both collapsing
+    # together. The old condition (`not zip_brand_rows and not location_rows`)
+    # could never fire for locations, because zip_brand_rows is never empty -
+    # so a gold read that returned 0 locations during a silver rebuild's
+    # drop-then-recreate window was swapped straight in, wiping every location
+    # from the mirror. Observed live: 13,803 location rows replaced by 0 while
+    # 41,585 zip rows "looked fine", and reporting then served 0 listings and
+    # 0 brands as a legitimate answer.
+    collapsed = []
+    if previous_locations > 0 and not location_rows:
+        collapsed.append(f"locations {previous_locations}->0")
+    if previous_zip_brand > 0 and not zip_brand_rows:
+        collapsed.append(f"zip_brand {previous_zip_brand}->0")
+    if had_real_data and not force and collapsed:
         LOGGER.warning(
-            "gold_mirror_sync_suspicious_empty_result skipped=True previous_zip_brand_rows=%s previous_location_rows=%s",
-            previous_status.get("zip_brand_rows"), previous_status.get("location_rows"),
+            "gold_mirror_sync_suspicious_empty_result skipped=True collapsed=%s zip_brand_has_activity=%s",
+            ", ".join(collapsed), zip_brand_has_activity,
         )
-        return {"zip_brand_rows": 0, "location_rows": 0, "business_rows": len(business_rows), "skipped_empty_swap": True}
+        return {
+            "zip_brand_rows": len(zip_brand_rows), "location_rows": len(location_rows),
+            "business_rows": len(business_rows), "skipped_empty_swap": True,
+            "collapsed": collapsed,
+        }
+
+    # Re-check immediately before the swap, against the mirror as it is NOW.
+    # The three gold reads above can take a minute or more, and another sync
+    # (or a manual rebuild) can land a good mirror in that window - committing
+    # this thread's older, empty result over it is a lost update. The guard
+    # above compares against the state at read time; this compares against the
+    # state at write time, which is the one that matters.
+    if not force and not location_rows:
+        current = get_mirror_status()
+        current_locations = int((current or {}).get("location_rows") or 0)
+        if current_locations > 0:
+            LOGGER.warning(
+                "gold_mirror_sync_stale_empty_write skipped=True current_location_rows=%d",
+                current_locations)
+            return {
+                "zip_brand_rows": len(zip_brand_rows), "location_rows": len(location_rows),
+                "business_rows": len(business_rows), "skipped_empty_swap": True,
+                "collapsed": ["stale empty write"],
+            }
 
     replace_gold_mirror(zip_brand_rows, location_rows, business_rows)
     result = {"zip_brand_rows": len(zip_brand_rows), "location_rows": len(location_rows), "business_rows": len(business_rows)}
@@ -3367,19 +4224,68 @@ def _refresh_silver_background(low_priority: bool = True) -> bool:
 
 def enrichment_status() -> dict[str, Any]:
     _schedule_quality_fix_metrics_refresh()
+    throttled = ENRICHMENT_THROTTLED.is_set()
     with REPORTING_REFRESH_LOCK:
-        return {**ENRICHMENT_STATUS, "refreshing": REPORTING_REFRESHING, "auto_repair": get_auto_repair_stats()}
+        status = {**ENRICHMENT_STATUS, "refreshing": REPORTING_REFRESHING, "auto_repair": get_auto_repair_stats()}
+    # "eased" is a distinct state, not a flavour of running. The frontend uses
+    # it to drop the spinner and the progress line entirely: work at this pace
+    # is background housekeeping the user asked to stop being shown, and a
+    # progress bar that advances two rows every thirty seconds reads as a hung
+    # app rather than a considerate one.
+    status["throttled"] = throttled
+    if throttled and status.get("state") == "running":
+        status["state"] = "eased"
+    return status
 
 
 def stop_enrichment() -> dict[str, Any]:
+    """Hard abort. Kept for shutdown and destructive data operations.
+
+    This is NOT what the button does any more - see ease_enrichment().
+    """
     ENRICHMENT_STOP_REQUESTED.set()
     return {**enrichment_status(), "stop_requested": True}
+
+
+def ease_enrichment(enabled: bool = True) -> dict[str, Any]:
+    """Slow enrichment down to a trickle, or return it to full speed.
+
+    Deliberately does not touch ENRICHMENT_STOP_REQUESTED: the loop keeps
+    running and the queue keeps draining, just slowly enough to stay out of
+    the way. An in-flight batch finishes at its current pacing; the next one
+    picks up the new pacing via _enrichment_pacing().
+    """
+    if enabled:
+        ENRICHMENT_THROTTLED.set()
+        LOGGER.info("enrichment_eased batch=%s pause=%ss", AUTO_REPAIR_EASED_BATCH_SIZE, AUTO_REPAIR_EASED_PAUSE_SECONDS)
+    else:
+        ENRICHMENT_THROTTLED.clear()
+        LOGGER.info("enrichment_resumed_full_speed batch=%s pause=%ss", AUTO_REPAIR_BATCH_SIZE, AUTO_REPAIR_BATCH_PAUSE_SECONDS)
+    return {**enrichment_status(), "throttled": enabled}
 
 
 # Recheck for newly-arrived or user-corrected bronze rows without making the
 # foreground mapping/reporting requests wait for the refresh.
 SILVER_GOLD_REFRESH_INTERVAL_SECONDS = 600
 AUTO_REPAIR_BATCH_PAUSE_SECONDS = 5
+AUTO_REPAIR_BATCH_SIZE = 10
+# Eased pacing: few enough rows per pass that a batch cannot monopolise the
+# BigQuery client, and a long enough gap that the process is effectively
+# invisible to anyone using the app. Progress still happens - roughly 4 rows a
+# minute rather than ~120 - which is the point of easing rather than stopping.
+AUTO_REPAIR_EASED_BATCH_SIZE = 2
+AUTO_REPAIR_EASED_PAUSE_SECONDS = 30
+
+
+def _enrichment_pacing() -> tuple[int, float]:
+    """(batch size, pause) for this pass, re-read every iteration.
+
+    Re-read rather than captured once, so easing off takes effect on the
+    batch after the button is pressed instead of only on the next run.
+    """
+    if ENRICHMENT_THROTTLED.is_set():
+        return AUTO_REPAIR_EASED_BATCH_SIZE, float(AUTO_REPAIR_EASED_PAUSE_SECONDS)
+    return AUTO_REPAIR_BATCH_SIZE, float(AUTO_REPAIR_BATCH_PAUSE_SECONDS)
 
 
 def _quality_fix_event_id(fix_type: str, event_id: str, row_number: int) -> str:
@@ -4050,6 +4956,7 @@ def _mirror_gap_rows(
 def _mirror_map_records(
     location_rows: list[dict[str, Any]], selected_brands: list[str],
     min_population: float | None, min_income: float | None, max_median_age: float | None,
+    map_scope_full: bool = False,
 ) -> list[dict[str, Any]]:
     rows = []
     for r in location_rows:
@@ -4065,7 +4972,29 @@ def _mirror_map_records(
             "county": r.get("county"), "zip_code": r.get("zip_code"), "phone_number": r.get("phone_number"),
             "latitude": r.get("latitude"), "longitude": r.get("longitude"),
         })
-    return rows[:1000]
+    # A scoped fetch (map_scope=full, with a state/county/city/zip filter
+    # already applied upstream via fetch_mirror_reporting_locations) has
+    # nothing left to spread across states - location_rows IS the scope. The
+    # round-robin below exists only to make a NATIONAL sample fair; skip it
+    # and use the higher scoped ceiling instead of the 5,000 national cap.
+    if map_scope_full:
+        return rows[:SCOPED_MAP_RECORD_LIMIT]
+    # Same round-robin as the BigQuery map query above, for the same reason:
+    # a flat rows[:1000] handed the map whichever states happened to sort
+    # first in the mirror, which is how the national view came to show one
+    # metro. Group by state, then interleave, so the cut spreads nationally.
+    by_state: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_state.setdefault(str(row.get("state") or ""), []).append(row)
+    interleaved: list[dict[str, Any]] = []
+    for index in range(max((len(group) for group in by_state.values()), default=0)):
+        for state in sorted(by_state):
+            group = by_state[state]
+            if index < len(group):
+                interleaved.append(group[index])
+        if len(interleaved) >= MAP_RECORD_LIMIT:
+            break
+    return interleaved[:MAP_RECORD_LIMIT]
 
 
 def _mirror_sample_records(
@@ -4111,10 +5040,23 @@ def _reporting_data_from_mirror(
     main_brands: list[str], competitor_brands: list[str], selected_brands: list[str],
     state_filter: str, county_filter: str, city_filter: str, zip_filter: str,
     min_population: float | None, min_income: float | None, max_median_age: float | None,
+    map_scope_full: bool = False,
 ) -> dict[str, Any] | None:
-    """Returns None (triggering the live BigQuery fallback) only when the
-    mirror has never been synced - once synced, an empty result set is a
-    legitimate answer, not a signal to fall back."""
+    """Returns None (triggering the live BigQuery fallback) when the mirror has
+    never been synced, or when it is internally inconsistent.
+
+    Once synced, an empty result set IS a legitimate answer - an empty
+    warehouse really has no rows. But "synced" and "empty" together are not
+    always the truth: a sample clear deletes the mirror's location rows by
+    brand, and if that lands while the warehouse still holds those rows, the
+    mirror reports a confident zero over a full warehouse. Observed live:
+    mirror_reporting_locations = 0 alongside 41,585 zip-brand rows and a gold
+    view holding 13,803 - and reporting duly rendered zeros.
+
+    The two mirrors are populated from the same sync, so one empty while the
+    other is full is a partial wipe, never a real state. Fall back and let the
+    sync repopulate rather than presenting the gap as data.
+    """
     if get_mirror_status() is None:
         return None
     try:
@@ -4125,6 +5067,13 @@ def _reporting_data_from_mirror(
         business_rows = fetch_mirror_businesses()
     except Exception as exc:
         LOGGER.warning("reporting_mirror_read_failed error=%s", exc)
+        return None
+
+    if not location_rows and any((row.get("location_count") or 0) > 0 for row in all_zip_rows):
+        LOGGER.warning(
+            "reporting_mirror_inconsistent locations=0 zip_brand_rows=%d - falling back and resyncing",
+            len(all_zip_rows))
+        _sync_gold_mirror_best_effort()
         return None
 
     base_rows = _mirror_base_rows(zip_rows, selected_brands, min_population, min_income, max_median_age)
@@ -4139,7 +5088,7 @@ def _reporting_data_from_mirror(
         "brands": _mirror_brand_query(base_rows),
         "filter_options": _mirror_filter_options(all_zip_rows, business_rows),
         "raw_whitespace": _mirror_gap_rows(zip_rows, main_brands, competitor_brands, min_population, min_income, max_median_age, state_filter),
-        "map_records": _mirror_map_records(location_rows, selected_brands, min_population, min_income, max_median_age),
+        "map_records": _mirror_map_records(location_rows, selected_brands, min_population, min_income, max_median_age, map_scope_full),
         "sample_records": _mirror_sample_records(location_rows, main_brands, min_population, min_income, max_median_age),
         "data_quality_row": _mirror_data_quality(quality_rows),
         "present_states": {r["zip_state"] for r in base_rows if r.get("zip_state") and (r.get("location_count") or 0) > 0},
@@ -4218,13 +5167,19 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
     county_filter = str(params.get("county", [""])[0]).strip()
     city_filter = str(params.get("city", [""])[0]).strip()
     zip_filter = str(params.get("zip", [""])[0]).strip()
+    # Set by the map when it has zoomed past national breadth: skip the
+    # stratified sample and hand back a state's (or narrower) full detail
+    # instead. Meaningless without an accompanying geo filter, so it is only
+    # honoured when one is present.
+    map_scope = str(params.get("map_scope", [""])[0]).strip().lower()
+    map_scope_full = map_scope == "full" and bool(state_filter or county_filter or city_filter or zip_filter)
     min_population = _safe_float(params.get("min_population", [""])[0])
     min_income = _safe_float(params.get("min_income", [""])[0])
     max_median_age = _safe_float(params.get("max_median_age", [""])[0])
 
     mirror_data = _reporting_data_from_mirror(
         main_brands, competitor_brands, selected_brands, state_filter, county_filter,
-        city_filter, zip_filter, min_population, min_income, max_median_age,
+        city_filter, zip_filter, min_population, min_income, max_median_age, map_scope_full,
     )
     if mirror_data is not None:
         refresh_started = _refresh_silver_background()
@@ -4538,8 +5493,52 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
       AND (@max_median_age IS NULL OR COALESCE(median_age, 0) <= @max_median_age)
       AND (latitude BETWEEN 13.0 AND 72.0)
       AND ((longitude BETWEEN -180.0 AND -64.0) OR (longitude BETWEEN 144.0 AND 146.0))
-    LIMIT 1000
     """
+    # The map shows a SAMPLE, and that sample has to be spread across the
+    # country or it is not a map of the country.
+    #
+    # This query used to end in a bare `LIMIT 1000` with no ORDER BY, so
+    # BigQuery returned whichever 1,000 rows came to hand. Measured against
+    # the live mirror: 42,869 listings with coordinates across 59 state
+    # codes, but the first 1,000 in natural order were 973 Massachusetts.
+    # That is the whole of "only 1 area showing such blue solid ones" - the
+    # data was national, the sample was one metro, and it also starved the
+    # state-to-city drill-down everywhere else, because the city tier is
+    # aggregated from these same rows.
+    #
+    # Round-robin by state instead: rank rows within each state, then order
+    # by that rank, so the sample takes the 1st listing of every state, then
+    # the 2nd of every state, and so on. Every state with listings gets
+    # markers, and the cut stays at MAP_RECORD_LIMIT rows for the browser's
+    # sake. The fingerprint ordering inside a state is deterministic, so the
+    # same sample comes back across reloads rather than shuffling.
+    if map_scope_full:
+        # A scoped fetch (map has zoomed into one state or narrower) has
+        # nothing to spread across states - the WHERE clause above already
+        # narrowed to the requested state/county/city/zip, so `filtered` IS
+        # the scope. Skip the round-robin (it exists only to make a NATIONAL
+        # sample fair) and use the higher scoped ceiling instead.
+        map_query = f"""
+        {map_query}
+        ORDER BY state, zip_code, name
+        LIMIT {SCOPED_MAP_RECORD_LIMIT}
+        """
+    else:
+        map_query = f"""
+        WITH filtered AS ({map_query}),
+        ranked AS (
+          SELECT filtered.*,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY state
+                   ORDER BY FARM_FINGERPRINT(CONCAT(COALESCE(zip_code, ''), '|', COALESCE(name, '')))
+                 ) AS rank_in_state
+          FROM filtered
+        )
+        SELECT * EXCEPT (rank_in_state)
+        FROM ranked
+        ORDER BY rank_in_state, state
+        LIMIT {MAP_RECORD_LIMIT}
+        """
     sample_query = f"""
     SELECT
       name,
@@ -5424,6 +6423,9 @@ def save_template_version(data: dict[str, Any]) -> dict[str, Any]:
         bigquery.ScalarQueryParameter("source_type_id", "STRING", source_type_id),
     ])
     client.query(query, job_config=config).result()
+    # The Template Library list is mirrored now, so an edit has to drop it or
+    # the library keeps showing the version that was just replaced.
+    invalidate_template_cache()
     return {"workflow_template_id": template_id, "updated": True}
 
 
@@ -5466,6 +6468,108 @@ def list_rejected(event_id: str = "", business_id: str = "", limit: int = 50, of
         records.append(item)
     has_more = len(records) > safe_limit
     return {"records": records[:safe_limit], "offset": safe_offset, "limit": safe_limit, "has_more": has_more}
+
+
+def list_needs_review(business_id: str = "", state: str = "", reviewed: str = "", limit: int = 50, offset: int = 0, *, client: Any = None) -> dict[str, Any]:
+    """Rows that reached bronze `listings` but fail the silver validity gate
+    (missing_state, unresolved_coordinates, etc.) - read from the gold
+    `vw_listings_needs_review` view, per the user's explicit ask that this
+    population be fetched from gold rather than queried ad hoc against
+    silver. A DIFFERENT, much larger population than `list_rejected()`'s
+    `error_listings` (rows rejected at parse/mapping time, never reaching
+    `listings` at all) - see codex.md's 2026-09-10 entry for the full
+    measured comparison. `reviewed` filters on the `user_reviewed` flag
+    ("true"/"false"); omitted returns both.
+    """
+    from google.cloud import bigquery
+
+    project_id, bronze_dataset_id, silver_dataset_id, gold_dataset_id, credentials_json = _medallion_settings()
+    if client is None:
+        client = _bigquery_client(project_id, credentials_json)
+    safe_limit = max(1, min(int(limit or 50), 50000))
+    safe_offset = max(0, int(offset or 0))
+    reviewed_clause = ""
+    if reviewed.strip().lower() in {"true", "1", "yes"}:
+        reviewed_clause = "AND user_reviewed IS TRUE"
+    elif reviewed.strip().lower() in {"false", "0", "no"}:
+        reviewed_clause = "AND user_reviewed IS NOT TRUE"
+    query = f"""SELECT listing_id, business_id, brand_name, source_type_id, template_id,
+      name, address, city_name, county, state_code, state_name, zip_code,
+      country, latitude, longitude, phone_number, rejection_reason, user_reviewed,
+      first_observed_at, last_observed_at
+    FROM `{project_id}.{gold_dataset_id}.vw_listings_needs_review`
+    WHERE (@business_id = '' OR business_id = @business_id)
+      AND (@state = '' OR state_code = @state)
+      {reviewed_clause}
+    ORDER BY listing_id
+    LIMIT {safe_limit + 1} OFFSET {safe_offset}"""
+    config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("business_id", "STRING", business_id),
+        bigquery.ScalarQueryParameter("state", "STRING", state),
+    ])
+    try:
+        result_rows = list(client.query(query, job_config=config).result())
+    except Exception as exc:
+        if getattr(exc, "code", None) == 404:
+            return {"records": [], "offset": safe_offset, "limit": safe_limit, "has_more": False}
+        raise
+    records = [dict(row) for row in result_rows]
+    has_more = len(records) > safe_limit
+    return {"records": records[:safe_limit], "offset": safe_offset, "limit": safe_limit, "has_more": has_more}
+
+
+# Whitelisted, editable columns for fix_needs_review_record() - deliberately
+# the same location-identity fields silver's validity gate checks
+# (missing_state / missing_zip / unresolved_coordinates / missing_city /
+# missing_address), not every column on `listings`. Widening this to
+# arbitrary fields would let the review-edit path silently rewrite data the
+# gate never flagged as wrong.
+_NEEDS_REVIEW_EDITABLE_FIELDS = (
+    "name", "address", "city_name", "county", "state_code", "state_name",
+    "zip_code", "country", "latitude", "longitude",
+)
+
+
+def fix_needs_review_record(listing_id: str, updates: dict[str, Any], *, client: Any = None) -> dict[str, Any]:
+    """Apply a human correction to a silver-invalid row.
+
+    Per the project's "a fix must be recorded as state, not applied as a
+    one-off UPDATE" rule: silver is rebuilt from bronze on every run, so the
+    correction is written to bronze `listings` (the edit authority) - never
+    to silver/gold directly, which would be overwritten on the next rebuild.
+    Also stamps `user_reviewed = TRUE` on that bronze row, so a person having
+    looked at and fixed it is durable state, not something the next rebuild
+    can lose. Does not itself trigger a synchronous silver rebuild (that is
+    an expensive full-table operation); starts the existing low-priority
+    background refresh instead, same as other write paths that need silver
+    to eventually reflect a bronze change.
+    """
+    if not listing_id:
+        raise ValueError("listing_id is required")
+    safe_updates = {k: v for k, v in (updates or {}).items() if k in _NEEDS_REVIEW_EDITABLE_FIELDS}
+    if not safe_updates:
+        raise ValueError(f"No editable fields provided (allowed: {', '.join(_NEEDS_REVIEW_EDITABLE_FIELDS)})")
+
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    if client is None:
+        client = _bigquery_client(project_id, credentials_json)
+    listings_ref = f"{project_id}.{dataset_id}.listings"
+
+    set_clauses = ", ".join(f"{field} = @{field}" for field in safe_updates)
+    params = {"listing_id": listing_id, **{
+        field: float(value) if field in ("latitude", "longitude") and value is not None else value
+        for field, value in safe_updates.items()
+    }}
+    updated = run_sql_dml(client, f"""
+    UPDATE `{listings_ref}`
+    SET {set_clauses}, user_reviewed = TRUE
+    WHERE listing_id = @listing_id AND is_deleted IS NOT TRUE
+    """, params, label="fix_needs_review_record")
+
+    if updated:
+        invalidate_cache()
+        _refresh_silver_background()
+    return {"listing_id": listing_id, "updated": bool(updated), "fields_applied": sorted(safe_updates.keys())}
 
 
 def _count_error_listings_live(business_id: str = "", *, client: Any = None) -> int:
@@ -5545,6 +6649,52 @@ def error_listings_by_brand() -> dict[str, Any]:
     return {"brands": rows, "total": sum(row["count"] for row in rows)}
 
 
+def _quality_decode_json(value: Any) -> Any:
+    """Decode a JSON-string column (errors/raw_record) if it is one, else pass through."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError):
+            return value
+    return value
+
+
+def _quality_raw_value(raw: Any, *keys: str) -> str:
+    """Read the first present key out of an error_listings raw_record payload.
+
+    Shared by reporting_quality_summary() (the DQ tab) and
+    reporting_metric_export() (its per-card downloads) so both apply the
+    same county/city/zip extraction to the same source rows - otherwise a
+    download can honor a different filter definition than the tab it was
+    downloaded from.
+    """
+    raw = _quality_decode_json(raw)
+    if not isinstance(raw, dict):
+        return ""
+    for key in keys:
+        value = raw.get(key)
+        if value not in (None, ""):
+            return str(value).strip()
+    return ""
+
+
+def _quality_reasons_from_errors(errors: Any) -> list[str]:
+    """Normalize an error_listings `errors` column into the reason-label set
+    the DQ tab's reason filter and reason counts are built from."""
+    errors = _quality_decode_json(errors)
+    if isinstance(errors, dict):
+        errors = list(errors.values())
+    if not isinstance(errors, list):
+        errors = [errors] if errors else []
+    reasons: list[str] = []
+    for value in errors:
+        label = str(value.get("code") or value.get("type") or value.get("reason") or value) if isinstance(value, dict) else str(value)
+        label = label.strip().lower().replace(" ", "_")
+        if label:
+            reasons.append(label)
+    return reasons
+
+
 def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _skip_cache: bool = False) -> dict[str, Any]:
     """Return the invalid-listing population for Reporting's quality tab.
 
@@ -5581,6 +6731,17 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
                     with _QUALITY_REFRESH_LOCK:
                         _QUALITY_REFRESH_KEYS.discard(quality_cache_key)
             threading.Thread(target=refresh_quality, name="quality-mirror-refresh", daemon=True).start()
+        # fix_states is a GLOBAL, mirror-backed figure: it counts every
+        # listing that was ever invalid, across all brands, and does not vary
+        # with the filter params that key this cache. Freezing it into a
+        # per-filter cached payload meant any filter combination whose payload
+        # was first built while the fix-state mirror was still cold kept
+        # serving {"computed": false} forever - the five cards ("Fixed by AI",
+        # "Fixed manually", "Ever invalid", ...) showed "-" on that view long
+        # after the mirror had filled, while an unfiltered request showed the
+        # real numbers. Re-read it on the way out so a cache hit carries the
+        # current counts; it is a cheap SQLite mirror read.
+        cached_quality["fix_states"] = _cumulative_fix_states()
         return cached_quality
     if not cached_quality and not _skip_cache and not force_refresh:
         # A genuinely cold cache (first load, or right after invalidate_cache()
@@ -5611,7 +6772,16 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
             "scope": "invalid_listings",
             "metrics": {"invalid_listings": 0, "needs_manual_review": 0, "ai_fixed": 0, "manual_fixed": 0, "unresolved_rate_pct": 0.0, "invalid_record_rate_pct": 0.0},
             "reasons": [], "brands": [], "states": [], "cities": [], "history": [],
-            "filters": {"brands": [], "states": [], "reasons": []},
+            "filters": {"brands": [], "states": [], "counties": [], "cities": [], "zips": [], "reasons": []},
+            # The fix-state counts are GLOBAL - they count every listing ever
+            # invalid, across all brands - so they do not depend on the
+            # per-filter aggregation this placeholder is standing in for.
+            # Withholding them here was the last path that could still hand
+            # the UI a payload with no fix_states at all, which renders the
+            # five cards as "-" beside a donut showing real data. They cost a
+            # cheap SQLite mirror read, so include them: the cards can paint
+            # immediately while the filtered aggregation is still computing.
+            "fix_states": _cumulative_fix_states(),
             "warning": "", "quality_cache": "warming",
         }
     project_id, dataset_id, credentials_json = _warehouse_settings()
@@ -5625,7 +6795,13 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
         LOGGER.warning("error_listings_schema_ensure_failed error=%s", exc)
     brand = str(params.get("brand", [""])[0] or "").strip()
     state = str(params.get("state", [""])[0] or "").strip().upper()
+    # County and ZIP were missing here while the Location tab had both, which
+    # is why the two reporting tabs' geographic filters were not the same set.
+    # Same shape as state/city: matched against the row's raw record, since
+    # error_listings stores the source payload rather than enriched columns.
+    county = str(params.get("county", [""])[0] or "").strip().lower()
     city = str(params.get("city", [""])[0] or "").strip().lower()
+    zip_code = str(params.get("zip", [""])[0] or "").strip()
     reason = str(params.get("reason", [""])[0] or "").strip().lower()
     status = str(params.get("status", ["all"])[0] or "all").strip().lower()
     start_date = str(params.get("start_date", [""])[0] or "").strip()
@@ -5654,28 +6830,15 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
         else:
             raise
 
-    def decode(value: Any) -> Any:
-        if isinstance(value, str):
-            try:
-                return json.loads(value)
-            except (TypeError, ValueError):
-                return value
-        return value
-
-    def raw_value(raw: Any, *keys: str) -> str:
-        raw = decode(raw)
-        if not isinstance(raw, dict):
-            return ""
-        for key in keys:
-            value = raw.get(key)
-            if value not in (None, ""):
-                return str(value).strip()
-        return ""
+    decode = _quality_decode_json
+    raw_value = _quality_raw_value
 
     reason_counts: dict[str, int] = {}
     brand_counts: dict[str, dict[str, int]] = {}
     state_counts: dict[str, int] = {}
+    county_counts: dict[str, int] = {}
     city_counts: dict[str, int] = {}
+    zip_counts: dict[str, int] = {}
     filtered: list[dict[str, Any]] = []
     _schedule_quality_fix_metrics_refresh()
     repair_stats = get_auto_repair_stats()
@@ -5688,28 +6851,27 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
         item["raw_record"] = decode(item.get("raw_record"))
         brand_name = str(item.get("brand") or "Unknown").strip()
         item_state = raw_value(item.get("raw_record"), "state", "state_code", "state_name").upper()
+        item_county = raw_value(item.get("raw_record"), "county", "county_name").lower()
         item_city = raw_value(item.get("raw_record"), "city", "city_name").lower()
-        error_text = item.get("errors")
-        if isinstance(error_text, dict):
-            error_text = list(error_text.values())
-        if not isinstance(error_text, list):
-            error_text = [error_text] if error_text else []
-        item_reasons = []
-        for value in error_text:
-            label = str(value.get("code") or value.get("type") or value.get("reason") or value) if isinstance(value, dict) else str(value)
-            label = label.strip().lower().replace(" ", "_")
-            if label:
-                item_reasons.append(label)
-                reason_counts[label] = reason_counts.get(label, 0) + 1
+        item_zip = raw_value(item.get("raw_record"), "zip", "zip_code", "postal_code", "zipcode")
+        item_reasons = _quality_reasons_from_errors(item.get("errors"))
+        for label in item_reasons:
+            reason_counts[label] = reason_counts.get(label, 0) + 1
         item["quality_reasons"] = sorted(set(item_reasons))
         item["state"] = item_state
+        item["county"] = item_county
         item["city"] = item_city
+        item["zip"] = item_zip
         item["status"] = "ai_fixed" if item.get("is_ai_enriched") else "needs_review"
         if brand and brand_name.lower() != brand.lower():
             continue
         if state and item_state != state:
             continue
+        if county and item_county != county:
+            continue
         if city and item_city != city:
+            continue
+        if zip_code and item_zip != zip_code:
             continue
         if reason and reason not in item["quality_reasons"]:
             continue
@@ -5719,7 +6881,9 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
             continue
         filtered.append(item)
         state_counts[item_state or "Unknown"] = state_counts.get(item_state or "Unknown", 0) + 1
+        county_counts[item_county.title() if item_county else "Unknown"] = county_counts.get(item_county.title() if item_county else "Unknown", 0) + 1
         city_counts[item_city.title() if item_city else "Unknown"] = city_counts.get(item_city.title() if item_city else "Unknown", 0) + 1
+        zip_counts[item_zip or "Unknown"] = zip_counts.get(item_zip or "Unknown", 0) + 1
         bucket = brand_counts.setdefault(brand_name, {"invalid": 0, "needs_review": 0, "ai_enriched": 0})
         bucket["invalid"] += 1
         if item.get("is_ai_enriched"):
@@ -6108,6 +7272,9 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
         "filters": {
             "brands": sorted({str(row.get("brand") or "Unknown") for row in rows}),
             "states": sorted({raw_value(row.get("raw_record"), "state", "state_code", "state_name").upper() for row in rows if raw_value(row.get("raw_record"), "state", "state_code", "state_name")}),
+            "counties": sorted({key for key in county_counts if key != "Unknown"}),
+            "cities": sorted({key for key in city_counts if key != "Unknown"}),
+            "zips": sorted({key for key in zip_counts if key != "Unknown"}),
             "reasons": sorted(reason_counts),
         },
         "warning": "",
@@ -6579,6 +7746,16 @@ def reporting_metric_export(params: dict[str, list[str]] | None = None) -> tuple
     states = _multi("state", upper=True)
     start_date = str(params.get("start_date", [""])[0] or "").strip()
     end_date = str(params.get("end_date", [""])[0] or "").strip()
+    # county/city/zip/reason/status: same single-value params, same
+    # normalization (case-insensitive except zip/status), as the DQ tab's
+    # own filter rail (reporting_quality_summary()) - these used to be
+    # silently dropped here, so a metric download never matched what the
+    # DQ tab was actually showing when any of these five were set.
+    county = str(params.get("county", [""])[0] or "").strip().lower()
+    city = str(params.get("city", [""])[0] or "").strip().lower()
+    zip_code = str(params.get("zip", [""])[0] or "").strip()
+    reason = str(params.get("reason", [""])[0] or "").strip().lower()
+    status = str(params.get("status", ["all"])[0] or "all").strip().lower()
     query_params = [
         bigquery.ArrayQueryParameter("brands", "STRING", brands),
         bigquery.ArrayQueryParameter("states", "STRING", states),
@@ -6770,6 +7947,48 @@ def reporting_metric_export(params: dict[str, list[str]] | None = None) -> tuple
         else:
             raise
 
+    # county/city/zip/reason/status only apply to the two DQ-tab-backed
+    # branches above (quality_fix_events and error_listings both select
+    # raw_record/errors, the same columns reporting_quality_summary()
+    # filters on) - the coverage/location/ZIP/brand branches have no such
+    # columns and are unaffected. Applied post-fetch, in Python, with the
+    # exact same field extraction and matching as reporting_quality_summary()
+    # (raw_value/decode -> _quality_raw_value/_quality_decode_json), so a
+    # download always matches what the DQ tab shows for the same filters.
+    if (metric in _FIX_EVENT_METRIC_TYPES or metric in _ERROR_METRIC_PREDICATES) and (
+        county or city or zip_code or reason or status != "all"
+    ):
+        filtered_rows = []
+        for row in rows:
+            item = dict(row)
+            item_county = _quality_raw_value(item.get("raw_record"), "county", "county_name").lower()
+            item_city = _quality_raw_value(item.get("raw_record"), "city", "city_name").lower()
+            item_zip = _quality_raw_value(item.get("raw_record"), "zip", "zip_code", "postal_code", "zipcode")
+            item_reasons = _quality_reasons_from_errors(item.get("errors"))
+            if county and item_county != county:
+                continue
+            if city and item_city != city:
+                continue
+            if zip_code and item_zip != zip_code:
+                continue
+            if reason and reason not in item_reasons:
+                continue
+            # Status (needs_review / ai_fixed) is the open-review-population
+            # split reporting_quality_summary() applies via is_ai_enriched.
+            # It only has meaning on the error_listings branch, which
+            # carries that flag (as fixed_with_ai); the fix-events branch
+            # exports rows already resolved into an AI/manual bucket by
+            # definition of the metric itself, so status has no matching
+            # column there and is left as a no-op rather than invented.
+            if status != "all" and metric in _ERROR_METRIC_PREDICATES:
+                is_ai_enriched = bool(item.get("is_ai_enriched") or item.get("fixed_with_ai"))
+                if status == "ai_fixed" and not is_ai_enriched:
+                    continue
+                if status == "needs_review" and is_ai_enriched:
+                    continue
+            filtered_rows.append(item)
+        rows = filtered_rows
+
     def scalar(value: Any) -> Any:
         # Booleans pass through untouched: the metrics sheet detects flag
         # columns by type to compute each rate, so stringifying them here
@@ -6808,7 +8027,7 @@ def reporting_timeseries(params: dict[str, list[str]] | None = None) -> dict[str
 
     Query params:
       brands   – comma-separated brand names (primary + competitors) - a filter, not a series split
-      period   – 1D | 1W | 1M | 1Q | 1Y  (default 1M)
+      period   – 1H | 1D | 1W | 1M | 1Q | 1Y  (default 1M)
     """
     from google.cloud import bigquery
 
@@ -6817,18 +8036,29 @@ def reporting_timeseries(params: dict[str, list[str]] | None = None) -> dict[str
     brands_raw = str(params.get("brands", [""])[0] or "").strip()
     brands = [b.strip() for b in brands_raw.split(",") if b.strip()] if brands_raw else []
 
-    # Never finer than a day (explicit ask: "granularity till day level
-    # only"), rolling up to week/month/quarter as the period widens.
+    # Granularity now goes below a day. This supersedes the earlier
+    # "granularity till day level only" instruction, on the owner's later
+    # instruction to make hourly available.
+    #
+    # It was not a cosmetic change. Measured on this warehouse: all 42,802
+    # live listings fall inside a single calendar day, so truncating to DAY
+    # collapsed every period to ONE bucket and the 1D/1W/1M/1Q/1Y buttons
+    # could not differ - which is exactly what "these buttons don't change the
+    # number" was reporting. At HOUR the same rows resolve into five distinct
+    # buckets (5,204 / 22,500 / 7,342 / 7,341 / 415), because they arrived in
+    # separate load passes. The structure was always in the data; DAY was
+    # throwing it away.
     PERIOD_CONFIG: dict[str, tuple[str, str]] = {
-        "1D": ("DAY",   "1 DAY"),
-        "1W": ("DAY",   "7 DAY"),
-        "1M": ("DAY",   "30 DAY"),
-        "1Q": ("WEEK",  "90 DAY"),
-        "1Y": ("MONTH", "365 DAY"),
+        "1H": ("MINUTE", "1 HOUR"),
+        "1D": ("HOUR",   "1 DAY"),
+        "1W": ("DAY",    "7 DAY"),
+        "1M": ("DAY",    "30 DAY"),
+        "1Q": ("WEEK",   "90 DAY"),
+        "1Y": ("MONTH",  "365 DAY"),
     }
     granularity, interval = PERIOD_CONFIG.get(period, ("DAY", "30 DAY"))
     force_refresh = str(params.get("refresh", [""])[0] or "").lower() in {"1", "true", "yes"}
-    timeseries_cache_key = f"reporting_timeseries:v2:{period}:{','.join(sorted(brands))}"
+    timeseries_cache_key = f"reporting_timeseries:v3:{period}:{','.join(sorted(brands))}"
     if not force_refresh:
         cached_series = get_cached_query(timeseries_cache_key)
         if cached_series:
@@ -7014,7 +8244,12 @@ def auto_repair_error_batch(limit: int = 10, offset: int = 0, *, client: Any = N
     if not records:
         return {"attempted": 0, "resolved": 0, "remaining": 0}
 
-    templates = {item.get("workflow_template_id"): item for item in list_templates(client=client).get("templates", [])}
+    # include_inactive: this lookup drives record repair, and an error row's
+    # template legitimately has zero live listings (that is what makes the row
+    # an error). Filtering to library-visible templates here would drop the
+    # exact templates repair needs and quietly stop fixing those rows.
+    templates = {item.get("workflow_template_id"): item
+                 for item in list_templates(include_inactive=True, client=client).get("templates", [])}
     resolved = 0
     processed_keys = []
     for record in records:
@@ -7107,9 +8342,60 @@ def auto_repair_error_batch(limit: int = 10, offset: int = 0, *, client: Any = N
     return {"attempted": len(records), "resolved": resolved, "remaining": max(len(records) - resolved, 0)}
 
 
-def start_auto_repair() -> dict[str, Any]:
-    """Run the current review set once in advancing ten-row batches."""
+# Retry backoff after a FAILED automatic repair run.
+#
+# There was none: the run set state="failed", the UI said "it will retry
+# automatically", and the next trigger (any reporting refresh) started it
+# again immediately - so a persistent failure retried in a tight loop against
+# the same broken condition. Each consecutive failure now adds five minutes,
+# up to an hour; the first success clears it and the normal cadence resumes.
+AUTO_REPAIR_BACKOFF_STEP_SECONDS = 300.0
+AUTO_REPAIR_BACKOFF_MAX_SECONDS = 3600.0
+_AUTO_REPAIR_BACKOFF_SECONDS: float = 0.0
+_AUTO_REPAIR_RETRY_NOT_BEFORE: float = 0.0
+_AUTO_REPAIR_BACKOFF_LOCK = threading.Lock()
+
+
+def _note_auto_repair_failure() -> float:
+    """Push the next attempt out by another step. Returns the new wait."""
+    global _AUTO_REPAIR_BACKOFF_SECONDS, _AUTO_REPAIR_RETRY_NOT_BEFORE
+    with _AUTO_REPAIR_BACKOFF_LOCK:
+        _AUTO_REPAIR_BACKOFF_SECONDS = min(
+            _AUTO_REPAIR_BACKOFF_SECONDS + AUTO_REPAIR_BACKOFF_STEP_SECONDS,
+            AUTO_REPAIR_BACKOFF_MAX_SECONDS)
+        _AUTO_REPAIR_RETRY_NOT_BEFORE = wall_clock_time() + _AUTO_REPAIR_BACKOFF_SECONDS
+        return _AUTO_REPAIR_BACKOFF_SECONDS
+
+
+def _note_auto_repair_success() -> None:
+    """A completed run returns the loop to its normal cadence."""
+    global _AUTO_REPAIR_BACKOFF_SECONDS, _AUTO_REPAIR_RETRY_NOT_BEFORE
+    with _AUTO_REPAIR_BACKOFF_LOCK:
+        _AUTO_REPAIR_BACKOFF_SECONDS = 0.0
+        _AUTO_REPAIR_RETRY_NOT_BEFORE = 0.0
+
+
+def auto_repair_retry_wait_seconds() -> float:
+    """Seconds until the next attempt is allowed; 0 when it may run now."""
+    with _AUTO_REPAIR_BACKOFF_LOCK:
+        return max(0.0, _AUTO_REPAIR_RETRY_NOT_BEFORE - wall_clock_time())
+
+
+def start_auto_repair(manual: bool = False) -> dict[str, Any]:
+    """Run the current review set once in advancing ten-row batches.
+
+    `manual=True` is a user pressing the button: it ignores and clears any
+    failure backoff, because an explicit request should just run. Automatic
+    triggers wait out the backoff instead of hammering a broken condition.
+    """
     global AUTO_REPAIR_THREAD
+    if manual:
+        _note_auto_repair_success()
+    else:
+        waiting = auto_repair_retry_wait_seconds()
+        if waiting > 0:
+            LOGGER.info("automatic_review_repair_backing_off remaining=%.0fs", waiting)
+            return {"status": "backing_off", "processed": ENRICHMENT_STATUS.get("processed", 0)}
     with AUTO_REPAIR_LOCK:
         if AUTO_REPAIR_THREAD and AUTO_REPAIR_THREAD.is_alive():
             return {"status": "running", "processed": ENRICHMENT_STATUS.get("processed", 0)}
@@ -7141,7 +8427,8 @@ def start_auto_repair() -> dict[str, Any]:
                     if idle_seconds < FOREGROUND_IDLE_GRACE_SECONDS:
                         sleep(FOREGROUND_IDLE_GRACE_SECONDS - idle_seconds)
                         _enrichment_checkpoint()
-                    batch = auto_repair_error_batch(10, client=client)
+                    batch_size, batch_pause = _enrichment_pacing()
+                    batch = auto_repair_error_batch(batch_size, client=client)
                     if not batch["attempted"]:
                         break
                     fixed += batch["resolved"]
@@ -7154,7 +8441,7 @@ def start_auto_repair() -> dict[str, Any]:
                     set_auto_repair_stats(base_fixed + fixed, base_processed + processed, unresolved, base_manual)
                     ENRICHMENT_STATUS.update({"processed": offset + batch["attempted"], "current_id": "", "updated_at": utc_now_iso()})
                     offset += batch["attempted"]
-                    sleep(AUTO_REPAIR_BATCH_PAUSE_SECONDS)
+                    sleep(batch_pause)
                 ENRICHMENT_STATUS.update({"state": "idle", "current_id": "", "updated_at": utc_now_iso()})
                 AUTO_REPAIR_STATS["remaining"] = max(total - fixed, 0)
                 set_auto_repair_stats(base_fixed + fixed, base_processed + offset, max(total - fixed, 0), base_manual)
@@ -7163,9 +8450,20 @@ def start_auto_repair() -> dict[str, Any]:
                 if fixed > 0:
                     _invalidate_cache_background()
                     _refresh_silver_background(low_priority=True)
+                _note_auto_repair_success()
             except Exception as exc:
-                ENRICHMENT_STATUS.update({"state": "stopped" if ENRICHMENT_STOP_REQUESTED.is_set() else "failed", "updated_at": utc_now_iso()})
-                LOGGER.warning("automatic_review_repair_failed error=%s", exc)
+                stopped = ENRICHMENT_STOP_REQUESTED.is_set()
+                ENRICHMENT_STATUS.update({"state": "stopped" if stopped else "failed", "updated_at": utc_now_iso()})
+                if stopped:
+                    # The user stopped it; that is not a failure to back off from.
+                    _note_auto_repair_success()
+                    LOGGER.info("automatic_review_repair_stopped_by_user")
+                else:
+                    # Logged, never surfaced. The user does not need a
+                    # countdown - if they want it to run now they press the
+                    # button, which bypasses the backoff entirely.
+                    wait = _note_auto_repair_failure()
+                    LOGGER.warning("automatic_review_repair_failed retry_in=%.0fs error=%s", wait, exc)
 
         AUTO_REPAIR_THREAD = threading.Thread(target=worker, name="automatic-review-repair", daemon=True)
         AUTO_REPAIR_THREAD.start()
@@ -7536,6 +8834,441 @@ def _row_error_listing(
     }
 
 
+def rehash_listings_content_hash(batch_size: int = 2000, dry_run: bool = False) -> dict[str, Any]:
+    """Recompute stored `listings.content_hash` under the CURRENT definition.
+
+    O8. `business_id` was removed from CONTENT_HASH_FIELDS, so every hash
+    written before that change is stale. Nothing BREAKS while they are stale -
+    `_dedupe_listings_against_bronze()` matches the legacy hash too and
+    upgrades a row in place when it is re-observed - but a row that is never
+    re-observed keeps its old hash, and the cross-brand duplicate signal
+    cannot see it. This brings those rows forward in one pass.
+
+    Recomputed in PYTHON, deliberately, not in SQL. The hash is
+    sha256(json.dumps({field: str(value) or ""}, sort_keys=True)), and
+    reproducing Python's str() for floats and None in BigQuery SQL is a trap -
+    `str(30.0)` is "30.0", `CAST(30.0 AS STRING)` agrees, but the edge cases
+    (large floats, ints stored as floats, NULL vs empty) do not. Using the
+    same function the writer uses is the only way to be certain the values
+    match.
+
+    Idempotent: rows already carrying the right hash are skipped, so this can
+    be re-run safely and stops when a pass changes nothing.
+    """
+    from google.cloud import bigquery
+    from whitespace_tool.warehouse_bigquery import CONTENT_HASH_FIELDS, content_hash
+
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    table_ref = f"{project_id}.{dataset_id}.listings"
+    columns = ", ".join(["listing_id", "content_hash", *CONTENT_HASH_FIELDS])
+
+    scanned = 0
+    stale = 0
+    updated = 0
+    offset = 0
+    while True:
+        rows = run_sql_rows(client, f"""
+        SELECT {columns}
+        FROM `{table_ref}`
+        WHERE is_deleted IS NOT TRUE
+        ORDER BY listing_id
+        LIMIT {int(batch_size)} OFFSET {int(offset)}
+        """, label="rehash_listings:read")
+        if not rows:
+            break
+        scanned += len(rows)
+        offset += len(rows)
+        changes = []
+        for row in rows:
+            wanted = content_hash(row)
+            if str(row.get("content_hash") or "") == wanted:
+                continue
+            stale += 1
+            changes.append({"listing_id": row["listing_id"], "content_hash": wanted})
+        if changes and not dry_run:
+            # One MERGE per batch rather than one UPDATE per row: on BigQuery
+            # the cost is per statement, so per-row DML would take hours.
+            staging = f"{project_id}.{dataset_id}._content_hash_rehash"
+            client.query(f"""
+            CREATE OR REPLACE TABLE `{staging}` (listing_id STRING, content_hash STRING)
+            """).result()
+            client.load_table_from_json(changes, staging).result()
+            merged = run_sql_dml(client, f"""
+            MERGE `{table_ref}` AS target
+            USING `{staging}` AS source
+            ON target.listing_id = source.listing_id
+            WHEN MATCHED THEN UPDATE SET content_hash = source.content_hash
+            """, label="rehash_listings:merge")
+            updated += merged
+            client.query(f"DROP TABLE IF EXISTS `{staging}`").result()
+        LOGGER.info("rehash_listings_progress scanned=%d stale=%d updated=%d", scanned, stale, updated)
+
+    if updated:
+        invalidate_cache()
+    return {"scanned": scanned, "stale": stale, "updated": updated, "dry_run": bool(dry_run)}
+
+
+def _slugify_for_template_name(value: str) -> str:
+    """Lowercase, dash-separated slug for building a legible template name.
+    Not the canonical `businesses.slug` (which may not exist for every
+    business) - just enough to make a backfilled name readable."""
+    text = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+    return text or "unknown"
+
+
+def backfill_orphan_template_ids(dry_run: bool = True, sample_rows_per_pair: int = 200) -> dict[str, Any]:
+    """RULE R0: every listing must carry a resolvable `template_id`. Some
+    live listings were written before that rule existed (or by a path that
+    skipped it) and are stuck at NULL/''. `listings.template_id` is REQUIRED
+    on newly created tables, but BigQuery cannot promote an existing
+    NULLABLE column in place, so the live table still accepts these NULLs -
+    this backfills them explicitly rather than waiting on a table rebuild.
+
+    Grouped by (business_id, source_type_id), NOT a single fallback template:
+    a template_id is the traceable link between a listing and the mapping
+    that produced it, so collapsing every orphan onto one shared id would
+    erase exactly the information R0 exists to preserve.
+
+    For each distinct orphan (business_id, source_type_id) pair:
+      - If a non-deleted `workflow_templates` row ALREADY exists for that
+        exact pair, point the orphans at it. This is not a placeholder path -
+        if the real mapping that produced this data is still on file, using
+        it is strictly better than inventing a stand-in that claims less
+        than is actually known.
+      - Otherwise, create ONE new placeholder template for the pair. Its
+        `components` reconstructs what it can (the observed `custom_fields`
+        keys still carried on the rows, i.e. columns no typed field
+        absorbed) and is explicit everywhere else that this is a
+        reconstruction, not a recorded mapping - it must never be mistaken
+        for a real, user-created template in the Template Library.
+
+    Idempotent by construction, not just by the WHERE clause: a placeholder
+    created on a prior run IS a "non-deleted template for that pair", so a
+    second run finds and reuses it in the first branch above instead of
+    making another one. The WHERE (template_id IS NULL OR '') guard on the
+    read AND the final UPDATE is kept anyway as a belt-and-suspenders check.
+
+    Runs once, on demand (unlike `brand_merges`, which is replayed on every
+    silver build) - a `template_id` backfill fixes rows in place and has
+    nothing left to reapply once every orphan is pointed somewhere.
+
+    dry_run=True (the default) computes and returns real counts without
+    creating templates or touching listings.
+    """
+    from google.cloud import bigquery
+
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    listings_ref = f"{project_id}.{dataset_id}.listings"
+    templates_ref = f"{project_id}.{dataset_id}.workflow_templates"
+    businesses_ref = f"{project_id}.{dataset_id}.businesses"
+    source_types_ref = f"{project_id}.{dataset_id}.source_types"
+
+    # Step 1: find the distinct orphan pairs and how many rows each covers.
+    pairs = run_sql_rows(client, f"""
+    SELECT business_id, source_type_id, COUNT(*) AS orphan_count
+    FROM `{listings_ref}`
+    WHERE is_deleted IS NOT TRUE AND (template_id IS NULL OR template_id = '')
+    GROUP BY business_id, source_type_id
+    ORDER BY orphan_count DESC
+    """, label="backfill_orphan_template_ids:pairs")
+
+    result: dict[str, Any] = {
+        "dry_run": bool(dry_run),
+        "orphan_listings_total": sum(int(p["orphan_count"]) for p in pairs),
+        "orphan_pairs_total": len(pairs),
+        "pairs": [],
+        "templates_linked_existing": 0,
+        "templates_created": 0,
+        "listings_updated": 0,
+    }
+    if not pairs:
+        return result
+
+    new_template_rows: list[dict[str, Any]] = []
+    pair_to_template_id: dict[tuple[str, str], str] = {}
+
+    for pair in pairs:
+        business_id = str(pair["business_id"] or "")
+        source_type_id = str(pair["source_type_id"] or "")
+        orphan_count = int(pair["orphan_count"])
+
+        # Does a usable (non-deleted) template already exist for this exact
+        # pair? Older first, so a re-run always lands on the same row rather
+        # than drifting if more than one somehow exists.
+        existing = run_sql_rows(client, f"""
+        SELECT workflow_template_id, name
+        FROM `{templates_ref}`
+        WHERE business_id = @business_id AND source_type_id = @source_type_id
+          AND is_deleted IS NOT TRUE
+        ORDER BY created_at ASC
+        LIMIT 1
+        """, {"business_id": business_id, "source_type_id": source_type_id},
+            label="backfill_orphan_template_ids:existing_template")
+
+        pair_info: dict[str, Any] = {
+            "business_id": business_id, "source_type_id": source_type_id,
+            "orphan_count": orphan_count,
+        }
+
+        if existing:
+            template_id = str(existing[0]["workflow_template_id"])
+            pair_info["action"] = "link_existing_template"
+            pair_info["template_id"] = template_id
+            pair_info["template_name"] = existing[0]["name"]
+            result["templates_linked_existing"] += 1
+            pair_to_template_id[(business_id, source_type_id)] = template_id
+            result["pairs"].append(pair_info)
+            continue
+
+        # No real template on file for this pair - build a placeholder.
+        # Pull a small sample of the orphaned rows to recover what we
+        # honestly can: the leftover `custom_fields` keys are real source
+        # column names that no typed field claimed, so they are worth
+        # keeping. Everything else about "the mapping" is unknown and must
+        # be labeled as such, not guessed at.
+        business_rows = run_sql_rows(client, f"""
+        SELECT name, slug FROM `{businesses_ref}` WHERE business_id = @business_id LIMIT 1
+        """, {"business_id": business_id}, label="backfill_orphan_template_ids:business")
+        source_type_rows = run_sql_rows(client, f"""
+        SELECT name FROM `{source_types_ref}` WHERE source_type_id = @source_type_id LIMIT 1
+        """, {"source_type_id": source_type_id}, label="backfill_orphan_template_ids:source_type")
+        brand_name = str((business_rows[0]["name"] if business_rows else business_id) or business_id)
+        brand_slug = str((business_rows[0]["slug"] if business_rows else "") or "").strip() or _slugify_for_template_name(brand_name)
+        source_type_slug = _slugify_for_template_name((source_type_rows[0]["name"] if source_type_rows else "") or source_type_id)
+
+        sample_rows = run_sql_rows(client, f"""
+        SELECT custom_fields
+        FROM `{listings_ref}`
+        WHERE is_deleted IS NOT TRUE AND business_id = @business_id AND source_type_id = @source_type_id
+          AND (template_id IS NULL OR template_id = '') AND custom_fields IS NOT NULL
+        LIMIT {int(sample_rows_per_pair)}
+        """, {"business_id": business_id, "source_type_id": source_type_id},
+            label="backfill_orphan_template_ids:sample")
+        reconstructed_fields: set[str] = set()
+        for row in sample_rows:
+            raw = row.get("custom_fields")
+            if not raw:
+                continue
+            try:
+                parsed = json.loads(raw) if isinstance(raw, str) else raw
+            except ValueError:
+                continue
+            if isinstance(parsed, dict):
+                reconstructed_fields.update(str(k) for k in parsed.keys())
+
+        template_id = str(uuid4())
+        template_name = f"{brand_slug}_{source_type_slug}_backfilled"
+        now = utc_now_iso()
+        new_template_rows.append({
+            "workflow_template_id": template_id,
+            "business_id": business_id, "source_type_id": source_type_id,
+            "name": template_name,
+            "components": json.dumps({
+                # Explicit, load-bearing markers: this must never render or
+                # export indistinguishably from a real, user-created
+                # template. Anything reading `components` for "the mapping"
+                # should treat this shape as "we don't actually know".
+                "backfilled": True,
+                "backfill_reason": "RULE_R0_orphan_template_id_backfill",
+                "note": (
+                    "Placeholder created because no template_id was recorded "
+                    "for these listings and no matching workflow_templates "
+                    "row existed for this (business_id, source_type_id) pair. "
+                    "source_fields below are RECONSTRUCTED from leftover "
+                    "custom_fields keys on the affected rows, not a mapping "
+                    "that was ever actually applied."
+                ),
+                "reconstructed_source_fields": sorted(reconstructed_fields),
+                "source_fields_recovered": bool(reconstructed_fields),
+            }, sort_keys=True),
+            "archived_components": None,
+            "source_configuration": None,
+            "is_sample_data": None,
+            "sample_batch_id": None,
+            "is_deleted": False,
+            "deleted_on": None,
+            "created_at": now, "updated_at": now,
+        })
+        pair_info["action"] = "create_placeholder_template"
+        pair_info["template_id"] = template_id
+        pair_info["template_name"] = template_name
+        pair_info["reconstructed_source_fields"] = sorted(reconstructed_fields)
+        result["templates_created"] += 1
+        pair_to_template_id[(business_id, source_type_id)] = template_id
+        result["pairs"].append(pair_info)
+
+    if dry_run:
+        return result
+
+    # Step 2: actually create the placeholder templates (append-only insert -
+    # nothing else in workflow_templates is being touched).
+    if new_template_rows:
+        errors = client.insert_rows_json(templates_ref, new_template_rows)
+        if errors:
+            raise RuntimeError(f"backfill_orphan_template_ids: failed to insert placeholder templates: {errors}")
+        invalidate_template_cache()
+
+    # Step 3: point the orphaned listings at their resolved template_id, one
+    # MERGE keyed on (business_id, source_type_id) rather than one UPDATE per
+    # row - the number of distinct pairs is tiny even when the row count
+    # behind them is not.
+    staging_rows = [
+        {"business_id": biz, "source_type_id": stype, "template_id": tmpl}
+        for (biz, stype), tmpl in pair_to_template_id.items()
+    ]
+    staging = f"{project_id}.{dataset_id}._orphan_template_backfill"
+    client.query(f"""
+    CREATE OR REPLACE TABLE `{staging}` (business_id STRING, source_type_id STRING, template_id STRING)
+    """).result()
+    client.load_table_from_json(staging_rows, staging).result()
+    updated = run_sql_dml(client, f"""
+    MERGE `{listings_ref}` AS target
+    USING `{staging}` AS source
+    ON target.business_id = source.business_id AND target.source_type_id = source.source_type_id
+    WHEN MATCHED AND (target.template_id IS NULL OR target.template_id = '') THEN
+      UPDATE SET template_id = source.template_id
+    """, label="backfill_orphan_template_ids:merge")
+    client.query(f"DROP TABLE IF EXISTS `{staging}`").result()
+    result["listings_updated"] = updated
+
+    if updated or new_template_rows:
+        invalidate_cache()
+    return result
+
+
+def backfill_sample_template_source_structure(dry_run: bool = True, batch_size: int = 100) -> dict[str, Any]:
+    """The sample-load RULE R0 backfill (in `_load_sample_dataset_impl()`)
+    creates one `workflow_templates` stub per referenced `template_id` so the
+    listing's foreign key resolves, but its `components` was only ever
+    `{"brand": business_id}` - no `source_fields`. The template editor's
+    "This template has no stored source columns. Parse a source file to
+    remap it." message is not a bug in that message; it is truthfully
+    describing bronze data that never carried a structure, on 456 of 461
+    templates measured live (every `is_sample_data` template).
+
+    "Parse a source file to remap it" is also actively wrong advice for these:
+    they were never parsed from a file at all (bulk `INSERT...SELECT` straight
+    into bronze), so there is no source file to re-parse. Fixing this at the
+    UI layer alone would just be hiding a truthful message; the fix belongs
+    at the bronze layer - give the template the structure it actually has.
+
+    For each template with no `components.source_fields`, derive the real
+    column set from its own listings: `CONTENT_HASH_FIELDS` columns that hold
+    a non-null value on any listing pointing at this template, plus any
+    `custom_fields` keys those listings still carry (columns no typed field
+    absorbed). Writes `components.source_fields`, `components.unmapped_fields`
+    (leftover `custom_fields` keys), and `components.structure_synthesized =
+    True` so nothing downstream mistakes this for a mapping that was actually
+    configured. A template with literally zero listings (nothing to derive
+    from) instead gets `components.structure_unavailable = True` and an empty
+    `source_fields` - the frontend can use that flag to say "no data recorded
+    for this template" rather than the misleading parse-a-file prompt.
+
+    Idempotent: only templates missing `source_fields` are touched, and a
+    template that already has them (including one this function already
+    fixed) is skipped on a re-run.
+    """
+    from whitespace_tool.warehouse_bigquery import CONTENT_HASH_FIELDS
+
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    templates_ref = f"{project_id}.{dataset_id}.workflow_templates"
+    listings_ref = f"{project_id}.{dataset_id}.listings"
+
+    targets = run_sql_rows(client, f"""
+    SELECT workflow_template_id, components
+    FROM `{templates_ref}`
+    WHERE is_deleted IS NOT TRUE
+      AND (
+        ARRAY_LENGTH(JSON_EXTRACT_ARRAY(components, '$.source_fields')) IS NULL
+        OR ARRAY_LENGTH(JSON_EXTRACT_ARRAY(components, '$.source_fields')) = 0
+      )
+    """, label="backfill_sample_template_source_structure:targets")
+
+    result: dict[str, Any] = {
+        "dry_run": bool(dry_run),
+        "templates_missing_structure": len(targets),
+        "templates_synthesized": 0,
+        "templates_unavailable": 0,
+        "sample": [],
+    }
+    if not targets:
+        return result
+
+    field_cols = ", ".join(CONTENT_HASH_FIELDS)
+    updates: list[dict[str, Any]] = []
+    for i in range(0, len(targets), max(1, int(batch_size))):
+        batch = targets[i:i + max(1, int(batch_size))]
+        template_ids = [str(t["workflow_template_id"]) for t in batch]
+        rows = run_sql_rows(client, f"""
+        SELECT template_id, {field_cols}, custom_fields
+        FROM `{listings_ref}`
+        WHERE is_deleted IS NOT TRUE AND template_id IN UNNEST(@template_ids)
+        """, {"template_ids": template_ids}, label="backfill_sample_template_source_structure:listings")
+        by_template: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            by_template.setdefault(str(row["template_id"]), []).append(row)
+
+        for target in batch:
+            template_id = str(target["workflow_template_id"])
+            try:
+                components = json.loads(target["components"]) if isinstance(target["components"], str) else (target["components"] or {})
+            except (TypeError, ValueError):
+                components = {}
+            if not isinstance(components, dict):
+                components = {}
+            listing_rows = by_template.get(template_id, [])
+            if not listing_rows:
+                components["structure_unavailable"] = True
+                components["structure_synthesized"] = True
+                components["source_fields"] = []
+                components["unmapped_fields"] = []
+                result["templates_unavailable"] += 1
+            else:
+                present_fields: set[str] = set()
+                custom_keys: set[str] = set()
+                for row in listing_rows:
+                    for field in CONTENT_HASH_FIELDS:
+                        if row.get(field) not in (None, ""):
+                            present_fields.add(field)
+                    raw = row.get("custom_fields")
+                    if raw:
+                        try:
+                            parsed = json.loads(raw) if isinstance(raw, str) else raw
+                        except ValueError:
+                            parsed = None
+                        if isinstance(parsed, dict):
+                            custom_keys.update(str(k) for k in parsed.keys())
+                components["source_fields"] = sorted(present_fields | custom_keys)
+                components["unmapped_fields"] = sorted(custom_keys)
+                components["structure_synthesized"] = True
+                result["templates_synthesized"] += 1
+            if len(result["sample"]) < 10:
+                result["sample"].append({"template_id": template_id, "source_fields": components.get("source_fields", [])})
+            updates.append({"workflow_template_id": template_id, "components": json.dumps(components, sort_keys=True)})
+
+    if dry_run:
+        return result
+
+    staging = f"{project_id}.{dataset_id}._sample_template_structure_backfill"
+    client.query(f"""
+    CREATE OR REPLACE TABLE `{staging}` (workflow_template_id STRING, components STRING)
+    """).result()
+    client.load_table_from_json(updates, staging).result()
+    run_sql_dml(client, f"""
+    MERGE `{templates_ref}` AS target
+    USING `{staging}` AS source
+    ON target.workflow_template_id = source.workflow_template_id
+    WHEN MATCHED THEN UPDATE SET components = PARSE_JSON(source.components), updated_at = CURRENT_TIMESTAMP()
+    """, label="backfill_sample_template_source_structure:merge")
+    client.query(f"DROP TABLE IF EXISTS `{staging}`").result()
+
+    invalidate_template_cache()
+    return result
+
+
 def _dedupe_listings_against_bronze(client: Any, project_id: str, dataset_id: str, listing_rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
     """Drop listing rows whose content_hash already exists in bronze for
     the same business (the same real-world listing observed again),
@@ -7714,14 +9447,23 @@ def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_inval
     incoming_attempt_count = int(payload.get("attempt_count", 0) or 0)
     for index, row in enumerate(rows):
         source_index = row_offset + index
-        if sample_meta.get("is_sample_data") and isinstance(row, dict):
-            row.setdefault("__meta", {
-                "template_id": template_id,
-                "ingestion_id": ingestion_id,
-                "mapping_id": mapping_id,
-                "is_sample_data": True,
-                "sample_batch_id": sample_meta.get("sample_batch_id"),
-            })
+        if isinstance(row, dict):
+            # RULE R0: every listing carries BOTH its business_id and its
+            # template_id. This used to stamp __meta only for sample rows, so
+            # an ordinary save produced listings with a NULL template_id -
+            # measured: 5,619 of 28,119 live rows, every one of them a real
+            # user upload. Those rows cannot be traced back to the mapping
+            # that produced them, and the template editor's preview cannot
+            # find them. The id already exists here; it just was not applied.
+            meta = row.setdefault("__meta", {})
+            if isinstance(meta, dict):
+                meta.setdefault("template_id", template_id)
+                meta.setdefault("ingestion_id", ingestion_id)
+                if mapping_id:
+                    meta.setdefault("mapping_id", mapping_id)
+                if sample_meta.get("is_sample_data"):
+                    meta.setdefault("is_sample_data", True)
+                    meta.setdefault("sample_batch_id", sample_meta.get("sample_batch_id"))
         observed_at = utc_now_iso()
         row_errors: list[dict[str, Any]] = []
         location = None
@@ -7795,10 +9537,27 @@ def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_inval
     for record in error_listings:
         record["source_type_id"] = source_type_id
     rows_by_table["source_types"] = []
+    # The template records the WHOLE source structure, mapped and unmapped.
+    #
+    # template_id and business_id are foreign keys on every listing, so the
+    # template is the definition those rows point at - and a definition that
+    # lists only the columns that happened to be mapped is not the structure.
+    # The editor's job is to map MORE, which it cannot do without knowing the
+    # columns that have no home yet, so both halves are stored explicitly
+    # rather than left to be re-derived from a re-parse.
+    mapped_source_fields = [value for value in (mapper.get("fields") or {}).values() if value]
+    all_source_fields = [str(field) for field in source_fields if str(field).strip()]
+    unmapped_source_fields = [field for field in all_source_fields if field not in set(mapped_source_fields)]
     rows_by_table["workflow_templates"] = [{
         "workflow_template_id": template_id,
         "business_id": business_id, "source_type_id": source_type_id, "name": source_name,
-        "components": json.dumps({"mapper": config_json, "source_type_id": source_type_id, "sample_meta": sample_meta}, sort_keys=True),
+        "components": json.dumps({
+            "mapper": config_json,
+            "source_type_id": source_type_id,
+            "sample_meta": sample_meta,
+            "source_fields": all_source_fields,
+            "unmapped_fields": unmapped_source_fields,
+        }, sort_keys=True),
         "archived_components": None,
         "source_configuration": json.dumps(sample_meta.get("source_configuration") or {}, sort_keys=True),
         "is_sample_data": bool(sample_meta.get("is_sample_data")),
@@ -7868,6 +9627,9 @@ def clear_saved_data() -> dict[str, Any]:
     truncated = clear_result["truncated_tables"]
     ZIP_REFERENCE_CACHE.pop((project_id, dataset_id), None)
     invalidate_cache()
+    # The brand list is spared by the blanket wipe, so the paths that do
+    # change it clear it themselves.
+    invalidate_brand_cache()
     # invalidate_cache() deliberately spares reporting_quality:* keys (they
     # self-refresh on read), but clearing changes the underlying population,
     # so those must go too.
@@ -7909,8 +9671,14 @@ def master_delete_data(data: dict[str, Any]) -> dict[str, Any]:
     datasets = [bronze_dataset_id, silver_dataset_id, gold_dataset_id]
     results = []
     dropped_tables: list[str] = []
+    # ONE client for all three datasets. drop_dataset_tables() used to build
+    # (and never close) its own on each call - the gRPC socket/OOM leak pattern
+    # this repo already learned about the hard way, paid three times per master
+    # delete. (_bigquery_client() is a plain factory, not a cache, so the only
+    # way to have one client here is to make one and pass it down.)
+    client = _bigquery_client(project_id, credentials_json)
     for dataset_id in datasets:
-        result = drop_dataset_tables(project_id, dataset_id, credentials_json)
+        result = drop_dataset_tables(project_id, dataset_id, credentials_json, client=client)
         qualified = [f"{dataset_id}.{name}" for name in result["dropped_tables"]]
         dropped_tables.extend(qualified)
         results.append({"dataset": f"{project_id}.{dataset_id}", "dropped_tables": result["dropped_tables"], "dropped_count": len(result["dropped_tables"])})
@@ -7918,6 +9686,9 @@ def master_delete_data(data: dict[str, Any]) -> dict[str, Any]:
     ZIP_REFERENCE_CACHE.clear()
     _forget_ensured_tables()
     invalidate_cache()
+    # The brand list is spared by the blanket wipe, so the paths that do
+    # change it clear it themselves.
+    invalidate_brand_cache()
     # invalidate_cache() deliberately spares reporting_quality:* keys, but a
     # master delete removes the population they describe.
     invalidate_quality_cache()
@@ -7968,16 +9739,32 @@ def template_sample_records(params: dict[str, list[str]] | None = None) -> dict[
     except Exception as exc:
         LOGGER.warning("template_sample_ensure_failed error=%s", exc)
 
+    # Template id FIRST, business id as the fallback.
+    #
+    # Matching on template_id alone returned nothing for every template on a
+    # sample-loaded warehouse: listings carry the template ids copied from the
+    # source (`tmpl_john_standard` and friends) while workflow_templates holds
+    # its own UUIDs, so the join key never met. The rows are still the right
+    # rows to show - they belong to the same brand - so the query falls back
+    # to the brand rather than showing an empty preview and telling the user
+    # to re-parse a file they have already loaded.
+    #
+    # Bronze directly, no cache: this is the editor's ground truth, and a
+    # mirror that lags would be worse than a slower read.
     query = f"""
     SELECT
       l.listing_id, l.name, l.address, l.city_name, l.state_code, l.zip_code,
       l.country, l.latitude, l.longitude, l.phone_number, l.website_url,
-      l.last_observed_at, l.custom_fields
+      l.last_observed_at, l.custom_fields,
+      IF(l.template_id = @template_id, 0, 1) AS match_rank
     FROM `{project_id}.{dataset_id}.listings` l
     WHERE l.is_deleted IS NOT TRUE
-      AND l.template_id = @template_id
+      AND (
+        l.template_id = @template_id
+        OR (@business_id != '' AND l.business_id = @business_id)
+      )
       AND (@business_id = '' OR l.business_id = @business_id)
-    ORDER BY l.last_observed_at DESC
+    ORDER BY match_rank, l.last_observed_at DESC
     LIMIT {limit}
     """
     config = bigquery.QueryJobConfig(query_parameters=[
@@ -7996,8 +9783,49 @@ def template_sample_records(params: dict[str, list[str]] | None = None) -> dict[
             return value.isoformat()
         return value
 
-    records = [{k: scalar(v) for k, v in dict(row).items()} for row in rows]
-    return {"records": records, "total": len(records), "template_id": template_id}
+    # UNMAPPED columns are the point of this preview.
+    #
+    # The typed columns only show what is already mapped, and the whole reason
+    # to open a template is to map MORE - so the source data that never got a
+    # typed home has to be visible too. _collect_extras() puts exactly that in
+    # custom_fields, so it is expanded here into real columns rather than
+    # returned as one opaque JSON blob the editor cannot offer as a mapping
+    # target.
+    #
+    # match_rank is ordering machinery, not data, and never surfaces.
+    records: list[dict[str, Any]] = []
+    unmapped_columns: list[str] = []
+    for row in rows:
+        record = {k: scalar(v) for k, v in dict(row).items()
+                  if k not in ("match_rank", "custom_fields")}
+        extras = dict(row).get("custom_fields")
+        if extras:
+            try:
+                parsed = json.loads(extras) if isinstance(extras, str) else dict(extras)
+            except (TypeError, ValueError):
+                parsed = {}
+            for key, value in (parsed or {}).items():
+                # A typed column always wins: an extra of the same name is the
+                # raw passthrough of a value the mapped column already holds,
+                # and overwriting it would show the unnormalized one.
+                if key in record:
+                    continue
+                record[key] = scalar(value)
+                if key not in unmapped_columns:
+                    unmapped_columns.append(key)
+        records.append(record)
+    exact = sum(1 for row in rows if int(dict(row).get("match_rank", 1)) == 0)
+    return {
+        "records": records,
+        "total": len(records),
+        "template_id": template_id,
+        # Which columns carry source data with no mapped home yet - what the
+        # user can still map. The editor flags these so they stand out.
+        "unmapped_columns": sorted(unmapped_columns),
+        # True when these rows are the brand's rather than this template's, so
+        # the UI can say so instead of implying the template produced them.
+        "matched_by": "template" if exact else ("business" if records else "none"),
+    }
 
 
 # Reporting TABLES export their own shape, not raw listing rows: a market-gap
@@ -8343,11 +10171,29 @@ HEAVY_REQUEST_CONCURRENCY = 3
 _HEAVY_REQUEST_SEMAPHORE = threading.BoundedSemaphore(HEAVY_REQUEST_CONCURRENCY)
 
 
+# How long a heavy read will queue before giving up. Observed live: the
+# acquire() below had NO timeout, so once three requests wedged inside the
+# semaphore, every later /api/reporting and /api/reporting/quality call
+# blocked forever - the server answered static files and /api/session in
+# milliseconds while those two endpoints hung past 180s, with no error and
+# nothing in the log. A cap turns "hung forever, silently" into "busy, try
+# again", which the UI can actually surface.
+HEAVY_REQUEST_WAIT_SECONDS = 45.0
+
+
 class _heavy_request:
-    """Context manager bounding how many expensive reads run at once."""
+    """Context manager bounding how many expensive reads run at once.
+
+    Raises TimeoutError rather than queueing indefinitely: a permit that never
+    comes back must not take the endpoint down with it.
+    """
 
     def __enter__(self) -> "_heavy_request":
-        _HEAVY_REQUEST_SEMAPHORE.acquire()
+        if not _HEAVY_REQUEST_SEMAPHORE.acquire(timeout=HEAVY_REQUEST_WAIT_SECONDS):
+            LOGGER.warning("heavy_request_queue_timeout waited=%.0fs concurrency=%d",
+                           HEAVY_REQUEST_WAIT_SECONDS, HEAVY_REQUEST_CONCURRENCY)
+            raise TimeoutError(
+                "The server is busy with other reporting requests. Try again in a moment.")
         return self
 
     def __exit__(self, *exc_info: Any) -> None:
@@ -8523,7 +10369,8 @@ def make_handler(ui_dir: Path):
                 try:
                     limit = int(raw_limit or "500")
                     offset = int(raw_offset or "0")
-                    _json_response(self, 200, list_templates(search, business_id, source_type_id, limit=limit, offset=offset))
+                    include_inactive = str(params.get("include_inactive", [""])[0] or "").lower() in {"1", "true", "yes"}
+                    _json_response(self, 200, list_templates(search, business_id, source_type_id, limit=limit, offset=offset, include_inactive=include_inactive))
                 except Exception as exc:
                     _json_response(self, 400, {"error": str(exc)})
                 return
@@ -8673,6 +10520,18 @@ def make_handler(ui_dir: Path):
                 except Exception as exc:
                     _json_response(self, 400, {"error": str(exc)})
                 return
+            if self.path.startswith("/api/review/needs-review"):
+                params = parse_qs(urlsplit(self.path).query)
+                business_id = params.get("business_id", [""])[0]
+                state = params.get("state", [""])[0]
+                reviewed = params.get("reviewed", [""])[0]
+                offset = int(params.get("offset", ["0"])[0] or 0)
+                limit = int(params.get("limit", ["50"])[0] or 50)
+                try:
+                    _json_response(self, 200, list_needs_review(business_id, state, reviewed, limit=limit, offset=offset))
+                except Exception as exc:
+                    _json_response(self, 400, {"error": str(exc)})
+                return
             if self.path.startswith("/api/error-listings/by-brand"):
                 try:
                     _json_response(self, 200, error_listings_by_brand())
@@ -8706,7 +10565,7 @@ def make_handler(ui_dir: Path):
             if _requires_session(self.path) and not _request_has_session(self):
                 _json_response(self, 401, {"error": "Sign in to continue."})
                 return
-            if self.path not in {"/api/login", "/api/preview", "/api/source-url", "/api/sheets", "/api/save", "/api/clear", "/api/master-delete", "/api/brands", "/api/brands/update", "/api/brands/merge", "/api/learning", "/api/reprocess", "/api/review/auto-repair", "/api/field-alias", "/api/custom-field", "/api/custom-field/delete", "/api/templates/save", "/api/silver/enrich", "/api/reporting/refresh", "/api/enrichment/stop", "/api/sample/load", "/api/sample/clear", "/api/settings"}:
+            if self.path not in {"/api/login", "/api/preview", "/api/source-url", "/api/sheets", "/api/save", "/api/clear", "/api/master-delete", "/api/brands", "/api/brands/update", "/api/brands/merge", "/api/learning", "/api/reprocess", "/api/review/auto-repair", "/api/review/needs-review/fix", "/api/field-alias", "/api/custom-field", "/api/custom-field/delete", "/api/templates/save", "/api/silver/enrich", "/api/reporting/refresh", "/api/enrichment/stop", "/api/sample/load", "/api/sample/clear", "/api/settings"}:
                 _json_response(self, 404, {"error": "Not found"})
                 return
             if self.path not in {"/api/review/auto-repair", "/api/enrichment/stop"}:
@@ -8752,8 +10611,15 @@ def make_handler(ui_dir: Path):
                     _json_response(self, 200, learn_mappings(payload))
                 elif self.path == "/api/reprocess":
                     _json_response(self, 200, reprocess_rejected(payload))
+                elif self.path == "/api/review/needs-review/fix":
+                    try:
+                        _json_response(self, 200, fix_needs_review_record(payload.get("listing_id", ""), payload.get("updates", {})))
+                    except ValueError as exc:
+                        _json_response(self, 400, {"error": str(exc)})
                 elif self.path == "/api/review/auto-repair":
-                    _json_response(self, 202, start_auto_repair())
+                    # This endpoint is only reached by the user pressing the
+                    # button, so it runs now regardless of any failure backoff.
+                    _json_response(self, 202, start_auto_repair(manual=True))
                 elif self.path == "/api/field-alias":
                     _json_response(self, 200, add_field_alias(payload))
                 elif self.path == "/api/custom-field":
@@ -8769,9 +10635,28 @@ def make_handler(ui_dir: Path):
                     else:
                         _json_response(self, 200, build_silver_layer(low_priority=bool(payload.get("low_priority", False))))
                 elif self.path == "/api/enrichment/stop":
-                    _json_response(self, 200, stop_enrichment())
+                    # The button eases the loop off rather than killing it.
+                    # The route keeps its name so existing clients keep
+                    # working; `resume: true` puts it back to full speed.
+                    resume = str(payload.get("resume", "")).lower() in {"1", "true", "yes"}
+                    _json_response(self, 200, ease_enrichment(enabled=not resume))
                 elif self.path == "/api/sample/load":
-                    _json_response(self, 200, load_sample_dataset(bool(payload.get("reset"))))
+                    # Guarded because a second load is never what the user
+                    # meant: the endpoint had no in-flight check, so a double
+                    # click (or a click landing while the automatic NTILE(2)
+                    # second half was still running) started another full
+                    # load, each spawning its own half-2 thread, all writing
+                    # the same rows and competing for the same BigQuery
+                    # client. Returning the in-flight status is the honest
+                    # answer to "load it again" while it is still loading.
+                    if _SAMPLE_LOAD_RUNNING.is_set():
+                        _json_response(self, 200, {
+                            "loaded": False,
+                            "in_progress": True,
+                            "message": "The sample dataset is already loading.",
+                        })
+                    else:
+                        _json_response(self, 200, load_sample_dataset(bool(payload.get("reset"))))
                 elif self.path == "/api/sample/clear":
                     _json_response(self, 200, clear_sample_dataset())
                 elif self.path == "/api/settings":

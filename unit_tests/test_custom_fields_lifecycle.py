@@ -19,12 +19,16 @@ from __future__ import annotations
 
 import inspect
 import sys
+import threading
+from pathlib import Path
 import types
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import whitespace_tool.workflow_server as ws
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _fake_bigquery_modules():
@@ -1243,3 +1247,421 @@ class BackgroundCacheInvalidationTests(unittest.TestCase):
             self.assertIn("_invalidate_cache_background()", source, function.__name__)
             # No bare blanket call may survive alongside it.
             self.assertNotIn("\n        invalidate_cache()", source, function.__name__)
+
+
+class MirrorConsistencyTests(unittest.TestCase):
+    """Live-measured: mirror_reporting_locations held 0 rows while the gold
+    view held 13,803 and bronze held 14,499 live listings - and reporting
+    served that zero as a legitimate answer."""
+
+    def test_a_half_wiped_mirror_falls_back_instead_of_reporting_zero(self):
+        source = inspect.getsource(ws._reporting_data_from_mirror)
+        # Zip-brand rows present but zero location rows is a partial wipe, not
+        # a real state - the two are populated by the same sync.
+        self.assertIn(
+            'if not location_rows and any((row.get("location_count") or 0) > 0 for row in all_zip_rows):',
+            source)
+        self.assertIn("_sync_gold_mirror_best_effort()", source)
+        self.assertIn("reporting_mirror_inconsistent", source)
+
+    def test_clear_empties_the_warehouse_before_the_mirror(self):
+        # The mirror used to be cleared first, so a BigQuery failure left the
+        # worst state: data still in bronze and gold, nothing in the mirror.
+        source = inspect.getsource(ws.clear_sample_dataset)
+        reset_at = source.index("_reset_sample_data(client")
+        mirror_at = source.index("clear_sample_reporting_mirror(")
+        self.assertLess(reset_at, mirror_at,
+                        "BigQuery must be cleared before the local mirror")
+
+    def test_a_second_sample_load_is_refused_while_one_is_running(self):
+        handler = inspect.getsource(ws.make_handler)
+        load_branch = handler.split('elif self.path == "/api/sample/load":', 1)[1].split("elif self.path", 1)[0]
+        self.assertIn("_SAMPLE_LOAD_RUNNING.is_set()", load_branch)
+        self.assertIn('"in_progress": True', load_branch)
+
+    def test_clearing_stops_an_in_flight_load_rather_than_racing_it(self):
+        source = inspect.getsource(ws.clear_sample_dataset)
+        self.assertIn("SAMPLE_LOAD_CANCELLED.set()", source)
+        # The flag must be raised before anything is deleted, or the running
+        # loader writes half 2 back in after the delete.
+        self.assertLess(source.index("SAMPLE_LOAD_CANCELLED.set()"),
+                        source.index("_reset_sample_data(client"))
+        impl = inspect.getsource(ws._load_sample_dataset_impl)
+        # A user-initiated load clears any stop left by a previous Clear.
+        self.assertIn("SAMPLE_LOAD_CANCELLED.clear()", impl)
+        # The wrapper guarantees the in-flight flag is always released.
+        self.assertIn("_SAMPLE_LOAD_RUNNING.clear()", inspect.getsource(ws.load_sample_dataset))
+
+
+class SampleStatusMirrorTests(unittest.TestCase):
+    """User-reported: "on refresh why it changed my button to Load Sample
+    Dataset when it was already loaded". Six BigQuery COUNTs ran inline on
+    every page load, and any failure rendered "not loaded" over a full
+    warehouse."""
+
+    def test_status_is_mirrored_outside_the_wipeable_query_cache(self):
+        source = inspect.getsource(ws.sample_dataset_status)
+        # app_settings, not query_cache - invalidate_cache() wipes the latter,
+        # and this is exactly the value that has to survive it.
+        self.assertIn("_read_sample_status_mirror()", source)
+        self.assertIn('SAMPLE_STATUS_MIRROR_KEY = "sample_status_mirror:v1"',
+                      inspect.getsource(ws).split("def sample_dataset_status", 1)[0])
+        self.assertIn("get_app_setting", inspect.getsource(ws._read_sample_status_mirror))
+
+    def test_a_bigquery_failure_serves_the_mirror_not_a_false_zero(self):
+        source = inspect.getsource(ws.sample_dataset_status)
+        self.assertIn('return {**mirror, "source": "mirror_stale"}', source)
+
+    def test_the_ui_leaves_the_button_alone_when_the_check_fails(self):
+        review_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
+        catch = review_js.split("async function refreshSampleDatasetStatus()", 1)[1].split("\nasync function ", 1)[0]
+        self.assertNotIn("updateSampleDatasetControls({ loaded: false })", catch)
+
+
+class SoftDeleteColumnDDLTests(unittest.TestCase):
+    """The soft-delete ALTERs are a safety net for tables that predate the
+    columns - they are in TABLE_SCHEMAS, so on any table this app created they
+    already exist. Re-running them on EVERY sample load cost 4 tables x 2 DDL
+    statements at roughly 4s each: about 30 of a 47-second load spent proving
+    columns exist."""
+
+    def setUp(self):
+        ws._SOFT_DELETE_COLUMNS_ENSURED.clear()
+        self.addCleanup(ws._SOFT_DELETE_COLUMNS_ENSURED.clear)
+
+    def test_the_ddl_runs_once_per_table_per_process(self):
+        client = FakeClient()
+        for _ in range(5):
+            ws._ensure_soft_delete_columns(client, "proj.ds.listings")
+        alters = [q for q in client.queries if "ADD COLUMN IF NOT EXISTS" in q]
+        self.assertEqual(len(alters), 1)
+        # A different table still gets its own pass.
+        ws._ensure_soft_delete_columns(client, "proj.ds.businesses")
+        self.assertEqual(len([q for q in client.queries if "ADD COLUMN IF NOT EXISTS" in q]), 2)
+
+    def test_reset_issues_the_update_every_time_but_not_the_ddl(self):
+        client = FakeClient()
+        for _ in range(3):
+            ws._reset_sample_data(client, "proj", "ds")
+        alters = [q for q in client.queries if "ADD COLUMN IF NOT EXISTS" in q]
+        updates = [q for q in client.queries if q.strip().startswith("UPDATE")]
+        # 4 tables, once each - not once per call.
+        self.assertEqual(len(alters), 4)
+        self.assertEqual(len(updates), 12)
+
+    def test_forgetting_ensured_tables_also_forgets_the_columns(self):
+        # A clear or master delete can change the deployed schema, so a stale
+        # "already ensured" must not survive it.
+        ws._SOFT_DELETE_COLUMNS_ENSURED.add("proj.ds.listings")
+        ws._forget_ensured_tables()
+        self.assertEqual(ws._SOFT_DELETE_COLUMNS_ENSURED, set())
+
+    def test_the_immutable_source_dataset_is_still_refused(self):
+        with self.assertRaises(PermissionError):
+            ws._reset_sample_data(FakeClient(), "proj", "sample_locations")
+
+
+class SilverBuildSerialisationTests(unittest.TestCase):
+    """build_silver_layer() writes a fixed staging table and DROPs it, so two
+    concurrent builds destroy each other's destination - observed live as
+    "Destination deleted/expired during operation: _listings_staging". Two of
+    the five call sites took REPORTING_REFRESHING; three did not, so a user
+    clicking Load Sample Dataset during a background refresh could collide,
+    and the failed build leaves gold stale."""
+
+    def test_the_public_entry_point_serialises_builds(self):
+        wrapper = inspect.getsource(ws.build_silver_layer)
+        self.assertIn("with _SILVER_BUILD_LOCK:", wrapper)
+        self.assertIn("_build_silver_layer_impl(low_priority=low_priority)", wrapper)
+
+    def test_every_caller_goes_through_the_locked_entry_point(self):
+        module = inspect.getsource(ws)
+        body = module.split("def _build_silver_layer_impl", 1)[1]
+        # Nothing may call the unlocked implementation except the wrapper.
+        self.assertNotIn("_build_silver_layer_impl(", body)
+
+    def test_the_lock_is_reentrant_so_the_nested_bootstrap_path_cannot_deadlock(self):
+        # _ensure_gold_reporting_views() calls build_silver_layer() as part of
+        # its bootstrap, so a plain Lock would deadlock that path against
+        # itself. Reentrancy costs nothing - a nested call on one thread is
+        # already serialised - and still blocks the cross-thread collision.
+        #
+        # Asserted on the TYPE, not by acquiring: a background silver build
+        # legitimately holds this lock, and an acquire-based check failed that
+        # way in a full-suite run.
+        self.assertIsInstance(ws._SILVER_BUILD_LOCK, type(threading.RLock()))
+        self.assertNotIsInstance(ws._SILVER_BUILD_LOCK, type(threading.Lock()))
+
+
+class HeavyRequestQueueTests(unittest.TestCase):
+    """Observed live: the semaphore's acquire() had NO timeout, so once three
+    requests wedged inside it every later /api/reporting and
+    /api/reporting/quality call blocked forever - the server answered static
+    files and /api/session in milliseconds while those two hung past 180s,
+    with no error and nothing in the log."""
+
+    def test_waiting_for_a_permit_is_bounded(self):
+        source = inspect.getsource(ws._heavy_request)
+        self.assertIn("_HEAVY_REQUEST_SEMAPHORE.acquire(timeout=HEAVY_REQUEST_WAIT_SECONDS)", source)
+        self.assertIn("raise TimeoutError(", source)
+        self.assertGreater(ws.HEAVY_REQUEST_WAIT_SECONDS, 0)
+
+    def test_a_full_queue_raises_instead_of_hanging(self):
+        # Drain every permit, then prove a further entry gives up rather than
+        # blocking for the rest of the process's life.
+        held = []
+        try:
+            for _ in range(ws.HEAVY_REQUEST_CONCURRENCY):
+                self.assertTrue(ws._HEAVY_REQUEST_SEMAPHORE.acquire(timeout=1))
+                held.append(1)
+            with patch.object(ws, "HEAVY_REQUEST_WAIT_SECONDS", 0.05):
+                with self.assertRaises(TimeoutError):
+                    with ws._heavy_request():
+                        pass
+        finally:
+            for _ in held:
+                ws._HEAVY_REQUEST_SEMAPHORE.release()
+
+    def test_a_permit_is_always_returned(self):
+        before = ws._HEAVY_REQUEST_SEMAPHORE._value
+        try:
+            with ws._heavy_request():
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+        self.assertEqual(ws._HEAVY_REQUEST_SEMAPHORE._value, before)
+
+
+class SampleStatusRecountThrottleTests(unittest.TestCase):
+    """The UI polls /api/sample/status, and it used to spawn a background
+    recount thread - six BigQuery COUNTs on a fresh client - on every call."""
+
+    def setUp(self):
+        ws._LAST_SAMPLE_STATUS_RECOUNT_AT = 0.0
+        self.addCleanup(setattr, ws, "_LAST_SAMPLE_STATUS_RECOUNT_AT", 0.0)
+
+    def test_only_one_recount_is_claimed_per_interval(self):
+        clock = [1000.0]
+        with patch.object(ws, "wall_clock_time", lambda: clock[0]):
+            self.assertTrue(ws._claim_sample_status_recount())
+            for _ in range(10):
+                self.assertFalse(ws._claim_sample_status_recount())
+            clock[0] += ws.SAMPLE_STATUS_RECOUNT_INTERVAL_SECONDS + 1
+            self.assertTrue(ws._claim_sample_status_recount())
+
+    def test_the_status_endpoint_goes_through_the_throttle(self):
+        source = inspect.getsource(ws.sample_dataset_status)
+        self.assertIn("if _claim_sample_status_recount():", source)
+
+
+class RebuildInvalidationThrottleTests(unittest.TestCase):
+    """User: "why is loading trend data running each time, this could also
+    save in cache". It WAS cached - measured, all five
+    reporting_timeseries:* entries were in query_cache - but the silver and
+    gold rebuilds each did a blanket invalidate_cache(), and they run on
+    every reporting refresh. So the trend chart re-queried BigQuery (6-8s per
+    period) even though nothing about the data had changed."""
+
+    def test_the_layer_rebuilds_use_the_throttled_invalidation(self):
+        for function in (ws._build_silver_layer_impl, ws.build_gold_layer):
+            source = inspect.getsource(function)
+            self.assertIn("_invalidate_cache_background()", source, function.__name__)
+            # No bare blanket wipe left alongside it.
+            self.assertNotIn("\n        invalidate_cache()", source, function.__name__)
+            self.assertNotIn("\n    invalidate_cache()", source, function.__name__)
+
+    def test_user_actions_still_invalidate_immediately(self):
+        # Only the routine rebuilds are throttled; a save or brand change must
+        # still be visible at once.
+        for function in (ws.create_brand, ws.update_brand, ws.merge_brands, ws.clear_saved_data):
+            source = inspect.getsource(function)
+            self.assertIn("invalidate_cache()", source, function.__name__)
+            self.assertNotIn("_invalidate_cache_background()", source, function.__name__)
+
+
+class AutoRepairBackoffTests(unittest.TestCase):
+    """BB5: a failed run set state="failed", the UI said "it will retry
+    automatically", and the next trigger started it again immediately - a
+    tight retry loop against the same broken condition."""
+
+    def setUp(self):
+        ws._note_auto_repair_success()
+        self.addCleanup(ws._note_auto_repair_success)
+
+    def test_each_failure_adds_five_minutes_up_to_an_hour(self):
+        clock = [1000.0]
+        with patch.object(ws, "wall_clock_time", lambda: clock[0]):
+            waits = [ws._note_auto_repair_failure() for _ in range(15)]
+        self.assertEqual(waits[0], 300.0)
+        self.assertEqual(waits[1], 600.0)
+        self.assertEqual(waits[2], 900.0)
+        # Ceiling, and it never grows past it.
+        self.assertEqual(max(waits), 3600.0)
+        self.assertEqual(waits[-1], 3600.0)
+
+    def test_a_success_returns_the_loop_to_its_normal_cadence(self):
+        clock = [1000.0]
+        with patch.object(ws, "wall_clock_time", lambda: clock[0]):
+            ws._note_auto_repair_failure()
+            ws._note_auto_repair_failure()
+            self.assertGreater(ws.auto_repair_retry_wait_seconds(), 0)
+            ws._note_auto_repair_success()
+            self.assertEqual(ws.auto_repair_retry_wait_seconds(), 0.0)
+
+    def test_automatic_triggers_wait_but_a_user_click_runs_now(self):
+        clock = [1000.0]
+        with patch.object(ws, "wall_clock_time", lambda: clock[0]):
+            ws._note_auto_repair_failure()
+            # Automatic: refused while backing off, and it never touches the
+            # thread machinery.
+            self.assertEqual(ws.start_auto_repair()["status"], "backing_off")
+            # Manual: the backoff is cleared, so it is allowed through.
+            with patch.object(ws, "AUTO_REPAIR_THREAD", None), \
+                 patch.object(threading, "Thread") as thread:
+                thread.return_value = SimpleNamespace(start=lambda: None, is_alive=lambda: False)
+                result = ws.start_auto_repair(manual=True)
+            self.assertNotEqual(result.get("status"), "backing_off")
+            self.assertEqual(ws.auto_repair_retry_wait_seconds(), 0.0)
+
+    def test_the_button_endpoint_is_manual_and_no_timing_is_surfaced(self):
+        handler = inspect.getsource(ws.make_handler)
+        assert "start_auto_repair(manual=True)" in handler
+        # The user asked NOT to be told when the next attempt is - the retry
+        # schedule is logged, never returned.
+        worker = inspect.getsource(ws.start_auto_repair)
+        self.assertNotIn("retry_after_seconds", worker)
+        self.assertNotIn("retry_after_seconds", inspect.getsource(ws.make_handler))
+
+
+class ContentHashRehashTests(unittest.TestCase):
+    """O8. Removing business_id from CONTENT_HASH_FIELDS made every
+    previously-stored hash stale. Nothing breaks while they are - the dedupe
+    matches the legacy hash too and upgrades a row when it is re-observed -
+    but a row never re-observed keeps its old hash, so the cross-brand
+    duplicate signal cannot see it. Dry run against the live warehouse:
+    27,704 of 35,461 live listings stale."""
+
+    def test_it_recomputes_in_python_not_sql(self):
+        source = inspect.getsource(ws.rehash_listings_content_hash)
+        # The hash is sha256 over json.dumps({field: str(value) or ""},
+        # sort_keys=True). Reproducing Python's str() for floats and None in
+        # BigQuery SQL is a trap, so the writer's own function is reused.
+        self.assertIn("from whitespace_tool.warehouse_bigquery import CONTENT_HASH_FIELDS, content_hash", source)
+        self.assertIn("wanted = content_hash(row)", source)
+        self.assertNotIn("TO_HEX(SHA256", source)
+
+    def test_it_skips_rows_that_are_already_correct(self):
+        source = inspect.getsource(ws.rehash_listings_content_hash)
+        self.assertIn('if str(row.get("content_hash") or "") == wanted:', source)
+        self.assertIn("continue", source)
+
+    def test_it_writes_one_merge_per_batch_not_one_update_per_row(self):
+        # BigQuery charges per STATEMENT - measured 2.60s for a single-row
+        # UPDATE - so per-row DML over 27,704 rows would take hours.
+        source = inspect.getsource(ws.rehash_listings_content_hash)
+        self.assertIn("MERGE `{table_ref}` AS target", source)
+        self.assertIn("load_table_from_json(changes, staging)", source)
+        self.assertNotIn("UPDATE `{table_ref}` SET content_hash = @", source)
+
+    def test_dry_run_writes_nothing(self):
+        source = inspect.getsource(ws.rehash_listings_content_hash)
+        self.assertIn("if changes and not dry_run:", source)
+        # The staging table is cleaned up rather than left behind.
+        self.assertIn("DROP TABLE IF EXISTS `{staging}`", source)
+
+
+class SuggestionPanelBoundsTests(unittest.TestCase):
+    """BB8 follow-up: "what happened to minimise dropdown to fixed height and
+    enable scrolling". The PANEL was already capped; the native <select> popup
+    is what cannot be - CSS has no control over a browser's own dropdown, and
+    with 1,000 brands it draws a list the length of the screen. So the bounded
+    panel now opens on focus and becomes the primary way to pick."""
+
+    def test_the_panel_is_height_capped_and_scrolls(self):
+        html = (ROOT / "ui" / "integrations.html").read_text()
+        rule = html.split(".select-suggestions {", 1)[1].split("}", 1)[0]
+        self.assertIn("max-height:", rule)
+        self.assertIn("overflow-y: auto;", rule)
+
+    def test_focus_opens_the_full_list_not_only_typing(self):
+        common_js = (ROOT / "ui" / "js" / "common.js").read_text()
+        self.assertIn("const renderSuggestions = (query, showAll = false) =>", common_js)
+        self.assertIn("if (!query && !showAll) return hideSuggestions();", common_js)
+        self.assertIn("search.onfocus =", common_js)
+        # An empty query must not claim "no matching brand".
+        self.assertIn("if (!query) return hideSuggestions();", common_js)
+
+
+class RememberedBrandsTests(unittest.TestCase):
+    """User: "search box dont load while loading app, it comes a few seconds
+    later, maybe start with last remember brands atleast and refresh in
+    backend". loadBrands() is a network round trip (6.0s cold, 6ms warm,
+    measured) and attachSearchableSelect() cannot create the search input
+    until options exist - so the brand controls were absent for the first
+    seconds of a cold start."""
+
+    def test_the_render_is_split_out_so_both_paths_share_it(self):
+        mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
+        # One render path, used by both the remembered list and the fetch -
+        # the dropdown, the duplicate rail and the search cache must not have
+        # two ways of being built.
+        self.assertIn("function renderBrandOptions(brands) {", mapper_js)
+        fetcher = mapper_js.split("async function loadBrands(search", 1)[1].split("\n}", 1)[0]
+        self.assertIn("renderBrandOptions(brands);", fetcher)
+        painter = mapper_js.split("function paintRememberedBrands()", 1)[1].split("\nasync function ", 1)[0]
+        self.assertIn("renderBrandOptions(remembered);", painter)
+
+    def test_remembered_brands_paint_before_the_fetch(self):
+        # loadAppData() must paint the remembered brands synchronously BEFORE
+        # awaiting loadBrands(): the fetch is a network round trip and
+        # attachSearchableSelect() cannot build the search box until options
+        # exist, so the brand controls were simply absent for the first few
+        # seconds of a cold start.
+        common_js = (ROOT / "ui" / "js" / "common.js").read_text()
+        # End on the function's own closing brace (column 0), not on an
+        # arbitrarily indented one - the old "\n    }" marker matched nothing
+        # here and silently ran the search on past the end of the function.
+        load = common_js.split("async function loadAppData()", 1)[1].split("\n}", 1)[0]
+        self.assertIn("paintRememberedBrands();", load)
+        # Comment lines are stripped before ordering: the explanation above
+        # this call names loadBrands() in prose, and a raw .index() matched
+        # THAT, reporting the calls as out of order while the code was right.
+        code = "\n".join(
+            line for line in load.split("\n") if not line.strip().startswith("//")
+        )
+        self.assertLess(code.index("paintRememberedBrands();"), code.index("loadBrands()"))
+        # ...and the real list still overwrites it once the fetch lands.
+        self.assertIn("loadBrands()", code)
+
+    def test_only_a_full_list_is_remembered(self):
+        # A name-filtered reload would otherwise repaint the next cold start
+        # with a handful of brands.
+        mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
+        self.assertIn("if (!search) rememberBrands(brands);", mapper_js)
+
+    def test_a_live_list_is_never_overwritten_by_the_remembered_one(self):
+        mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
+        painter = mapper_js.split("function paintRememberedBrands()", 1)[1].split("\nasync function ", 1)[0]
+        self.assertIn('select.dataset.brandsLoaded === "true"', painter)
+
+    def test_storage_failures_cannot_break_brand_loading(self):
+        mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
+        for fn in ("function rememberedBrands()", "function rememberBrands(brands)"):
+            body = mapper_js.split(fn, 1)[1].split("\nfunction ", 1)[0]
+            self.assertIn("catch (_)", body)
+
+
+class BrandListLimitTests(unittest.TestCase):
+    """User: "is there any counter limit on drop down scroll?" - yes, and it
+    was not on the scroll. list_brands had LIMIT 100 against 1,002 live
+    brands, so 902 were unreachable and typing a name outside the first 100
+    alphabetically found nothing, because the UI filters only what it was
+    given. Verified live: the API returned 100, now returns 1,002."""
+
+    def test_the_cap_is_named_and_large_enough_to_reach_every_brand(self):
+        source = inspect.getsource(ws)
+        self.assertIn("BRAND_LIST_LIMIT = ", source)
+        self.assertGreaterEqual(ws.BRAND_LIST_LIMIT, 1000)
+        listing = inspect.getsource(ws.list_brands)
+        self.assertIn("LIMIT {BRAND_LIST_LIMIT}", listing)
+        self.assertNotIn("LIMIT 100", listing)

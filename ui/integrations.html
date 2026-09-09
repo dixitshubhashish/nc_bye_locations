@@ -65,6 +65,13 @@
       --warn: #9a5b13;
       --error: #a52626;
       --ok: #246b3d;
+      /* Rendered height of the sticky <header>, measured and kept current by
+         syncAppHeaderOffset() in js/common.js - the header grows when its
+         action buttons wrap, so anything that pins itself underneath has to
+         read the live value rather than assume one. This declaration is only
+         the fallback for the moment before that first runs; it matches the
+         71px .progress-wrap already uses for its own sticky offset. */
+      --app-header-h: 71px;
     }
 
     * { box-sizing: border-box; }
@@ -130,9 +137,9 @@
       background: #ffffff;
       color: var(--ink);
       border-color: var(--line);
-      min-height: 40px;
-      padding: 9px 16px;
-      font-size: 14px;
+      min-height: 44px;
+      padding: 10px 18px;
+      font-size: 15px;
       font-weight: 800;
     }
 
@@ -142,7 +149,7 @@
     }
 
     .header-actions { grid-area: utilities; display: flex; gap: 12px; align-items: center; justify-content: flex-end; min-width: 0; }
-    .header-actions button { font-size: 11px; padding: 5px 7px; }
+    .header-actions button { min-height: 24px; font-size: 10px; padding: 4px 7px; }
     .header-readiness {
       display: inline-flex;
       align-items: center;
@@ -269,29 +276,6 @@
       display: block !important;
       grid-template-columns: none !important;
     }
-    .reporting-sidebar-pane {
-      max-height: none !important;
-      overflow: visible !important;
-      box-sizing: border-box;
-    }
-    .reporting-sidebar-pane .filter-category {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      column-gap: 10px;
-      align-items: start;
-    }
-    .reporting-sidebar-pane .filter-category > :first-child,
-    .reporting-sidebar-pane > div:last-child {
-      grid-column: 1 / -1;
-      display: grid !important;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 8px;
-    }
-    .reporting-sidebar-pane > div:last-child button {
-      width: 100% !important;
-      min-width: 0;
-      white-space: normal;
-    }
     #competitorDropdownBtnText {
       color: var(--ink) !important;
       opacity: 1 !important;
@@ -407,20 +391,110 @@
         width: 100% !important;
       }
     }
-    .reporting-sidebar-pane .filter-category > .report-filter-group {
+    /* ==================================================================
+       REPORT FILTER RAIL - one design, both reporting tabs.
+
+       Location Intelligence (markup further down this file) and Data
+       Quality (markup in reporting-tabs.js buildQualityPanel) were two
+       separately hand-styled panels that had drifted apart in card
+       treatment, padding, label size, section headers and search
+       behaviour - reported as "why are they different, even spacing is
+       different". Everything the rail looks like is defined here, once,
+       and BOTH markups carry these classes with no inline styling of
+       their own, so the only thing that can differ between the two tabs
+       now is which filters they hold.
+       ================================================================== */
+    .report-filter-rail {
+      box-sizing: border-box;
+      width: 100%;
       min-width: 0;
+      padding: 16px;
+      background: #ffffff;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+      /* Pinned, and NEVER scrolling inside itself.
+
+         Explicit owner instruction: "i wanted it to stick even if we scroll
+         right side screens, but it should be all open always no scroll on
+         filters sections".
+
+         The previous attempt gave the rail max-height + overflow-y so its
+         bottom buttons stayed reachable. That produced a HORIZONTAL
+         scrollbar on the rail, which is what got reported. The cause is a
+         CSS rule that is easy to miss: you cannot scroll one axis only. Per
+         the overflow spec, when one axis is a scrolling value and the other
+         is `visible`, the `visible` one computes to `auto`. So `overflow-y:
+         auto` silently turned overflow-x into `auto` as well, and any child
+         a pixel over the content box - a select at width:100% inside 16px
+         padding, a long option label - raised a horizontal bar.
+
+         Dropping the internal scroll removes both bars at once and leaves
+         every filter permanently open, which is what was asked for.
+
+         The typeahead work done for the scrolling version is NOT wasted and
+         must stay: attachSearchableSelect() positions .select-suggestions
+         with position:fixed off the input's own rect, so the panel is
+         immune to clipping by any ancestor - including this one when it was
+         a scroll box, and including the page itself now.
+
+         Known trade-off, stated rather than hidden: a sticky box does not
+         move with the page, so if the rail is ever taller than the viewport,
+         the filters past the fold cannot be reached at that window size.
+         The 900px breakpoint below already returns the rail to normal flow
+         for narrow layouts, which is where that is most likely to bite.
+
+         The offset is the live header height (see --app-header-h) plus a
+         12px gap, never a guessed number: the header is sticky at top:0 and
+         gets taller when its actions wrap, and the rail has to clear
+         whatever it actually is. */
+      position: sticky;
+      top: calc(var(--app-header-h, 71px) + 12px);
+      /* align-self:start stops a grid/flex parent stretching the rail to the
+         row height, which would defeat sticky entirely. */
+      align-self: start;
+      max-height: none;
+      overflow: visible;
+      /* position:sticky makes this a stacking context, which re-parents
+         everything inside it - including the competitor popup (1050) and the
+         typeahead panels (1200) - to the rail's own level. Without a z-index
+         the rail would sit at 0 and the Leaflet map beside it (its container
+         carries z-index:1) would paint straight over both. 30 clears the map
+         and the chart tooltips (20) while staying far below the loading
+         overlay (9999); the modals are native <dialog>s in the top layer, so
+         they are unaffected either way. */
+      z-index: 30;
     }
-    .reporting-sidebar-pane .filter-category > div[style*="display: grid"] {
-      grid-column: 1 / -1;
+    .report-filter-rail-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--line);
     }
-    .reporting-sidebar-pane .brand-filter-category {
+    .report-filter-rail-head h2 {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 700;
+      color: #1e293b;
+    }
+    /* Single column. The rail is 290px, so a two-up grid leaves ~129px per
+       card - narrower than the typeahead panel that now hangs off half of
+       them, and too tight for a search box above a select. */
+    .report-filter-section {
+      display: grid;
       grid-template-columns: 1fr;
+      gap: 8px;
+      margin: 0;
+      padding: 10px 0 0;
+      border-top: 1px solid #f1f5f9;
     }
-    .reporting-sidebar-pane .brand-filter-category > :first-child,
-    .reporting-sidebar-pane .brand-filter-category > .report-filter-group {
-      grid-column: 1;
+    .report-filter-section:first-of-type {
+      padding-top: 0;
+      border-top: 0;
     }
-    .report-filter-category-title {
+    .report-filter-section-title {
       display: flex;
       align-items: center;
       gap: 6px;
@@ -429,12 +503,22 @@
       color: #475569;
       text-transform: uppercase;
       letter-spacing: 0.05em;
-      margin-bottom: 8px;
       white-space: nowrap;
     }
-    /* One definition for every sidebar filter label/control so the Brand,
-       Geographic and Demographic groups can't drift apart in size or weight
-       the way they did when each carried its own inline styling. */
+    .report-filter-group {
+      /* Positioning context for whatever this card hangs off itself (the
+         competitor popup lives in one of these). The typeahead panel no
+         longer needs it - .select-suggestions is viewport-anchored so that
+         the rail's own scroll box cannot clip it - but a card that is a
+         positioning context costs nothing and keeps any absolutely
+         positioned child of a filter card anchored to its own card. */
+      position: relative;
+      min-width: 0;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+    }
     .report-filter-label {
       display: block;
       font-size: 11px;
@@ -445,6 +529,7 @@
     .report-filter-control {
       width: 100%;
       box-sizing: border-box;
+      height: 33px;
       padding: 7px 10px;
       border: 1px solid var(--line);
       border-radius: 6px;
@@ -453,6 +538,61 @@
       font-family: inherit;
       color: var(--ink);
       background: var(--panel);
+    }
+    .report-filter-control:focus { outline: 2px solid #bfdbfe; outline-offset: 1px; }
+    /* attachSearchableSelect() (common.js) inserts its input immediately
+       before the select it searches, so this is the gap between the two. It
+       belongs here rather than in that component, which has no business
+       knowing this rail exists. */
+    .report-filter-group > input[type="search"].report-filter-control { margin-bottom: 6px; }
+    /* The competitor picker is a button plus a popup rather than a <select>,
+       so it takes the control's metrics explicitly instead of inheriting
+       them - that is the whole reason the two rails' control heights could
+       disagree before. */
+    .report-filter-multi { position: relative; width: 100%; min-width: 0; }
+    .report-filter-multi-btn {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 4px;
+      text-align: left;
+      cursor: pointer;
+      overflow: hidden;
+    }
+    .report-filter-multi-btn > span:first-child {
+      flex: 1 1 auto;
+      min-width: 0;
+      color: var(--ink);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .report-filter-multi-caret { flex: 0 0 auto; font-size: 10px; color: var(--muted); }
+    .report-filter-multi-menu .report-checks { max-height: 230px; }
+    .report-filter-multi-menu {
+      display: none;
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      right: 0;
+      z-index: 1050;
+      max-height: 250px;
+      overflow-y: auto;
+      padding: 8px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 10px 25px rgba(15, 23, 42, 0.18);
+    }
+    /* The actions block is just another section, so the switch and the two
+       buttons line up on the same grid as the filters above them. */
+    .report-filter-actions button {
+      width: 100%;
+      padding: 9px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: normal;
     }
     .reporting-main-pane > #reportContent > * {
       width: 100%;
@@ -500,10 +640,18 @@
       .reporting-main-pane {
         grid-column: 1;
       }
-      .reporting-sidebar-pane {
-        position: static !important;
-        width: auto !important;
-        max-height: none !important;
+      /* Stacked layout: the rail sits ABOVE the dashboard rather than beside
+         it, so there is nothing to stay pinned alongside - and a pinned box
+         in a one-column stack is just a scroll box wedged between the header
+         and the report. Back to normal flow, where the page scroll reaches
+         Apply / Reset like every other control. One rule, so the Data
+         Quality rail (which stacks at the same 900px breakpoint, see
+         .dq-layout in reporting-tabs.js) does exactly the same thing. */
+      .report-filter-rail {
+        position: static;
+        max-height: none;
+        overflow: visible;
+        z-index: auto;
       }
     }
     @media (max-width: 600px) {
@@ -582,44 +730,25 @@
     }
     .sample-load-link.hidden { display: none; }
     .report-hero p { margin: 0; color: var(--muted); max-width: 780px; }
+    .view-intro {
+      border-bottom: 1px solid var(--line);
+      padding: 24px 32px 18px;
+    }
+    .view-intro h1,
+    .view-intro h2 {
+      margin: 0 0 6px;
+      color: var(--ink);
+      font-size: 20px;
+      line-height: 1.15;
+      letter-spacing: 0;
+    }
+    .view-intro p {
+      margin: 0;
+      color: var(--muted);
+      max-width: 860px;
+      line-height: 1.42;
+    }
     .report-source { color: var(--muted); font-size: 12px; margin-top: 8px; overflow-wrap: anywhere; }
-    .report-filters {
-      display: grid;
-      gap: 12px;
-      margin: 18px 0;
-      align-items: start;
-      background: var(--accent-tint);
-      border: 1px solid var(--accent-tint-line);
-      border-radius: 10px;
-      padding: 16px;
-    }
-    .report-filter-group { border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 8px; }
-    .report-filter-group h2 { margin: 0 0 8px; font-size: 12px; color: var(--ink); }
-    .report-filter-row {
-      display: grid;
-      gap: 12px;
-      align-items: start;
-    }
-    .report-filter-row.primary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .report-filter-row.geo { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-    .report-filter-row.demographics { grid-template-columns: minmax(260px, 0.5fr); justify-content: center; }
-    .report-filter-group.demographics .demographic-inputs {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 8px;
-    }
-    .report-filter-actions {
-      display: flex;
-      justify-content: center;
-      gap: 8px;
-      padding-top: 8px;
-      border-top: 1px solid var(--accent-tint-line);
-    }
-    .report-filter-actions button {
-      min-width: 132px;
-      padding: 7px 10px;
-      font-size: 12px;
-    }
     .brand-map-marker {
       width: 16px;
       height: 16px;
@@ -678,8 +807,6 @@
     .report-checks { display: grid; gap: 6px; max-height: 150px; overflow: auto; }
     .report-checks label { display: flex; gap: 7px; align-items: center; color: var(--ink); font-weight: 650; }
     .report-checks input { width: auto; }
-    .report-geo-filters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .report-geo-filters input { width: 100%; }
     .report-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 16px 0 22px; }
     .report-metric { border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 14px; min-height: 88px; }
     .report-metric strong { display: block; font-size: 28px; line-height: 1.1; color: var(--navy, var(--ink)); }
@@ -1150,6 +1277,9 @@
     .brand-edit-heading { display: none; margin: 0 0 14px; font-size: 18px; }
     .brand-source-format-field { display: none; }
     .template-library { padding: 24px; }
+    .template-library .view-intro {
+      margin: -24px -24px 20px;
+    }
     .template-search { display: flex; gap: 8px; max-width: 900px; margin-bottom: 16px; }
     .template-search input { flex: 1; min-width: 180px; }
     .template-search select { flex: 0 1 220px; min-width: 140px; }
@@ -1302,6 +1432,29 @@
     .python-function-options { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; padding: 8px 10px; border: 1px solid var(--accent-tint-line); border-radius: 6px; background: var(--accent-tint); }
     .python-function-options label { display: inline-flex; align-items: center; gap: 6px; width: auto; margin: 0; font-weight: 700; }
     .python-function-options input { width: auto; }
+    .source-input-options {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 10px;
+      padding: 8px 10px;
+      border: 1px solid #bae6fd;
+      border-radius: 6px;
+      background: #ecfeff;
+    }
+    .source-input-options label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      width: auto;
+      margin: 0;
+      color: #075985;
+      font-weight: 700;
+    }
+    .source-input-options input { width: auto; accent-color: #0284c7; }
+    .source-input-mode-select {
+      display: none;
+    }
 
     .connector-output { min-height: 150px; margin-top: 8px; }
 
@@ -1491,6 +1644,80 @@
     .app-help-content h3 { margin: 20px 0 6px; color: var(--navy); font-size: 15px; }
     .app-help-content p, .app-help-content li { color: var(--muted); font-size: 14px; line-height: 1.55; }
     .app-help-content ul { margin: 6px 0 0; padding-left: 20px; }
+    /* Notice dialog: tone-carrying, not a bare paragraph under a rule. */
+    .app-notice .app-help-content { padding: 22px 22px 18px; }
+    .app-notice-body { display: flex; gap: 14px; align-items: flex-start; }
+    .app-notice-icon {
+      flex: 0 0 auto; width: 40px; height: 40px; border-radius: 50%;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 20px; font-weight: 800;
+      background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0;
+    }
+    .app-notice-text h2 { margin: 2px 0 6px; font-size: 18px; color: var(--navy); }
+    .app-notice-text p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
+    .app-notice-actions { display: flex; justify-content: flex-end; margin-top: 18px; }
+    .app-notice-actions button { min-width: 96px; }
+    /* Tones. Default is success; warn/error recolour only the icon so the
+       shell stays the one Birdeye dialog. */
+    .app-notice.tone-warn .app-notice-icon { background: #fff8e6; color: #8a5a00; border-color: #ffe58f; }
+    .app-notice.tone-error .app-notice-icon { background: #fef2f2; color: var(--error); border-color: #fecaca; }
+    .app-notice.tone-info .app-notice-icon { background: var(--navy-soft); color: var(--accent); border-color: #bfdbfe; }
+    /* Typeahead panel for the searchable selects. Viewport-anchored, NOT
+       anchored to the card it belongs to: the reporting filter rail is a
+       pinned box that scrolls inside itself (it has to be, or its Apply /
+       Reset buttons sit below the fold forever), and an overflow:auto
+       ancestor clips any absolutely positioned descendant at its edge. A
+       fixed box's containing block is the viewport instead, so the rail's
+       scroll box cannot touch it. attachSearchableSelect() in js/common.js
+       owns the coordinates - it sets left/top (or bottom, when it flips the
+       panel above a control that sits low in the rail), the width to match
+       the control, and a max-height clamped to the space actually available -
+       and it recomputes them on every scroll and resize while the panel is
+       open, since a fixed box does not travel with its anchor. */
+    .select-suggestions {
+      /* z-index above the competitor popup (1050) and above Leaflet's panes
+         (400-700) - at z-index 30 the map painted over the ZIP/City
+         suggestions. Inside the rail this is now relative to the rail's own
+         stacking context (see .report-filter-rail's z-index), which is what
+         clears the map for the whole rail at once. */
+      position: fixed; z-index: 1200;
+      /* No margin: the 2px gap from the control is part of the coordinates
+         common.js computes, and a margin here would push the panel back down
+         over the input whenever it flips above one. */
+      margin: 0;
+      /* Ceiling on the panel height - common.js lowers it further when the
+         control is close to the top or bottom edge of the screen. Scroll
+         rather than a capped item count, so a broad query still reaches every
+         match. */
+      max-height: 320px; overflow-y: auto; overscroll-behavior: contain;
+      min-width: 220px; max-width: 380px;
+      background: var(--panel); border: 1px solid var(--line);
+      border-radius: 8px; box-shadow: 0 10px 28px rgba(15, 23, 42, 0.18);
+    }
+    .select-suggestion {
+      padding: 7px 10px; font-size: 12px; color: var(--ink); cursor: pointer;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .select-suggestion:hover { background: var(--navy-soft); color: var(--accent); }
+    .select-suggestion-empty { padding: 8px 10px; font-size: 12px; color: var(--muted); }
+    /* The pinned "+ Create New Brand" row. It carries the same colours as the
+       native option.create-new-option it stands in for, and sticks to the top
+       so it stays reachable after scrolling a thousand brands. */
+    .select-suggestion.is-create {
+      position: sticky; top: 0; z-index: 1;
+      color: #0b5f55; font-weight: 800; background: #e7f6ef;
+      border-bottom: 1px solid #c9ead9;
+    }
+    .select-suggestion.is-create:hover { background: #d5efe2; color: #0b5f55; }
+    /* An empty review queue is a success state, not a blank screen. */
+    .review-empty-ok {
+      display: flex; flex-direction: column; align-items: center; gap: 8px;
+      padding: 44px 20px; text-align: center;
+      border: 1px solid #a7f3d0; border-radius: 12px; background: #ecfdf5;
+    }
+    .review-empty-ok-emoji { font-size: 44px; line-height: 1; }
+    .review-empty-ok strong { font-size: 24px; font-weight: 800; color: #047857; }
+    .review-empty-ok span { font-size: 14px; color: #059669; max-width: 460px; }
     /* Top States bars: the whole group highlights on hover, so the pointer
        does not have to find the thin filled rect itself. */
     .dq-state-bar { cursor: pointer; }
@@ -1499,7 +1726,27 @@
     /* Confirm/notice bodies are set with textContent (never innerHTML, so a
        brand name can't inject markup), which means line breaks only survive
        if the paragraph honours them. */
-    #appConfirmMessage, #appNoticeMessage { white-space: pre-line; }
+    #appConfirmMessage, #appNoticeMessage { white-space: pre-line; overflow-wrap: anywhere; }
+    /* Notice and confirm carry a sentence or two, not a document. The shared
+       760px shell left them mostly empty space with the text stretched across
+       it - the box and its contents were sized independently. These size to
+       the message instead, and the content is what sets the width. */
+    #appNoticeDialog, #appConfirmDialog, #saveCompletionDialog, #sampleLoadedDialog {
+      width: auto;
+      min-width: min(320px, calc(100vw - 32px));
+      max-width: min(460px, calc(100vw - 32px));
+    }
+    #appNoticeDialog .app-help-content,
+    #appConfirmDialog .app-help-content,
+    #saveCompletionDialog .app-help-content,
+    #sampleLoadedDialog .app-help-content { padding: 20px; }
+    #appNoticeDialog .app-help-header h2,
+    #appConfirmDialog .app-help-header h2,
+    #saveCompletionDialog .app-help-header h2,
+    #sampleLoadedDialog .app-help-header h2 { font-size: 18px; }
+    /* The unsaved-changes dialog holds three buttons in a row, so it needs a
+       little more room than a plain confirm but still nothing like 760px. */
+    #unsavedChangesDialog { width: auto; max-width: min(560px, calc(100vw - 32px)); }
     /* Every dialog in the app uses this one shell
        (.app-help-dialog > .app-help-content > .app-help-header > h2). These
        modifiers vary only size and tone, so nothing needs a bespoke frame:
@@ -1524,10 +1771,45 @@
     .parser-business-field { margin: 0 0 14px; }
     .parser-business-field label { display: block; margin-bottom: 8px; color: var(--muted); font-weight: 800; }
     .parser-business-field select { width: 100%; }
+    .wide-brand-selector {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 8px 12px;
+      align-items: end;
+    }
+    .wide-brand-selector > label,
+    .wide-brand-selector > button,
+    .wide-brand-selector > .pre-parse-brand-validation,
+    .wide-brand-selector > #newBrandFields,
+    .wide-brand-selector > #presetBrandPanel {
+      grid-column: 1 / -1;
+    }
+    .wide-brand-selector > label {
+      margin-bottom: 0;
+    }
+    .wide-brand-selector > input[type="search"] {
+      grid-column: 1;
+      margin: 0;
+    }
+    .wide-brand-selector > select {
+      grid-column: 2;
+      margin: 0;
+    }
+    @media (max-width: 900px) {
+      .wide-brand-selector {
+        grid-template-columns: 1fr;
+      }
+      .wide-brand-selector > input[type="search"],
+      .wide-brand-selector > select {
+        grid-column: 1;
+      }
+    }
     .pre-parse-parser-panel { min-height: 100%; }
     .pre-parse-parser-panel > .panel { margin-bottom: 0; }
     .pre-parse-parser-panel > #status { margin: 0 0 16px; background: var(--accent-tint); border-color: var(--accent-tint-line); color: var(--navy); }
+    #mapperView.preparse-booting > #status { visibility: hidden; }
     #mapperView.pre-parse-active aside > .panel:not(#sourceControlsPanel):not(.left-rail-persistent) { display: none; }
+    #mapperView.preparse-booting .left-rail-persistent { visibility: hidden; }
     #mapperView.pre-parse-active #sourceControlsPanel { display: none; }
     #mapperView.pre-parse-active #defaultBrandModelPanel { display: none; }
     #mapperView.pre-parse-active #templateComponentsPanel,
@@ -1866,6 +2148,13 @@
        toggling each element's own .hidden, which updateSourceVisibility()
        independently owns for format-specific show/hide. */
     #mapperView.template-edit-mode .source-parser-only { display: none !important; }
+    /* Reviewing a saved template: the brand is a fact of the template, not a
+       choice (setTemplateEditBrandLock disables the select), so a search box
+       over a list you cannot pick from is dead furniture. The input and its
+       panel are created at runtime by attachSearchableSelect(), which is why
+       this hides them by id rather than by class. */
+    #mapperView.template-edit-mode #brandSelectSearch,
+    #mapperView.template-edit-mode #brandSelectSuggestions { display: none !important; }
 
     /* Duplicate entry point into the same edit-brand form as the CSV-preset
        panel's "Edit Brand Details" button (both call fillBrandFields() /
@@ -2102,13 +2391,16 @@
     }
 
     header h1 { color: var(--ink); letter-spacing: 0; }
-    .top-tabs { gap: 4px; }
+    .top-tabs { gap: 5px; }
     .top-tab {
       background: transparent;
       color: var(--muted);
       border-color: transparent;
       border-radius: 5px;
-      padding: 9px 11px;
+      min-height: 44px;
+      padding: 10px 18px;
+      font-size: 15px;
+      font-weight: 800;
     }
     .top-tab:hover { color: var(--accent); background: var(--navy-soft); }
     .top-tab.active { background: var(--accent); color: #ffffff; }
@@ -2238,8 +2530,8 @@
     header .brand-logo-image { filter: none; }
     .app-footer .brand-logo-image { filter: brightness(0) invert(1); }
     header .brand-mark { color: var(--cyan); }
-    .app-title { display: flex; align-items: center; gap: 18px; }
-    .app-title h1 { white-space: normal; overflow-wrap: anywhere; }
+    .app-title { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+    .app-title h1 { margin: 0; white-space: normal; overflow-wrap: anywhere; line-height: 1.05; }
     .app-footer {
       display: flex;
       justify-content: space-between;
@@ -2276,17 +2568,6 @@
       .header-actions #clearDataBtn { color: #ffd7df; border-color: #b94b65; background: rgba(196, 59, 84, 0.16); }
       .header-actions #clearDataBtn:hover { color: #ffffff; border-color: #dc7187; background: rgba(196, 59, 84, 0.32); }
       .header-actions #logoutBtn { color: #dbe5ff; border-color: #52678f; }
-      .report-filter-row.primary,
-      .report-filter-row.geo,
-      .report-filter-row.demographics {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-      }
-      .report-filter-group.demographics .demographic-inputs {
-        grid-template-columns: 1fr;
-      }
-      .report-filter-actions {
-        flex-wrap: wrap;
-      }
       aside { border-right: 0; border-bottom: 1px solid var(--line); }
       .mapping-grid { grid-template-columns: 1fr; }
       .mapping-head { display: none; }
@@ -2295,16 +2576,6 @@
       .app-footer { align-items: flex-start; flex-direction: column; padding: 18px 16px; }
     }
 
-    @media (max-width: 560px) {
-      .report-filter-row.primary,
-      .report-filter-row.geo,
-      .report-filter-row.demographics {
-        grid-template-columns: 1fr;
-      }
-      .report-filter-actions button {
-        width: 100%;
-      }
-    }
   </style>
 </head>
 <body>
@@ -2374,7 +2645,11 @@
         </div>
       </div>
     </header>
-    <div id="mapperView" class="pre-parse-active">
+    <div id="mapperView" class="pre-parse-active preparse-booting">
+      <div class="view-intro">
+        <h1>Mappings</h1>
+        <p>Choose the brand and source, preview incoming fields, then map that structure into the location model before saving clean rows and routing exceptions to Review.</p>
+      </div>
       <div id="status" class="status">Choose a source and parse it to start mapping in left pane.<button class="status-close" aria-label="Dismiss message" style="display: none;">×</button></div>
       <div id="saveProgress" class="progress-wrap hidden" aria-live="polite" aria-busy="false">
       <div class="progress-label"><span id="progressMessage">Preparing your records</span><span id="progressValue">0%</span></div>
@@ -2401,8 +2676,10 @@
         <div id="brandSelectValidation" class="pre-parse-brand-validation hidden" role="alert" aria-live="polite"></div>
         <button id="editExistingBrandLink" class="text-link hidden" type="button">Edit brand details</button>
         <div id="parserBusinessField" class="parser-business-field hidden">
-          <label for="parserBusinessSelect">Business</label>
-          <select id="parserBusinessSelect" aria-label="Select business before parsing">
+          <!-- BB13: "Brand" on both sides of the 40/60 layout. The backend
+               calls it a business; the user never should have to know that. -->
+          <label for="parserBusinessSelect">Brand</label>
+          <select id="parserBusinessSelect" aria-label="Select brand before parsing">
             <option value="">Select an existing brand</option>
             <option class="create-new-option" value="__create_new__">+ Create New Brand</option>
           </select>
@@ -2455,8 +2732,12 @@
         </div>
 
         <div class="field-group file-field source-parser-only">
-        <label for="sourceInputMode">Source input</label>
-        <select id="sourceInputMode">
+        <label id="sourceInputModeLabel">Source input</label>
+        <div class="source-input-options" role="radiogroup" aria-labelledby="sourceInputModeLabel">
+          <label><input type="radio" name="sourceInputModeChoice" value="url" checked> Public URL</label>
+          <label><input type="radio" name="sourceInputModeChoice" value="file"> Upload file</label>
+        </div>
+        <select id="sourceInputMode" class="source-input-mode-select" aria-hidden="true" tabindex="-1">
           <option value="url" selected>Public URL</option>
           <option value="file">Upload file</option>
         </select>
@@ -2641,7 +2922,14 @@ result = [
         <div class="mapping-note">Validates each listing against reference data, then uses AI to resolve and enrich the entity - repairing state, city, ZIP and coordinates so records that failed validation can re-enter the valid set.</div>
         <div class="button-row">
           <button class="secondary" id="reportingDataRefreshBtn" type="button">Start Enriching</button>
-          <button class="secondary hidden" id="stopEnrichmentBtn" type="button">Stop Enriching</button>
+          <!-- A two-state toggle, not a stop. It no longer kills the run: it
+               drops the pace to a trickle that keeps draining the queue in the
+               background, and a second click puts it back to full speed. The
+               label here is only the starting state - renderEnrichmentToggle()
+               (js/reporting.js) rewrites it from the server's throttled flag on
+               every status poll, so a reload during an eased run still shows
+               the right action. -->
+          <button class="secondary hidden" id="stopEnrichmentBtn" type="button" data-enrichment-mode="full">Ease Off Enriching</button>
         </div>
         <div id="reportingDataRefreshStatus" class="action-feedback" role="status" aria-live="polite"></div>
       </div>
@@ -2694,6 +2982,11 @@ result = [
         <div class="panel-title-row">
           <h2>Template Components</h2>
           <span class="mandatory-note">* indicates mandatory fields required</span>
+          <!-- Shown only when there are parsed columns and nothing is mapped
+               to them - the one moment where the grid is useless and there is
+               no other way back to the suggestions. -->
+          <button id="autoMapFieldsBtn" class="secondary hidden" type="button"
+                  title="Match the parsed columns to fields automatically">Auto-map fields</button>
         </div>
         <div class="mapping-grid" id="mappingGrid"></div>
       </div>
@@ -2828,7 +3121,7 @@ result = [
         <div class="report-hero">
           <div>
             <h1>Reporting</h1>
-            <p>Where your brand stands versus competitors: coverage by location, market gaps worth targeting, and how clean the underlying data is.</p>
+            <p>Explore the gold reporting layer: market coverage, competitor overlap, whitespace ZIPs, trend movement, and the data quality signals behind every filtered view.</p>
           </div>
           <div class="report-hero-actions">
             <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
@@ -2843,54 +3136,53 @@ result = [
         <!-- 2-Column Dashboard Layout: Left Vertical Filter Pane + Right Main Content Pane -->
         <div class="reporting-dashboard-layout" style="display: flex; gap: 24px; align-items: flex-start; margin-top: 14px;">
           <!-- Left Vertical Filter Sidebar -->
-          <aside class="reporting-sidebar-pane" style="width: 290px; flex-shrink: 0; position: sticky; top: 16px; background: #ffffff; border: 1px solid var(--line); border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); max-height: calc(100vh - 40px); overflow-y: auto;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--line);">
-              <h2 style="font-size: 15px; font-weight: 700; color: #1e293b; margin: 0;">Report Filters</h2>
+          <!-- Filter rail. Same classes, same order, same spacing as the
+               Data Quality rail (built in reporting-tabs.js
+               buildQualityPanel) - the two are one component holding
+               different filters, so nothing in here carries styling of its
+               own. See "REPORT FILTER RAIL" in the stylesheet above. -->
+          <aside class="report-filter-rail">
+            <div class="report-filter-rail-head">
+              <h2>Report Filters</h2>
             </div>
 
-            <!-- Brand Filters Category -->
-            <div class="filter-category brand-filter-category" style="margin-bottom: 10px;">
-              <div class="report-filter-category-title">
-                🏷️ Brand Filters
-              </div>
-              <div class="report-filter-group" style="margin-bottom: 10px;">
+            <div class="report-filter-section">
+              <div class="report-filter-section-title">&#127991;&#65039; Brand Filters</div>
+              <div class="report-filter-group">
                 <label for="reportMainBrandSelect" class="report-filter-label">Primary Brand</label>
                 <select id="reportMainBrandSelect" class="report-filter-control">
                   <option value="">Select Primary Brand</option>
                 </select>
               </div>
-              <div class="report-filter-group" style="min-width: 0;">
-                <label class="report-filter-label">Competitor Brands (Multi)</label>
-                <div id="competitorDropdownContainer" style="position: relative; width: 100%; min-width: 0;">
-                  <button id="competitorDropdownBtn" type="button" style="width: 100%; min-width: 0; max-width: 100%; height: 35px; text-align: left; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); font-size: 11px; background: var(--panel); display: flex; justify-content: space-between; align-items: center; cursor: pointer; box-sizing: border-box; overflow: hidden;">
-                    <span id="competitorDropdownBtnText" style="color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; flex: 1 1 auto; min-width: 0; padding-right: 6px;">Select Competitor Brands</span>
-                    <span style="font-size: 10px; flex-shrink: 0; color: var(--muted); margin-left: 4px;">▼</span>
+              <div class="report-filter-group">
+                <label for="competitorDropdownBtn" class="report-filter-label">Competitor Brands (Multi)</label>
+                <div id="competitorDropdownContainer" class="report-filter-multi">
+                  <button id="competitorDropdownBtn" type="button" class="report-filter-control report-filter-multi-btn">
+                    <span id="competitorDropdownBtnText">Select Competitor Brands</span>
+                    <span class="report-filter-multi-caret" aria-hidden="true">&#9660;</span>
                   </button>
-                  <div id="competitorDropdownMenu" style="display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 1050; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 10px 25px rgba(15,23,42,0.18); max-height: 250px; overflow-y: auto; padding: 8px;">
-                    <div id="competitorBrandChecks" class="report-checks" style="max-height: 230px; overflow-y: auto;"></div>
+                  <div id="competitorDropdownMenu" class="report-filter-multi-menu">
+                    <div id="competitorBrandChecks" class="report-checks"></div>
                   </div>
                 </div>
               </div>
             </div>
 
-            <!-- Geographic Filters Category -->
-            <div class="filter-category" style="margin-bottom: 10px; padding-top: 8px; border-top: 1px solid #f1f5f9;">
-              <div class="report-filter-category-title">
-                📍 Geographic Filters
-              </div>
-              <div class="report-filter-group" style="margin-bottom: 8px;">
+            <div class="report-filter-section">
+              <div class="report-filter-section-title">&#128205; Geographic Filters</div>
+              <div class="report-filter-group">
                 <label for="reportStateFilter" class="report-filter-label">State</label>
                 <select id="reportStateFilter" class="report-filter-control">
                   <option value="">All States</option>
                 </select>
               </div>
-              <div class="report-filter-group" style="margin-bottom: 8px;">
+              <div class="report-filter-group">
                 <label for="reportCountyFilter" class="report-filter-label">County</label>
                 <select id="reportCountyFilter" class="report-filter-control">
                   <option value="">All Counties</option>
                 </select>
               </div>
-              <div class="report-filter-group" style="margin-bottom: 8px;">
+              <div class="report-filter-group">
                 <label for="reportCityFilter" class="report-filter-label">City</label>
                 <select id="reportCityFilter" class="report-filter-control">
                   <option value="">All Cities</option>
@@ -2898,36 +3190,39 @@ result = [
               </div>
               <div class="report-filter-group">
                 <label for="reportZipFilter" class="report-filter-label">ZIP Code</label>
-                <input id="reportZipFilter" list="zipSuggestions" class="report-filter-control" placeholder="Search 30k+ ZIPs...">
+                <!-- The one control here that is NOT a searchable select: ZIP
+                     matches are fetched from the server as you type
+                     (setupZipTypeahead), because 30k+ ZIPs are never all in
+                     the page to filter client-side. -->
+                <input id="reportZipFilter" list="zipSuggestions" class="report-filter-control" placeholder="Search ZIP">
                 <datalist id="zipSuggestions"></datalist>
               </div>
             </div>
 
-            <!-- Demographic Filters Category -->
-            <div class="filter-category" style="margin-bottom: 10px; padding-top: 8px; border-top: 1px solid #f1f5f9;">
-              <div class="report-filter-category-title">
-                👥 Demographic Filters
+            <div class="report-filter-section">
+              <div class="report-filter-section-title">&#128101; Demographic Filters</div>
+              <div class="report-filter-group">
+                <label for="reportMinPopFilter" class="report-filter-label">Min Population</label>
+                <input id="reportMinPopFilter" type="number" class="report-filter-control" placeholder="Min Population">
               </div>
-              <div style="display: grid; gap: 8px;">
-                <div>
-                  <label for="reportMinPopFilter" class="report-filter-label">Min Population</label>
-                  <input id="reportMinPopFilter" type="number" class="report-filter-control" placeholder="Min Population">
-                </div>
-                <div>
-                  <label for="reportMinIncomeFilter" class="report-filter-label">Min Income ($)</label>
-                  <input id="reportMinIncomeFilter" type="number" class="report-filter-control" placeholder="Min Income">
-                </div>
-                <div>
-                  <label for="reportMaxAgeFilter" class="report-filter-label">Max Median Age</label>
-                  <input id="reportMaxAgeFilter" type="number" class="report-filter-control" placeholder="Max Age">
-                </div>
+              <div class="report-filter-group">
+                <label for="reportMinIncomeFilter" class="report-filter-label">Min Income ($)</label>
+                <input id="reportMinIncomeFilter" type="number" class="report-filter-control" placeholder="Min Income">
+              </div>
+              <div class="report-filter-group">
+                <label for="reportMaxAgeFilter" class="report-filter-label">Max Median Age</label>
+                <input id="reportMaxAgeFilter" type="number" class="report-filter-control" placeholder="Max Age">
               </div>
             </div>
 
-            <!-- Actions: Apply All Filters & Reset All -->
-            <div style="display: grid; gap: 8px; padding-top: 8px; border-top: 1px solid #f1f5f9;">
-              <button id="applyReportFiltersBtn" type="button" style="width: 100%; padding: 9px; font-size: 12px; font-weight: 600; border-radius: 6px;">Apply All Filters</button>
-              <button id="resetReportFiltersBtn" type="button" class="secondary" style="width: 100%; padding: 8px; font-size: 12px; font-weight: 600; border-radius: 6px;">Reset All</button>
+            <!-- Auto-apply switch first, then Apply / Reset - the same order
+                 and the same host-div pattern as the Data Quality rail, so
+                 the control sits in the same place on both tabs. It is
+                 mounted by setupReportAutoApply() (js/reporting.js). -->
+            <div class="report-filter-section report-filter-actions">
+              <div id="reportAutoApplyHost"></div>
+              <button id="applyReportFiltersBtn" type="button">Apply All Filters</button>
+              <button id="resetReportFiltersBtn" type="button" class="secondary">Reset All</button>
             </div>
           </aside>
 
@@ -2935,7 +3230,7 @@ result = [
           <main class="reporting-main-pane" style="flex: 1; min-width: 0;">
             <div id="reportContent" class="hidden">
               <div class="dq-intro">
-                <div><h2>Location Intelligence &amp; Whitespace</h2><p>Where your brand and competitors actually are, how much market you cover, and which ZIPs are still open.</p></div>
+                <div><h2>Location Intelligence &amp; Whitespace</h2><p>Use validated location records to compare your footprint with competitors, inspect map coverage, find open ZIPs, and follow market movement over time.</p></div>
               </div>
               <div class="report-grid" style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px;">
                 <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportStates" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Total States</span><button type="button" class="report-metric-download" data-metric-label="Total States" title="Download the listings behind this number, with its metrics, as Excel">⬇ Excel</button></div>
@@ -2948,48 +3243,6 @@ result = [
                 <div class="report-metric" style="background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; text-align: center;"><strong id="reportWhitespaceGaps" style="display: block; font-size: 20px; font-weight: 700; color: var(--ink);">0</strong><span style="font-size: 11px; color: var(--muted);">Uncovered ZIPs</span><button type="button" class="report-metric-download" data-metric-label="Uncovered ZIPs" title="Download the listings behind this number, with its metrics, as Excel">⬇ Excel</button></div>
               </div>
 
-              <!-- Moved here from the Data Quality tab (RPT-05/06/07): these
-                   read /api/reporting/summary and /api/reporting/timeseries,
-                   not the slow quality payload, so they belong with Location
-                   Intelligence. -->
-
-        <div class="dq-section">
-          <div class="dq-trend-head">
-            <h3>Trends Over Time</h3>
-            <div class="dq-trend-controls">
-              <div class="dq-period-toggle" id="dqTrendPeriod" role="group" aria-label="Trend period">
-                <button type="button" data-period="1D">1D</button>
-                <button type="button" data-period="1W">1W</button>
-                <button type="button" data-period="1M" class="active">1M</button>
-                <button type="button" data-period="1Q">1Q</button>
-                <button type="button" data-period="1Y">1Y</button>
-              </div>
-            </div>
-          </div>
-          <div id="dqTrendChart" class="dq-history-chart"><div class="report-status">Loading trend data&hellip;</div></div>
-          <div id="dqTrendLegend" class="dq-trend-legend"></div>
-        </div>
-        <!-- Moved from the Data Quality tab: this is a count-over-time question,
-                   which belongs with Location Intelligence, and it now plots
-                   LISTINGS over time (not just invalid records) with the same
-                   period control as Trends and a competitor comparison line. -->
-              <div class="dq-section">
-                <h3>Historical Quality &amp; Change Tracking</h3>
-                <div class="dq-trend-controls">
-                  <div class="dq-period-toggle" role="group" aria-label="History period">
-                    <button type="button" data-history-period="1W">1W</button>
-                    <button type="button" data-history-period="1M">1M</button>
-                    <button type="button" data-history-period="1Q" class="active">1Q</button>
-                    <button type="button" data-history-period="1Y">1Y</button>
-                  </div>
-                </div>
-                <div class="dq-history-grid">
-                  <div id="dqHistoryChart" class="dq-history-chart"><div class="report-status">Loading history</div></div>
-                  <div id="dqPeriodComparisons"></div>
-                </div>
-              </div>
-              <div class="dq-section"><h3>Top States by Coverage</h3><div id="dqTopStatesBar" class="dq-bars"><div class="report-status">Loading coverage by state&hellip;</div></div></div>
-
               <!-- Location Map Section -->
               <section class="report-section" style="margin-top: 0;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; flex-wrap: wrap; gap: 8px;">
@@ -3000,11 +3253,73 @@ result = [
                     <span style="display: inline-block; width: 10px; height: 10px; background: #f59e0b; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Gap ZIPs
                   </div>
                 </div>
-                <p style="margin: 0 0 12px; font-size: 11px; color: var(--muted);">Each marker is one listing - the same "Total Listings" count above, not the ZIP-level "Covered Markets" count (several listings can share one ZIP).</p>
+                <!-- Rewritten by renderReportingMap() when the report comes back capped:
+                     the server returns at most 1000 map records, and a truncated map
+                     must say so rather than read as the whole footprint. -->
+                <p id="reportingMapNote" style="margin: 0 0 12px; font-size: 11px; color: var(--muted);">Each marker is one listing - the same "Total Listings" count above, not the ZIP-level "Covered Markets" count (several listings can share one ZIP).</p>
                 <div id="reportingMapContainer" style="border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #e5e7eb; position: relative;">
                   <div id="reportingMap" style="height: 480px; width: 100%; z-index: 1;"></div>
                 </div>
               </section>
+
+              <div class="dq-section"><h3>Top States by Coverage</h3><div id="dqTopStatesBar" class="dq-bars"><div class="report-status"><span class="spinner"></span> Loading coverage by state</div></div></div>
+
+              <!-- Moved here from the Data Quality tab (RPT-05/06/07): these
+                   read /api/reporting/summary and /api/reporting/timeseries,
+                   not the slow quality payload, so they belong with Location
+                   Intelligence after the map and coverage panels. -->
+              <div class="dq-section">
+                <div class="dq-trend-head">
+                  <h3>Trends Over Time</h3>
+                  <div class="dq-trend-controls">
+                    <!-- 1H first, and it is not decoration: every live listing was
+                         loaded inside a single calendar day, so anything that
+                         truncates to DAY collapses each of these periods to one
+                         point and the buttons appear to do nothing. 1H buckets by
+                         MINUTE and 1D by HOUR, which is where the shape of the
+                         loads actually is. The click handler in reporting-tabs.js
+                         reads data-period generically, so a button is all this
+                         needs. -->
+                    <div class="dq-period-toggle" id="dqTrendPeriod" role="group" aria-label="Trend period">
+                      <button type="button" data-period="1H" class="active">1H</button>
+                      <button type="button" data-period="1D">1D</button>
+                      <button type="button" data-period="1W">1W</button>
+                      <button type="button" data-period="1M">1M</button>
+                      <button type="button" data-period="1Q">1Q</button>
+                      <button type="button" data-period="1Y">1Y</button>
+                    </div>
+                  </div>
+                </div>
+                <div id="dqTrendChart" class="dq-history-chart"><div class="report-status"><span class="spinner"></span> Loading trend data</div></div>
+                <div id="dqTrendLegend" class="dq-trend-legend"></div>
+              </div>
+              <!-- Moved from the Data Quality tab: this is a count-over-time question,
+                   which belongs with Location Intelligence, and it now plots
+                   LISTINGS over time (not just invalid records) with the same
+                   period control as Trends and a competitor comparison line. -->
+              <div class="dq-section">
+                <div class="dq-trend-head">
+                  <h3>Historical Quality &amp; Change Tracking</h3>
+                  <div class="dq-trend-controls">
+                    <!-- Same endpoint, same granularities as Trends above.
+                         All period-toggle chart features default to 1H so a
+                         same-day dataset does not collapse into a single
+                         point on first paint. -->
+                    <div class="dq-period-toggle" role="group" aria-label="History period">
+                      <button type="button" data-history-period="1H" class="active">1H</button>
+                      <button type="button" data-history-period="1D">1D</button>
+                      <button type="button" data-history-period="1W">1W</button>
+                      <button type="button" data-history-period="1M">1M</button>
+                      <button type="button" data-history-period="1Q">1Q</button>
+                      <button type="button" data-history-period="1Y">1Y</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="dq-history-grid">
+                  <div id="dqHistoryChart" class="dq-history-chart"><div class="report-status">Loading history</div></div>
+                  <div id="dqPeriodComparisons"></div>
+                </div>
+              </div>
 
               <!-- Top States Section (Dynamic Heading: X's Top States) -->
               <section class="report-section" style="margin-top: 24px;">
@@ -3178,7 +3493,10 @@ result = [
       </div>
     </dialog>
     <section id="templateLibraryView" class="template-library hidden">
-      <h2>Template Library</h2>
+      <div class="view-intro">
+        <h2>Template Library</h2>
+        <p>Reuse saved source mappings by brand and format, inspect stored source fields, repair assignments, and keep future loads aligned to the same template structure.</p>
+      </div>
       <div class="template-search">
         <input id="templateSearch" placeholder="Search templates">
         <select id="templateBusinessFilter" aria-label="Filter by brand"><option value="">All brands</option></select>
@@ -3197,13 +3515,18 @@ result = [
   <!-- One themed notice/confirm pair so nothing has to fall back to the
        browser's own alert()/confirm() chrome, which ignored the app theme
        and could not be styled. Both follow the centred-OK convention. -->
-  <dialog id="appNoticeDialog" class="app-help-dialog" aria-labelledby="appNoticeTitle">
+  <dialog id="appNoticeDialog" class="app-help-dialog app-notice" aria-labelledby="appNoticeTitle">
     <div class="app-help-content">
-      <div class="app-help-header">
-        <h2 id="appNoticeTitle">Done</h2>
+      <!-- An outcome, not a form: the icon carries the tone and the heading
+           sits beside it, rather than a bare rule across an empty box. -->
+      <div class="app-notice-body">
+        <span class="app-notice-icon" id="appNoticeIcon" aria-hidden="true">&#10003;</span>
+        <div class="app-notice-text">
+          <h2 id="appNoticeTitle">Done</h2>
+          <p id="appNoticeMessage"></p>
+        </div>
       </div>
-      <p id="appNoticeMessage"></p>
-      <div style="display: flex; justify-content: center; margin-top: 16px;">
+      <div class="app-notice-actions">
         <button id="appNoticeOk" type="button">OK</button>
       </div>
     </div>
@@ -3264,10 +3587,10 @@ result = [
 
   <script src="js/common.js?v=preparse-layout-v2"></script>
   <script src="js/reporting.js"></script>
-  <script src="reporting-tabs.js?v=quality-layout-v2"></script>
+  <script src="reporting-tabs.js?v=quality-layout-v4"></script>
   <script src="js/review.js"></script>
   <script src="js/templates.js"></script>
-  <script src="js/mapper.js?v=preparse-layout-v5"></script>
+  <script src="js/mapper.js?v=preparse-layout-v6"></script>
   <script>
     el("parseBtn").addEventListener("click", parseSource);
     el("testReadinessBtn")?.addEventListener("click", testReadiness);
@@ -3282,7 +3605,10 @@ result = [
     el("addHeaderBtn").addEventListener("click", () => addPairRow("customHeaders", "x-client-id", "value"));
     el("authType").addEventListener("change", updateAuthVisibility);
     el("saveBtn").addEventListener("click", saveMapper);
-    el("resetMappingBtn").addEventListener("click", resetMapping);
+    // Clears the mapping and keeps the parsed columns, so "Auto-map fields"
+    // can re-suggest against them. resetMapping() (full teardown, including
+    // the parse) stays on the navigate-away / discard paths below.
+    el("resetMappingBtn").addEventListener("click", resetFieldMappingsOnly);
     el("restartMappingBtn").addEventListener("click", restartMapping);
     el("jobHistoryShowMoreBtn")?.addEventListener("click", openJobHistoryDialog);
     el("jobHistoryDialogCloseBtn")?.addEventListener("click", () => el("jobHistoryDialog")?.close());
@@ -3291,7 +3617,7 @@ result = [
     el("clearDataBtn").addEventListener("click", clearSavedData);
     el("masterDeleteBtn").addEventListener("click", masterDeleteData);
     el("reportingDataRefreshBtn").addEventListener("click", refreshReportingData);
-    el("stopEnrichmentBtn")?.addEventListener("click", stopEnrichment);
+    el("stopEnrichmentBtn")?.addEventListener("click", toggleEnrichmentEasing);
     el("logoutBtn").addEventListener("click", logout);
     document.querySelector(".status-close")?.addEventListener("click", () => {
           el("status").className = "status";
@@ -3338,6 +3664,12 @@ result = [
     el("unsavedChangesCancelBtn")?.addEventListener("click", () => el("unsavedChangesDialog")?.close());
     el("unsavedChangesContinueBtn")?.addEventListener("click", () => {
           el("unsavedChangesDialog")?.close();
+          // "Continue Without Saving" means DISCARD. It used to only navigate
+          // away, so the parsed source, its mappings and the selected brand
+          // all survived - come back to Mappings and the abandoned parse was
+          // still sitting there, and switching tabs carried it around. The
+          // user declined to save it; keeping it is the opposite of that.
+          if (typeof resetMapping === "function") resetMapping();
           if (pendingUnsavedNavTarget) switchView(pendingUnsavedNavTarget);
         });
     el("unsavedChangesSaveBtn")?.addEventListener("click", async () => {
@@ -3345,6 +3677,7 @@ result = [
           await saveMapper();
           if (pendingUnsavedNavTarget && typeof pendingUnsavedParse !== "undefined" && !pendingUnsavedParse) switchView(pendingUnsavedNavTarget);
         });
+    el("autoMapFieldsBtn")?.addEventListener("click", () => autoMapUnmappedFields());
     el("addOptionalFieldBtn").addEventListener("click", () => {
           const key = el("optionalFieldSelect").value;
           if (!key) return;
@@ -3411,11 +3744,6 @@ result = [
           el("createBrandBtn").classList.toggle("hidden", Boolean(selectedBrand));
           el("newBrandFields").classList.add("hidden");
           el("newBrandFields").classList.remove("is-open");
-          if (selectedBrand && el("preParseEditBrand") && el("mapperView")?.classList.contains("pre-parse-active")) {
-            el("preParseEditBrand").checked = true;
-            el("preParseCreateBrand").checked = false;
-            openBrandEditorForm("edit");
-          }
           if (selectedBrand) applyBusinessSourceType(selectedBrand);
           else {
             el("sourceType").disabled = false;
@@ -3452,6 +3780,10 @@ result = [
             setStatus("No existing brands are available to edit.", "warn");
             el("preParseCreateBrand").checked = true;
             openBrandEditorForm("create");
+            return;
+          }
+          if (selectedBrand?.business_id) {
+            openBrandEditorForm("edit");
             return;
           }
           el("newBrandFields")?.classList.add("hidden");
@@ -3652,9 +3984,17 @@ result = [
             }
           }
           sourceParsed = false;
+          if (typeof syncSourceInputModeRadios === "function") syncSourceInputModeRadios();
           updateSourceVisibility();
           loadExcelSheets();
           setStatus("Choose a source and parse it to start mapping in left pane.", "");
+        });
+    document.querySelectorAll("input[name='sourceInputModeChoice']").forEach((input) => {
+          input.addEventListener("change", () => {
+            if (!input.checked) return;
+            el("sourceInputMode").value = input.value;
+            el("sourceInputMode").dispatchEvent(new Event("change", { bubbles: true }));
+          });
         });
     document.querySelectorAll("input[name='csvFunction']").forEach((input) => {
           input.addEventListener("change", () => updateCsvFunctionSelection(input.value));
@@ -3736,6 +4076,11 @@ result = [
     el("applyReportFiltersBtn")?.addEventListener("click", () => {
           const menu = el("competitorDropdownMenu");
           if (menu) menu.style.display = "none";
+          // An explicit Apply subsumes whatever auto-apply had queued - a
+          // debounce still counting down, or competitor ticks held back
+          // while that dropdown was open. Without this they fire a second,
+          // identical report load moments after this one.
+          reportAutoApply?.cancel();
           reportLoaded = false;
           loadReporting({ interactive: true });
         });
@@ -3748,6 +4093,7 @@ result = [
           if (el("reportMinPopFilter")) el("reportMinPopFilter").value = "";
           if (el("reportMinIncomeFilter")) el("reportMinIncomeFilter").value = "";
           if (el("reportMaxAgeFilter")) el("reportMaxAgeFilter").value = "";
+          clearReportFilterSearch(el("resetReportFiltersBtn"));
           document.querySelectorAll("input[name='competitorBrand']").forEach((input) => { input.checked = false; });
           const selectAll = document.querySelector("input[name='competitorBrand_selectAll']");
           if (selectAll) { selectAll.checked = false; selectAll.indeterminate = false; }
@@ -3756,6 +4102,9 @@ result = [
           const menu = el("competitorDropdownMenu");
           if (menu) menu.style.display = "none";
           await loadGeoOptions();
+          // Same reason as Apply above: this clears every control and runs
+          // the report itself, so anything auto-apply had queued is stale.
+          reportAutoApply?.cancel();
           reportLoaded = false;
           loadReporting({ interactive: true });
         });
@@ -3763,24 +4112,31 @@ result = [
           if (el("reportCountyFilter")) el("reportCountyFilter").value = "";
           if (el("reportCityFilter")) el("reportCityFilter").value = "";
           if (el("reportZipFilter")) el("reportZipFilter").value = "";
+          // The dependent dropdowns are always refreshed - that keeps the
+          // controls coherent and is not the report query - while the reload
+          // itself goes through the auto-apply switch, so turning it off
+          // silences the geographic filters too rather than only some of the
+          // rail.
           await loadGeoOptions();
-          reportLoaded = false;
-          loadReporting();
+          reportAutoApply?.schedule();
         });
     el("reportCountyFilter")?.addEventListener("change", async () => {
           if (el("reportCityFilter")) el("reportCityFilter").value = "";
           if (el("reportZipFilter")) el("reportZipFilter").value = "";
           await loadGeoOptions();
-          reportLoaded = false;
-          loadReporting();
+          reportAutoApply?.schedule();
         });
     ["reportCityFilter", "reportZipFilter"].forEach((id) => {
           el(id)?.addEventListener("change", () => {
-            reportLoaded = false;
-            loadReporting();
+            reportAutoApply?.schedule();
           });
           el(id)?.addEventListener("keydown", (event) => {
             if (event.key === "Enter") {
+              // Enter in these boxes is an explicit submit, the same gesture
+              // as clicking Apply All Filters, so it still runs with the
+              // auto-apply switch off - and cancels the debounce for the
+              // same reason that button does.
+              reportAutoApply?.cancel();
               reportLoaded = false;
               loadReporting();
             }
@@ -3818,10 +4174,22 @@ result = [
       }
       switchView(activeTab, true);
       setupZipTypeahead();
-      setupGeoFilterSearch();
+      refreshReportFilterSearch();
       setupBrandDropdownListeners();
+      // After setupBrandDropdownListeners(), which owns the competitor
+      // dropdown's open/closed state that auto-apply defers on.
+      setupReportAutoApply();
       refreshSampleDatasetStatus();
       loadGeoOptions();
+      // The enrichment control lives on the mapping view's left rail, but the
+      // only thing that used to start its status poll was loadReporting() -
+      // so an eased run reloaded onto any other view left the user with no
+      // visible way back to full speed. Started here instead, on boot,
+      // regardless of which view opens: the first poll is what establishes
+      // whether enrichment is currently eased and therefore what the toggle
+      // must offer. It settles to a 30s tick when there is nothing to watch,
+      // and stops itself once a run it was watching ends.
+      if (typeof startEnrichmentStatusPolling === "function") startEnrichmentStatusPolling();
       if (typeof loadJobHistory === "function") loadJobHistory();
       // Paint the Review Error Listings tab badge immediately from the
       // last-known SQLite count (no live BigQuery wait), regardless of which

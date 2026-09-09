@@ -103,7 +103,7 @@
 
     button.disabled = true;
     const oldText = button.textContent;
-    button.textContent = "Signing in…";
+    button.textContent = "Signing in";
     const status = document.getElementById("loginStatus");
     if (status) status.className = "status hidden";
 

@@ -120,15 +120,48 @@ class ReportingTimeseriesQueryColumnTests(_FakeBigQueryModuleMixin):
         self.assertIn("AND qf.fix_type = 'AI' AND qf.processed AND qf.improved", ai_query)
         self.assertIn("AND qf.fix_type = 'MANUAL' AND qf.processed AND qf.improved", manual_query)
 
-    def test_day_is_the_finest_granularity_even_for_the_1d_period(self) -> None:
-        # Explicit ask: "granularity till day level only" - 1D used to
-        # bucket by HOUR.
+    def test_hour_is_the_granularity_for_1d_and_minute_is_the_floor(self) -> None:
+        # Product change (supersedes the earlier "granularity till day level
+        # only" ask): hourly buckets are explicitly wanted. Every live listing
+        # lands in one calendar day, so DAY truncation collapsed 1D/1W/1M/1Q/1Y
+        # to a single identical bucket and the period buttons could not differ.
+        # 1H now buckets by MINUTE and 1D by HOUR; MINUTE stays the floor -
+        # nothing finer (SECOND) is ever emitted.
+        expected = {
+            "1H": "MINUTE",
+            "1D": "HOUR",
+            "1W": "DAY",
+            "1M": "DAY",
+            "1Q": "WEEK",
+            "1Y": "MONTH",
+        }
+        allowed = {"MINUTE", "HOUR", "DAY", "WEEK", "MONTH"}
+        for period, granularity in expected.items():
+            with self.subTest(period=period):
+                with patch.object(workflow_server, "get_cached_query", return_value=None):
+                    with patch.object(workflow_server, "set_cached_query"):
+                        with patch.object(workflow_server, "_warehouse_settings", return_value=("project", "gold", None)):
+                            with patch.object(workflow_server, "_bigquery_client", return_value=_FakeClient()):
+                                result = workflow_server.reporting_timeseries({"period": [period]})
+                self.assertEqual(result["granularity"], granularity)
+                self.assertIn(result["granularity"], allowed)
+
+    def test_the_sql_truncates_on_the_periods_own_granularity(self) -> None:
+        # The granularity in the response must be the one actually sent to
+        # BigQuery - a response-only label would silently keep DAY buckets.
+        client = _QueryRecordingClient()
         with patch.object(workflow_server, "get_cached_query", return_value=None):
             with patch.object(workflow_server, "set_cached_query"):
                 with patch.object(workflow_server, "_warehouse_settings", return_value=("project", "gold", None)):
-                    with patch.object(workflow_server, "_bigquery_client", return_value=_FakeClient()):
-                        result = workflow_server.reporting_timeseries({"period": ["1D"]})
-        self.assertEqual(result["granularity"], "DAY")
+                    with patch.object(workflow_server, "_bigquery_client", return_value=client):
+                        workflow_server.reporting_timeseries({"period": ["1D"]})
+        self.assertEqual(len(client.queries), 4)
+        self.assertIn("TIMESTAMP_TRUNC(l.last_observed_at, HOUR)", client.queries[0])
+        self.assertIn("TIMESTAMP_TRUNC(e.observed_at, HOUR)", client.queries[1])
+        for query in client.queries[2:]:
+            self.assertIn("TIMESTAMP_TRUNC(qf.created_at, HOUR)", query)
+        for query in client.queries:
+            self.assertNotIn(", DAY)", query)
 
 
 class ReportingTimeseriesSeriesShapeTests(_FakeBigQueryModuleMixin):
@@ -179,7 +212,9 @@ class ReportingTimeseriesCacheTests(_FakeBigQueryModuleMixin):
         self.assertEqual(result["series"][0]["label"], "Locations")
         set_cached.assert_called_once()
         cached_key, cached_payload = set_cached.call_args[0]
-        self.assertTrue(cached_key.startswith("reporting_timeseries:v2:1M:"))
+        # v3: the key was bumped when hourly granularity landed - a stale v2 key
+        # would keep serving DAY-bucketed payloads to every period.
+        self.assertTrue(cached_key.startswith("reporting_timeseries:v3:1M:"))
         self.assertEqual(cached_payload["series"], result["series"])
 
     def test_refresh_param_bypasses_cache_even_on_a_hit(self) -> None:

@@ -4,6 +4,59 @@
   const fmt = (v) => num(v).toLocaleString();
   const pct = (v) => `${num(v).toFixed(1)}%`;
   const formatIssue = (value) => String(value || '').replace(/[_-]+/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+  // Full state names, not the raw 2-letter code stored on the row -
+  // stateCodeToName is already defined globally in reporting.js. Module level
+  // because the State filter and the impacted-states table both label states,
+  // and the Location rail's State dropdown reads "California", not "CA".
+  const stateLabel = (code) => (typeof stateCodeToName === 'object' && stateCodeToName[String(code).toUpperCase()]) || code || 'Unknown';
+
+  // This rail's long selects are searched by the SAME component as the
+  // Location rail's and the brand pickers': attachSearchableSelect from
+  // common.js. With 1,002 brands in the warehouse a bare <select> is
+  // unusable, and a second local implementation is how the two tabs ended
+  // up searching differently in the first place.
+  const QUALITY_SEARCHABLE_FILTERS = ['dqBrandFilter', 'dqStateFilter', 'dqCountyFilter', 'dqCityFilter', 'dqReasonFilter'];
+  // MUST run immediately after loadQuality() rewrites those selects. The
+  // component re-reads and caches the option list on every call, so a
+  // rebuild without a re-attach leaves the search filtering options the
+  // control no longer holds - the BB9/BB10 staleness, where a newly created
+  // brand was invisible to the search because the cache predated it.
+  const refreshQualityFilterSearch = () => {
+    if (typeof attachSearchableSelect !== 'function') return;
+    QUALITY_SEARCHABLE_FILTERS.forEach((id) => attachSearchableSelect(id, { threshold: 15, minChars: 1 }));
+  };
+
+  // This rail's Geographic Filters ARE the Location rail's: the same four
+  // cascading controls, loaded by the same loadGeoOptions(), searched by the
+  // same component, and typed into by the same setupZipTypeahead() - both in
+  // js/reporting.js. This object is the whole of the difference between the
+  // two rails: it names which ids that shared code should read and write
+  // here. Nothing about the cascade is reimplemented below, deliberately -
+  // the two tabs' geographic filters diverged precisely because they were
+  // written twice.
+  //
+  // ownsStateOptions is false because loadQuality() fills State from the
+  // quality response's own list of states that actually have issues ("All
+  // impacted states"); the shared cascade reads that select to scope
+  // counties, but must not overwrite it with the full 50-state reference
+  // list. County/City/ZIP have no impacted-only equivalent to preserve, so
+  // they come straight from the shared reference data, exactly as on tab 1.
+  const QUALITY_GEO_RAIL = {
+    state: 'dqStateFilter',
+    county: 'dqCountyFilter',
+    city: 'dqCityFilter',
+    zip: 'dqZipFilter',
+    zipList: 'dqZipSuggestions',
+    ownsStateOptions: false,
+    onOptionsRebuilt: () => refreshQualityFilterSearch(),
+  };
+  // Guarded because reporting-tabs.js is loaded independently of
+  // js/reporting.js; every other cross-file call in this file is guarded the
+  // same way.
+  const loadQualityGeoOptions = () => (typeof loadGeoOptions === 'function' ? loadGeoOptions(QUALITY_GEO_RAIL) : Promise.resolve());
+  // The four keys this rail now owns on /api/reporting/quality. Listed once
+  // because two places need them: the query builder (below) and Reset All.
+  const QUALITY_GEO_PARAM_KEYS = ['state', 'county', 'city', 'zip'];
 
   // ---- d3 charting -------------------------------------------------------
   // Vendored d3 (ui/vendor/d3). Every chart here is built with it; the
@@ -12,7 +65,21 @@
   const hasD3 = () => typeof window.d3 !== 'undefined';
 
   // One tooltip element per chart container, positioned against the cursor.
+  const TREND_POINT_RADIUS = 7;
+  const TREND_POINT_HOVER_RADIUS = 10;
+
   function chartTooltip(container) {
+    // The tooltip is position:absolute, so its top/left resolve against the
+    // nearest POSITIONED ancestor. These chart containers had none, so an
+    // absolute offset meant for the chart was applied against the page and
+    // the tooltip flew to the top of the screen, over the nav - user-reported
+    // and clearly visible with a single data point. Guaranteed here rather
+    // than in each container's CSS so a new chart cannot reintroduce it.
+    try {
+      if (window.getComputedStyle(container).position === 'static') {
+        container.style.position = 'relative';
+      }
+    } catch (_) { container.style.position = 'relative'; }
     let tip = container.querySelector('.dq-chart-tooltip');
     if (!tip) {
       tip = document.createElement('div');
@@ -116,20 +183,22 @@
         .attr('class', 'dq-chart-point')
         .attr('cx', (p) => x(p.date))
         .attr('cy', (p) => y(p.value))
-        .attr('r', 4)
+        // 4px was hard to see and harder to hit - on a single-point series it
+        // read as a speck. The white ring keeps it legible over the line.
+        .attr('r', TREND_POINT_RADIUS)
         .attr('fill', color)
         .attr('stroke', '#fff')
-        .attr('stroke-width', 1.5)
+        .attr('stroke-width', 2)
         .style('cursor', 'pointer')
         .on('mouseenter', function (event, p) {
-          d3.select(this).attr('r', 6);
+          d3.select(this).attr('r', TREND_POINT_HOVER_RADIUS);
           tip.show(`<strong>${escapeHtml(s.label)}</strong><br>${escapeHtml(d3.timeFormat('%b %d, %Y')(p.date))}<br>${fmt(p.value)}`, event);
         })
         .on('mousemove', (event, p) => {
           tip.show(`<strong>${escapeHtml(s.label)}</strong><br>${escapeHtml(d3.timeFormat('%b %d, %Y')(p.date))}<br>${fmt(p.value)}`, event);
         })
         .on('mouseleave', function () {
-          d3.select(this).attr('r', 4);
+          d3.select(this).attr('r', TREND_POINT_RADIUS);
           tip.hide();
         });
     });
@@ -201,31 +270,18 @@
       .dq-improvements-list{display:grid;grid-template-columns:1fr;gap:10px}
       .dq-improvement{background:#fff;border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;padding:14px 16px}
       .dq-improvement strong{display:block;font-size:15px;color:var(--navy,var(--ink));margin-bottom:4px}.dq-improvement span{font-size:13px;color:var(--muted)}
-      /* Matches the Location Intelligence sidebar exactly (UIX-07): same
-         single-column stack, card padding, label/control type scale and
-         heading treatment, so the two tabs' filter rails can't look like
-         two different designs. Values mirror .reporting-sidebar-pane /
-         .report-filter-group / .report-filter-label / .report-filter-control
-         and .report-filter-category-title in integrations.html. */
-      .dq-filters{display:grid;grid-template-columns:1fr;gap:12px;align-items:start;margin:0 0 18px;padding:16px;background:var(--accent-tint);border:1px solid var(--accent-tint-line);border-radius:10px}
-      .dq-filters::before{content:'Report Filters';padding-bottom:8px;margin-bottom:2px;border-bottom:1px solid var(--line);color:#1e293b;font-size:15px;font-weight:700}
-      .dq-filter-field{display:grid;gap:4px;min-width:0;padding:8px;border:1px solid var(--line);border-radius:8px;background:#ffffff}
-      .dq-filter-field label{display:block;font-size:11px;font-weight:600;color:var(--ink);margin-bottom:0}
-      .dq-filters select,.dq-filters input{width:100%;box-sizing:border-box;padding:7px 10px;border:1px solid var(--line);border-radius:6px;font-size:11px;font-weight:600;font-family:inherit;color:var(--ink);background:var(--panel,#fff)}
-      .dq-filters select:focus,.dq-filters input:focus{outline:2px solid #bfdbfe;outline-offset:1px}
-      .dq-filters button{width:100%;box-sizing:border-box;padding:9px;border:1px solid var(--line);border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;background:#fff;color:var(--ink)}
-      .dq-filters #applyQualityFiltersBtn{background:var(--accent);color:#fff}.dq-filters #resetQualityFiltersBtn{background:#fff;color:var(--ink)}.dq-filters #autoApplyFiltersBtn[data-auto='on']{background:#fff;color:var(--ink)}.dq-filters #autoApplyFiltersBtn[data-auto='off']{background:#fff7ed;border-color:#f59e0b;color:#b45309}
+      /* No filter-rail styling here on purpose. This panel's sidebar is the
+         SAME component as the Location Intelligence one - .report-filter-rail
+         and friends, defined once under "REPORT FILTER RAIL" in
+         integrations.html. Every previous attempt to keep a parallel set of
+         .dq-filters rules "matching" it ended with the two tabs looking
+         different again. */
       .dq-loading-panel{min-height:360px;display:flex;align-items:center;justify-content:center}
       .dq-loading-panel.hidden,.dq-body.hidden{display:none!important}
       .dq-loading-box{display:flex;align-items:center;gap:12px;padding:16px 20px;background:#fff;border:1px solid var(--line);border-radius:8px;color:var(--ink);font-weight:750;box-shadow:0 8px 24px rgba(15,23,42,.08)}
-      .dq-layout{display:grid;grid-template-columns:290px minmax(0,1fr);gap:24px;align-items:start;width:100%;max-width:none}.dq-sidebar{position:sticky;top:16px;min-width:0}.dq-main{display:block;min-width:0;width:100%;max-width:none}.dq-main .dq-table{width:100%;table-layout:auto}.dq-sidebar .dq-filters{display:grid;grid-template-columns:1fr;gap:12px;margin:0;padding:16px}.dq-sidebar .dq-filters::before{grid-column:1}.dq-sidebar .dq-filter-field{padding:8px}.dq-sidebar .dq-filters button{grid-column:1}.dq-sidebar .dq-filters #applyQualityFiltersBtn,.dq-sidebar .dq-filters #resetQualityFiltersBtn{width:100%}
-      .dq-history-grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(260px,1fr);gap:14px}.dq-history-chart{min-height:190px;padding:8px;border:1px solid var(--line);border-radius:8px;background:#fbfdff}.dq-history-chart svg{width:100%;height:175px;display:block}.dq-period-row{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);font-size:12px}.dq-period-row strong{color:var(--navy,var(--ink))}
-      /* Trends Over Time is its own, bigger chart (explicit request) -
-         #dqTrendChart shares .dq-history-chart's box styling but overrides
-         the height, since that shared class's svg rule is also used by the
-         smaller Historical Quality chart next to it. */
-      #dqTrendChart{min-height:360px}#dqTrendChart svg{height:340px}
-      @media(max-width:900px){.dq-layout{grid-template-columns:1fr}.dq-sidebar{position:static}.dq-sidebar .dq-filters{grid-template-columns:repeat(2,minmax(0,1fr))}.dq-sidebar .dq-filters::before{grid-column:1/-1}.dq-sidebar .dq-filters button{grid-column:auto}}@media(max-width:520px){.dq-filters{grid-template-columns:1fr}.dq-filters::before{grid-column:1}.dq-sidebar .dq-filters{grid-template-columns:1fr}.dq-sidebar .dq-filters::before{grid-column:1}}
+      .dq-layout{display:grid;grid-template-columns:290px minmax(0,1fr);gap:24px;align-items:start;width:100%;max-width:none}.dq-main{display:block;min-width:0;width:100%;max-width:none}.dq-main .dq-table{width:100%;table-layout:auto}
+      .dq-history-grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(260px,1fr);gap:14px}.dq-history-chart{min-height:360px;padding:8px;border:1px solid var(--line);border-radius:8px;background:#fbfdff}.dq-history-chart svg{width:100%;height:340px;display:block}.dq-period-row{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);font-size:12px}.dq-period-row strong{color:var(--navy,var(--ink))}
+      @media(max-width:900px){.dq-layout{grid-template-columns:1fr}}
       @media(max-width:1000px){.dq-grid{grid-template-columns:repeat(2,minmax(160px,1fr))}.dq-improvements{grid-template-columns:1fr}}
       .dq-trend-head{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin:0 0 10px}
       .dq-trend-controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
@@ -432,7 +488,7 @@
     const isLocationTab = button.classList.contains('report-metric-download');
     downloadMetricEntities(label, isLocationTab
       ? { brand: 'reportMainBrandSelect', state: 'reportStateFilter' }
-      : { brand: 'dqBrandFilter', state: 'dqStateFilter', reason: 'dqReasonFilter', status: 'dqStatusFilter', start_date: 'dqStartDate', end_date: 'dqEndDate' }, button);
+      : { brand: 'dqBrandFilter', state: 'dqStateFilter', county: 'dqCountyFilter', city: 'dqCityFilter', zip: 'dqZipFilter', reason: 'dqReasonFilter', status: 'dqStatusFilter', start_date: 'dqStartDate', end_date: 'dqEndDate' }, button);
   });
 
   function buildQualityPanel() {
@@ -441,8 +497,50 @@
     panel.id = 'reportQualityPanel';
     panel.className = 'reporting-tab-panel hidden';
     panel.innerHTML = `
-      <div class="dq-layout"><aside class="dq-sidebar"><div class="dq-filters"><div class="dq-filter-field"><label for="dqBrandFilter">Primary Brand</label><select id="dqBrandFilter"><option value="">All impacted brands</option></select></div><div class="dq-filter-field"><label for="dqStateFilter">State</label><select id="dqStateFilter"><option value="">All impacted states</option></select></div><div class="dq-filter-field"><label for="dqReasonFilter">Issue Type</label><select id="dqReasonFilter"><option value="">All issue types</option></select></div><div class="dq-filter-field"><label for="dqStatusFilter">Review Status</label><select id="dqStatusFilter"><option value="all">All statuses</option><option value="needs_review">Needs review</option><option value="ai_fixed">AI fixed</option></select></div><div class="dq-filter-field"><label for="dqStartDate">From Date</label><input id="dqStartDate" type="date"></div><div class="dq-filter-field"><label for="dqEndDate">To Date</label><input id="dqEndDate" type="date"></div><div class="dq-filter-field"><label for="dqStaleDays">Stale after (days)</label><select id="dqStaleDays"><option value="1">1 day</option><option value="7">7 days</option><option value="30">30 days</option><option value="90" selected>90 days</option><option value="180">180 days</option><option value="365">365 days</option></select></div><button id="applyQualityFiltersBtn" type="button">Apply All Filters</button><button id="autoApplyFiltersBtn" class="secondary" type="button" data-auto="on">Stop auto apply</button><button id="resetQualityFiltersBtn" class="secondary" type="button">Reset All</button></div></aside><main class="dq-main"><div class="dq-intro">
-        <div><h2>Data Quality &amp; Improvements</h2><p>Focus on invalid listings, unresolved issues, and measurable improvement from automatic and manual fixes.</p></div>
+      <div class="dq-layout">
+      <!-- The filter rail: identical structure, classes and spacing to the
+           Location Intelligence one in integrations.html (search it for
+           "report-filter-rail"). Section titles, cards and the auto-apply
+           switch above Apply/Reset all come from there; only the filters
+           themselves differ. -->
+      <aside class="report-filter-rail">
+        <div class="report-filter-rail-head"><h2>Report Filters</h2></div>
+        <div class="report-filter-section">
+          <div class="report-filter-section-title">&#127991;&#65039; Brand Filters</div>
+          <div class="report-filter-group"><label for="dqBrandFilter" class="report-filter-label">Primary Brand</label><select id="dqBrandFilter" class="report-filter-control"><option value="">All impacted brands</option></select></div>
+        </div>
+        <div class="report-filter-section">
+          <div class="report-filter-section-title">&#128205; Geographic Filters</div>
+          <div class="report-filter-group"><label for="dqStateFilter" class="report-filter-label">State</label><select id="dqStateFilter" class="report-filter-control"><option value="">All impacted states</option></select></div>
+          <div class="report-filter-group"><label for="dqCountyFilter" class="report-filter-label">County</label><select id="dqCountyFilter" class="report-filter-control"><option value="">All Counties</option></select></div>
+          <div class="report-filter-group"><label for="dqCityFilter" class="report-filter-label">City</label><select id="dqCityFilter" class="report-filter-control"><option value="">All Cities</option></select></div>
+          <!-- The one control here that is NOT a searchable select, same as
+               the Location rail: ZIP matches are fetched from the server as
+               you type (setupZipTypeahead, given QUALITY_GEO_RAIL), because
+               30k+ ZIPs are never all in the page. -->
+          <div class="report-filter-group"><label for="dqZipFilter" class="report-filter-label">ZIP Code</label><input id="dqZipFilter" list="dqZipSuggestions" class="report-filter-control" placeholder="Search ZIP"><datalist id="dqZipSuggestions"></datalist></div>
+        </div>
+        <div class="report-filter-section">
+          <div class="report-filter-section-title">&#128269; Issue Filters</div>
+          <div class="report-filter-group"><label for="dqReasonFilter" class="report-filter-label">Issue Type</label><select id="dqReasonFilter" class="report-filter-control"><option value="">All issue types</option></select></div>
+          <div class="report-filter-group"><label for="dqStatusFilter" class="report-filter-label">Review Status</label><select id="dqStatusFilter" class="report-filter-control"><option value="all">All statuses</option><option value="needs_review">Needs review</option><option value="ai_fixed">AI fixed</option></select></div>
+        </div>
+        <div class="report-filter-section">
+          <div class="report-filter-section-title">&#128197; Date Range</div>
+          <div class="report-filter-group"><label for="dqStartDate" class="report-filter-label">From Date</label><input id="dqStartDate" type="date" class="report-filter-control"></div>
+          <div class="report-filter-group"><label for="dqEndDate" class="report-filter-label">To Date</label><input id="dqEndDate" type="date" class="report-filter-control"></div>
+        </div>
+        <div class="report-filter-section">
+          <div class="report-filter-section-title">&#9881;&#65039; Settings</div>
+          <div class="report-filter-group"><label for="dqStaleDays" class="report-filter-label">Stale after (days)</label><select id="dqStaleDays" class="report-filter-control"><option value="1">1 day</option><option value="7">7 days</option><option value="30">30 days</option><option value="90" selected>90 days</option><option value="180">180 days</option><option value="365">365 days</option></select></div>
+        </div>
+        <div class="report-filter-section report-filter-actions">
+          <div id="dqAutoApplyHost"></div>
+          <button id="applyQualityFiltersBtn" type="button">Apply All Filters</button>
+          <button id="resetQualityFiltersBtn" class="secondary" type="button">Reset All</button>
+        </div>
+      </aside><main class="dq-main"><div class="dq-intro">
+        <div><h2>Data Quality &amp; Improvements</h2><p>Review rejected listings and quality mirrors to see issue patterns, fix progress, freshness risk, and where automatic or manual repair is improving the dataset.</p></div>
       </div><div id="dqStatus" class="report-status hidden"></div><div id="dqLoadingPanel" class="dq-loading-panel hidden"><div class="dq-loading-box"><span class="spinner"></span><span>Loading quality metrics</span></div></div>
       <div id="dqBody" class="dq-body hidden">
         <div id="dqMetricGrid" class="dq-grid">${[['0','Invalid listings'],['0','Needs manual review'],['0','Listings fixed automatically'],['0','Listings fixed manually'],['0.00%','Unresolved rate'],['0.00%','ZIP completeness'],['0.00%','Coordinate completeness'],['0.00%','Duplicate rate'],['0','Stale records'],['0','Entity-resolution attempts'],['0.00%','Entity-resolution success'],['0','Active issue types']].map(([value,label]) => metricCard(value,label)).join('')}</div>
@@ -575,7 +673,10 @@
   // timeseries endpoint Trends uses, keeps errors as the quality line, and
   // overlays a competitor series when competitors are selected - so it
   // answers "is our footprint growing, and is quality keeping up".
-  let historyPeriod = '1Q';
+  // Default all period-toggle chart features to 1H. Same-day datasets collapse
+  // to one point under longer buckets, which makes first paint look empty even
+  // when useful minute-level/hourly shape exists.
+  let historyPeriod = '1H';
 
   async function loadQualityHistory() {
     const chart = $('dqHistoryChart');
@@ -586,7 +687,13 @@
       ? window.selectedCompetitorBrands() : [];
     const fetchSeries = async (brands) => {
       const params = new URLSearchParams({ period: historyPeriod });
-      (brands || []).filter(Boolean).forEach((b) => params.append('brand', b));
+      // ONE `brands` parameter, comma-separated. This used to append a
+      // repeated `brand` parameter, which /api/reporting/timeseries never
+      // reads - it takes params.get("brands")[0] and splits it on commas - so
+      // every brand filter on this chart was silently discarded and the
+      // "competitors" line was really a second copy of the all-brands line.
+      const brandList = (brands || []).filter(Boolean);
+      if (brandList.length) params.set('brands', brandList.join(','));
       const response = await fetch(`/api/reporting/timeseries?${params}`);
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || 'Unable to load history.');
@@ -611,7 +718,7 @@
         });
       }
       renderTimeSeriesChart(chart, series, {
-        height: 260,
+        height: 340,
         ariaLabel: 'Listings and errors over time',
         emptyMessage: 'No history for this period yet.',
       });
@@ -736,11 +843,22 @@
     });
   }
 
-  let trendState = { period: '1M' };
+  let trendState = { period: '1H' };
+
+  // Set once a real chart has been drawn, never reset - the same rule the
+  // location report uses (reportHasRenderedOnce). Without it every call tore
+  // the chart down and put "Loading trend data" back up, including the ones
+  // answered from the SQLite cache in milliseconds, so the chart appeared to
+  // reload constantly when in fact nothing was being re-queried.
+  let trendHasRenderedOnce = false;
 
   async function loadTrendChart() {
     const chart = $('dqTrendChart');
-    if (chart) chart.innerHTML = '<div class="report-status">Loading trend data&hellip;</div>';
+    // Only blank the panel when there is nothing to keep. A refresh leaves
+    // the current chart on screen and swaps it when the new data lands.
+    if (chart && !trendHasRenderedOnce) {
+      chart.innerHTML = '<div class="report-status"><span class="spinner"></span> Loading trend data</div>';
+    }
     try {
       let qs = '';
       try { if (typeof window.reportingQueryString === 'function') qs = window.reportingQueryString(); } catch (_) {}
@@ -750,8 +868,13 @@
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Unable to load trend data.');
       renderTrendChart(Array.isArray(data.series) ? data.series : []);
+      trendHasRenderedOnce = true;
     } catch (err) {
-      if (chart) chart.innerHTML = `<div class="report-status">${escapeHtml(typeof productSafeError === 'function' ? productSafeError(err.message, 'Trend data is temporarily unavailable.') : 'Trend data is temporarily unavailable.')}</div>`;
+      // Only replace a drawn chart with an error if there is no chart to
+      // keep - a transient failure must not wipe good data off the screen.
+      if (chart && !trendHasRenderedOnce) {
+        chart.innerHTML = `<div class="report-status">${escapeHtml(typeof productSafeError === 'function' ? productSafeError(err.message, 'Trend data is temporarily unavailable.') : 'Trend data is temporarily unavailable.')}</div>`;
+      }
     }
   }
 
@@ -810,7 +933,19 @@
       } catch (_) {}
       const qualityParams = new URLSearchParams(qs);
       if (forceRefresh) qualityParams.set('refresh', '1');
-      [['brand', 'dqBrandFilter'], ['state', 'dqStateFilter'], ['reason', 'dqReasonFilter'], ['status', 'dqStatusFilter'], ['start_date', 'dqStartDate'], ['end_date', 'dqEndDate']].forEach(([key, id]) => { const node = $(id); if (node?.value) qualityParams.set(key, node.value); });
+      // County/City/ZIP travel with State now that this rail has all four.
+      // The blank case matters as much as the set one: qs above is seeded
+      // from the LOCATION rail's query string (for brand scope), which also
+      // carries its state/county/city/zip - so a control left empty here has
+      // to delete the inherited key rather than leave tab 1's geography
+      // quietly filtering tab 2's numbers while tab 2's own boxes read "All".
+      // A rail that does not describe what is filtered is the bug this whole
+      // change exists to remove.
+      [['brand', 'dqBrandFilter'], ['state', 'dqStateFilter'], ['county', 'dqCountyFilter'], ['city', 'dqCityFilter'], ['zip', 'dqZipFilter'], ['reason', 'dqReasonFilter'], ['status', 'dqStatusFilter'], ['start_date', 'dqStartDate'], ['end_date', 'dqEndDate']].forEach(([key, id]) => {
+        const node = $(id);
+        if (node?.value) qualityParams.set(key, node.value);
+        else if (QUALITY_GEO_PARAM_KEYS.includes(key)) qualityParams.delete(key);
+      });
       const res = await fetch(`/api/reporting/quality${qualityParams.toString() ? `?${qualityParams}` : ''}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Unable to load quality metrics.');
@@ -860,11 +995,19 @@
       const reasons = Array.isArray(data.reasons) ? data.reasons : [];
       const states = Array.isArray(data.states) ? data.states : [];
       const cities = Array.isArray(data.cities) ? data.cities : [];
-      [['dqBrandFilter', data.filters?.brands || [], 'All impacted brands'], ['dqStateFilter', data.filters?.states || [], 'All impacted states'], ['dqReasonFilter', data.filters?.reasons || [], 'All issue types']].forEach(([id, values, label]) => {
+      // Per-filter option labels. States read as full names, because that is
+      // what the Location rail's State dropdown shows and what its search box
+      // matches on - a rail that says "CA" next to one that says "California"
+      // is the same mismatch in smaller print. The option VALUE is still the
+      // raw code, so what gets sent to /api/reporting/quality is unchanged.
+      [['dqBrandFilter', data.filters?.brands || [], 'All impacted brands', formatIssue],
+       ['dqStateFilter', data.filters?.states || [], 'All impacted states', stateLabel],
+       ['dqReasonFilter', data.filters?.reasons || [], 'All issue types', formatIssue]].forEach(([id, values, label, optionLabel]) => {
         const node = $(id); if (!node) return; const previous = node.value;
-        node.innerHTML = `<option value="">${label}</option>${values.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(formatIssue(value))}</option>`).join('')}`;
+        node.innerHTML = `<option value="">${label}</option>${values.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(optionLabel(value))}</option>`).join('')}`;
         if (values.includes(previous)) node.value = previous;
       });
+      refreshQualityFilterSearch();
 
       // Same INV-15 reasoning as the Quality Signals table below: the
       // coverage-derived cards are zeroed defaults when the coverage query
@@ -935,9 +1078,6 @@
 
       const brandRows = Array.isArray(data.brands) ? data.brands : [];
       $('dqBrandTable').innerHTML = `<table class="dq-table"><thead><tr><th>Brand</th><th>Invalid</th><th>Needs review</th><th>AI fixed</th></tr></thead><tbody>${brandRows.length ? brandRows.map((brand) => `<tr><td>${escapeHtml(formatBrandName(brand.brand))}</td><td>${fmt(brand.invalid)}</td><td>${fmt(brand.needs_review)}</td><td>${fmt(brand.ai_enriched)}</td></tr>`).join('') : '<tr><td colspan="4">No invalid brand records are available for this filter.</td></tr>'}</tbody></table>`;
-      // Full state names, not the raw 2-letter code stored on the row -
-      // stateCodeToName is already defined globally in reporting.js.
-      const stateLabel = (code) => (typeof stateCodeToName === 'object' && stateCodeToName[String(code).toUpperCase()]) || code || 'Unknown';
       // Was a hard .slice(0, 10) on both tables: rows 11+ were simply hidden
       // with no pager and no indication they existed. Paginated instead, so
       // every impacted state/city is reachable.
@@ -1043,36 +1183,73 @@
       $('dqTrendPeriod').querySelectorAll('[data-period]').forEach((b) => b.classList.toggle('active', b === btn));
       loadTrendChart();
     });
-    $('applyQualityFiltersBtn')?.addEventListener('click', () => loadQuality());
-    // Filters apply themselves as they change; the button stays for an
-    // explicit re-run. Auto-apply can be stopped (the same button turns into
-    // "Restart auto apply") for anyone setting several filters at once who
-    // does not want a query fired after every keystroke.
-    let autoApplyFilters = true;
-    let autoApplyTimer = null;
-    const QUALITY_FILTER_IDS = ['dqBrandFilter', 'dqStateFilter', 'dqReasonFilter', 'dqStatusFilter', 'dqStartDate', 'dqEndDate'];
-    const scheduleAutoApply = () => {
-      if (!autoApplyFilters) return;
-      // Debounced: changing three filters in a row is one query, not three.
-      window.clearTimeout(autoApplyTimer);
-      autoApplyTimer = window.setTimeout(() => loadQuality(), 400);
-    };
-    QUALITY_FILTER_IDS.forEach((id) => {
-      $(id)?.addEventListener('change', scheduleAutoApply);
+    // Everything Reset All clears. The geographic four are listed here but
+    // deliberately NOT watched by the auto-apply switch below: they carry
+    // their own change handlers, because changing State has to refresh the
+    // dependent dropdowns whether auto-apply is on or off, and those handlers
+    // hand only the reload back via schedule(). That is exactly how the
+    // Location rail splits the same work between integrations.html and
+    // setupReportAutoApply().
+    const QUALITY_GEO_FILTER_IDS = [QUALITY_GEO_RAIL.state, QUALITY_GEO_RAIL.county, QUALITY_GEO_RAIL.city, QUALITY_GEO_RAIL.zip];
+    const QUALITY_FILTER_IDS = ['dqBrandFilter', ...QUALITY_GEO_FILTER_IDS, 'dqReasonFilter', 'dqStatusFilter', 'dqStartDate', 'dqEndDate'];
+    // Filters apply themselves as they change; the button below stays for an
+    // explicit re-run, and the switch beside it stops that for anyone setting
+    // several filters at once who does not want a query fired after every
+    // keystroke. The switch, its 400ms debounce and the "turning it back on
+    // applies whatever moved while it was off" rule all come from
+    // attachAutoApplyToggle() in js/reporting.js, shared with the Location
+    // Intelligence rail so the two tabs cannot end up behaving differently.
+    const qualityAutoApply = typeof attachAutoApplyToggle === 'function' ? attachAutoApplyToggle('dqAutoApplyHost', {
+      id: 'dqAutoApplyToggle',
+      title: 'Reload this tab automatically whenever a filter changes. Turn it off to set several filters first, then use Apply All Filters.',
+      watchIds: QUALITY_FILTER_IDS.filter((id) => !QUALITY_GEO_FILTER_IDS.includes(id)),
+      onApply: () => loadQuality()
+    }) : null;
+    // An explicit Apply subsumes a debounce still counting down, so cancel it
+    // rather than let it fire the same query again a moment later.
+    $('applyQualityFiltersBtn')?.addEventListener('click', () => {
+      qualityAutoApply?.cancel();
+      loadQuality();
     });
-    $('autoApplyFiltersBtn')?.addEventListener('click', () => {
-      const button = $('autoApplyFiltersBtn');
-      autoApplyFilters = !autoApplyFilters;
-      button.dataset.auto = autoApplyFilters ? 'on' : 'off';
-      button.textContent = autoApplyFilters ? 'Stop auto apply' : 'Restart auto apply';
-      if (autoApplyFilters) {
-        // Restarting applies whatever was changed while it was off, so the
-        // view can never sit out of step with the controls.
-        scheduleAutoApply();
-      } else {
-        window.clearTimeout(autoApplyTimer);
-      }
+
+    // Geographic filters: State -> County -> City -> ZIP, cascading, all
+    // searchable - identical to tab 1 because it IS tab 1's code, pointed at
+    // this rail's ids through QUALITY_GEO_RAIL. What is written here is only
+    // the wiring: which control clears which dependents before the shared
+    // loader refetches. Clearing them is tab 1's rule too - a county left
+    // over from the previously selected state is not a filter anyone asked
+    // for, and it would silently keep filtering the numbers.
+    if (typeof setupZipTypeahead === 'function') setupZipTypeahead(QUALITY_GEO_RAIL);
+    const clearQualityFilters = (ids) => ids.forEach((id) => { const node = $(id); if (node) node.value = ''; });
+    $(QUALITY_GEO_RAIL.state)?.addEventListener('change', async () => {
+      clearQualityFilters([QUALITY_GEO_RAIL.county, QUALITY_GEO_RAIL.city, QUALITY_GEO_RAIL.zip]);
+      // The dependent dropdowns always refresh - that keeps the controls
+      // coherent and is not the query - while the reload itself goes through
+      // the auto-apply switch, so turning it off silences the geographic
+      // filters too rather than only part of the rail.
+      await loadQualityGeoOptions();
+      qualityAutoApply?.schedule();
     });
+    $(QUALITY_GEO_RAIL.county)?.addEventListener('change', async () => {
+      clearQualityFilters([QUALITY_GEO_RAIL.city, QUALITY_GEO_RAIL.zip]);
+      await loadQualityGeoOptions();
+      qualityAutoApply?.schedule();
+    });
+    [QUALITY_GEO_RAIL.city, QUALITY_GEO_RAIL.zip].forEach((id) => {
+      $(id)?.addEventListener('change', () => qualityAutoApply?.schedule());
+      $(id)?.addEventListener('keydown', (event) => {
+        // Enter in these boxes is an explicit submit, the same gesture as
+        // clicking Apply All Filters, so it still runs with the auto-apply
+        // switch off - and cancels the debounce for the same reason that
+        // button does.
+        if (event.key !== 'Enter') return;
+        qualityAutoApply?.cancel();
+        loadQuality();
+      });
+    });
+    // Populate County/City up front so the rail is usable the moment the tab
+    // is opened, instead of staying empty until the first State change.
+    loadQualityGeoOptions();
     // Stale-after-days is a persisted setting, not a per-view filter: load
     // the saved value, and save + recompute whenever it's changed.
     (async () => {
@@ -1092,11 +1269,20 @@
       } catch (_) {}
       loadQuality(true);
     });
-    $('resetQualityFiltersBtn')?.addEventListener('click', () => {
-      ['dqBrandFilter', 'dqStateFilter', 'dqReasonFilter', 'dqStatusFilter', 'dqStartDate', 'dqEndDate'].forEach((id) => {
+    $('resetQualityFiltersBtn')?.addEventListener('click', async () => {
+      QUALITY_FILTER_IDS.forEach((id) => {
         const node = $(id);
         if (node) node.value = id === 'dqStatusFilter' ? 'all' : '';
       });
+      if (typeof clearReportFilterSearch === 'function') clearReportFilterSearch($('resetQualityFiltersBtn'));
+      // County/City were narrowed to the cleared State, so put the full lists
+      // back before the query runs - otherwise "Reset All" leaves a rail
+      // still showing one state's counties. Tab 1's Reset All awaits the same
+      // call for the same reason.
+      await loadQualityGeoOptions();
+      // Same reason as Apply: this clears every filter and runs the query
+      // itself, so anything the switch had queued is stale.
+      qualityAutoApply?.cancel();
       loadQuality();
     });
     let initialTab = 'location';
