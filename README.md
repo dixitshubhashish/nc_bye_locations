@@ -30,10 +30,20 @@ SQLite is WAL-backed and persistent at `.cache/whitespace_cache.db`. It mirrors 
 Use [docs/smoke_test_and_presentation.md](docs/smoke_test_and_presentation.md) for the smoke matrix, fresh-upload checklist, five-minute presentation flow, and current assessment gaps.
 
 ## Data Model Rules
-Only `brand` is mandatory to accept a record, at every layer — field config, mapper validation, row acceptance, and the BigQuery schema itself. A record's brand is fixed by its `event_id -> business_id` relation once created; it cannot be changed by re-submitting a different brand string. Global (non-US) postal codes are preserved and upper-cased rather than digit-stripped; reverse-geocoding a coordinate to a reference city is capped at 50km so a "nearest match" is never a false positive from far away.
+Only `brand` is mandatory to accept a record, at every layer — field config, mapper validation, row acceptance, and the BigQuery schema itself. A record's brand is fixed by its `event_id -> business_id` relation once created; it cannot be changed by re-submitting a different brand string. Global (non-US) postal codes are preserved and upper-cased rather than digit-stripped.
+
+Coordinates are repaired before they are judged: a longitude outside ±180 is folded back into range (a wrapped `-245.22` is really `114.78`, a real meridian), while an impossible latitude is flagged rather than silently folded to another hemisphere. Reverse-geocoding is capped at 50km when it *snaps automatically* and 100km when it *suggests a city for a person to confirm* — a silent repair earns less benefit of the doubt than one a human approves.
+
+Source columns no typed field covers are preserved per row in `listings.custom_fields` and carried through silver, gold and the SQLite mirror, because every parse presents a different column list and a fixed schema can never anticipate them all. Values that cannot be what their column means (a phone reading `N/A`, a revenue reading `excellent`) are cleared and left for enrichment rather than stored as junk — geo fields are exempt, since `clean_zip`, `normalize_state_code` and the cached city↔ZIP lookups are smarter than a generic rule.
+
+Every listing that was ever invalid stays counted. Fixing a record soft-deletes its error row, so the review totals are computed over both live and soft-deleted rows via `was_ever_invalid` / `resolution_status`, and split into five mutually exclusive states (AI fixed, fixed from an AI suggestion, fixed manually, AI suggestion pending, manual pending) that must sum to the total.
 
 ## Current Gaps
-Cold-start source-type bootstrap still needs a fast local fallback when the warehouse is slow or unavailable. Authenticated browser-level smoke tests, run-over-run snapshots, external source coverage benchmarking, true metro definitions, cross-source identity matching, and final multi-sheet Excel export verification remain open. A hierarchy-resolution picker for conflicting city/state/country vs. lat/lon values, a save-job history panel, deferred single-row re-validation, and duplicate-detection messaging on save are scoped but not yet built — see `codex.md` for the current detailed backlog.
+Cold-start source-type bootstrap still needs a fast local fallback when the warehouse is slow or unavailable. Authenticated browser-level smoke tests, run-over-run snapshots, external source coverage benchmarking, true metro definitions and cross-source identity matching remain open, as does deferred single-row re-validation (`user_reviewed` status). Test coverage sits at roughly half the codebase, concentrated in the HTTP layer.
+
+Shipped since this section was last written, and no longer gaps: the hierarchy-resolution picker for conflicting ZIP vs. coordinate readings, the save-job history panel with pagination, duplicate-detection messaging on save, multi-sheet exports (now ZIP bundles carrying a workbook, normalized CSVs, a per-brand competitor sheet and a README naming the filters that produced them), and server-side session enforcement — login previously validated credentials but issued nothing, leaving every `/api/*` route open to an unauthenticated caller.
+
+See `docs/bug_tracker.md` for live fixed-vs-open status and `codex.md` for the detailed batch history.
 
 ## Start
 ```bash

@@ -17,6 +17,7 @@ QueryJobConfig. See _fake_bigquery_modules() below.
 
 from __future__ import annotations
 
+import inspect
 import sys
 import types
 import unittest
@@ -550,3 +551,695 @@ class EmptyArrayParameterTests(unittest.TestCase):
         stripped = source.replace("COALESCE(ARRAY_LENGTH(@brands), 0) = 0", "")
         stripped = stripped.replace("COALESCE(ARRAY_LENGTH(@states), 0) = 0", "")
         self.assertEqual(re.findall(r"ARRAY_LENGTH\(@\w+\) = 0", stripped), [])
+
+
+class SchemaEnsureMemoTests(unittest.TestCase):
+    """Table schemas only change when the process deploys new code, but the
+    _ensure_*_table() passes re-ran on EVERY save - each a BigQuery get_table
+    round trip. Measured live: a round trip floors at ~1.75s, so two ensure
+    passes added ~3.6s to every single-record edit before any real work.
+    """
+
+    def setUp(self) -> None:
+        ws._forget_ensured_tables()
+
+    def tearDown(self) -> None:
+        ws._forget_ensured_tables()
+
+    def test_an_ensure_pass_runs_once_per_process_not_once_per_save(self) -> None:
+        calls = []
+        def fake_ensure(client, project_id, dataset_id):
+            calls.append((project_id, dataset_id))
+        for _ in range(5):
+            ws._ensure_once("listings", fake_ensure, object(), "p", "d")
+        self.assertEqual(len(calls), 1, "ensure pass must not repeat per save")
+
+    def test_each_table_and_dataset_is_memoized_separately(self) -> None:
+        calls = []
+        fake = lambda c, p, d: calls.append((p, d))
+        ws._ensure_once("listings", fake, object(), "p", "d")
+        ws._ensure_once("error_listings", fake, object(), "p", "d")   # different table
+        ws._ensure_once("listings", fake, object(), "p", "other")     # different dataset
+        ws._ensure_once("listings", fake, object(), "p", "d")         # repeat -> skipped
+        self.assertEqual(len(calls), 3)
+
+    def test_a_failed_ensure_is_retried_rather_than_marked_done(self) -> None:
+        # Caching a failure would leave a table permanently un-reconciled.
+        attempts = []
+        def failing(client, project_id, dataset_id):
+            attempts.append(1)
+            raise RuntimeError("transient")
+        for _ in range(2):
+            with self.assertRaises(RuntimeError):
+                ws._ensure_once("listings", failing, object(), "p", "d")
+        self.assertEqual(len(attempts), 2)
+
+    def test_clearing_data_forgets_the_memo(self) -> None:
+        # A master delete drops the tables, so the next write must reconcile
+        # them again rather than trusting a stale "already ensured" mark.
+        import inspect
+        ws._ensure_once("listings", lambda c, p, d: None, object(), "p", "d")
+        ws._forget_ensured_tables()
+        calls = []
+        ws._ensure_once("listings", lambda c, p, d: calls.append(1), object(), "p", "d")
+        self.assertEqual(len(calls), 1)
+        self.assertIn("_forget_ensured_tables()", inspect.getsource(ws.master_delete_data))
+
+
+class IdleBrandEnrichmentTests(unittest.TestCase):
+    """Enrichment that fills blank brand contact fields from open sources.
+
+    Strictly best-effort background work on a 512MB box: it waits for real
+    idle time, takes a handful of brands, and sleeps between each one. It
+    must never be the reason the app feels heavy.
+    """
+
+    def test_loop_waits_for_genuine_idle_before_each_pass(self) -> None:
+        import inspect
+
+        source = inspect.getsource(ws._start_brand_enrichment_background)
+        assert "idle_seconds = wall_clock_time() - LAST_FOREGROUND_ACTIVITY_AT" in source
+        assert "if idle_seconds < BRAND_ENRICH_IDLE_SECONDS:" in source
+        # A full minute of quiet, not the 10s the auto-repair loop uses -
+        # this work is lower priority than review repair.
+        self.assertGreaterEqual(ws.BRAND_ENRICH_IDLE_SECONDS, 60.0)
+        # Backs off hard when there is nothing to do rather than spinning.
+        # "attempted" now sums the brand and store passes, which share this
+        # thread - a quiet brand pass must not force a 5-minute sleep while
+        # store-level enrichment still has work.
+        assert 'attempted = result["attempted"] + locations.get("attempted", 0)' in source
+        assert "sleep(300.0 if not attempted else 60.0)" in source
+        assert "_idle_location_enrichment_pass()" in source
+
+    def test_a_pass_is_small_and_paced(self) -> None:
+        import inspect
+
+        self.assertLessEqual(ws.BRAND_ENRICH_BATCH, 5)
+        self.assertGreaterEqual(ws.BRAND_ENRICH_PAUSE_SECONDS, 10.0)
+        source = inspect.getsource(ws._idle_brand_enrichment_pass)
+        assert "_enrichment_checkpoint()" in source  # honours the stop signal
+        assert "sleep(BRAND_ENRICH_PAUSE_SECONDS)" in source
+
+    def test_a_brand_is_attempted_once_per_process(self) -> None:
+        # Without this, a brand the open sources genuinely cannot resolve
+        # would be retried on every single cycle forever.
+        import inspect
+
+        source = inspect.getsource(ws._idle_brand_enrichment_pass)
+        assert "_BRAND_ENRICH_ATTEMPTED.add(business_id)" in source
+        assert "if str(r[\"business_id\"]) not in ws._BRAND_ENRICH_ATTEMPTED" in source.replace("ws.", "") \
+            or "not in _BRAND_ENRICH_ATTEMPTED" in source
+
+    def test_only_blank_fields_are_written(self) -> None:
+        # A value a person entered outranks anything a public source guessed.
+        import inspect
+
+        source = inspect.getsource(ws._idle_brand_enrichment_pass)
+        # Candidates are selected on the blank condition, AND the UPDATE
+        # re-checks it - so a value written between the two cannot be
+        # clobbered by a stale enrichment result.
+        self.assertEqual(source.count("(website_url IS NULL OR website_url = '')"), 2)
+        # Nothing is written when the sources could not establish a value.
+        assert "if not website:" in source and "continue" in source
+
+    def test_the_loop_is_started_with_the_server(self) -> None:
+        import inspect
+
+        assert "_start_brand_enrichment_background()" in inspect.getsource(ws.serve)
+
+
+class CacheObservabilityTests(unittest.TestCase):
+    """Only slow calls were recorded, which hid the death-by-a-thousand-cuts
+    case: a call that is individually fast but runs thousands of times costs
+    more than one slow call."""
+
+    def test_every_action_is_counted_not_only_slow_ones(self) -> None:
+        from whitespace_tool import sqlite_cache
+
+        sqlite_cache.init_sqlite_cache()
+        before = {row["action"]: row["calls"] for row in sqlite_cache.get_cache_action_stats(200)}
+        for _ in range(3):
+            sqlite_cache.get_auto_repair_stats()
+        after = {row["action"]: row["calls"] for row in sqlite_cache.get_cache_action_stats(200)}
+        self.assertGreaterEqual(after.get("get_auto_repair_stats", 0),
+                                before.get("get_auto_repair_stats", 0) + 3)
+
+    def test_stats_are_ranked_by_total_time_and_carry_an_average(self) -> None:
+        from whitespace_tool import sqlite_cache
+
+        sqlite_cache.init_sqlite_cache()
+        sqlite_cache.get_auto_repair_stats()
+        rows = sqlite_cache.get_cache_action_stats(50)
+        self.assertTrue(rows)
+        totals = [row["total_ms"] for row in rows]
+        self.assertEqual(totals, sorted(totals, reverse=True))
+        for row in rows:
+            self.assertIn("avg_ms", row)
+            self.assertIn("calls", row)
+
+    def test_counters_are_in_memory_not_a_row_per_cache_read(self) -> None:
+        # Persisting a row per cache read would cost more than the reads.
+        import inspect
+        from whitespace_tool import sqlite_cache
+
+        source = inspect.getsource(sqlite_cache._tally_cache_action)
+        assert "_CACHE_ACTION_TALLY" in source
+        assert "conn.execute" not in source
+        # Slow calls are still persisted, as before.
+        wrapper = inspect.getsource(sqlite_cache._timed_cache_action)
+        assert "if duration_ms >= SLOW_ACTION_THRESHOLD_MS:" in wrapper
+        assert "_record_slow_action(func.__name__, duration_ms)" in wrapper
+
+
+class BrandLevelFixStateTests(unittest.TestCase):
+    """Quality-by-Brand counted is_ai_enriched over the currently-OPEN error
+    rows while the headline card counted all-time fix events - two different
+    measures under one label, which is why the numbers disagreed."""
+
+    def test_per_brand_counts_use_the_same_cumulative_model(self) -> None:
+        import inspect
+
+        source = inspect.getsource(ws.fix_state_counts_by_brand)
+        # Same five expressions as the headline query.
+        for expression in (
+            "COUNTIF(state = 'fixed' AND ai_fixed) AS ai_fixed",
+            "COUNTIF(state = 'fixed' AND NOT ai_fixed AND ai_suggested) AS ai_suggested_fixed",
+            "COUNTIF(state = 'fixed' AND NOT ai_fixed AND NOT ai_suggested) AS manual_fixed",
+        ):
+            assert expression in source, expression
+        # Counted over soft-deleted rows too, or fixed records vanish.
+        assert "IF(e.is_deleted IS TRUE, 'fixed', 'pending')" in source
+        assert "GROUP BY brand" in source
+
+    def test_the_brand_table_is_overwritten_with_the_cumulative_counts(self) -> None:
+        import inspect
+
+        source = inspect.getsource(ws.reporting_quality_summary)
+        assert "cumulative_by_brand = fix_state_counts_by_brand(client=client)" in source
+        assert 'bucket["ai_enriched"] = cumulative["ai_fixed"]' in source
+        # Best-effort: a failure must leave the open-row counts rendering.
+        assert 'LOGGER.warning("fix_state_by_brand_failed error=%s", exc)' in source
+
+
+class FailingFieldReportingTests(unittest.TestCase):
+    """A blanket "check required fields, ZIP Code, and coordinates" made the
+    user re-read every input hunting for the one that mattered."""
+
+    def test_save_reports_which_fields_failed(self) -> None:
+        import inspect
+
+        source = inspect.getsource(ws.save_mapper)
+        assert '"failed_fields": failed_field_names' in source
+        # Distinct, order-preserving.
+        assert "if field and field not in failed_field_names:" in source
+
+    def test_the_retry_message_names_those_fields(self) -> None:
+        from pathlib import Path
+
+        review_js = (Path(__file__).resolve().parents[1] / "ui" / "js" / "review.js").read_text()
+        assert "const failed = Array.isArray(result.failed_fields) ? result.failed_fields : [];" in review_js
+        assert "need${failed.length === 1 ? \"s\" : \"\"} attention:" in review_js
+        # Formatted labels, not raw DB keys.
+        assert "formatFieldLabel(f) || f" in review_js
+        # The blanket message must not come back.
+        assert "Please check required fields, ZIP Code, and coordinates." not in review_js
+
+
+class MetricExportExecutionTests(_FakeBigQueryModuleMixin):
+    """reporting_metric_export() is ~240 lines that no test actually EXECUTED -
+    every existing test asserted on its source text. That is exactly how the
+    empty-array NULL bug and the `is_covered` SQL error reached a live server:
+    source assertions cannot run a query. These drive the real function.
+    """
+
+    class _Job:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def result(self):
+            return self._rows
+
+    class _Client:
+        """Returns rows for any query and records the SQL it was given."""
+
+        def __init__(self, rows=None):
+            self.queries = []
+            self._rows = rows if rows is not None else [
+                {"listing_id": "L1", "brand": "Acme", "state_code": "TX",
+                 "city_name": "Austin", "zip_code": "78701",
+                 "has_valid_zip": True, "has_valid_coordinates": True,
+                 "is_stale": False, "duplicate_group_count": 1, "is_duplicate": False},
+            ]
+
+        def query(self, sql, job_config=None):
+            self.queries.append(sql)
+            return MetricExportExecutionTests._Job(self._rows)
+
+    def _run(self, params, rows=None):
+        client = self._Client(rows)
+        with patch.object(ws, "_warehouse_settings", return_value=("p", "d", None)), \
+             patch.object(ws, "_medallion_settings", return_value=("p", "b", "s", "g", None)), \
+             patch.object(ws, "_bigquery_client", return_value=client), \
+             patch.object(ws, "_ensure_once"), \
+             patch.object(ws, "get_stale_after_days", return_value=90):
+            payload, filename = ws.reporting_metric_export(params)
+        return payload, filename, client
+
+    def test_a_listing_metric_produces_a_real_zip_bundle(self) -> None:
+        import io
+        import zipfile
+
+        payload, filename, _ = self._run({"metric": ["zip-completeness"]})
+        self.assertTrue(filename.endswith(".zip"))
+        bundle = zipfile.ZipFile(io.BytesIO(payload))
+        self.assertIn("zip-completeness.xlsx", bundle.namelist())
+        self.assertIn("listings.csv", bundle.namelist())
+        self.assertIn("README.txt", bundle.namelist())
+
+    def test_every_registered_metric_slug_actually_runs(self) -> None:
+        # Catches a slug that is registered but whose branch raises - the
+        # class of bug that made uncovered-zips 400 in production.
+        known = (set(ws._ERROR_METRIC_PREDICATES) | set(ws._FIX_EVENT_METRIC_TYPES)
+                 | set(ws._LISTING_METRIC_SLUGS) | set(ws._LOCATION_VIEW_METRIC_SLUGS)
+                 | set(ws._ZIP_METRIC_SLUGS) | set(ws._BRAND_METRIC_SLUGS))
+        for slug in sorted(known):
+            with self.subTest(metric=slug):
+                payload, filename, _ = self._run({"metric": [slug]})
+                self.assertTrue(payload)
+                self.assertTrue(filename.startswith(slug))
+
+    def test_multi_value_filters_reach_the_query_as_arrays(self) -> None:
+        _, _, client = self._run({"metric": ["zip-completeness"], "state": ["TX", "CA"]})
+        sql = "\n".join(client.queries)
+        self.assertIn("IN UNNEST(@states)", sql)
+        # And the empty-array NULL trap stays guarded.
+        self.assertIn("COALESCE(ARRAY_LENGTH(@states), 0) = 0", sql)
+
+    def test_comma_separated_filters_are_split(self) -> None:
+        _, _, client = self._run({"metric": ["zip-completeness"], "state": ["TX,CA,NY"]})
+        self.assertTrue(client.queries)  # ran without error
+
+    def test_an_unknown_metric_raises_rather_than_returning_an_empty_file(self) -> None:
+        with self.assertRaises(ValueError):
+            self._run({"metric": ["not-a-real-metric"]})
+        with self.assertRaises(ValueError):
+            self._run({"metric": [""]})
+
+    def test_a_missing_table_is_labelled_unavailable_not_reported_as_zero(self) -> None:
+        import io
+        import zipfile
+
+        class _NotFound(Exception):
+            code = 404
+
+        class _MissingClient(MetricExportExecutionTests._Client):
+            def query(self, sql, job_config=None):
+                raise _NotFound("Not found: Table")
+
+        client = _MissingClient()
+        with patch.object(ws, "_warehouse_settings", return_value=("p", "d", None)), \
+             patch.object(ws, "_medallion_settings", return_value=("p", "b", "s", "g", None)), \
+             patch.object(ws, "_bigquery_client", return_value=client), \
+             patch.object(ws, "_ensure_once"), \
+             patch.object(ws, "get_stale_after_days", return_value=90):
+            payload, _ = ws.reporting_metric_export({"metric": ["zip-completeness"]})
+        readme = zipfile.ZipFile(io.BytesIO(payload)).read("README.txt").decode()
+        self.assertIn("does not exist yet", readme)
+
+
+class TableExportExecutionTests(_FakeBigQueryModuleMixin):
+    """Same reasoning for the per-table exports."""
+
+    def test_each_table_export_runs_and_carries_its_own_columns(self) -> None:
+        import csv
+        import io
+        import zipfile
+
+        summary = {
+            "gaps": [{"zip_code": "78701", "state": "TX", "population": 100}],
+            "brands": [{"brand": "Acme", "locations": 3}],
+            "top_states": [{"state": "TX", "locations": 5}],
+            "top_cities": [{"city": "Austin", "locations": 2}],
+        }
+        for table, expected_column in (("market-gaps", "zip_code"), ("brand-comparison", "brand"),
+                                       ("top-states", "state"), ("top-cities", "city")):
+            with self.subTest(table=table):
+                with patch.object(ws, "reporting_summary", return_value=summary):
+                    payload, filename = ws.reporting_table_export({"table": [table]})
+                self.assertTrue(filename.startswith(table))
+                bundle = zipfile.ZipFile(io.BytesIO(payload))
+                rows = list(csv.DictReader(io.StringIO(bundle.read("listings.csv").decode())))
+                self.assertIn(expected_column, rows[0])
+
+    def test_an_unknown_table_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            ws.reporting_table_export({"table": ["nope"]})
+        with self.assertRaises(ValueError):
+            ws.reporting_table_export({})
+
+
+class GenericSqlHelperTests(unittest.TestCase):
+    """91 call sites issued client.query() directly, each re-deriving its own
+    parameter plumbing and error handling. That is how a scalar filter
+    survived in one query while its siblings moved to arrays."""
+
+    def setUp(self) -> None:
+        self._bq = patch.dict(sys.modules, _fake_bigquery_modules())
+        self._bq.start()
+        self.addCleanup(self._bq.stop)
+
+    def test_parameters_are_inferred_from_plain_python_values(self) -> None:
+        # The fake builds (name, type, value) for both scalar and array.
+        built = {p[0]: p[1] for p in ws._sql_params(
+            {"s": "TX", "n": 5, "f": 1.5, "b": True, "arr": ["TX", "CA"]})}
+        self.assertEqual(built["s"], "STRING")
+        self.assertEqual(built["n"], "INT64")
+        self.assertEqual(built["f"], "FLOAT64")
+        self.assertEqual(built["b"], "BOOL")
+        self.assertEqual(built["arr"], "STRING")  # element type
+
+    def test_bool_is_not_mistaken_for_an_int(self) -> None:
+        # bool is a subclass of int in Python; checking int first would type
+        # every flag as INT64 and break the comparison in BigQuery.
+        self.assertEqual(ws._sql_params({"b": True})[0][1], "BOOL")
+
+    def test_an_empty_list_still_produces_an_array_parameter(self) -> None:
+        # It must stay an ARRAY (BigQuery turns it into NULL, which is why
+        # every ARRAY_LENGTH check is COALESCE-guarded) - not a scalar.
+        built = ws._sql_params({"x": []})[0]
+        self.assertEqual(built[2], [])          # value kept as a list
+        self.assertEqual(built[1], "STRING")    # default element type
+
+    def test_no_parameters_is_an_empty_list_not_none(self) -> None:
+        self.assertEqual(ws._sql_params(None), [])
+        self.assertEqual(ws._sql_params({}), [])
+
+    def test_dml_returns_the_rows_it_actually_affected(self) -> None:
+        class _Job:
+            num_dml_affected_rows = 7
+            def result(self): return []
+        class _Client:
+            def query(self, sql, job_config=None): return _Job()
+        self.assertEqual(ws.run_sql_dml(_Client(), "UPDATE x SET a=1"), 7)
+
+    def test_dml_reports_zero_rather_than_none_when_nothing_matched(self) -> None:
+        # A no-op must be distinguishable from a real change, not None.
+        class _Job:
+            num_dml_affected_rows = None
+            def result(self): return []
+        class _Client:
+            def query(self, sql, job_config=None): return _Job()
+        self.assertEqual(ws.run_sql_dml(_Client(), "UPDATE x SET a=1"), 0)
+
+    def test_rows_come_back_as_plain_dicts(self) -> None:
+        class _Job:
+            def result(self): return [{"a": 1}, {"a": 2}]
+        class _Client:
+            def query(self, sql, job_config=None): return _Job()
+        self.assertEqual(ws.run_sql_rows(_Client(), "SELECT a FROM x"), [{"a": 1}, {"a": 2}])
+
+    def test_statements_are_labelled_for_logging(self) -> None:
+        self.assertEqual(ws._sql_label("  update  `p.d.t`  set a=1 "), "UPDATE `P.D.T`")
+        self.assertEqual(ws._sql_label(""), "")
+
+
+class DeferredReviewSaveTests(unittest.TestCase):
+    """A record the user edited is kept even when it still fails validation:
+    saved as user_reviewed and re-checked at enrichment, rather than bounced
+    back for a value the system may not be able to confirm yet."""
+
+    def test_the_columns_exist(self) -> None:
+        from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS
+
+        columns = {f["name"] for f in TABLE_SCHEMAS["error_listings"]}
+        self.assertTrue({"user_reviewed", "user_reviewed_at"} <= columns)
+
+    def test_the_path_is_opt_in_and_keeps_the_users_input(self) -> None:
+        import inspect
+
+        source = inspect.getsource(ws.reprocess_rejected)
+        # Opt-in only: a normal retry must still validate.
+        assert 'str(data.get("accept_as_reviewed", "")).lower() in {"1", "true", "yes"}' in source
+        # Their edited values are stored, not discarded in favour of the old row.
+        assert "raw_record = @raw_record" in source
+        assert "SET user_reviewed = TRUE" in source
+        assert "attempt_count = COALESCE(attempt_count, 0) + 1" in source
+        # Routed through the shared helper like every other mutation.
+        assert 'label="reprocess:accept_as_reviewed"' in source
+
+    def test_the_button_appears_only_after_a_retry_has_failed(self) -> None:
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "ui" / "integrations.html").read_text()
+        review_js = (root / "ui" / "js" / "review.js").read_text()
+        # Hidden by default - offering it up front would invite skipping
+        # validation that would have passed.
+        assert 'id="acceptAsReviewedBtn" class="secondary hidden"' in html
+        assert 'if (acceptBtn) acceptBtn.classList.remove("hidden");' in review_js
+        # Reuses the normal submit path so the two cannot diverge.
+        assert 'el("submitEditRecordBtn")?.click();' in review_js
+        assert "accept_as_reviewed: window.__acceptAsReviewed === true," in review_js
+        # The flag must never leak into the next retry.
+        assert "window.__acceptAsReviewed = false;" in review_js
+
+
+class MergeBrandsPreviewTests(_FakeBigQueryModuleMixin):
+    """Combining brands is irreversible from the UI, so the confirm step needs
+    real counts. Preview mode must COUNT and must never mutate."""
+
+    def _run(self, client, **extra):
+        with patch.object(ws, "_warehouse_settings", return_value=("proj", "ds", None)), \
+             patch.object(ws, "_bigquery_client", return_value=client), \
+             patch.object(ws, "_ensure_businesses_table", lambda *a, **k: None), \
+             patch.object(ws, "invalidate_cache", lambda *a, **k: None), \
+             patch.object(ws, "_sync_gold_mirror_best_effort", lambda *a, **k: None):
+            return ws.merge_brands({
+                "target_business_id": "keep-1",
+                "source_business_ids": ["dupe-1", "dupe-2"],
+                **extra,
+            })
+
+    def test_preview_counts_rows_and_issues_no_mutation(self):
+        client = FakeClient(query_results={
+            "ds.listings`": [{"row_count": 1240}],
+            "ds.workflow_templates`": [{"row_count": 3}],
+            "ds.error_listings`": [{"row_count": 38}],
+        })
+        result = self._run(client, preview=True)
+
+        self.assertTrue(result["preview"])
+        self.assertEqual(result["listings_moved"], 1240)
+        self.assertEqual(result["templates_moved"], 3)
+        self.assertEqual(result["review_rows_moved"], 38)
+        self.assertEqual(result["moved_total"], 1281)
+        self.assertTrue(result["counts_complete"])
+        # Nothing may be written, and the source brands must stay live.
+        statements = " ".join(client.queries).upper()
+        self.assertNotIn("UPDATE ", statements)
+        self.assertNotIn("DELETE ", statements)
+        self.assertNotIn("IS_DELETED = TRUE", statements)
+        self.assertEqual(len(client.queries), 3)
+
+    def test_unreadable_table_reports_unknown_not_zero(self):
+        # Reporting a table we could not read as 0 would let the dialog claim
+        # "nothing will move" about data that is actually there.
+        class HalfBrokenClient(FakeClient):
+            def query(self, sql, job_config=None):
+                if "ds.error_listings`" in sql:
+                    raise RuntimeError("table unavailable")
+                return super().query(sql, job_config)
+
+        client = HalfBrokenClient(query_results={
+            "ds.listings`": [{"row_count": 5}],
+            "ds.workflow_templates`": [{"row_count": 0}],
+        })
+        result = self._run(client, preview=True)
+
+        self.assertIsNone(result["review_rows_moved"])
+        self.assertFalse(result["counts_complete"])
+        self.assertEqual(result["listings_moved"], 5)
+
+    def test_without_preview_the_merge_still_mutates(self):
+        client = FakeClient(affected_by_query={
+            "ds.listings`": 7, "ds.workflow_templates`": 1, "ds.error_listings`": 2,
+        })
+        result = self._run(client)
+
+        self.assertNotIn("preview", result)
+        statements = " ".join(client.queries).upper()
+        self.assertIn("UPDATE ", statements)
+        self.assertIn("IS_DELETED = TRUE", statements)
+
+
+class LocationContactEnrichmentTests(unittest.TestCase):
+    """Store-level OSM lookup. The whole value of this is that it answers for
+    ONE store, so the name check and the tag check both have to hold."""
+
+    def _payload(self, elements):
+        return {"elements": elements}
+
+    def _lookup(self, elements, **kwargs):
+        from whitespace_tool import brand_enrichment
+        with patch.object(brand_enrichment, "_get_json", return_value=self._payload(elements)):
+            return brand_enrichment.enrich_location_contact(
+                kwargs.pop("name", "Domino's Pizza #4412"),
+                kwargs.pop("lat", 30.2672), kwargs.pop("lon", -97.7431), **kwargs)
+
+    def test_returns_contact_tags_from_the_matching_poi(self):
+        result = self._lookup([{"tags": {
+            "name": "Dominos Pizza",
+            "phone": "+1 512-555-1234",
+            "contact:website": "dominos.com",
+            "contact:email": "store4412@dominos.com",
+        }}])
+        self.assertEqual(result["phone_number"], "+15125551234")
+        self.assertEqual(result["website_url"], "https://dominos.com")
+        self.assertEqual(result["email"], "store4412@dominos.com")
+        self.assertEqual(result["website_url_source"], "openstreetmap")
+        self.assertEqual(result["matched_name"], "Dominos Pizza")
+
+    def test_an_unrelated_neighbour_never_donates_its_contact_details(self):
+        # The whole point of the name check: a POI 40m away is not this store.
+        result = self._lookup([{"tags": {"name": "Blue Owl Coffee", "phone": "+1 512-555-9999"}}])
+        self.assertEqual(result, {})
+
+    def test_name_matched_poi_with_no_contact_tags_is_not_an_answer(self):
+        result = self._lookup([{"tags": {"name": "Dominos Pizza", "cuisine": "pizza"}}])
+        self.assertEqual(result, {})
+
+    def test_out_of_range_or_missing_coordinates_do_not_call_out(self):
+        from whitespace_tool import brand_enrichment
+        with patch.object(brand_enrichment, "_get_json") as fetch:
+            self.assertEqual(brand_enrichment.enrich_location_contact("Store", None, None), {})
+            self.assertEqual(brand_enrichment.enrich_location_contact("Store", 91.0, 0.0), {})
+            self.assertEqual(brand_enrichment.enrich_location_contact("", 30.0, -97.0), {})
+        fetch.assert_not_called()
+
+    def test_an_unreachable_overpass_returns_nothing_rather_than_raising(self):
+        import urllib.error
+        from whitespace_tool import brand_enrichment
+        with patch.object(brand_enrichment, "_get_json", side_effect=urllib.error.URLError("down")):
+            self.assertEqual(brand_enrichment.enrich_location_contact("Store", 30.0, -97.0), {})
+
+    def test_radius_is_clamped_so_a_caller_cannot_widen_it_to_the_whole_city(self):
+        from whitespace_tool import brand_enrichment
+        seen = {}
+
+        def capture(url):
+            seen["url"] = url
+            return {"elements": []}
+
+        with patch.object(brand_enrichment, "_get_json", side_effect=capture):
+            brand_enrichment.enrich_location_contact("Store", 30.0, -97.0, radius_m=50000)
+        self.assertIn("around%3A500%2C", seen["url"])
+
+
+class IdleLocationEnrichmentPassTests(_FakeBigQueryModuleMixin):
+    """The background pass must only ever fill blanks, and must re-assert that
+    in SQL - the row was read a moment earlier, so a concurrent user edit has
+    to win."""
+
+    def setUp(self):
+        super().setUp()
+        ws._LOCATION_ENRICH_ATTEMPTED.clear()
+        self.addCleanup(ws._LOCATION_ENRICH_ATTEMPTED.clear)
+
+    def _run(self, client, resolved):
+        from whitespace_tool import brand_enrichment
+        with patch.object(ws, "_warehouse_settings", return_value=("proj", "ds", None)), \
+             patch.object(ws, "_bigquery_client", return_value=client), \
+             patch.object(ws, "invalidate_cache", lambda *a, **k: None), \
+             patch.object(ws, "sleep", lambda *a, **k: None), \
+             patch.object(brand_enrichment, "enrich_location_contact", return_value=resolved):
+            return ws._idle_location_enrichment_pass()
+
+    def _client(self, rows):
+        return FakeClient(query_results={"FROM `proj.ds.listings`": rows})
+
+    def test_fills_only_the_blank_columns_and_guards_them_again_in_sql(self):
+        client = self._client([{
+            "listing_id": "L1", "name": "Dominos Pizza", "latitude": 30.0, "longitude": -97.0,
+            "phone_number": "", "website_url": "https://already-set.example", "email": None,
+        }])
+        result = self._run(client, {
+            "phone_number": "+15125551234",
+            "website_url": "https://osm-would-have-said-this.example",
+            "email": "store@example.com",
+        })
+
+        self.assertEqual(result["updated"], 1)
+        self.assertEqual(result["fields_filled"], 2)
+        update = next(q for q in client.queries if q.strip().upper().startswith("UPDATE"))
+        self.assertIn("phone_number = @phone_number", update)
+        self.assertIn("email = @email", update)
+        # website_url already had a value, so it is neither set nor guarded.
+        self.assertNotIn("website_url = @website_url", update)
+        self.assertIn("(phone_number IS NULL OR phone_number = '')", update)
+        self.assertIn("(email IS NULL OR email = '')", update)
+
+    def test_a_listing_osm_does_not_know_is_left_blank_not_written(self):
+        client = self._client([{
+            "listing_id": "L1", "name": "Unknown Store", "latitude": 30.0, "longitude": -97.0,
+            "phone_number": None, "website_url": None, "email": None,
+        }])
+        result = self._run(client, {})
+        self.assertEqual(result["updated"], 0)
+        self.assertFalse([q for q in client.queries if q.strip().upper().startswith("UPDATE")])
+
+    def test_a_listing_is_attempted_once_so_the_loop_moves_on(self):
+        rows = [{
+            "listing_id": "L1", "name": "Unknown Store", "latitude": 30.0, "longitude": -97.0,
+            "phone_number": None, "website_url": None, "email": None,
+        }]
+        self.assertEqual(self._run(self._client(rows), {})["attempted"], 1)
+        self.assertEqual(self._run(self._client(rows), {})["attempted"], 0)
+
+
+class BackgroundCacheInvalidationTests(unittest.TestCase):
+    """User-reported: "is clear cache happening always... more frequent 0 data".
+
+    It was. invalidate_cache() is a blanket DELETE of every cached payload
+    except reporting_quality:*, and the background loops called it on every
+    pass - auto-repair fixes ten rows a cycle, the enrichment passes fill a
+    field at a time. Measured on the live mirror: query_cache held ONLY the
+    exempt reporting_quality:* keys; every reporting_summary:* entry was gone,
+    so each dashboard load paid a full recompute.
+    """
+
+    def setUp(self):
+        ws._LAST_BACKGROUND_INVALIDATION_AT = 0.0
+        self.addCleanup(setattr, ws, "_LAST_BACKGROUND_INVALIDATION_AT", 0.0)
+
+    def test_repeated_background_passes_clear_the_cache_at_most_once_per_window(self):
+        calls = []
+        clock = [1000.0]
+        with patch.object(ws, "invalidate_cache", lambda *a, **k: calls.append(1)), \
+             patch.object(ws, "wall_clock_time", lambda: clock[0]):
+            self.assertTrue(ws._invalidate_cache_background())
+            # Five more passes inside the window must all be skipped.
+            for _ in range(5):
+                self.assertFalse(ws._invalidate_cache_background())
+            self.assertEqual(len(calls), 1)
+            # Past the window, one more is allowed through.
+            clock[0] += ws.BACKGROUND_INVALIDATION_MIN_INTERVAL_SECONDS + 1
+            self.assertTrue(ws._invalidate_cache_background())
+            self.assertEqual(len(calls), 2)
+
+    def test_user_actions_still_clear_immediately(self):
+        # A save or a brand merge has to be visible at once - only the
+        # background loops are throttled.
+        for function in (ws.merge_brands, ws.create_brand, ws.update_brand, ws.clear_saved_data):
+            source = inspect.getsource(function)
+            self.assertIn("invalidate_cache()", source, function.__name__)
+            self.assertNotIn("_invalidate_cache_background()", source, function.__name__)
+
+    def test_every_background_loop_uses_the_throttled_path(self):
+        for function in (ws.auto_repair_error_batch, ws.start_auto_repair,
+                         ws._idle_brand_enrichment_pass, ws._idle_location_enrichment_pass):
+            source = inspect.getsource(function)
+            if "invalidate_cache" not in source:
+                continue
+            self.assertIn("_invalidate_cache_background()", source, function.__name__)
+            # No bare blanket call may survive alongside it.
+            self.assertNotIn("\n        invalidate_cache()", source, function.__name__)

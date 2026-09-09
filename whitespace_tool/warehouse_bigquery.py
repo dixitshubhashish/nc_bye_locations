@@ -33,8 +33,20 @@ def _pandas():
 # ingestion_id/mapping_id/sample_batch_id (ingestion-run metadata, not
 # content), first_observed_at/last_observed_at (time-varying by design),
 # and is_deleted/deleted_on (mutable state).
+#
+# business_id is excluded TOO, and that is the whole point: the hash answers
+# "is this the same physical place?", and which brand filed the record is not
+# part of that question. With business_id inside, the identical store filed
+# under two brand records produced two different hashes, so a cross-brand
+# duplicate was undetectable by construction. Per-brand dedupe does not
+# depend on it either - _dedupe_listings_against_bronze() keys on the
+# composite (business_id, content_hash), carrying the brand explicitly.
+#
+# Removing a field changes every hash. LEGACY_CONTENT_HASH_FIELDS below
+# reproduces the old definition so already-stored rows stay recognisable
+# until they are rehashed - see rehash_listings_content_hash().
 CONTENT_HASH_FIELDS: tuple[str, ...] = (
-    "business_id", "name", "address", "city_name", "town", "state_code", "province",
+    "name", "address", "city_name", "town", "state_code", "province",
     "zip_code", "country", "latitude", "longitude", "franchise_name", "concept_type",
     "cuisine_type", "neighborhood", "district", "phone_number", "website_url",
     "google_maps_link", "social_media_handles", "operating_hours", "seating_capacity",
@@ -43,6 +55,12 @@ CONTENT_HASH_FIELDS: tuple[str, ...] = (
     "population_density", "average_household_income", "competitor_count",
     "foot_traffic_score", "parking_availability", "ratings", "country_code", "email",
 )
+
+
+# The hash definition in force before business_id was removed. Kept so a row
+# written under the old rule can still be recognised as the same listing
+# rather than re-inserted as a new one; nothing new is ever written with it.
+LEGACY_CONTENT_HASH_FIELDS: tuple[str, ...] = ("business_id",) + CONTENT_HASH_FIELDS
 
 
 def _canonical_hash_payload(row: dict[str, Any], fields: tuple[str, ...] | list[str]) -> str:
@@ -67,8 +85,23 @@ def _canonical_hash_payload_from_values(values: list[Any], fields: tuple[str, ..
 
 
 def content_hash(row: dict[str, Any]) -> str:
-    """Deterministic SHA-256 over a listing's stable content fields."""
+    """Deterministic SHA-256 over a listing's stable content fields.
+
+    Brand-independent: the same physical store hashes identically no matter
+    which brand record it was filed under, which is what makes a cross-brand
+    duplicate detectable at all.
+    """
     payload = _canonical_hash_payload(row, CONTENT_HASH_FIELDS)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def legacy_content_hash(row: dict[str, Any]) -> str:
+    """The hash this row WOULD have had before business_id was removed.
+
+    Used only to recognise already-stored rows during the transition, so a
+    re-save matches the existing row instead of inserting a duplicate.
+    """
+    payload = _canonical_hash_payload(row, LEGACY_CONTENT_HASH_FIELDS)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -146,6 +179,18 @@ LOGGER = logging.getLogger("whitespace_tool.workflow")
 
 
 TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
+    # Auto-mapping confidence lives in SQLite for speed, but that file is on
+    # ephemeral disk on Render - a restart would erase everything the app had
+    # learned about which source column maps to which field. Mirrored here so
+    # the learning is durable; SQLite stays the fast read path.
+    "field_mapping_confidence": [
+        {"name": "target_key", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "source_field_normalized", "type": "STRING", "mode": "REQUIRED"},
+        {"name": "score", "type": "FLOAT", "mode": "NULLABLE"},
+        {"name": "sample_count", "type": "INTEGER", "mode": "NULLABLE"},
+        {"name": "updated_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
+        {"name": "content_hash", "type": "STRING", "mode": "NULLABLE"},
+    ],
     "field_catalogs": [
         {"name": "field_id", "type": "STRING", "mode": "REQUIRED", "default": "GENERATE_UUID()"},
         {"name": "business_id", "type": "STRING", "mode": "NULLABLE"},
@@ -331,6 +376,21 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         # counter in the edit dialog instead of silently re-inserting a
         # fresh row each retry with no memory of prior attempts.
         {"name": "attempt_count", "type": "INTEGER", "mode": "NULLABLE"},
+        # A row that was EVER invalid stays marked forever. Fixing a record
+        # soft-deletes its error row (is_deleted = TRUE), which removed it
+        # from every count - so "how many bad listings have we had in total,
+        # and how were they resolved" was unanswerable and the fix counters
+        # appeared to reset. These two columns make the population cumulative:
+        # was_ever_invalid never clears, resolution_status moves pending->fixed.
+        {"name": "was_ever_invalid", "type": "BOOLEAN", "mode": "NULLABLE"},
+        {"name": "resolution_status", "type": "STRING", "mode": "NULLABLE"},
+        # A row the user has edited and accepted, even though it does not
+        # validate yet. Keeping their input rather than rejecting it means the
+        # save returns immediately (no live re-validation round trip) and
+        # enrichment re-checks it later, when it may well have the reference
+        # data it was missing.
+        {"name": "user_reviewed", "type": "BOOLEAN", "mode": "NULLABLE"},
+        {"name": "user_reviewed_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
     ],
     "quality_fix_events": [
         {"name": "fix_id", "type": "STRING", "mode": "REQUIRED"},
@@ -623,7 +683,10 @@ def _assert_not_protected_dataset(dataset_name: str) -> None:
 
 def _clear_dataset_tables_with_client(client: Any, dataset_ref: str) -> dict[str, list[str]]:
     _assert_not_protected_dataset(dataset_ref)
-    preserved_tables = {"us_zipcodes", "field_catalogs", "field_catalog", "source_types", "workflow_templates", "quality_fix_events"}
+    # Learning survives a data clear: the confidence table describes HOW to map,
+    # not what was mapped, so wiping listings must not cost it.
+    preserved_tables = {"us_zipcodes", "field_catalogs", "field_catalog", "source_types",
+                        "workflow_templates", "quality_fix_events", "field_mapping_confidence"}
     table_refs = [table.reference for table in client.list_tables(dataset_ref) if table.table_id not in preserved_tables]
     LOGGER.warning("db_clear_started dataset=%s table_count=%d", dataset_ref, len(table_refs))
     soft_deleted: list[str] = []

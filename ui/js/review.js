@@ -6,12 +6,34 @@ let reviewBrandNames = {};
 let autoRepairPollTimer = null;
 let aiFixedAnimationTimer = null;
 let reviewPage = 0;
-// Delegated click handler for the review table's action buttons. Must be
-// MODULE scope: it is written by loadRejectedRecords() and read on the
-// next load to detach the previous listener. Declared inside another
-// function it threw "reviewActionHandler is not defined" on every
-// review-queue render, including the empty-queue path.
-let reviewActionHandler = null;
+// Records currently rendered in the review queue, keyed by event_id::row_number
+// (the same pair the button carries in its dataset). The click handler reads
+// this instead of closing over a per-render array, so it never depends on a
+// listener being re-attached after a re-render.
+const reviewRecordsByKey = new Map();
+// Templates per business_id. Opening the edit dialog used to fetch these on
+// every single click, sequentially after the brands fetch - two round trips
+// before anything rendered, which is the delay felt on "Manual Review" /
+// "AI Suggested Fix". A template rarely changes mid-session, so one fetch
+// per business is enough.
+const reviewTemplateCache = new Map();
+
+// ONE document-level listener, installed at load. Deliberately not attached
+// per render: any throw between drawing the table and attaching a listener
+// used to leave the buttons visible but dead. Capture phase so a stray
+// stopPropagation() upstream cannot swallow the click either.
+document.addEventListener("click", (event) => {
+  const button = event.target?.closest?.("button[data-open-edit]");
+  if (!button) return;
+  event.preventDefault();
+  const record = reviewRecordsByKey.get(`${button.dataset.event}::${button.dataset.openEdit}`);
+  if (record) {
+    openEditRecordModal(record);
+  } else {
+    // Surfacing this beats a button that silently does nothing.
+    console.warn("review: no record for", button.dataset.event, button.dataset.openEdit);
+  }
+}, true);
 const REVIEW_PAGE_SIZE = 50;
 
 async function reviewFetch(url, options = {}, timeoutMs = 120000) {
@@ -89,6 +111,60 @@ async function autoRepairReviewBatch() {
         if (button?.dataset.autoRepairing !== "true") clearButtonBusy(button, previousButton);
       }
 
+// Cumulative five-state counts for the review tab's cards.
+let reviewFixStates = null;
+
+let reviewFixStateRetries = 0;
+const REVIEW_FIX_STATE_RETRY_LIMIT = 5;
+const REVIEW_FIX_STATE_RETRY_DELAY_MS = 4000;
+
+async function refreshReviewFixStates() {
+      try {
+        // Dedicated mirror-backed endpoint, NOT /api/reporting/quality: these
+        // six numbers live in SQLite and must not wait on - or fail with -
+        // that endpoint's heavy aggregation. That coupling is why every card
+        // showed "-" while the correct values sat on disk.
+        const response = await fetch("/api/review/fix-states", { cache: "no-store" });
+        const data = await response.json();
+        if (!response.ok) return;
+        if (data.computed === true) {
+          reviewFixStateRetries = 0;
+          reviewFixStates = data;
+          renderReviewFixStates();
+          return;
+        }
+        // Not computed yet, but a recount is running - come back for it
+        // rather than leaving dashes on screen for the rest of the session.
+        if (data.refreshing && reviewFixStateRetries < REVIEW_FIX_STATE_RETRY_LIMIT) {
+          reviewFixStateRetries += 1;
+          window.setTimeout(refreshReviewFixStates, REVIEW_FIX_STATE_RETRY_DELAY_MS);
+        }
+      } catch (_) {
+        // Leave whatever is displayed; a transient failure must not blank
+        // correct numbers (the same mistake the old `|| 0` default made).
+      }
+    }
+
+function renderReviewFixStates() {
+      const states = reviewFixStates;
+      const cards = [
+        ["reviewStateAiFixed", "ai_fixed"],
+        ["reviewStateAiSuggestedFixed", "ai_suggested_fixed"],
+        ["reviewStateManualFixed", "manual_fixed"],
+        ["reviewStateAiPending", "ai_suggested_pending"],
+        ["reviewStateManualPending", "manual_pending"],
+        ["reviewStateTotal", "total_ever_invalid"],
+      ];
+      // "Not computed yet" is shown as a dash, never as zero - a zero here
+      // would read as "nothing has ever been invalid", which is a claim.
+      const computed = states && states.computed === true;
+      cards.forEach(([id, key]) => {
+        const node = el(id);
+        if (node) node.textContent = computed ? Number(states[key] || 0).toLocaleString() : "-";
+      });
+      renderAiFixedShare();
+    }
+
 function renderFixCounters(state) {
   // RPT-13 follow-up: `state.auto_repair?.x || 0` meant ANY status response
   // that omitted auto_repair (an early poll, a partial/errored payload, a
@@ -99,20 +175,40 @@ function renderFixCounters(state) {
   // numbers alone; only a real payload may update them.
   const stats = state && typeof state.auto_repair === "object" && state.auto_repair ? state.auto_repair : null;
   if (!stats) return;
+  // Five-state cards: the same cumulative counts the reporting tab shows, so
+  // the two can never disagree. Read from the quality payload's fix_states,
+  // which is mirror-backed (instant paint, BigQuery authoritative).
+  renderReviewFixStates();
   const fixedCount = el("reviewAiFixedCount");
   if (fixedCount) animateAiFixedCount(Number(stats.fixed) || 0);
   const manualFixedCount = el("reviewManualFixedCount");
   if (manualFixedCount) manualFixedCount.textContent = formatAiFixedCount(Number(stats.manual_fixed) || 0, true);
+  renderAiFixedShare();
+}
+
+// "AI Fixed by Total Error" sits directly beside the five cumulative cards,
+// so it has to be computed from the SAME numbers or it contradicts them on
+// screen. It used to divide the CURRENT auto-repair batch's counters
+// (fixed / fixed+manual_fixed+remaining) - which reset to 0 whenever a new
+// batch starts, so it read "0.00%" next to cards showing 110 AI fixes.
+// Cumulative AI fixes over everything that was ever invalid is the figure
+// the label actually claims.
+function renderAiFixedShare() {
   const aiPercent = el("reviewAiFixedPercent");
-  if (aiPercent) {
-    const ai = Number(stats.fixed || 0);
-    const manual = Number(stats.manual_fixed || 0);
-    const pending = Number(stats.remaining || 0);
-    const total = ai + manual + pending;
-    aiPercent.textContent = `${total ? (ai / total * 100).toFixed(2) : "0.00"}%`;
-    const manualPercent = el("reviewManualFixedPercent");
-    if (manualPercent) manualPercent.textContent = `${total ? (manual / total * 100).toFixed(2) : "0.00"}%`;
+  if (!aiPercent) return;
+  const states = reviewFixStates;
+  if (!states || states.computed !== true) {
+    // Not measured yet is a dash, never "0.00%" - a zero here is a claim
+    // that the AI has fixed nothing, which is a different statement.
+    aiPercent.textContent = "-";
+    return;
   }
+  const total = Number(states.total_ever_invalid || 0);
+  const ai = Number(states.ai_fixed || 0);
+  const manual = Number(states.manual_fixed || 0);
+  aiPercent.textContent = total ? `${(ai / total * 100).toFixed(2)}%` : "-";
+  const manualPercent = el("reviewManualFixedPercent");
+  if (manualPercent) manualPercent.textContent = total ? `${(manual / total * 100).toFixed(2)}%` : "-";
 }
 async function refreshFixCountersOnce() {
   // These counters only ever updated while an active auto-repair run was
@@ -128,6 +224,9 @@ async function refreshFixCountersOnce() {
     const state = await response.json();
     if (response.ok) renderFixCounters(state);
   } catch (_) {}
+  // Cumulative five-state counts come from the quality payload, not the
+  // live auto-repair status - fetched alongside so both land together.
+  refreshReviewFixStates();
 }
 async function pollAutoRepairStatus() {
   const button = el("autoRepairReviewBtn");
@@ -199,7 +298,7 @@ async function _loadRejectedRecordsOnce() {
       if (searchBtn) setButtonBusy(searchBtn, "Searching");
 
       target.className = "status";
-      target.textContent = "Loading error listings...";
+      target.textContent = "Loading error listings";
       try {
         await loadReviewBrandFilter();
         const eventId = el("reviewEventId").value.trim();
@@ -216,15 +315,27 @@ async function _loadRejectedRecordsOnce() {
             const isSuggested = recordHasSuggestionAvailable(record);
             return fixTypeFilter === "ai_suggested" ? isSuggested : !isSuggested;
           });
+        } else {
+          // No explicit filter: interleave AI-suggested and manual rows so
+          // both get equal attention. The server orders by event_id/row_number,
+          // which clusters a whole brand's suggested rows together - so the
+          // first page could be entirely one kind and the other kind never
+          // got looked at. Whichever list is longer supplies the tail.
+          const suggested = result.records.filter(recordHasSuggestionAvailable);
+          const manual = result.records.filter((record) => !recordHasSuggestionAvailable(record));
+          if (suggested.length && manual.length) {
+            const interleaved = [];
+            for (let i = 0; i < Math.max(suggested.length, manual.length); i += 1) {
+              if (i < suggested.length) interleaved.push(suggested[i]);
+              if (i < manual.length) interleaved.push(manual[i]);
+            }
+            result.records = interleaved;
+          }
         }
         if (!result.records.length) {
-          // Detach before the early return: the queue going from N records to
-          // 0 would otherwise leave the previous delegated listener attached,
-          // holding the old records array alive in its closure.
-          if (reviewActionHandler) {
-            target.removeEventListener("click", reviewActionHandler);
-            reviewActionHandler = null;
-          }
+          // Nothing to act on - drop the store so a stale record can never
+          // be reopened from a previous page of results.
+          reviewRecordsByKey.clear();
           target.textContent = "No error listings found.";
           return;
         }
@@ -245,8 +356,20 @@ async function _loadRejectedRecordsOnce() {
 
           const hasSuggestionAvailable = recordHasSuggestionAvailable(record);
           const attemptCount = Number(record.attempt_count || 0);
+          // Effort icon (figure pushing a boulder uphill) instead of the words
+          // "Attempt N" - it reads at a glance in a dense table. Drawn inline
+          // rather than linked: the page's CSP blocks external images, and an
+          // inline path carries no third-party licensing question. The full
+          // sentence stays in the tooltip for anyone who needs it.
           const attemptBadge = attemptCount > 0
-            ? `<span title="Reviewed ${attemptCount} time${attemptCount === 1 ? "" : "s"} already" style="display:inline-block; margin-left:6px; padding:1px 7px; border-radius:999px; background:#fff1f0; color:#cf1322; font-size:11px; font-weight:700;">Attempt ${attemptCount}</span>`
+            ? `<span class="review-attempt-badge" title="Reviewed ${attemptCount} time${attemptCount === 1 ? "" : "s"} already" aria-label="Reviewed ${attemptCount} time${attemptCount === 1 ? "" : "s"} already">
+                 <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                   <line x1="2" y1="21" x2="21" y2="8"></line>
+                   <circle cx="16.5" cy="10" r="4"></circle>
+                   <circle cx="6.2" cy="6.6" r="1.7"></circle>
+                   <path d="M5 9.4h4.3l-1.6 3.4 2.2 1.9-.5 3.6"></path>
+                   <path d="M4.2 18.9l1.4-3.1"></path>
+                 </svg>${attemptCount}</span>`
             : "";
           const actionButtonHtml = hasSuggestionAvailable
             ? `<button type="button" class="review-fix-suggested" data-open-edit="${escapeHtml(record.row_number)}" data-event="${escapeHtml(record.event_id)}" style="background:#1677ee; border-color:#1677ee; color:#fff;">🤖 AI Suggested Fix</button>`
@@ -267,21 +390,17 @@ async function _loadRejectedRecordsOnce() {
         target.insertAdjacentHTML("beforeend", `<div class="review-pagination" style="display:flex; justify-content:center; gap:8px; margin-top:12px;"><button type="button" class="secondary" data-review-page="prev" ${reviewPage === 0 ? "disabled" : ""}>Previous</button><span style="padding:8px 4px; color:var(--muted);">Page ${reviewPage + 1}</span><button type="button" class="secondary" data-review-page="next" ${result.has_more ? "" : "disabled"}>Next</button></div>`);
         target.querySelector('[data-review-page="prev"]')?.addEventListener("click", () => { reviewPage -= 1; loadRejectedRecords(); });
         target.querySelector('[data-review-page="next"]')?.addEventListener("click", () => { reviewPage += 1; loadRejectedRecords(); });
-        // Delegated, not per-button: enableSortableTable() rebuilds the tbody
-        // when a column is sorted, which detached the per-button listeners
-        // bound here and left "AI Suggested Fix" / "Manual Review" doing
-        // nothing on click. One listener on the container survives any
-        // re-render or re-sort. Re-bound per load, so the previous one is
-        // removed first rather than stacking up.
-        if (reviewActionHandler) target.removeEventListener("click", reviewActionHandler);
-        reviewActionHandler = (event) => {
-          const button = event.target.closest("button[data-open-edit]");
-          if (!button || !target.contains(button)) return;
-          event.preventDefault();
-          const rec = result.records.find(r => r.event_id === button.dataset.event && String(r.row_number) === button.dataset.openEdit);
-          if (rec) openEditRecordModal(rec);
-        };
-        target.addEventListener("click", reviewActionHandler);
+        // Publish the rendered records for the document-level click handler
+        // (installed once at load, see reviewRecordsByKey). Binding a
+        // listener HERE was fragile: anything that threw between rendering
+        // the table and reaching this line - a sort helper, the pagination
+        // insert - left visible buttons with no listener at all, which is
+        // exactly how "Manual Review" / "AI Suggested Fix" ended up dead on
+        // click. A handler that is already attached cannot be skipped.
+        reviewRecordsByKey.clear();
+        (result.records || []).forEach((record) => {
+          reviewRecordsByKey.set(`${record.event_id}::${record.row_number}`, record);
+        });
       } catch (error) {
         target.className = "status error";
         target.textContent = error.name === "AbortError"
@@ -478,9 +597,13 @@ async function openEditRecordModal(record) {
         // result is the most recent one for this business - a reasonable
         // default when there's no exact template_id to match.
         if (record.business_id) {
-          const templatesRes = await fetch(`/api/templates?business_id=${encodeURIComponent(record.business_id)}`);
-          const templatesData = await templatesRes.json();
-          const templates = Array.isArray(templatesData.templates) ? templatesData.templates : [];
+          let templates = reviewTemplateCache.get(record.business_id);
+          if (!templates) {
+            const templatesRes = await fetch(`/api/templates?business_id=${encodeURIComponent(record.business_id)}`);
+            const templatesData = await templatesRes.json();
+            templates = Array.isArray(templatesData.templates) ? templatesData.templates : [];
+            reviewTemplateCache.set(record.business_id, templates);
+          }
           const matched = (record.template_id && templates.find((t) => t.workflow_template_id === record.template_id)) || templates[0];
           const components = matched?.components?.mapper || matched?.components || {};
           if (components && typeof components.fields === "object" && !Array.isArray(components.fields)) {
@@ -503,7 +626,25 @@ async function openEditRecordModal(record) {
 
       // Match similar brand from existing data:
       // Check record.business_id, rawObj business_id/brand, active mapper brand, or name matching
-      const rawBrandVal = String(getNestedRawValue(rawObj, mapperFields.brand || "brand") || record.brand || activeMapper.brand || "").trim();
+      // String() on an object yields "[object Object]", which formatBrandName
+      // then title-cased into "Object Object" - shown to the user in place of
+      // a real brand like "Casa Verde". The raw record's brand can legitimately
+      // be a nested object (e.g. {name: "..."}), so unwrap it before
+      // stringifying and fall back to the resolved brand rather than printing
+      // the placeholder.
+      const brandCandidate = getNestedRawValue(rawObj, mapperFields.brand || "brand");
+      const unwrapBrand = (value) => {
+        if (value === null || value === undefined) return "";
+        if (typeof value === "object") {
+          // Common shapes: {name}, {value}, {brand}, or a single-entry object.
+          const nested = value.name ?? value.value ?? value.brand ?? value.label;
+          if (nested !== undefined && typeof nested !== "object") return String(nested);
+          const first = Object.values(value).find((v) => v !== null && typeof v !== "object");
+          return first === undefined ? "" : String(first);
+        }
+        return String(value);
+      };
+      const rawBrandVal = (unwrapBrand(brandCandidate) || String(record.brand ?? activeMapper.brand ?? "")).trim();
       const rawNameVal = String(getNestedRawValue(rawObj, mapperFields.name || "name") || "").trim();
       const targetBusinessId = String(record.business_id || activeMapper.business_id || "").trim();
 
@@ -726,7 +867,7 @@ el("submitEditRecordBtn")?.addEventListener("click", async () => {
           feedbackEl.textContent = msg;
           feedbackEl.style.display = "block";
         } else {
-          alert(msg);
+          showAppNotice(msg, "Review record");
         }
       };
 
@@ -832,6 +973,10 @@ el("submitEditRecordBtn")?.addEventListener("click", async () => {
             row_numbers: [currentEditingRecord.row_number],
             mapper: retryMapper,
             rows: [updatedRaw],
+            // Set only by "Save anyway, review later": keeps the user's edit
+            // and defers re-validation to enrichment instead of bouncing it
+            // back for a value the system cannot confirm right now.
+            accept_as_reviewed: window.__acceptAsReviewed === true,
             // An adopted system suggestion counts as an automatic fix (AI
             // Fixed), not a manual one, even though a person clicked
             // Retry - reprocess_rejected() branches its fix-count
@@ -883,7 +1028,19 @@ el("submitEditRecordBtn")?.addEventListener("click", async () => {
           const suggestionText = suggestion && Object.keys(suggestion).length
             ? ` The enricher suggests: ${Object.entries(suggestion).map(([field, value]) => `${escapeHtml(field)} = "${escapeHtml(value)}"`).join(", ")}.`
             : "";
-          showDialogError(`Review Again (attempt ${attemptCount || 1}): this record still doesn't validate. Please check required fields, ZIP Code, and coordinates.${suggestionText}`);
+          // Name the fields that actually failed. The old blanket "check
+          // required fields, ZIP Code, and coordinates" made the user re-read
+          // every input looking for the one that mattered.
+          const failed = Array.isArray(result.failed_fields) ? result.failed_fields : [];
+          const failedText = failed.length
+            ? `${failed.length === 1 ? "This field still" : "These fields still"} need${failed.length === 1 ? "s" : ""} attention: ${failed.map((f) => escapeHtml(formatFieldLabel(f) || f)).join(", ")}.`
+            : "This record still doesn't validate. Please check the highlighted fields.";
+          showDialogError(`Review Again (attempt ${attemptCount || 1}): ${failedText}${suggestionText}`);
+          // Offer the escape hatch only once a retry has actually failed -
+          // showing it up front would invite skipping validation that would
+          // have passed.
+          const acceptBtn = el("acceptAsReviewedBtn");
+          if (acceptBtn) acceptBtn.classList.remove("hidden");
           if (result.hierarchy_conflict) renderHierarchyConflictPicker(result.hierarchy_conflict);
           if (result.non_us_suggestion) renderNonUsSuggestion(result.non_us_suggestion);
         }
@@ -936,7 +1093,7 @@ function _donutSvg(slices, total, size = 320) {
             <title>${escapeHtml(nonZero[0].label || 'Brand')}\n${nonZero[0].value} records\n${pct}% of errors</title>
           </circle>
           <text x="${cx}" y="${cy - 2}" text-anchor="middle" font-size="22" font-weight="700" fill="#1f2937">${total}</text>
-          <text x="${cx}" y="${cy + 17}" text-anchor="middle" font-size="10" fill="#6b7280">total</text>
+          <text x="${cx}" y="${cy + 17}" text-anchor="middle" font-size="11" fill="#6b7280">error listings</text>
         </svg>`;
       }
       let angle = -Math.PI / 2;
@@ -957,7 +1114,7 @@ function _donutSvg(slices, total, size = 320) {
       return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" role="img" aria-label="Error listings by brand">
         ${arcs}
         <text x="${cx}" y="${cy - 2}" text-anchor="middle" font-size="22" font-weight="700" fill="#1f2937">${total}</text>
-        <text x="${cx}" y="${cy + 17}" text-anchor="middle" font-size="10" fill="#6b7280">total</text>
+        <text x="${cx}" y="${cy + 17}" text-anchor="middle" font-size="11" fill="#6b7280">error listings</text>
       </svg>`;
     }
 
@@ -1014,3 +1171,17 @@ async function loadErrorBrandBreakdown() {
         container.style.display = "none";
       }
     }
+
+
+// "Save anyway, review later": keeps the user's edit as user_reviewed and
+// hands re-validation to enrichment. Reuses the normal submit path so the
+// two can never diverge - the only difference is the accept_as_reviewed flag.
+el("acceptAsReviewedBtn")?.addEventListener("click", async () => {
+  window.__acceptAsReviewed = true;
+  try {
+    el("submitEditRecordBtn")?.click();
+  } finally {
+    // Cleared immediately: the flag must never leak into the next retry.
+    window.__acceptAsReviewed = false;
+  }
+});

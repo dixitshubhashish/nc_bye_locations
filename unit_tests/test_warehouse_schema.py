@@ -616,3 +616,75 @@ def test_edited_records_round_trip_unmapped_columns():
     review_js = (Path(__file__).resolve().parents[1] / "ui" / "js" / "review.js").read_text()
     assert "Object.entries(rawObj).filter(" in review_js
     assert "updatedRaw[rawKey] = input.value;" in review_js
+
+
+def test_mapping_confidence_is_mirrored_to_bigquery_and_survives_a_clear():
+    # SQLite is the fast read path, but on Render it sits on ephemeral disk -
+    # a restart would erase everything the app had learned about which source
+    # column maps to which field.
+    import inspect
+    from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS, _clear_dataset_tables_with_client
+    import whitespace_tool.workflow_server as ws
+
+    assert "field_mapping_confidence" in TABLE_SCHEMAS
+    columns = {f["name"] for f in TABLE_SCHEMAS["field_mapping_confidence"]}
+    assert {"target_key", "source_field_normalized", "score", "sample_count"} <= columns
+
+    # The learning describes HOW to map, not what was mapped, so a data clear
+    # must not cost it.
+    clear_source = inspect.getsource(_clear_dataset_tables_with_client)
+    assert '"field_mapping_confidence"' in clear_source
+
+    sync = inspect.getsource(ws.sync_mapping_confidence_to_warehouse)
+    # Full replace keeps BigQuery exactly in step rather than accumulating
+    # superseded scores.
+    assert 'write_disposition="WRITE_TRUNCATE"' in sync
+
+    restore = inspect.getsource(ws.restore_mapping_confidence_from_warehouse)
+    assert "INSERT OR REPLACE INTO field_mapping_confidence" in restore
+    # A missing table is an empty restore, not a crash.
+    assert 'return {"restored": 0}' in restore
+
+    # Restore is lazy and runs at most once per process.
+    once = inspect.getsource(ws._restore_mapping_confidence_once)
+    assert "if _CONFIDENCE_RESTORED:" in once
+    assert "if get_mapping_confidence():" in once  # cache survived -> skip
+
+
+def test_sample_load_records_phase_timings():
+    # The ZIP path logs per-phase durations; the sample load had event logs
+    # but no timings, so "why does it stick" could only be answered by
+    # staring at it.
+    import inspect
+    import whitespace_tool.workflow_server as ws
+
+    source = inspect.getsource(ws.load_sample_dataset)
+    assert "phase_started = perf_counter()" in source
+    assert "sample_brand_loaded brand=%s rows=%d elapsed_s=%.2f" in source
+    assert "sample_load_timing total_s=%.2f brands=%d skipped=%d slowest=%s" in source
+    # Timings are returned to the caller, not only logged.
+    assert 'summary["timing"] = {"total_seconds": total_elapsed, "per_brand_seconds": brand_timings}' in source
+
+
+def test_confidence_restore_never_blocks_the_mapping_request():
+    # This is called from the auto-map path, which a user is waiting on. Doing
+    # the BigQuery round trip inline stalled mapping and hung the test suite
+    # (3s -> >500s). The scores are an optimisation: the current request
+    # proceeds without them and the next one benefits.
+    import inspect
+    import whitespace_tool.workflow_server as ws
+
+    source = inspect.getsource(ws._restore_mapping_confidence_once)
+    assert 'threading.Thread(target=restore, name="mapping-confidence-restore", daemon=True).start()' in source
+    # The network call must sit inside the thread body, not at call level.
+    before_thread = source.split("threading.Thread(", 1)[0]
+    assert "restore_mapping_confidence_from_warehouse()" not in before_thread.split("def restore()", 1)[0]
+
+
+def test_confidence_sync_is_also_backgrounded():
+    import inspect
+    import whitespace_tool.workflow_server as ws
+
+    # Recorded on the save path, pushed to BigQuery off-thread.
+    source = inspect.getsource(ws.save_mapper)
+    assert 'name="mapping-confidence-sync", daemon=True).start()' in source

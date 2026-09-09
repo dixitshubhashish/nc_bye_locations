@@ -95,7 +95,10 @@ function attachSearchableSelect(selectId, { threshold = 15, minChars = 2 } = {})
         search.id = `${selectId}Search`;
         search.className = "report-filter-control";
         search.autocomplete = "off";
-        search.placeholder = `Type ${minChars}+ character${minChars > 1 ? "s" : ""} to search`;
+        // Plain label. This filters the select's own options in memory
+        // (liveOptions above) - it never queries the server - so there is no
+        // reason to explain a minimum length to the user.
+        search.placeholder = selectId === "brandSelect" ? "Search brand" : "Search";
         search.setAttribute("aria-label", "Search this list");
         select.parentNode.insertBefore(search, select);
       }
@@ -143,11 +146,51 @@ function renderSimpleTable(targetId, columns, rows) {
         }).join("")}</tr>`).join("")}</tbody></table>`;
         return;
       }
-      target.innerHTML = `<table><thead><tr>${columns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join("")}</tr></thead><tbody>${visibleRows.map((row) => `<tr>${columns.map((column) => {
+      // Every table paginates once it is long enough to need it. Before this
+      // only the market-gaps table had a pager; everything else rendered
+      // every row (or a silent .slice(0, 10) that hid the rest with no way
+      // to reach it). State is per-target so two tables cannot fight.
+      const page = simpleTablePages.get(targetId) || 0;
+      const pageCount = Math.ceil(visibleRows.length / SIMPLE_TABLE_PAGE_SIZE);
+      const safePage = Math.min(Math.max(page, 0), Math.max(pageCount - 1, 0));
+      simpleTablePages.set(targetId, safePage);
+      const pageRows = pageCount > 1
+        ? visibleRows.slice(safePage * SIMPLE_TABLE_PAGE_SIZE, (safePage + 1) * SIMPLE_TABLE_PAGE_SIZE)
+        : visibleRows;
+      const tableHtml = `<table><thead><tr>${columns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join("")}</tr></thead><tbody>${pageRows.map((row) => `<tr>${columns.map((column) => {
         const value = column.format ? column.format(row[column.key], row) : row[column.key];
         return `<td>${column.html ? value : escapeHtml(value)}</td>`;
       }).join("")}</tr>`).join("")}</tbody></table>`;
+      const pager = pageCount > 1
+        ? `<div class="simple-table-pager" style="display:flex; justify-content:center; align-items:center; gap:8px; margin-top:10px;">
+             <button type="button" class="secondary" data-simple-page="prev" data-target="${escapeHtml(targetId)}"${safePage === 0 ? " disabled" : ""}>Previous</button>
+             <span style="font-size:12px; color:var(--muted);">Page ${safePage + 1} of ${pageCount} &middot; ${visibleRows.length.toLocaleString()} rows</span>
+             <button type="button" class="secondary" data-simple-page="next" data-target="${escapeHtml(targetId)}"${safePage >= pageCount - 1 ? " disabled" : ""}>Next</button>
+           </div>`
+        : "";
+      target.innerHTML = tableHtml + pager;
+      target.dataset.simpleTableColumns = "1";
+      simpleTableData.set(targetId, { columns, rows });
     }
+
+// Paging state and the last dataset per table, so a page change can re-render
+// without refetching. Module scope: renderSimpleTable is called repeatedly.
+const SIMPLE_TABLE_PAGE_SIZE = 10;
+const simpleTablePages = new Map();
+const simpleTableData = new Map();
+
+// One delegated listener for every simple table's pager.
+document.addEventListener("click", (event) => {
+      const button = event.target?.closest?.("button[data-simple-page]");
+      if (!button) return;
+      event.preventDefault();
+      const targetId = button.dataset.target;
+      const stored = simpleTableData.get(targetId);
+      if (!stored) return;
+      const current = simpleTablePages.get(targetId) || 0;
+      simpleTablePages.set(targetId, button.dataset.simplePage === "next" ? current + 1 : current - 1);
+      renderSimpleTable(targetId, stored.columns, stored.rows);
+    });
 
 function flattenObject(value, prefix = "", output = {}) {
       if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -282,6 +325,43 @@ function hideProgress() {
       hideLoadingOverlay();
       if (typeof clearBackgroundSaveNotice === "function") clearBackgroundSaveNotice();
     }
+// Themed replacements for window.alert / window.confirm. The native ones
+// ignore the app theme entirely and cannot be styled, so they looked like a
+// different product every time they appeared. Both degrade to the native
+// call only if the dialog element is missing (e.g. a page that does not
+// include the shell markup).
+function showAppNotice(message, title = "Done") {
+      const dialog = el("appNoticeDialog");
+      if (!dialog || typeof dialog.showModal !== "function") { window.alert(message); return; }
+      el("appNoticeTitle").textContent = title;
+      el("appNoticeMessage").textContent = message;
+      const ok = el("appNoticeOk");
+      if (ok && !ok.dataset.bound) {
+        ok.dataset.bound = "1";
+        ok.addEventListener("click", () => dialog.close());
+      }
+      dialog.showModal();
+    }
+function showAppConfirm(message, title = "Please confirm") {
+      const dialog = el("appConfirmDialog");
+      if (!dialog || typeof dialog.showModal !== "function") return Promise.resolve(window.confirm(message));
+      el("appConfirmTitle").textContent = title;
+      el("appConfirmMessage").textContent = message;
+      return new Promise((resolve) => {
+        const finish = (answer) => {
+          el("appConfirmYes").removeEventListener("click", onYes);
+          el("appConfirmNo").removeEventListener("click", onNo);
+          dialog.close();
+          resolve(answer);
+        };
+        const onYes = () => finish(true);
+        const onNo = () => finish(false);
+        el("appConfirmYes").addEventListener("click", onYes);
+        el("appConfirmNo").addEventListener("click", onNo);
+        dialog.showModal();
+      });
+    }
+
 function busyMarkup(label = "Loading") {
       const cleanLabel = String(label).replace(/\.\.\.+$/, "").trim();
       return `<span class="busy-label">${escapeHtml(cleanLabel)} <span class="inline-spinner"></span></span>`;

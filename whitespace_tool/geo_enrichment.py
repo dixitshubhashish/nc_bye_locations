@@ -70,6 +70,48 @@ def normalize_city_text(city: str | None) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def normalize_wrapped_longitude(lon: float | None) -> tuple[float | None, bool]:
+    """Fold an out-of-range longitude back into -180..180.
+
+    A value like -245.22 is not "a coordinate outside the US" - it is outside
+    the valid longitude range altogether, so no lookup can ever match it. But
+    -245.22 + 360 = 114.78, a real meridian: the source wrapped the value
+    instead of clamping it. Folding it back recovers a usable coordinate
+    rather than discarding the row as unfixable.
+
+    Returns (longitude, was_wrapped).
+    """
+    if lon is None:
+        return None, False
+    try:
+        value = float(lon)
+    except (TypeError, ValueError):
+        return None, False
+    if -180.0 <= value <= 180.0:
+        return value, False
+    # Fold into range. ((v + 180) mod 360) - 180 handles either direction and
+    # any number of whole revolutions.
+    folded = ((value + 180.0) % 360.0) - 180.0
+    # A value that folds exactly onto the antimeridian from the wrong side is
+    # still ambiguous, but it is at least in range and lookup-able.
+    return folded, True
+
+
+def normalize_wrapped_latitude(lat: float | None) -> tuple[float | None, bool]:
+    """Latitude has no meaningful wrap: beyond +/-90 the value is simply wrong,
+    and folding it would silently move the point to a different hemisphere.
+    Reported as unusable instead of quietly repaired."""
+    if lat is None:
+        return None, False
+    try:
+        value = float(lat)
+    except (TypeError, ValueError):
+        return None, False
+    if -90.0 <= value <= 90.0:
+        return value, False
+    return None, True
+
+
 def detect_and_fix_inverted_coords(lat: float | None, lon: float | None) -> tuple[float | None, float | None, bool]:
     """Detect if lat and lon are inverted (i.e. lat is longitude and lon is latitude in US).
     Returns (corrected_lat, corrected_lon, was_inverted).
@@ -101,6 +143,11 @@ def is_us_land_coordinate(lat: float | None, lon: float | None) -> bool:
 
 
 MAX_SNAP_DISTANCE_KM = 50.0
+# A *suggestion* may reach further than an automatic repair. Snapping silently
+# at 100km would be too loose, but offering the nearest city within 100km for
+# a person to accept is exactly the "corner the 100km radius and see if any
+# city it can be mapped with" ask - non-US data is valid data, just not US.
+MAX_SUGGESTION_DISTANCE_KM = 100.0
 
 
 def haversine_distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -285,6 +332,7 @@ def find_nearest_worldwide_city(
     lon: float,
     conn: sqlite3.Connection,
     country: str | None = None,
+    max_distance_km: float = MAX_SNAP_DISTANCE_KM,
 ) -> dict[str, Any] | None:
     """Find the nearest worldwide city from worldwide_cities in cachedb for any coordinates (including ocean/offshore)."""
     if lat is None or lon is None:
@@ -327,9 +375,16 @@ def find_nearest_worldwide_city(
             min_dist = dist
             best_match = r
 
-    if best_match and min_dist <= MAX_SNAP_DISTANCE_KM:
+    # Radius is the caller's choice, defaulting to the tight snap distance so
+    # every existing automatic path keeps its guarantee. The non-US
+    # "here is the nearest city, accept it?" prompt passes the wider
+    # MAX_SUGGESTION_DISTANCE_KM, because a person confirms that one.
+    if best_match and min_dist <= max_distance_km:
         res = dict(best_match)
         res["distance_km"] = round(min_dist, 2)
+        # Lets a caller tell a confident snap from a wider confirm-me
+        # suggestion instead of treating them alike.
+        res["within_snap_radius"] = min_dist <= MAX_SNAP_DISTANCE_KM
         return res
     return None
 

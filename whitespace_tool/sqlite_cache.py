@@ -6,6 +6,7 @@ import functools
 import json
 import logging
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any, Generator
@@ -169,6 +170,18 @@ def init_sqlite_cache() -> None:
             if column not in existing_business_columns:
                 column_type = "INTEGER" if column in {"is_reference_data", "listing_count"} else "TEXT"
                 conn.execute(f"ALTER TABLE mirror_businesses ADD COLUMN {column} {column_type};")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS fix_state_counts (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                ai_fixed INTEGER NOT NULL DEFAULT 0,
+                ai_suggested_fixed INTEGER NOT NULL DEFAULT 0,
+                manual_fixed INTEGER NOT NULL DEFAULT 0,
+                ai_suggested_pending INTEGER NOT NULL DEFAULT 0,
+                manual_pending INTEGER NOT NULL DEFAULT 0,
+                total_ever_invalid INTEGER NOT NULL DEFAULT 0,
+                updated_at TIMESTAMP
+            );
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS mirror_meta (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -376,9 +389,50 @@ def _timed_cache_action(func):
             return func(*args, **kwargs)
         finally:
             duration_ms = (time.perf_counter() - started) * 1000.0
+            # EVERY action is counted, not only the slow ones: a call that is
+            # individually fast but runs thousands of times is a bigger cost
+            # than one slow call, and counting only the slow ones made that
+            # pattern invisible. Counters are in-memory (no write amplification
+            # from logging every cache read); only genuinely slow calls are
+            # persisted, as before.
+            _tally_cache_action(func.__name__, duration_ms)
             if duration_ms >= SLOW_ACTION_THRESHOLD_MS:
                 _record_slow_action(func.__name__, duration_ms)
     return wrapper
+
+
+# action -> (call count, total ms). In memory on purpose: persisting a row per
+# cache read would cost more than the reads themselves.
+_CACHE_ACTION_TALLY: dict[str, list[float]] = {}
+_CACHE_TALLY_LOCK = threading.Lock()
+
+
+def _tally_cache_action(action: str, duration_ms: float) -> None:
+    with _CACHE_TALLY_LOCK:
+        entry = _CACHE_ACTION_TALLY.setdefault(action, [0.0, 0.0])
+        entry[0] += 1
+        entry[1] += duration_ms
+
+
+def get_cache_action_stats(limit: int = 50) -> list[dict[str, Any]]:
+    """Per-action call count and total/average time for this process.
+
+    Answers "what is this cache actually spending its time on" - including
+    the death-by-a-thousand-cuts case a slow-call log can never show.
+    """
+    with _CACHE_TALLY_LOCK:
+        snapshot = {action: list(values) for action, values in _CACHE_ACTION_TALLY.items()}
+    rows = [
+        {
+            "action": action,
+            "calls": int(calls),
+            "total_ms": round(total_ms, 2),
+            "avg_ms": round(total_ms / calls, 3) if calls else 0.0,
+        }
+        for action, (calls, total_ms) in snapshot.items()
+    ]
+    rows.sort(key=lambda row: row["total_ms"], reverse=True)
+    return rows[: max(1, int(limit))]
 
 
 def get_slow_actions(limit: int = 50) -> list[dict[str, Any]]:
@@ -743,6 +797,36 @@ def set_zip_reference_status(status: str, rows: int = 0, message: str = "") -> N
         conn.commit()
 
 
+# Five-state fix counts, mirrored so the cards render instantly on load and
+# survive a restart. BigQuery remains authoritative; this is the fast read.
+FIX_STATE_COLUMNS = (
+    "ai_fixed", "ai_suggested_fixed", "manual_fixed",
+    "ai_suggested_pending", "manual_pending", "total_ever_invalid",
+)
+
+
+def set_fix_state_counts(counts: dict[str, Any]) -> None:
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        conn.execute(
+            f"INSERT OR REPLACE INTO fix_state_counts (id, {', '.join(FIX_STATE_COLUMNS)}, updated_at) "
+            f"VALUES (1, {', '.join('?' for _ in FIX_STATE_COLUMNS)}, CURRENT_TIMESTAMP);",
+            tuple(int(counts.get(column, 0) or 0) for column in FIX_STATE_COLUMNS),
+        )
+        conn.commit()
+
+
+def get_fix_state_counts() -> dict[str, Any]:
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        row = conn.execute(
+            f"SELECT {', '.join(FIX_STATE_COLUMNS)}, updated_at FROM fix_state_counts WHERE id = 1;"
+        ).fetchone()
+        # No row yet is honestly "not computed", not "all zero" - the caller
+        # decides whether to show a placeholder or trigger a recount.
+        return dict(row) if row else {}
+
+
 def get_auto_repair_stats() -> dict[str, Any]:
     init_sqlite_cache()
     with get_db_connection() as conn:
@@ -832,6 +916,7 @@ def clear_local_cache_db(include_reference_zips: bool = False) -> None:
         "mirror_reporting_locations",
         "mirror_businesses",
         "mirror_meta",
+        "fix_state_counts",
     ]
     if include_reference_zips:
         tables_to_clear.extend(["us_zipcodes", "zip_reference_status"])

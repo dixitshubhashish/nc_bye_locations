@@ -207,8 +207,12 @@ def test_refresh_report_button_starts_backend_refresh_and_shows_status():
     assert 'fetch("/api/reporting/refresh"' in refresh_function
     assert 'method: "POST"' in refresh_function
     assert 'body: JSON.stringify({ low_priority: true })' in refresh_function
-    assert "Report refresh started. Updating numbers..." in refresh_function
-    assert "Report refresh is already running..." in refresh_function
+    # No duplicate status line: the Refresh button itself shows the
+    # in-flight state with a spinner, and its reserved height was the
+    # empty band under the button.
+    assert "Report refresh started. Updating numbers" not in refresh_function
+    assert "Report refresh is already running" not in refresh_function
+    assert 'if (status) status.classList.add("hidden");' in refresh_function
     assert "await loadReporting({ interactive: true });" in refresh_function
     assert "clearButtonBusy(refreshBtn, previousRefreshBtn);" in refresh_function
 
@@ -236,7 +240,7 @@ def test_reporting_zero_setup_polls_frequently_until_business_data_exists():
     assert "function reportHasBusinessData" in reporting_js
     assert "function scheduleReportingWarmupPoll" in reporting_js
     assert "window.setTimeout" in reporting_js
-    assert "Preparing reporting data..." in load_reporting
+    assert "Preparing reporting data" in load_reporting
     assert "scheduleReportingWarmupPoll(3000);" in load_reporting
     assert "clearTimeout(reportingWarmupTimer);" in load_reporting
 
@@ -628,7 +632,12 @@ def test_retry_button_splits_into_ai_suggested_vs_manual_review_with_attempt_bad
     assert 'data-open-edit="${escapeHtml(record.row_number)}" data-event="${escapeHtml(record.event_id)}" style="background:#1677ee; border-color:#1677ee; color:#fff;">\U0001F916 AI Suggested Fix</button>' in review_js
     assert 'data-open-edit="${escapeHtml(record.row_number)}" data-event="${escapeHtml(record.event_id)}" style="background:#fff; border-color:#d97706; color:#b45309;">🛠️ Manual Review</button>' in review_js
     assert "const attemptCount = Number(record.attempt_count || 0);" in review_js
-    assert 'Attempt ${attemptCount}' in review_js
+    # The words "Attempt N" became an effort icon + the count: it reads at a
+    # glance in a dense table. Drawn inline because the page CSP blocks
+    # external images and an inline path carries no licensing question.
+    assert 'class="review-attempt-badge"' in review_js
+    assert "<svg viewBox=\"0 0 24 24\"" in review_js
+    assert "</svg>${attemptCount}</span>" in review_js
 
 
 def test_hierarchy_conflict_picker_offers_both_readings_without_auto_applying():
@@ -757,22 +766,23 @@ def test_header_utilities_column_wraps_instead_of_overlapping_or_silently_clippi
     assert "flex-wrap: nowrap;" not in html.split("header .header-actions {", 1)[1].split("}", 1)[0]
 
 
-def test_trends_top_states_and_extended_coverage_live_on_tab_one():
+def test_trends_and_top_states_live_on_tab_one():
+    # Extended Coverage Metrics used to be asserted here too; it was deleted
+    # for duplicating/contradicting the top row (see
+    # test_extended_coverage_metrics_panel_is_gone).
     # RPT-05/06/07: all three read /api/reporting/summary and
     # /api/reporting/timeseries (not the slow quality payload), so they
     # belong with Location Intelligence. Extended Coverage Metrics sits
     # directly after the first number-card block per RPT-07.
     html = (ROOT / "ui" / "integrations.html").read_text()
     reporting_tabs_js = (ROOT / "ui" / "reporting-tabs.js").read_text()
-    for marker in ('id="dqExtraGrid"', 'id="dqTrendChart"', 'id="dqTopStatesBar"'):
+    for marker in ('id="dqTrendChart"', 'id="dqTopStatesBar"'):
         assert marker in html, f"{marker} should now live in tab 1's markup"
         assert marker not in reporting_tabs_js, f"{marker} still in the Data Quality panel"
     tab_one = html.split('<div id="reportContent" class="hidden">', 1)[1].split("<!-- Location Map Section -->", 1)[0]
-    assert 'id="dqExtraGrid"' in tab_one
     assert 'id="dqTrendChart"' in tab_one
     assert 'id="dqTopStatesBar"' in tab_one
-    # Extended Coverage Metrics before the charts, right after the cards.
-    assert tab_one.index('id="dqExtraGrid"') < tab_one.index('id="dqTrendChart"')
+    # Trends sits before Top States within tab 1.
     # No longer driven by the quality load path.
     quality_fn = reporting_tabs_js.split("async function loadQuality(forceRefresh = false)", 1)[1].split("\n  function ", 1)[0]
     assert "loadExtendedMetrics()" not in quality_fn
@@ -797,13 +807,20 @@ def test_d3_is_vendored_locally_and_every_chart_uses_it():
     assert 'vendor/d3/d3.min.js' in guard_block
 
     reporting_tabs_js = (ROOT / "ui" / "reporting-tabs.js").read_text()
-    # Every chart renderer goes through d3 - no hand-rolled SVG strings left.
+    # Every chart renderer goes through d3 EXCEPT renderTopStatesBar, which
+    # was moved to a fixed-viewBox SVG on purpose - see
+    # test_top_states_bar_reads_the_real_locations_field_not_a_nonexistent_one
+    # for why measuring width made it unfixable in d3.
     assert "function renderTimeSeriesChart(container, series, options = {})" in reporting_tabs_js
     assert "function chartTooltip(container)" in reporting_tabs_js
-    for marker in ("d3.scaleTime()", "d3.scaleLinear()", "d3.scaleBand()", "d3.pie()", "d3.arc()", "d3.axisBottom", "d3.axisLeft"):
+    for marker in ("d3.scaleTime()", "d3.scaleLinear()", "d3.pie()", "d3.arc()", "d3.axisBottom", "d3.axisLeft"):
         assert marker in reporting_tabs_js, marker
-    # Each renderer degrades honestly if the library somehow fails to load.
-    assert reporting_tabs_js.count("Charting library failed to load") >= 3
+    # Each d3 renderer degrades honestly if the library somehow fails to
+    # load. Top States no longer needs the guard - it does not use d3 at all,
+    # so claiming the library failed would be a false explanation.
+    assert reporting_tabs_js.count("Charting library failed to load") >= 2
+    bar_fn = reporting_tabs_js.split("function renderTopStatesBar(states = [])", 1)[1].split("\n  function ", 1)[0]
+    assert "Charting library failed to load" not in bar_fn
 
 
 def test_number_cards_offer_a_hover_download_of_their_data():
@@ -837,7 +854,7 @@ def test_location_tab_number_cards_are_exportable_too():
     # Explicit report: "first tab CSV export math is missing" - the location
     # intelligence cards had no download affordance at all.
     html = (ROOT / "ui" / "integrations.html").read_text()
-    for label in ("Total States", "Market ZIPs", "Active Brands", "Total Stores",
+    for label in ("Total States", "Market ZIPs", "Active Brands", "Total Listings",
                   "Covered Markets (ZIPs)", "Covered States", "Covered Cities", "Uncovered ZIPs"):
         assert f'class="report-metric-download" data-metric-label="{label}"' in html, label
     assert "⬇ Excel</button>" in html
@@ -1178,22 +1195,37 @@ def test_most_impacted_states_shows_full_names_not_two_letter_codes():
     reporting_tabs_js = (ROOT / "ui" / "reporting-tabs.js").read_text()
     assert "const stateLabel = (code) =>" in reporting_tabs_js
     assert "stateCodeToName[String(code).toUpperCase()]" in reporting_tabs_js
-    assert "escapeHtml(stateLabel(row.state))" in reporting_tabs_js
+    # The geo tables moved to the paginated renderer, which escapes in one
+    # place - the label conversion still happens at the call site.
+    assert "states.map((row) => [stateLabel(row.state), fmt(row.count)])" in reporting_tabs_js
 
 
 def test_top_states_bar_reads_the_real_locations_field_not_a_nonexistent_one():
     # Live-verified bug: renderTopStatesBar() read row.zip_count ?? row.count,
     # but the real top_states payload uses "locations" - neither other name
-    # ever existed on it, so every bar computed to 0. Now a d3 bar chart
-    # with real scales/axes and hover tooltips.
+    # ever existed on it, so every bar computed to 0.
+    #
+    # This chart is deliberately NOT d3 (unlike every other chart here). Two
+    # d3 versions were broken by the same root cause: sizing from
+    # container.clientWidth, which is 0 while the panel is hidden. The first
+    # produced a 900px viewBox scaled into one solid block; the second needed
+    # a ResizeObserver that could re-enter and stack a second chart over the
+    # first (overlapping full-height rectangles, user-reported). A fixed
+    # viewBox scales to any width without measuring, so neither case exists.
     reporting_tabs_js = (ROOT / "ui" / "reporting-tabs.js").read_text()
     bar_fn = reporting_tabs_js.split("function renderTopStatesBar(states = [])", 1)[1].split("\n  function ", 1)[0]
     assert "num(row.locations)" in bar_fn
     assert "r.zip_count" not in bar_fn
     assert "row.zip_count" not in bar_fn
-    assert "d3.scaleLinear()" in bar_fn
-    assert "d3.scaleBand()" in bar_fn
+    # No width measurement and no observer means no zero-width or re-entrancy.
+    assert "clientWidth" not in bar_fn
+    assert "ResizeObserver" not in bar_fn
+    assert "d3." not in bar_fn
+    assert 'viewBox="0 0 ${TOP_STATES_VIEW_W} ${height}"' in bar_fn
+    # Birdeye accent hue, labels, and hover interactivity all still required.
+    assert "hsl(213, 88%" in reporting_tabs_js
     assert "chartTooltip(container)" in bar_fn
+    assert "group.addEventListener('mouseenter', show);" in bar_fn
 
 
 def test_mapping_confidence_snapshot_and_diff_are_wired_into_save():
@@ -1302,8 +1334,12 @@ def test_error_listings_schema_is_ensured_before_it_is_queried():
     ensure = inspect.getsource(ws._ensure_error_listings_table)
     assert 'TABLE_SCHEMAS["error_listings"]' in ensure
     assert "client.update_table(existing, [\"schema\"])" in ensure
+    # Routed through the once-per-process memo now: the ensure pass still
+    # runs before the query, but a repeat save no longer pays the ~1.75s
+    # BigQuery round trip for a schema that cannot have changed.
     for reader in (ws.reporting_quality_summary, ws.reporting_metric_export):
-        assert "_ensure_error_listings_table(client, project_id, dataset_id)" in inspect.getsource(reader), reader.__name__
+        source = inspect.getsource(reader)
+        assert '_ensure_once("error_listings", _ensure_error_listings_table, client, project_id, dataset_id)' in source, reader.__name__
 
 
 def test_empty_metric_export_says_whether_the_source_was_missing():
@@ -1352,42 +1388,6 @@ def test_duplicate_brand_detection_runs_on_app_load():
     assert "loadBrands()" in boot
 
 
-def test_duplicate_brands_surface_in_the_forty_percent_rail_one_at_a_time():
-    # "should be shown in 40% mapper already to fix one by one".
-    assert 'id="duplicateBrandPanel"' in HTML
-    assert 'class="panel left-rail-persistent hidden" id="duplicateBrandPanel"' in HTML
-    assert 'id="duplicateBrandList"' in HTML
-
-    mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
-    rail = mapper_js.split("function renderDuplicateBrandRail(", 1)[1].split("\nasync function ", 1)[0]
-    # Hidden entirely when there is nothing to merge.
-    assert 'panel.classList.add("hidden");' in rail
-    # One group at a time, with the rest counted rather than all rendered.
-    assert "const group = groups[0];" in rail
-    assert "const remaining = groups.length - 1;" in rail
-    # Merging reloads so merged-away ids leave every picker.
-    assert "await loadBrands();" in rail
-
-
-def test_duplicate_brand_details_are_hover_text_not_inline():
-    # "based on the brand name ID and created_at as newest vs oldest, this
-    # all info can be like a hover".
-    mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
-    rail = mapper_js.split("function renderDuplicateBrandRail(", 1)[1].split("\nasync function ", 1)[0]
-    assert "const newestCreatedAt = Math.max(...group.map(businessCreatedTime));" in rail
-    assert 'title="${escapeHtml(businessOptionLabel(brand, newestCreatedAt))}"' in rail
-    # The hover-only rule applies to the brand DROPDOWN (where inline detail
-    # was clutter). The merge picker is a decision, so it shows newest/oldest
-    # and listing counts inline - see
-    # test_merge_picker_shows_newest_vs_oldest_and_listing_counts_visibly.
-    load = mapper_js.split("async function loadBrands(", 1)[1].split("\nasync function ", 1)[0]
-    assert 'title="${escapeHtml(businessOptionLabel(brand))}"' in load
-    assert "${escapeHtml(formatBrandName(brand.name))}</option>" in load
-    # businessOptionLabel is what carries id + listing count + created_at.
-    for part in ("display_business_id", "listings", "created "):
-        assert part in mapper_js.split("function businessOptionLabel(", 1)[1].split("\nfunction ", 1)[0], part
-
-
 def test_there_is_only_one_brand_merge_ui():
     # Two competing merge forms for the same problem is how this stayed
     # unresolved - the old "Similar Brands" block inside the Active Brands
@@ -1396,22 +1396,36 @@ def test_there_is_only_one_brand_merge_ui():
     assert "data-merge-action" not in mapper_js
     assert "mergeHtml" not in mapper_js
     # One call site (the rail) plus the function definition itself.
-    assert mapper_js.count("await mergeDuplicateBusinesses(targetId, sourceIds);") == 1
+    # Bulk merge calls it once per group inside one loop - still a single
+    # call site, not a second competing UI.
+    assert mapper_js.count("await mergeDuplicateBusinesses(plan.targetId, plan.sourceIds);") == 1
 
 
-def test_review_action_buttons_use_a_delegated_listener():
-    # Reported non-functional: the per-button listeners were bound right
-    # after enableSortableTable(), which rebuilds the tbody when a column is
-    # sorted - detaching them and leaving "AI Suggested Fix" / "Manual
-    # Review" dead on click. One delegated listener survives any re-render.
+def test_review_action_buttons_are_bound_once_at_load_not_per_render():
+    # Two live failures here: per-button listeners died when the sortable
+    # helper rebuilt the tbody, and the per-render container listener was
+    # skipped entirely whenever anything threw between drawing the table and
+    # reaching the bind line - leaving visible buttons that did nothing. A
+    # handler installed once at load cannot be skipped.
     review_js = (ROOT / "ui" / "js" / "review.js").read_text()
-    assert "let reviewActionHandler = null;" in review_js
-    assert 'const button = event.target.closest("button[data-open-edit]");' in review_js
-    assert 'target.addEventListener("click", reviewActionHandler);' in review_js
-    # Re-bound per load, so handlers don't stack up.
-    assert 'if (reviewActionHandler) target.removeEventListener("click", reviewActionHandler);' in review_js
-    # The old stale-prone per-button binding must not come back.
+    assert "const reviewRecordsByKey = new Map();" in review_js
+    assert 'document.addEventListener("click", (event) => {' in review_js
+    assert 'const button = event.target?.closest?.("button[data-open-edit]");' in review_js
+    # Capture phase, so a stray stopPropagation upstream cannot swallow it.
+    assert "}, true);" in review_js
+    # Record lookup is by the same key the button carries.
+    assert 'reviewRecordsByKey.get(`${button.dataset.event}::${button.dataset.openEdit}`)' in review_js
+    assert 'reviewRecordsByKey.set(`${record.event_id}::${record.row_number}`, record)' in review_js
+    # The fragile per-render binding must not come back.
+    assert "reviewActionHandler" not in review_js
     assert 'target.querySelectorAll("button[data-open-edit]").forEach(' not in review_js
+
+
+def test_empty_review_queue_clears_the_record_store():
+    # A stale record must not stay openable from a previous page of results.
+    review_js = (ROOT / "ui" / "js" / "review.js").read_text()
+    empty_branch = review_js.split("if (!result.records.length) {", 1)[1].split("return;", 1)[0]
+    assert "reviewRecordsByKey.clear();" in empty_branch
 
 
 def test_the_ai_action_carries_an_ai_icon_and_manual_keeps_its_own():
@@ -1466,8 +1480,22 @@ def test_brand_similarity_uses_a_seventy_five_percent_threshold():
     assert "function brandNameSimilarity(a = \"\", b = \"\")" in mapper_js
     assert "return (2 * shared) / (first.size + second.size);" in mapper_js
     assert "function duplicateBusinessGroups(brands = [], threshold = BRAND_SIMILARITY_THRESHOLD)" in mapper_js
-    # content_hash grouping helper exists for the dedupe follow-up.
-    assert "function duplicateContentHashGroups(listings = [])" in mapper_js
+    # business_id was REMOVED from CONTENT_HASH_FIELDS (user decision), so the
+    # hash now answers "is this the same physical place?" independently of
+    # which brand filed it - which is what makes a cross-brand duplicate
+    # detectable at all. The old client-side helper stays deleted: the signal
+    # belongs warehouse-side, where the whole table can be grouped.
+    assert "function duplicateContentHashGroups" not in mapper_js
+
+    from whitespace_tool.warehouse_bigquery import (
+        CONTENT_HASH_FIELDS, LEGACY_CONTENT_HASH_FIELDS, content_hash, legacy_content_hash)
+    assert "business_id" not in CONTENT_HASH_FIELDS
+    listing = {"name": "Store 1", "address": "1 Main St", "zip_code": "78701"}
+    assert content_hash({**listing, "business_id": "brand-A"}) == content_hash({**listing, "business_id": "brand-B"})
+    # The legacy definition is kept verbatim so already-stored rows stay
+    # recognisable during the transition - it must still separate brands.
+    assert LEGACY_CONTENT_HASH_FIELDS == ("business_id",) + CONTENT_HASH_FIELDS
+    assert legacy_content_hash({**listing, "business_id": "brand-A"}) != legacy_content_hash({**listing, "business_id": "brand-B"})
 
 
 def test_data_model_gets_search_and_scrolling_only_when_the_field_list_is_long():
@@ -1512,9 +1540,15 @@ def test_template_review_locks_the_business_and_keeps_the_template_library_tab()
     common_js = (ROOT / "ui" / "js" / "common.js").read_text()
     mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
 
-    assert "function setTemplateEditBrandLock(locked)" in templates_js
+    assert 'function setTemplateEditBrandLock(locked, businessId = "", brandLabel = "")' in templates_js
     assert '["brandSelect", "parserBusinessSelect", "preParseBrandSelect"].forEach' in templates_js
-    assert "setTemplateEditBrandLock(true);" in templates_js
+    assert "setTemplateEditBrandLock(true, template.business_id," in templates_js
+    # A locked picker must SHOW the brand, not the placeholder. The option can
+    # be genuinely absent - this select hides duplicate brands and the
+    # template may point at a hidden copy - so it is added when missing.
+    assert "if (locked && businessId) {" in templates_js
+    assert "node.appendChild(option);" in templates_js
+    assert "node.value = businessId;" in templates_js
 
     # Top nav highlight stays on Template Library while in template-edit mode.
     assert 'const highlightViewId = (viewId === "mapperView" && el("mapperView")?.classList.contains("template-edit-mode"))' in common_js
@@ -1526,71 +1560,20 @@ def test_template_review_locks_the_business_and_keeps_the_template_library_tab()
     assert mapper_js.count('setTemplateEditBrandLock(false)') == mapper_js.count('classList.remove("template-edit-mode")')
 
 
-def test_merge_picker_shows_newest_vs_oldest_and_listing_counts_visibly():
-    # Reported: "you didn't tell which one is new or old, so user can decide".
-    # Unlike the brand dropdown - where inline detail was clutter - this is a
-    # DECISION, so the basis for it must be visible, not hover-only.
+def test_sample_load_shows_no_progress_readout_at_all():
+    # First the percentage was a fabrication (elapsed/estimate capped at 94,
+    # so a slow load parked there); then the honest elapsed-time replacement
+    # was still a running commentary occupying a whole band. Neither earns
+    # the space: the button's busy state says it is working and the
+    # completion dialog says what happened.
     mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
-    label = mapper_js.split("function businessMergeChoiceLabel(", 1)[1].split("\nfunction ", 1)[0]
-    assert '" - Newest"' in label
-    assert '" - Oldest"' in label
-    assert "listing_count" in label
-    assert "formatTimestamp(brand.created_at)" in label
-    # Used by the rail's picker (not the plain short label).
-    rail = mapper_js.split("function renderDuplicateBrandRail(", 1)[1].split("\nasync function ", 1)[0]
-    assert "businessMergeChoiceLabel(brand, newestCreatedAt, oldestCreatedAt)" in rail
-    assert "const oldestCreatedAt = Math.min(" in rail
-    # And the recommendation is stated, not left implicit.
-    assert "Suggested:" in rail
-
-
-
-def test_review_action_handler_is_declared_at_module_scope():
-    # Live error: "reviewActionHandler is not defined" on the review queue.
-    # The declaration had landed INSIDE the preceding function (between its
-    # finally block and its closing brace), so it was function-scoped and
-    # invisible to loadRejectedRecords(), which both reads and writes it.
-    import re
-
-    review_js = (ROOT / "ui" / "js" / "review.js").read_text()
-    lines = review_js.split("\n")
-    declaration = next(i for i, line in enumerate(lines, 1) if "let reviewActionHandler = null;" in line)
-    depth = 0
-    for line in lines[:declaration - 1]:
-        code = re.sub(r"//.*", "", line)
-        depth += code.count("{") - code.count("}")
-    assert depth == 0, f"reviewActionHandler declared at brace depth {depth}, must be module scope"
-
-
-def test_empty_review_queue_detaches_the_previous_action_handler():
-    # The queue going from N records to 0 returns early; without detaching,
-    # the previous delegated listener stays attached and holds the old
-    # records array alive in its closure.
-    review_js = (ROOT / "ui" / "js" / "review.js").read_text()
-    empty_branch = review_js.split("if (!result.records.length) {", 1)[1].split("return;", 1)[0]
-    assert 'target.removeEventListener("click", reviewActionHandler);' in empty_branch
-    assert "reviewActionHandler = null;" in empty_branch
-    assert 'target.textContent = "No error listings found.";' in empty_branch
-
-
-def test_sample_load_progress_never_parks_on_a_fabricated_percentage():
-    # Reported repeatedly: "why does it always stop at 94%". Nothing was
-    # stuck - the bar was elapsed/estimate capped at Math.min(94, ...), so any
-    # load slower than the 15/25s guess sat on 94% forever. A number that
-    # stops measuring must stop being shown as a measurement (INV-15).
-    mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
-    # Strip comments first: the explanatory comment above the fix names the
-    # very expression being asserted absent from the CODE.
     code_only = "\n".join(
         line for line in mapper_js.split("\n") if not line.strip().startswith("//"))
     assert "Math.min(94" not in code_only, "the 94% cap must not come back"
-    block = mapper_js.split("const renderProgress = (elapsed) =>", 1)[1].split("}, 1000);", 1)[0]
-    assert "percent < 95" in block
-    assert "elapsed}s elapsed" in block
-    assert "this keeps running" in block
-    # Spinner copy carries no trailing ellipsis.
-    assert "${progressLabel} (${detail})" in block
-    assert "(${percent}%)..." not in mapper_js
+    assert "progressLabel" not in code_only, "no running progress label"
+    assert "s elapsed - larger batches take longer" not in code_only
+    # The status band is emptied and hidden rather than carrying commentary.
+    assert 'status.className = "report-status hidden";' in mapper_js
 
 
 def test_sample_loader_skips_a_failing_brand_instead_of_aborting_the_batch():
@@ -1608,3 +1591,914 @@ def test_sample_loader_skips_a_failing_brand_instead_of_aborting_the_batch():
     save = inspect.getsource(ws.save_mapper)
     assert "if rows and all(not isinstance(row, dict) for row in rows):" in save
     assert 'raise ValueError("Row must be an object with named fields")' in save
+
+
+def test_extended_coverage_metrics_panel_is_gone():
+    # Removed after comparing it to the top row BY VALUE, not by label:
+    #   Active Market Locations 33 == Covered Markets 33      (duplicate)
+    #   Brands Tracked 11        == Active Brands 11          (duplicate)
+    #   Total Stores 10,130      == Total Stores 10,130       (duplicate)
+    #   ZIP Codes Covered 41,618 == Market ZIPs 41,618        (mislabelled)
+    #   States Covered 57        vs Covered States 11         (universe, wrong)
+    #   Cities Covered 21,788    vs Covered Cities 28         (universe, wrong)
+    #   Whitespace ZIPs 100      vs Uncovered ZIPs 41,585     (page size!)
+    # Only one value was unique and three actively contradicted the correct
+    # figures, so the panel was net-negative.
+    tabs_js = (ROOT / "ui" / "reporting-tabs.js").read_text()
+    assert "renderExtraMetrics" not in tabs_js
+    assert "dqExtraGrid" not in tabs_js
+    assert "dqExtraGrid" not in HTML
+    assert "Extended Coverage Metrics" not in HTML
+    # The Top States chart shared that loader and must survive.
+    assert "dqTopStatesBar" in tabs_js
+    assert "async function loadExtendedMetrics()" in tabs_js
+    assert "renderTopStatesBar(" in tabs_js
+
+
+def test_quality_sidebar_matches_tab_one_filter_styling():
+    # Reported: the Data Quality sidebar had extra spacing/framing tab 1 does
+    # not. Concretely it was a white card WITH a shadow whose inner fields
+    # carried 12px padding inside an already-16px-padded container - doubled
+    # framing - while tab 1 uses a tinted container with 8px inner boxes.
+    tabs_js = (ROOT / "ui" / "reporting-tabs.js").read_text()
+
+    # Same container treatment as .report-filters in integrations.html.
+    assert "background: var(--accent-tint);" in HTML
+    assert "border: 1px solid var(--accent-tint-line);" in HTML
+    assert "background:var(--accent-tint);border:1px solid var(--accent-tint-line)" in tabs_js
+    # No shadow - tab 1's container has none.
+    assert "box-shadow:0 1px 3px rgba(0,0,0,.05)}" not in tabs_js.split(".dq-filters{", 1)[1].split("}", 1)[0] + "}"
+    # Inner field boxes match .report-filter-group's 8px padding.
+    assert ".report-filter-group { border: 1px solid var(--line); background: #ffffff; border-radius: 8px; padding: 8px; }" in HTML
+    assert ".dq-sidebar .dq-filter-field{padding:8px}" in tabs_js
+    assert ".dq-sidebar .dq-filter-field{padding:12px}" not in tabs_js
+
+
+def test_template_editor_shows_real_saved_records_not_only_column_names():
+    # Asked repeatedly: the template editor showed only stored COLUMN NAMES
+    # ("no live data rows"), which is not enough to judge a mapping. The rows
+    # this template produced live in `listings` keyed by template_id.
+    import inspect
+    import whitespace_tool.workflow_server as ws
+
+    source = inspect.getsource(ws.template_sample_records)
+    assert "l.template_id = @template_id" in source
+    assert "(@business_id = '' OR l.business_id = @business_id)" in source
+    assert "l.is_deleted IS NOT TRUE" in source
+    assert 'raise ValueError("template_id is required")' in source
+
+    templates_js = (ROOT / "ui" / "js" / "templates.js").read_text()
+    assert "async function loadTemplateSampleRecords()" in templates_js
+    assert "/api/templates/sample-records?" in templates_js
+    assert 'id="templateSampleRecords"' in templates_js
+    # Only columns carrying a value are rendered - a table of empty columns
+    # is worse than a narrower honest one.
+    assert 'records.some((row) => row[key] !== null && row[key] !== "")' in templates_js
+    # Honest empty state rather than a blank panel.
+    assert "No records saved under this template yet." in templates_js
+
+
+def test_template_sample_route_is_matched_before_the_templates_prefix():
+    # /api/templates is a startswith() match, so it swallowed
+    # /api/templates/sample-records and returned the template LIST instead.
+    import inspect
+    import whitespace_tool.workflow_server as ws
+
+    handler = inspect.getsource(ws.make_handler)
+    specific = handler.index('startswith("/api/templates/sample-records")')
+    general = handler.index('startswith("/api/templates")')
+    assert specific < general, "the specific route must be tested first"
+
+
+def test_duplicate_brands_merge_in_bulk_with_one_radio_per_candidate():
+    # Asked for explicitly: "10 brands will have 10 rows, each one having a
+    # radio choice, name can be shown once, count, created biz id near the
+    # radio". Handling one group at a time cost one round trip per group.
+    mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
+    rail = mapper_js.split("function renderDuplicateBrandRail(", 1)[1].split("\nasync function ", 1)[0]
+
+    # A row per candidate, radio-selected, grouped by name.
+    assert 'type="radio" name="dupKeep${groupIndex}"' in rail
+    assert 'class="dup-brand-row"' in rail
+    # Name once per group, not repeated per row.
+    assert 'class="dup-brand-name"' in rail
+    # Business id always shows; count and date only when they actually tell
+    # the copies apart. Two copies loaded in one batch share a timestamp to
+    # the second and often both have 0 listings - printing identical strings
+    # on both rows makes the user compare them for nothing.
+    assert "dup-brand-id" in rail
+    # All four facts always show, so the choice can be made from the row.
+    assert "listings &middot; <strong>${age}</strong> &middot;" in rail
+    assert '"Newest"' in rail and '"Oldest"' in rail and '"Same age"' in rail
+    assert "formatTimestamp(brand.created_at)" in rail
+    # Recommendation rule stated and marked: most listings, older on a tie.
+    assert 'dup-brand-pick">recommended' in rail
+    assert "most listings, or the older record when counts match" in rail
+    # ONE submit covering every group.
+    assert 'id="duplicateBrandMergeBtn"' in rail
+    assert "const plans = groups.map((group, groupIndex)" in rail
+    assert "for (const plan of plans) {" in rail
+    # A failing group must not discard the ones that succeeded.
+    assert "failures.push(" in rail
+    # Sensible default: most listings, then oldest.
+    assert "Number(b.listing_count || 0) - Number(a.listing_count || 0)" in rail
+
+    assert ".dup-brand-row {" in HTML
+    assert ".dup-brand-group {" in HTML
+
+
+def test_duplicate_brand_panel_still_lives_in_the_forty_percent_rail():
+    assert 'class="panel left-rail-persistent hidden" id="duplicateBrandPanel"' in HTML
+    assert 'id="duplicateBrandList"' in HTML
+    mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
+    rail = mapper_js.split("function renderDuplicateBrandRail(", 1)[1].split("\nasync function ", 1)[0]
+    # Hidden entirely when there is nothing to merge.
+    assert 'panel.classList.add("hidden");' in rail
+    # Merging reloads so merged-away ids leave every picker.
+    assert "await loadBrands();" in rail
+
+
+def test_brand_dropdown_keeps_detail_on_hover_only():
+    # The hover-only rule applies to the brand DROPDOWN, where inline detail
+    # was clutter. The merge picker is a decision and shows it inline.
+    mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
+    load = mapper_js.split("async function loadBrands(", 1)[1].split("\nasync function ", 1)[0]
+    assert 'title="${escapeHtml(businessOptionLabel(brand))}"' in load
+    assert "${escapeHtml(formatBrandName(brand.name))}</option>" in load
+
+
+def _all_ui_js():
+    parts = [(ROOT / "ui" / "js" / name).read_text()
+             for name in ("mapper.js", "review.js", "templates.js", "common.js", "reporting.js", "login.js")]
+    parts.append((ROOT / "ui" / "reporting-tabs.js").read_text())
+    return "\n".join(parts)
+
+
+def test_every_button_with_an_id_has_a_handler_somewhere():
+    # Blanket guard: a button that renders but does nothing on click is the
+    # failure mode that hit "Manual Review" / "AI Suggested Fix" twice. Any
+    # new button whose id is never referenced from JS (and carries no inline
+    # handler) fails here rather than silently shipping dead.
+    import re
+
+    js = _all_ui_js()
+    # Only the CONTENTS of <script> blocks. Splitting on the first "<script"
+    # and taking the tail swept in the rest of the markup, so a dead button
+    # matched its own id attribute and the guard passed - verified by
+    # injecting a handler-less button, which this version catches.
+    inline_scripts = "\n".join(
+        re.findall(r"<script\b[^>]*>(.*?)</script>", HTML, re.S))
+    dead = []
+    for button_id in sorted(set(re.findall(r'<button[^>]*\bid="([A-Za-z0-9_]+)"', HTML))):
+        has_inline = re.search(r'<button[^>]*id="%s"[^>]*onclick=' % re.escape(button_id), HTML)
+        referenced = (re.search(r"\b%s\b" % re.escape(button_id), js)
+                      or re.search(r"\b%s\b" % re.escape(button_id), inline_scripts))
+        if not (has_inline or referenced):
+            dead.append(button_id)
+    assert dead == [], f"buttons with no handler: {dead}"
+
+
+def test_delegated_buttons_are_reachable_by_their_selector():
+    # Buttons created at render time carry no id, so the id sweep above
+    # cannot see them. Each is driven by a delegated listener; assert the
+    # selector the listener matches is the one the markup actually emits.
+    js = _all_ui_js()
+    for markup_class, selector in [
+        ("review-fix-suggested", 'button[data-open-edit]'),
+        ("review-fix-manual", 'button[data-open-edit]'),
+        ("dq-metric-download", ".dq-metric-download, .report-metric-download"),
+        ("report-metric-download", ".dq-metric-download, .report-metric-download"),
+    ]:
+        assert markup_class in js, f"{markup_class} markup missing"
+        assert selector in js, f"no delegated listener matching {selector}"
+    # Both review action buttons carry the attribute their listener selects on.
+    review_js = (ROOT / "ui" / "js" / "review.js").read_text()
+    for cls in ("review-fix-suggested", "review-fix-manual"):
+        button = review_js.split(f'class="{cls}"', 1)[1][:160]
+        assert "data-open-edit=" in button, f"{cls} is not selectable by the delegated listener"
+
+
+def test_review_action_buttons_open_the_editor_for_the_clicked_record():
+    # The behaviour, not just the wiring: the clicked button's identity must
+    # resolve to the record the modal opens.
+    review_js = (ROOT / "ui" / "js" / "review.js").read_text()
+    handler = review_js.split('document.addEventListener("click", (event) => {', 1)[1].split("}, true);", 1)[0]
+    assert 'closest?.("button[data-open-edit]")' in handler
+    assert "reviewRecordsByKey.get(" in handler
+    assert "openEditRecordModal(record)" in handler
+    # A click that resolves to no record must say so rather than dying quietly.
+    assert "console.warn" in handler
+    # The store is keyed by exactly what the button carries.
+    assert 'data-open-edit="${escapeHtml(record.row_number)}" data-event="${escapeHtml(record.event_id)}"' in review_js
+    assert 'reviewRecordsByKey.set(`${record.event_id}::${record.row_number}`, record)' in review_js
+
+
+def test_reporting_tables_use_two_row_alternating_bands():
+    # Asked for: "any tabular section of reporting should follow 2 row color
+    # policy like gradient to better visibility". Banded in PAIRS rather than
+    # single-row zebra so the grouping survives rows that wrap to two lines.
+    tabs_js = (ROOT / "ui" / "reporting-tabs.js").read_text()
+    for css in (HTML, tabs_js):
+        assert "nth-child(4n+1)" in css
+        assert "nth-child(4n+2)" in css
+        assert "nth-child(4n+3)" in css
+        assert "nth-child(4n+4)" in css
+        assert "linear-gradient(180deg" in css
+    # Scoped to reporting so data-entry tables elsewhere keep their plain look.
+    assert "#reportingView table tbody tr:nth-child(4n+1)," in HTML
+    assert ".dq-table tbody tr:nth-child(4n+1)" in tabs_js
+    # Hover stays distinct from both bands.
+    assert "#reportingView table tbody tr:hover { background: #e8f1fd; }" in HTML
+    assert ".dq-table tbody tr:hover{background:#e8f1fd}" in tabs_js
+
+
+def test_quality_filters_auto_apply_with_a_stop_and_restart_toggle():
+    # Asked for: "filters should be auto applied, with a choice to stop auto
+    # apply button which change from stop to restart auto apply".
+    tabs_js = (ROOT / "ui" / "reporting-tabs.js").read_text()
+
+    assert 'id="autoApplyFiltersBtn"' in tabs_js
+    assert "let autoApplyFilters = true;" in tabs_js
+    # Every filter control triggers it, not just one.
+    assert "const QUALITY_FILTER_IDS = ['dqBrandFilter', 'dqStateFilter', 'dqReasonFilter', 'dqStatusFilter', 'dqStartDate', 'dqEndDate'];" in tabs_js
+    assert "$(id)?.addEventListener('change', scheduleAutoApply);" in tabs_js
+    # Debounced: three quick changes are one query, not three.
+    assert "window.clearTimeout(autoApplyTimer);" in tabs_js
+    assert "autoApplyTimer = window.setTimeout(() => loadQuality(), 400);" in tabs_js
+    # The one button carries both labels.
+    assert "button.textContent = autoApplyFilters ? 'Stop auto apply' : 'Restart auto apply';" in tabs_js
+    # Restarting applies whatever changed while it was off, so the view can
+    # never sit out of step with the controls.
+    restart = tabs_js.split("if (autoApplyFilters) {", 1)[1].split("} else {", 1)[0]
+    assert "scheduleAutoApply();" in restart
+    # Off state is visually distinct.
+    assert "#autoApplyFiltersBtn[data-auto='off']" in tabs_js
+    # The explicit Apply button survives for a manual re-run.
+    assert "$('applyQualityFiltersBtn')?.addEventListener('click', () => loadQuality());" in tabs_js
+
+
+def test_reporting_tables_export_their_own_shape_as_a_zip():
+    # Asked for: "make each table of reporting downloadable ... with table
+    # level relevancy and data, not all tables needed pure listing data like
+    # market gap, brand comparison".
+    import inspect
+    import whitespace_tool.workflow_server as ws
+
+    source = inspect.getsource(ws.reporting_table_export)
+    # Served from the SAME payload the screen renders, so a downloaded table
+    # cannot disagree with what the user is looking at.
+    assert "summary = reporting_summary(" in source
+    assert 'rows = summary.get(spec["key"]) or []' in source
+    # An unknown table is an error, never an empty file passed off as data.
+    assert 'raise ValueError(f"unknown table: {table or \'(missing)\'}")' in source
+    # Reuses the metric ZIP bundle (workbook + normalized CSVs + README).
+    assert "_metric_export_bundle(table, rows" in source
+    assert 'f"{table}-{stamp}.zip"' in source
+
+    # Each table maps to its own payload slice, not to listings.
+    assert ws.REPORTING_TABLE_EXPORTS["market-gaps"]["key"] == "gaps"
+    assert ws.REPORTING_TABLE_EXPORTS["brand-comparison"]["key"] == "brands"
+    assert ws.REPORTING_TABLE_EXPORTS["top-states"]["key"] == "top_states"
+    assert ws.REPORTING_TABLE_EXPORTS["top-cities"]["key"] == "top_cities"
+
+
+def test_each_reporting_table_has_a_download_button_wired_to_its_own_slice():
+    tabs_js = (ROOT / "ui" / "reporting-tabs.js").read_text()
+    for table in ("market-gaps", "brand-comparison", "top-states", "top-cities"):
+        assert f'data-table-export="{table}"' in HTML, table
+    assert "event.target.closest('[data-table-export]')" in tabs_js
+    assert "/api/reporting/table-export?" in tabs_js
+    # Same one-request-per-click guard as the metric cards.
+    assert "const tableDownloadsInFlight = new Set();" in tabs_js
+    assert "if (!table || tableDownloadsInFlight.has(table)) return;" in tabs_js
+    # Downloads carry the filters currently on screen.
+    assert "window.reportingQueryString()" in tabs_js
+    assert ".table-export-btn {" in HTML
+
+
+def test_no_spinner_message_carries_a_trailing_ellipsis():
+    # Standing rule: verb-ing spinner text, no "...". The spinner already
+    # communicates that work is in progress; the ellipsis is noise and was
+    # inconsistent across the app.
+    import re
+
+    offenders = []
+    for name in ("reporting.js", "mapper.js", "review.js", "templates.js", "common.js", "login.js"):
+        js = (ROOT / "ui" / "js" / name).read_text()
+        offenders += [(name, m) for m in re.findall(r'<span class="spinner"></span>[^\'"`]*?\.\.\.', js)]
+    tabs = (ROOT / "ui" / "reporting-tabs.js").read_text()
+    offenders += [("reporting-tabs.js", m) for m in re.findall(r'<span class="spinner"></span>[^\'"`]*?\.\.\.', tabs)]
+    assert offenders == [], f"spinner text with trailing ellipsis: {offenders}"
+
+
+def test_reporting_skeleton_stays_hidden_until_there_is_data():
+    # Reported: a screen of blank space under "Preparing reporting data".
+    # #reportContent was revealed BEFORE checking whether any data existed,
+    # so every empty section reserved its full height behind the status line.
+    reporting_js = (ROOT / "ui" / "js" / "reporting.js").read_text()
+    assert "const preparing = Boolean(result.refreshing) && !hasBusinessData;" in reporting_js
+    assert 'el("reportContent").classList.toggle("hidden", preparing);' in reporting_js
+    # The unconditional reveal must not come back.
+    assert 'el("reportContent").classList.remove("hidden");\n        const totals' not in reporting_js
+    assert "'<span class=\"spinner\"></span> Preparing reporting data'" in reporting_js
+
+
+def test_auto_refresh_does_not_blank_the_report_before_fetching():
+    # Reported: "how come auto refresh removed all data which was good ...
+    # it even made 50 states as 0". renderEmptyReportingStructure() ran
+    # unconditionally BEFORE the fetch on every loadReporting(), including
+    # the 5-minute auto-refresh, so every count dropped to 0 until the
+    # response landed. 50 states is a global constant and can never be 0.
+    reporting_js = (ROOT / "ui" / "js" / "reporting.js").read_text()
+    # Keyed off a flag that is set ONCE and never reset. reportLoaded is reset
+    # on purpose to force a re-fetch (auto-refresh, manual refresh, filter
+    # change), so keying the blank off it wiped the numbers on every refresh -
+    # which is exactly the bug, just via a different path.
+    assert "let reportHasRenderedOnce = false;" in reporting_js
+    assert "if (!reportHasRenderedOnce) renderEmptyReportingStructure();" in reporting_js
+    assert "if (!reportLoaded) renderEmptyReportingStructure();" not in reporting_js
+    # The unconditional call must not come back either.
+    assert "\n      renderEmptyReportingStructure();\n      try {" not in reporting_js
+
+
+def test_review_queue_interleaves_ai_suggested_and_manual_rows():
+    # The server orders by event_id/row_number, which clusters a brand's
+    # suggested rows together - so a page could be entirely one kind and the
+    # other never got looked at.
+    review_js = (ROOT / "ui" / "js" / "review.js").read_text()
+    assert "const suggested = result.records.filter(recordHasSuggestionAvailable);" in review_js
+    assert "const manual = result.records.filter((record) => !recordHasSuggestionAvailable(record));" in review_js
+    assert "if (i < suggested.length) interleaved.push(suggested[i]);" in review_js
+    assert "if (i < manual.length) interleaved.push(manual[i]);" in review_js
+    # Interleaving only when there is no explicit filter, and only when both
+    # kinds are present - otherwise it would reorder for no reason.
+    assert "if (suggested.length && manual.length) {" in review_js
+
+
+def test_adopting_an_ai_suggestion_counts_as_an_ai_fix():
+    # Reported: "Suggested ZIP + coordinates: this enrichment didn't increase
+    # the number for Listings Fixed Automatically". The branch handled only
+    # the manual case, so an adopted suggestion skipped the manual increment
+    # (correct) but never wrote an AI fix event either - counting toward
+    # NEITHER metric.
+    import inspect
+    import whitespace_tool.workflow_server as ws
+
+    source = inspect.getsource(ws.reprocess_rejected)
+    assert 'adopted_ai_suggestion = bool(data.get("is_ai_enriched", False))' in source
+    assert 'fix_type = "AI" if adopted_ai_suggestion else "MANUAL"' in source
+    assert "if not adopted_ai_suggestion:\n                increment_manual_fixed_count(rows_updated)" in source
+    # The old manual-only guard must not come back.
+    assert "if manual_repair and result[" not in source
+
+
+def test_fix_state_pivot_can_report_fixed_states_not_just_pending():
+    # The pivot chose only between the two PENDING keys, so its ai_fixed and
+    # manual_fixed columns were structurally always 0.
+    import inspect
+    import whitespace_tool.workflow_server as ws
+
+    source = inspect.getsource(ws.reporting_quality_summary)
+    assert 'state_key = "ai_fixed"' in source
+    assert 'state_key = "manual_fixed"' in source
+    assert 'state_key = "ai_review_pending"' in source
+    assert 'state_key = "manual_review_pending"' in source
+    assert 'state_key = "ai_review_pending" if row.get("has_ai_suggestion") else "manual_review_pending"' not in source
+
+
+def test_quality_tables_scroll_instead_of_overflowing_their_panel():
+    tabs_js = (ROOT / "ui" / "reporting-tabs.js").read_text()
+    assert ".dq-section > div:has(> table),.dq-main div:has(> .dq-table){overflow-x:auto" in tabs_js
+
+
+def test_five_state_fix_counts_are_cumulative_and_mutually_exclusive():
+    # A fixed record is soft-deleted, which removed it from every count - so
+    # totals reset instead of accumulating. was_ever_invalid/resolution_status
+    # make the population cumulative.
+    import inspect
+    import whitespace_tool.workflow_server as ws
+    from whitespace_tool.warehouse_bigquery import TABLE_SCHEMAS
+
+    columns = {f["name"] for f in TABLE_SCHEMAS["error_listings"]}
+    assert {"was_ever_invalid", "resolution_status"} <= columns
+
+    source = inspect.getsource(ws.fix_state_counts)
+    # Exactly the user's truth table.
+    assert "COUNTIF(state = 'fixed' AND ai_fixed) AS ai_fixed" in source
+    assert "COUNTIF(state = 'fixed' AND NOT ai_fixed AND ai_suggested) AS ai_suggested_fixed" in source
+    assert "COUNTIF(state = 'fixed' AND NOT ai_fixed AND NOT ai_suggested) AS manual_fixed" in source
+    assert "COUNTIF(state != 'fixed' AND ai_suggested) AS ai_suggested_pending" in source
+    assert "COUNTIF(state != 'fixed' AND NOT ai_suggested) AS manual_pending" in source
+    # Counted over soft-deleted rows too, or fixed records vanish again.
+    assert "is_deleted IS TRUE, 'fixed', 'pending'" in source
+    # Historical rows predate the columns and must stay countable.
+    assert "COALESCE(was_ever_invalid, TRUE)" in source
+    # The five states must sum to the total, or the model has drifted.
+    assert 'counts["states_reconcile"]' in source
+    # Mirror-backed for instant paint; "not computed" is not "zero".
+    assert "set_fix_state_counts(counts)" in source
+    assert '{"computed": False, "refreshing": True}' in inspect.getsource(ws._cumulative_fix_states)
+
+
+def test_error_row_is_marked_invalid_at_write_and_resolved_at_fix():
+    import inspect
+    import whitespace_tool.workflow_server as ws
+
+    builder = inspect.getsource(ws._row_error_listing)
+    assert '"was_ever_invalid": True,' in builder
+    assert '"resolution_status": "pending",' in builder
+    reprocess = inspect.getsource(ws.reprocess_rejected)
+    assert "resolution_status = 'fixed'" in reprocess
+
+
+def test_listings_is_the_canonical_term_in_the_ui():
+    # Decision: "Listings" everywhere - it matches the DB table and every
+    # medallion layer. "Stores" and "listings" were previously mixed inside
+    # the same tables ("Competitor Stores" beside "Population Per Listing").
+    reporting_js = (ROOT / "ui" / "js" / "reporting.js").read_text()
+    assert "Total Listings</span>" in HTML
+    assert 'data-metric-label="Total Listings"' in HTML
+    assert 'label: "Competitor Listings"' in reporting_js
+    assert 'label: "Competitor Stores"' not in reporting_js
+    assert "Total Stores</span>" not in HTML
+
+
+def test_total_listings_is_emitted_with_a_backwards_compatible_alias():
+    # Renaming an API field outright would break any client still reading the
+    # old one mid-deploy, so both are emitted and readers prefer the new name.
+    import inspect
+    import whitespace_tool.workflow_server as ws
+
+    # Emitted by _mirror_totals(), which builds the totals payload.
+    source = inspect.getsource(ws._mirror_totals)
+    assert '"total_listings": int(total_stores),' in source
+    assert '"total_stores": int(total_stores)' in source
+    reporting_js = (ROOT / "ui" / "js" / "reporting.js").read_text()
+    assert "(totals.total_listings ?? totals.total_stores)" in reporting_js
+    # The renamed card must still resolve to a known export slug.
+    assert "total-listings" in ws._LOCATION_VIEW_METRIC_SLUGS
+    assert "total-listings" in ws._METRIC_EXPORT_DEFINITIONS
+
+
+def test_every_reporting_table_paginates():
+    # Only market-gaps had a pager; everything else rendered all rows, or a
+    # silent .slice(0, 10) that hid the rest with no way to reach them.
+    common_js = (ROOT / "ui" / "js" / "common.js").read_text()
+    tabs_js = (ROOT / "ui" / "reporting-tabs.js").read_text()
+
+    assert "const SIMPLE_TABLE_PAGE_SIZE = 10;" in common_js
+    assert 'button[data-simple-page]' in common_js
+    # Page state is per target so two tables cannot fight over one counter.
+    assert "simpleTablePages.set(targetId, safePage);" in common_js
+    # Clamped, so a shrinking dataset cannot strand the user on an empty page.
+    assert "const safePage = Math.min(Math.max(page, 0), Math.max(pageCount - 1, 0));" in common_js
+
+    assert "function renderPagedDqTable(targetId, headers, rows, emptyMessage)" in tabs_js
+    assert "button[data-dq-page]" in tabs_js
+    # The hard truncation must not come back.
+    assert "states.slice(0, 10)" not in tabs_js
+    assert "cities.slice(0, 10)" not in tabs_js
+
+
+def test_native_alert_and_confirm_are_replaced_by_themed_dialogs():
+    # window.alert/confirm ignore the app theme entirely and cannot be styled.
+    # Remaining uses must be fallbacks only (dialog missing / no showModal).
+    import re
+
+    for name in ("review.js", "reporting.js"):
+        js = (ROOT / "ui" / "js" / name).read_text()
+        bare = [m for m in re.findall(r"^\s*(?:window\.)?(?:alert|confirm)\(", js, re.M)]
+        assert bare == [], f"{name} still calls a native dialog unconditionally"
+
+    common_js = (ROOT / "ui" / "js" / "common.js").read_text()
+    assert 'function showAppNotice(message, title = "Done")' in common_js
+    assert 'function showAppConfirm(message, title = "Please confirm")' in common_js
+    assert 'id="appNoticeDialog"' in HTML and 'id="appConfirmDialog"' in HTML
+
+    mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
+    # The mapping-move prompt and the reset acknowledgement both went themed.
+    assert "const move = await showAppConfirm(" in mapper_js
+    assert 'showAppNotice("Workspace reset complete.' in mapper_js
+    # Brand save/update now acknowledge in-theme, not just an inline banner.
+    assert 'showAppNotice(`${formatBrandName(selectedBrand.name)} was created' in mapper_js
+    assert 'showAppNotice(`${formatBrandName(selectedBrand.name)} was updated.`' in mapper_js
+
+
+def test_zip_suggestions_are_deduped_per_zip():
+    # The reference union can carry a ZIP more than once, so a single ZIP
+    # appeared several times and typing a city returned every duplicate.
+    import inspect
+    import whitespace_tool.workflow_server as ws
+
+    source = inspect.getsource(ws.search_zips)
+    assert "GROUP BY zip_code" in source
+    assert "ANY_VALUE(city_name) AS city_name" in source
+
+
+def test_brand_identity_enrichment_is_keyless_and_never_invents_values():
+    import inspect
+    from whitespace_tool import brand_enrichment
+
+    source = inspect.getsource(brand_enrichment)
+    # Keyless sources only - nothing here may require credentials.
+    assert "overpass-api.de" in source
+    assert "api.duckduckgo.com" in source
+    assert "api_key" not in source.lower() and "apikey" not in source.lower()
+
+    # Aggregator hosts are not a brand's own site.
+    assert brand_enrichment._clean_website("en.wikipedia.org/wiki/X") == ""
+    assert brand_enrichment._clean_website("facebook.com/x") == ""
+    assert brand_enrichment._clean_website("dominos.com") == "https://dominos.com"
+    # Validation, not acceptance.
+    assert brand_enrichment._clean_phone("12") == ""
+    assert brand_enrichment._clean_phone("(512) 555-1234") == "5125551234"
+    assert brand_enrichment._clean_email("nope") == ""
+
+    # Owner-entered values are never overwritten.
+    assert brand_enrichment.enrich_brand_identity("X", existing={
+        "website_url": "https://a.com", "phone_number": "5125551234", "email": "a@b.com"}) == {}
+    # Every resolved field records its source, and unresolved stays visible.
+    assert '"unresolved_fields"' in source or "unresolved_fields" in source
+    assert '_source"] = "openstreetmap"' in source
+
+
+def test_brand_enrichment_endpoint_requires_a_name():
+    import inspect
+    import whitespace_tool.workflow_server as ws
+
+    source = inspect.getsource(ws.brand_identity_enrichment)
+    assert 'raise ValueError("name is required")' in source
+    handler = inspect.getsource(ws.make_handler)
+    assert 'startswith("/api/brands/enrich")' in handler
+
+
+def test_specific_api_routes_are_matched_before_their_prefix():
+    # startswith() routing means a broad prefix swallows a longer sibling.
+    # This bit twice: /api/templates ate /api/templates/sample-records, and
+    # /api/brands ate /api/brands/enrich (returning the brand LIST instead).
+    import inspect
+    import whitespace_tool.workflow_server as ws
+
+    handler = inspect.getsource(ws.make_handler)
+    for specific, general in (
+        ('startswith("/api/templates/sample-records")', 'startswith("/api/templates")'),
+        ('startswith("/api/brands/enrich")', 'startswith("/api/brands")'),
+        ('startswith("/api/reporting/table-export")', 'startswith("/api/reporting")'),
+        ('startswith("/api/reporting/metric-export")', 'startswith("/api/reporting")'),
+    ):
+        assert handler.index(specific) < handler.index(general), f"{specific} must precede {general}"
+
+
+def test_historical_quality_lives_on_tab_one_with_a_period_control():
+    # Was on tab 2, plotted a single "invalid records" series from the quality
+    # snapshot, and had no period control or competitor comparison.
+    tabs_js = (ROOT / "ui" / "reporting-tabs.js").read_text()
+
+    # Markup now lives in tab 1, before the map section.
+    tab_one = HTML.split('<div id="reportContent" class="hidden">', 1)[1].split("<!-- Location Map Section -->", 1)[0]
+    assert 'id="dqHistoryChart"' in tab_one
+    assert 'data-history-period="1W"' in tab_one
+    assert 'data-history-period="1Y"' in tab_one
+    # Same toggle markup as Trends, so both controls look identical.
+    assert 'class="dq-period-toggle" role="group" aria-label="History period"' in tab_one
+    # Removed from the quality panel.
+    assert 'id="dqHistoryChart"' not in tabs_js.split("function buildQualityPanel", 1)[1].split("return panel", 1)[0]
+
+    # Plots LISTINGS over time from the timeseries endpoint, not a single
+    # invalid-records series from the quality snapshot.
+    assert "async function loadQualityHistory()" in tabs_js
+    assert "/api/reporting/timeseries?" in tabs_js
+    assert "pick('Locations')" in tabs_js
+    assert "renderQualityHistory" not in tabs_js
+    # Competitor overlay, combined into one line rather than one per brand.
+    assert "`Competitors (${competitors.length})`" in tabs_js
+    # Loads with tab 1.
+    assert "loadQualityHistory();" in tabs_js.split("if (name === 'location') {", 1)[1][:400]
+
+
+def test_no_sliding_progress_bar_under_status_messages():
+    # A second, competing indicator next to the spinner: a long bar whose
+    # text "kept going and coming". The verb-ing label plus spinner is the
+    # standard; the bar communicated nothing extra.
+    assert ".report-status.loading::after" not in HTML
+    assert "@keyframes reportProgress" not in HTML
+    assert "animation: reportProgress" not in HTML
+
+
+def test_data_controls_panel_actually_renders_warm():
+    # .panel is declared later at the same specificity, so its
+    # `background: var(--panel)` was winning and this rendered plain white -
+    # losing the warning treatment entirely.
+    assert ".panel.data-danger-panel," in HTML
+    danger = HTML.split(".panel.data-danger-panel,", 1)[1].split("}", 1)[0]
+    assert "linear-gradient(180deg, #fff4d6 0%, #ffe9bf 100%)" in danger
+    assert "box-shadow: inset 3px 0 0 #d97706;" in danger
+
+
+def test_review_edit_dialog_never_shows_object_object_as_a_brand():
+    # Reported: the brand field displayed "Object Object" where the real brand
+    # was "Casa Verde". String() on an object yields "[object Object]", which
+    # formatBrandName then title-cased. The raw record's brand can legitimately
+    # be a nested object, so it is unwrapped before stringifying.
+    review_js = (ROOT / "ui" / "js" / "review.js").read_text()
+    assert "const unwrapBrand = (value) =>" in review_js
+    assert 'const nested = value.name ?? value.value ?? value.brand ?? value.label;' in review_js
+    # The bare String(...) that produced the placeholder must not come back.
+    assert 'String(getNestedRawValue(rawObj, mapperFields.brand || "brand")' not in review_js
+
+
+def test_opening_a_review_record_does_not_refetch_templates_every_click():
+    # Two sequential network round trips ran before the dialog painted, which
+    # is the delay felt on "Manual Review" / "AI Suggested Fix".
+    review_js = (ROOT / "ui" / "js" / "review.js").read_text()
+    assert "const reviewTemplateCache = new Map();" in review_js
+    assert "let templates = reviewTemplateCache.get(record.business_id);" in review_js
+    assert "reviewTemplateCache.set(record.business_id, templates);" in review_js
+
+
+def test_review_tab_shows_the_same_five_states_as_reporting():
+    # The five-state cards went to the reporting tab only; the review queue is
+    # where the work actually happens, so it needs them too - and from the
+    # same source, or the two tabs would disagree.
+    review_js = (ROOT / "ui" / "js" / "review.js").read_text()
+    for element_id in ("reviewStateAiFixed", "reviewStateAiSuggestedFixed", "reviewStateManualFixed",
+                       "reviewStateAiPending", "reviewStateManualPending", "reviewStateTotal"):
+        assert f'id="{element_id}"' in HTML, element_id
+        assert element_id in review_js, element_id
+    assert "async function refreshReviewFixStates()" in review_js
+    assert '"/api/review/fix-states"' in review_js
+    # "Not computed yet" is a dash, never a zero - zero would be a claim that
+    # nothing has ever been invalid.
+    assert 'node.textContent = computed ? Number(states[key] || 0).toLocaleString() : "-";' in review_js
+    # Colour carries meaning on these cards too.
+    assert ".review-state-card.state-ai-fixed" in HTML
+    assert ".review-state-card.state-manual-pending" in HTML
+
+
+def test_merging_brands_reports_what_it_actually_moved():
+    # "Merged 2 brands" says nothing about impact. Counting the rows moved
+    # per table distinguishes a merge that consolidated a real footprint from
+    # one that combined two already-empty duplicates.
+    import inspect
+    import whitespace_tool.workflow_server as ws
+
+    source = inspect.getsource(ws.merge_brands)
+    # Row counts now come from the shared run_sql_dml() helper, which is the
+    # single place SQL leaves this process.
+    assert 'moved[table_name] = run_sql_dml(client, f"""' in source
+    assert 'label=f"merge_brands:{table_name}"' in source
+    for key in ('"listings_moved"', '"templates_moved"', '"review_rows_moved"', '"moved_total"'):
+        assert key in source, key
+    assert "brands_merged target=%s sources=%d listings=%d templates=%d review_rows=%d" in source
+
+    mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
+    assert "listingsMoved += Number(outcome?.listings_moved || 0);" in mapper_js
+    assert "reviewMoved += Number(outcome?.review_rows_moved || 0);" in mapper_js
+    # A merge that moved nothing says so, rather than implying it did work.
+    assert "The copies held no records, so nothing needed moving." in mapper_js
+
+
+def test_readme_does_not_advertise_shipped_work_as_a_gap():
+    # The audit found it still listed the job-history panel and duplicate
+    # messaging as "scoped but not yet built" long after both shipped - a
+    # presentation built from it would have been wrong.
+    readme = (ROOT / "README.md").read_text()
+    assert "a save-job history panel" not in readme
+    assert "duplicate-detection messaging on save are scoped but not yet built" not in readme
+    # And it now documents the rules that actually govern the data.
+    assert "was_ever_invalid" in readme
+    assert "custom_fields" in readme
+    assert "100km" in readme and "50km" in readme
+
+
+def test_sample_data_loads_in_two_ntile_halves():
+    # Splitting in SQL (NTILE(2)) rather than orchestrating halves in Python:
+    # half 1 lands fast so the button can flip to "loaded", half 2 fills in
+    # behind it. One statement per half also means a slow row cannot hold the
+    # whole load hostage, which is what looked like a hang at "94%".
+    import inspect
+    import whitespace_tool.workflow_server as ws
+
+    source = inspect.getsource(ws.load_sample_dataset)
+    assert "def load_sample_dataset(reset: bool = False, load_half: int = 1)" in source
+    assert "NTILE(2) OVER (ORDER BY listing_id) AS load_half" in source
+    assert "WHERE s.load_half = @load_half" in source
+    # Half 2 must ADD to half 1, not wipe it.
+    assert "if load_half == 1:\n            client.query(f\"DELETE FROM" in source
+    # Half 2 is kicked off in the background after half 1 returns.
+    assert 'threading.Thread(target=load_second_half, name="sample-second-half", daemon=True).start()' in source
+    assert "load_sample_dataset(reset=False, load_half=2)" in source
+
+
+def test_brand_search_is_plain_and_client_side():
+    # It filters the select's own options in memory - it never queries the
+    # server - so explaining a minimum character count was noise.
+    common_js = (ROOT / "ui" / "js" / "common.js").read_text()
+    assert 'search.placeholder = selectId === "brandSelect" ? "Search brand" : "Search";' in common_js
+    assert "Type ${minChars}+ character" not in common_js
+    # Still filtering the in-memory list, not fetching.
+    assert "const liveOptions = Array.from(select.options)" in common_js
+
+
+def test_draft_restored_message_is_one_sentence():
+    mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
+    assert 'setStatus("Draft restored.", "ok");' in mapper_js
+    assert "re-parse before saving if you need the full dataset in memory" not in mapper_js
+
+
+def test_template_loaded_message_omits_the_internal_slug():
+    # "Loaded spice_route_csv_csv_sample." exposed an internal identifier that
+    # means nothing to the reader; the mapping it refers to is on screen.
+    templates_js = (ROOT / "ui" / "js" / "templates.js").read_text()
+    assert 'setStatus("Edit the field mapping, then click Save Template to update.", "ok");' in templates_js
+    assert "Loaded ${template.name}" not in templates_js
+
+
+def test_clicking_mappings_leaves_template_edit_mode():
+    # Template edit reuses the mapper view, and the nav highlight is pinned to
+    # Template Library while it is active. Clicking Mappings is a NEW mapping
+    # workflow, so it must exit that mode - otherwise the highlight stays on
+    # Template Library and the Mappings tab looks disabled.
+    nav = HTML.split('document.querySelectorAll("[data-view]").forEach', 1)[1].split("}));", 1)[0]
+    assert 'targetView === "mapperView" && el("mapperView")?.classList.contains("template-edit-mode")' in nav
+    assert 'if (typeof resetMapping === "function") resetMapping();' in nav
+    # resetMapping() is what clears the mode and restores the 40/60 layout.
+    mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
+    reset = mapper_js.split("function resetMapping() {", 1)[1].split("\nfunction ", 1)[0]
+    assert 'classList.remove("template-edit-mode")' in reset
+    assert "renderMappings();" in reset
+
+
+def test_every_dialog_uses_the_one_birdeye_shell():
+    """Five dialogs used to carry bespoke frames (`connector-editor-dialog`,
+    `danger-dialog`) that ignored the app theme. There is exactly one dialog
+    shell now - `<dialog class="app-help-dialog"> > .app-help-content >
+    .app-help-header > h2` - varied only by size/tone modifier classes."""
+    html = (ROOT / "ui" / "integrations.html").read_text()
+
+    # The retired bespoke frames must not come back anywhere, markup or CSS.
+    assert "connector-editor-dialog" not in html
+    assert "danger-dialog" not in html
+
+    dialogs = re.findall(r"<dialog\b[^>]*>", html)
+    assert len(dialogs) >= 12, f"expected the full dialog set, found {len(dialogs)}"
+    for tag in dialogs:
+        assert 'class="app-help-dialog' in tag, f"dialog off the shell: {tag}"
+        assert "aria-labelledby=" in tag, f"dialog with no labelled title: {tag}"
+
+    # Each dialog body carries the shell's content/header/title structure.
+    for body in re.findall(r"<dialog\b[^>]*>(.*?)</dialog>", html, re.S):
+        assert '<div class="app-help-content">' in body
+        assert '<div class="app-help-header">' in body
+        assert re.search(r'<h2 id="[^"]+"', body), body[:200]
+
+    # Destructive dialogs stay visibly destructive while on the shell.
+    for dialog_id in ("dangerDialog", "masterDeleteCredentialsDialog", "masterDeleteConfirmDialog"):
+        tag = next(t for t in dialogs if f'id="{dialog_id}"' in t)
+        assert "app-help-dialog--danger" in tag, tag
+    assert ".app-help-dialog--danger .app-help-header h2 { color: var(--error); }" in html
+
+
+def test_a_failed_save_is_recorded_and_announced_like_a_successful_one():
+    """O1: hiding the progress panel sends the save to the background. The
+    success path pops a dialog and refreshes Job History; the failure path
+    used to write only to an inline status line the user is no longer looking
+    at - and recorded no job at all, so the attempt left no trace anywhere."""
+    import whitespace_tool.workflow_server as ws
+
+    source = inspect.getsource(ws.save_mapper)
+    # The push is what can fail after the job genuinely started; an
+    # argument-validation raise above it never became a job.
+    push, _, after = source.partition("push_to_bigquery(project_id, dataset_id, rows_by_table")
+    assert "try:" in push.rsplit("\n", 3)[-3:][0] or "try:" in push[-200:]
+    assert "record_save_event(" in after.split("_maybe_refresh_after_save", 1)[0]
+    # mapped_rows=0 with rows present is what record_save_event derives
+    # FAILED from - no new status vocabulary.
+    assert "mapped_rows=0, error_listings=0, duplicate_listings_skipped=0," in after
+    assert "raise" in after.split("_maybe_refresh_after_save", 1)[0]
+
+    mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
+    save_catch = mapper_js.split('const wasBackgrounded', 1)[1].split("\n        }", 1)[0]
+    assert "showAppNotice(" in save_catch
+    assert "loadJobHistory();" in save_catch
+    # hideProgress() resets saveProgressHiddenByUser, so the flag has to be
+    # captured before it is called - reading it afterwards is always false.
+    assert save_catch.index("hideProgress();") < save_catch.index("showAppNotice(")
+    assert save_catch.lstrip().startswith("= typeof saveProgressHiddenByUser")
+
+
+def test_the_brand_form_submit_button_cannot_create_a_duplicate_while_editing():
+    """User-reported: "some clicks lose create brand form, call the unexpected
+    one". Three flags decide what the single #createBrandBtn means, each set by
+    a different path that opens the form - and the click handler consulted only
+    one of them, so the preset panel's "Edit Brand Details" left the button on
+    its CREATE branch and saving filed a second copy of the brand on screen."""
+    html = (ROOT / "ui" / "integrations.html").read_text()
+
+    handler = html.split('el("createBrandBtn").addEventListener("click"', 1)[1].split("});", 1)[0]
+    assert "brandEditMode || presetBrandEditMode" in handler
+    # The business_id check is what stops a stale preset flag turning a
+    # genuine create into an update of nothing.
+    assert "Boolean(selectedBrand?.business_id)" in handler
+    assert "if (editingExistingBrand) return updateExistingBrand();" in handler
+
+    # Every path that ends an edit must clear ALL three flags, or the next
+    # click inherits a mode the form is no longer in.
+    select_handler = html.split('el("brandSelect").addEventListener("change"', 1)[1].split("\n    el(", 1)[0]
+    create_branch, _, existing_branch = select_handler.partition('const brands = JSON.parse(')
+    for branch, label in ((create_branch, "create"), (existing_branch, "existing")):
+        assert "brandEditMode = false;" in branch, label
+        assert "presetCreateMode = false;" in branch, label
+        assert "presetBrandEditMode = false;" in branch, label
+
+    cancel = html.split('el("cancelBrandEditBtn").addEventListener("click"', 1)[1].split("});", 1)[0]
+    for flag in ("brandEditMode = false;", "presetCreateMode = false;", "presetBrandEditMode = false;"):
+        assert flag in cancel, flag
+
+
+def test_competitor_diffs_are_coloured_from_the_primary_brands_point_of_view():
+    """User-reported: "+ count is red for business, - count is green". Every
+    row of Head-to-Head is a COMPETITOR measured against the primary brand, so
+    a competitor with MORE locations is bad news for the primary brand. The
+    table coloured diff > 0 green, reading "+278 competitor locations" as an
+    achievement."""
+    reporting_js = (ROOT / "ui" / "js" / "reporting.js").read_text()
+    cell = reporting_js.split("const competitorDiffCell =", 1)[1].split("};", 1)[0]
+    assert "const ahead = diff > 0;" in cell
+    # Ahead = the competitor is ahead = bad for us.
+    assert 'const color = ahead ? "var(--error)" : "var(--ok)";' in cell
+    assert "is behind by" in cell and "is ahead by" in cell
+    # One helper drives every column, so two columns cannot disagree again.
+    assert reporting_js.count("const color = diff > 0 ? \"var(--ok)\"") == 0
+    for column in ("locations", "states", "counties", "cities", "zips"):
+        assert f'competitorColumn("{column}"' in reporting_js, column
+
+
+def test_benchmark_brand_and_competitor_share_one_line():
+    html = (ROOT / "ui" / "integrations.html").read_text()
+    cell = html.split(".comp-bench-brand-cell {", 1)[1].split("}", 1)[0]
+    assert "flex-direction: row;" in cell
+    assert "flex-wrap: nowrap;" in cell
+    # Width comes from the metric columns, which were mostly whitespace.
+    assert "width: 46%;" in html.split("th.brand-col {", 1)[1].split("}", 1)[0]
+    # The wrapping properties that forced the second line must be gone from
+    # both name styles, replaced by truncation with a tooltip.
+    for selector in (".comp-primary-name {", ".comp-link-name {"):
+        rule = html.split(selector, 1)[1].split("}", 1)[0]
+        assert "word-break:" not in rule, selector
+        assert "white-space: nowrap;" in rule, selector
+        assert "text-overflow: ellipsis;" in rule, selector
+
+
+def test_review_fix_state_cards_do_not_depend_on_the_heavy_quality_endpoint():
+    """The six cumulative cards rendered "-" while the correct values sat in
+    the SQLite mirror, because they were read off /api/reporting/quality - a
+    heavy aggregation they had to wait on, and fail with."""
+    import whitespace_tool.workflow_server as ws
+
+    review_js = (ROOT / "ui" / "js" / "review.js").read_text()
+    fetcher = review_js.split("async function refreshReviewFixStates()", 1)[1].split("\nfunction ", 1)[0]
+    assert '"/api/review/fix-states"' in fetcher
+    assert 'fetch("/api/reporting/quality' not in fetcher
+    # Not computed yet must be retried, not left as dashes for the session.
+    assert "data.refreshing && reviewFixStateRetries < REVIEW_FIX_STATE_RETRY_LIMIT" in fetcher
+
+    handler = inspect.getsource(ws.make_handler)
+    assert '/api/review/fix-states' in handler
+    # A cold mirror has to say a recount is running, or the page cannot know
+    # to come back for it.
+    assert '{"computed": False, "refreshing": True}' in inspect.getsource(ws._cumulative_fix_states)
+
+
+def test_ai_fixed_share_uses_cumulative_counts_not_the_current_batch():
+    """It read the live auto-repair batch (fixed / fixed+manual+remaining),
+    which resets to 0 when a batch starts - so it showed "0.00%" beside cards
+    reporting 110 AI fixes. Verified against the live mirror at the time:
+    ai_fixed=110, total_ever_invalid=395, i.e. 27.85%, not 0.00%."""
+    review_js = (ROOT / "ui" / "js" / "review.js").read_text()
+    share = review_js.split("function renderAiFixedShare()", 1)[1].split("\nfunction ", 1)[0]
+    assert "states.total_ever_invalid" in share
+    assert "states.ai_fixed" in share
+    assert "stats.fixed" not in share and "stats.remaining" not in share
+    # Unmeasured is a dash; "0.00%" would be a claim that AI fixed nothing.
+    assert 'aiPercent.textContent = "-";' in share
+
+
+def test_the_reporting_warmup_poll_has_an_attempt_budget():
+    """It was the only poll in the file with none: each poll that came back
+    still refreshing scheduled another, forever - so the "Preparing reporting
+    data" spinner reappeared every few seconds for the rest of the session."""
+    reporting_js = (ROOT / "ui" / "js" / "reporting.js").read_text()
+    assert "const REPORTING_WARMUP_POLL_LIMIT = 20;" in reporting_js
+    scheduler = reporting_js.split("function scheduleReportingWarmupPoll(", 1)[1].split("\nfunction ", 1)[0]
+    assert "if (reportingWarmupPolls >= REPORTING_WARMUP_POLL_LIMIT) return;" in scheduler
+    assert "reportingWarmupPolls += 1;" in scheduler
+    # Exhausted says so once instead of spinning; an explicit click resets it.
+    assert "Reporting data is taking longer than usual to prepare." in reporting_js
+    assert "resetReportingWarmupPolls();" in reporting_js.split("async function refreshReportingNow()", 1)[1][:600]
+
+
+def test_the_error_donut_says_what_its_centre_number_counts():
+    review_js = (ROOT / "ui" / "js" / "review.js").read_text()
+    assert ">total</text>" not in review_js
+    assert review_js.count(">error listings</text>") == 2

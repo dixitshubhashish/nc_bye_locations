@@ -244,22 +244,15 @@ function duplicateBusinessGroups(brands = [], threshold = BRAND_SIMILARITY_THRES
       });
       return groups.filter((group) => group.length > 1);
     }
-// Listings that carry the same content_hash are the same physical record
-// saved twice. content_hash already has business_id baked in
-// (CONTENT_HASH_FIELDS), so a collision across two brand records is strong
-// evidence those brand records are the same brand.
-function duplicateContentHashGroups(listings = []) {
-      const byHash = new Map();
-      listings.forEach((row) => {
-        const hash = String(row.content_hash || "").trim();
-        if (!hash) return;
-        if (!byHash.has(hash)) byHash.set(hash, []);
-        byHash.get(hash).push(row);
-      });
-      return [...byHash.entries()]
-        .filter(([, rows]) => rows.length > 1)
-        .map(([hash, rows]) => ({ hash, rows }));
-    }
+// duplicateContentHashGroups() was removed here rather than wired up: its
+// premise is impossible. It grouped listings by shared content_hash to spot
+// the same physical store filed under two brands - but business_id IS one of
+// CONTENT_HASH_FIELDS, so two brand records can never collide on a hash by
+// construction (verified: identical listing under brand-A vs brand-B produces
+// two different hashes). Cross-brand overlap needs a hash over the physical
+// identity WITHOUT business_id, computed warehouse-side, and a product call on
+// whether a shared street address is evidence of a duplicate brand or just a
+// shared strip mall. Both are open - see O2 in docs/bug_tracker.md.
 function businessCreatedTime(brand = {}) {
       const value = Date.parse(brand.created_at || "");
       return Number.isFinite(value) ? value : 0;
@@ -299,59 +292,145 @@ function renderDuplicateBrandRail(groups = []) {
         return;
       }
       panel.classList.remove("hidden");
-      // One at a time: only the first unresolved group is actionable, so the
-      // rail never becomes a wall of merge forms.
-      const group = groups[0];
-      const newestCreatedAt = Math.max(...group.map(businessCreatedTime));
-      const oldestCreatedAt = Math.min(...group.map(businessCreatedTime).filter(Boolean));
-      const ranked = [...group].sort((a, b) =>
-        (Number(b.listing_count || 0) - Number(a.listing_count || 0))
-        || (businessCreatedTime(a) - businessCreatedTime(b)));
-      const remaining = groups.length - 1;
-      list.innerHTML = `
-        <div data-duplicate-group style="border: 1px solid #e5cfaa; border-left: 4px solid #f59e0b; border-radius: 6px; padding: 10px; background: #fff9ed;">
-          <div style="font-weight: 700; margin-bottom: 6px;">${escapeHtml(formatBrandName(group[0].name || "Similar brand"))} <span style="font-weight: 400; color: var(--muted);">&times;${group.length}</span></div>
-          <label style="font-size: 12px; font-weight: 700;" for="duplicateBrandKeep">Keep</label>
-          <select id="duplicateBrandKeep" style="width: 100%; margin: 4px 0 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px;">
-            ${ranked.map((brand) => `<option value="${escapeHtml(brand.business_id)}" title="${escapeHtml(businessOptionLabel(brand, newestCreatedAt))}">${escapeHtml(businessMergeChoiceLabel(brand, newestCreatedAt, oldestCreatedAt))}</option>`).join("")}
-          </select>
-          <div style="font-size: 11px; color: var(--muted); margin: -4px 0 8px;">Suggested: the record with the most listings, then the oldest — other records already point at it.</div>
-          <button type="button" class="secondary" id="duplicateBrandMergeBtn">Merge Others Into Keep</button>
-          ${remaining > 0 ? `<div style="font-size: 11px; color: var(--muted); margin-top: 6px;">${remaining} more duplicate ${remaining === 1 ? "group" : "groups"} after this one.</div>` : ""}
-        </div>`;
+      // One row per candidate brand, radio-selected, every group submitted
+      // together. Handling groups one at a time meant ten duplicates cost ten
+      // round trips; the decision for each is independent, so they may as
+      // well all be made before a single submit.
+      list.innerHTML = groups.map((group, groupIndex) => {
+        const times = group.map(businessCreatedTime).filter(Boolean);
+        const newest = times.length ? Math.max(...times) : 0;
+        const oldest = times.length ? Math.min(...times) : 0;
+        // Default selection: most listings, then oldest - the record other
+        // rows already point at.
+        const ranked = [...group].sort((a, b) =>
+          (Number(b.listing_count || 0) - Number(a.listing_count || 0))
+          || (businessCreatedTime(a) - businessCreatedTime(b)));
+        const keepId = ranked[0].business_id;
+        // Always show all four facts - BID, listing count, Newest/Oldest and
+        // the created date - so the choice can be made from the row itself
+        // without opening anything. The recommended row (pre-selected) is the
+        // one with the most listings; on a tie, the older record wins, since
+        // that is the one other records already point at.
+        const rows = ranked.map((brand, index) => {
+          const created = businessCreatedTime(brand);
+          const age = created === newest && newest !== oldest ? "Newest"
+            : (created === oldest && newest !== oldest ? "Oldest" : "Same age");
+          return `
+            <label class="dup-brand-row">
+              <input type="radio" name="dupKeep${groupIndex}" value="${escapeHtml(brand.business_id)}"${brand.business_id === keepId ? " checked" : ""}>
+              <span class="dup-brand-meta">
+                <span class="dup-brand-id">${escapeHtml(brand.display_business_id || "BID --------")}${index === 0 ? ' <em class="dup-brand-pick">recommended</em>' : ""}</span>
+                <span class="dup-brand-facts">${formatNumber(brand.listing_count || 0)} listings &middot; <strong>${age}</strong> &middot; ${escapeHtml(brand.created_at ? formatTimestamp(brand.created_at) : "date unknown")}</span>
+              </span>
+            </label>`;
+        }).join("");
+        // Name shown once per group, not repeated on every row.
+        return `
+          <div class="dup-brand-group" data-dup-group="${groupIndex}">
+            <div class="dup-brand-name">${escapeHtml(formatBrandName(group[0].name || "Similar brand"))} <span class="dup-brand-count">${group.length} copies</span></div>
+            ${rows}
+          </div>`;
+      }).join("");
+      list.insertAdjacentHTML("beforeend", `
+        <button type="button" class="secondary" id="duplicateBrandMergeBtn">Combine selected</button>
+        <div style="font-size: 11px; color: var(--muted); margin-top: 6px;">Pick the one to keep in each group. Everything from the others moves into it. Nothing is lost. We recommend the one with the most listings, or the older record when counts match.</div>`);
       el("duplicateBrandMergeBtn")?.addEventListener("click", async () => {
         const button = el("duplicateBrandMergeBtn");
         const status = el("duplicateBrandStatus");
-        const targetId = el("duplicateBrandKeep")?.value || "";
-        const sourceIds = group.map((brand) => brand.business_id).filter((id) => id && id !== targetId);
-        if (!targetId || !sourceIds.length) return;
-        const previous = setButtonBusy(button, "Merging");
+        // Read every group's choice, then submit them together.
+        const plans = groups.map((group, groupIndex) => {
+          const targetId = list.querySelector(`input[name="dupKeep${groupIndex}"]:checked`)?.value || "";
+          return { targetId, sourceIds: group.map((b) => b.business_id).filter((id) => id && id !== targetId) };
+        }).filter((plan) => plan.targetId && plan.sourceIds.length);
+        if (!plans.length) return;
+        // Combining is irreversible from the UI, so it gets an explicit
+        // confirmation naming what moves - counted in the warehouse, not
+        // guessed from the dropdown's listing_count.
+        const checking = setButtonBusy(button, "Checking");
+        const summary = await describeMergeImpact(plans);
+        clearButtonBusy(button, checking);
+        const confirmed = await showAppConfirm(summary, "Combine these brands?");
+        if (!confirmed) return;
+        const previous = setButtonBusy(button, "Combining");
         if (status) { status.className = "action-feedback"; status.textContent = ""; }
-        try {
-          await mergeDuplicateBusinesses(targetId, sourceIds);
-          if (status) {
-            status.className = "action-feedback ok";
-            status.textContent = `Merged ${sourceIds.length} duplicate ${sourceIds.length === 1 ? "brand" : "brands"} into the kept record.`;
+        let merged = 0;
+        const failures = [];
+        let listingsMoved = 0;
+        let reviewMoved = 0;
+        for (const plan of plans) {
+          try {
+            const outcome = await mergeDuplicateBusinesses(plan.targetId, plan.sourceIds);
+            merged += plan.sourceIds.length;
+            // Weighting: what the merge actually consolidated. "Combined 2
+            // brands" says nothing about impact.
+            listingsMoved += Number(outcome?.listings_moved || 0);
+            reviewMoved += Number(outcome?.review_rows_moved || 0);
+          } catch (error) {
+            // One bad group must not discard the ones that worked.
+            failures.push(productSafeError(error.message, "one group could not be combined"));
           }
-          // Reload so the merged-away ids disappear from every picker and the
-          // next unresolved group takes this one's place.
-          await loadBrands();
-        } catch (error) {
-          if (status) {
-            status.className = "action-feedback error";
-            status.textContent = productSafeError(error.message, "Could not merge these brands.");
-          }
-        } finally {
-          clearButtonBusy(button, previous);
         }
+        if (status) {
+          status.className = failures.length ? "action-feedback error" : "action-feedback ok";
+          status.textContent = failures.length
+            ? `Combined ${merged}, but ${failures.length} group${failures.length === 1 ? "" : "s"} failed: ${failures[0]}`
+            : `Combined ${merged} duplicate brand${merged === 1 ? "" : "s"}.${
+                listingsMoved || reviewMoved
+                  ? ` Moved ${formatNumber(listingsMoved)} listing${listingsMoved === 1 ? "" : "s"}${reviewMoved ? ` and ${formatNumber(reviewMoved)} review row${reviewMoved === 1 ? "" : "s"}` : ""}.`
+                  : " The copies held no records, so nothing needed moving."
+              }`;
+        }
+        clearButtonBusy(button, previous);
+        await loadBrands();
       });
     }
 
-async function mergeDuplicateBusinesses(targetId, sourceIds) {
+// What the user is about to agree to, in their own terms. Counts come from
+// the warehouse via the merge endpoint's preview mode; a table whose count
+// could not be read is reported as unknown rather than as zero, so "nothing
+// will move" is only ever said when it is actually true.
+async function describeMergeImpact(plans) {
+      const brandCount = plans.reduce((total, plan) => total + plan.sourceIds.length, 0);
+      const lines = [
+        `${brandCount} duplicate brand${brandCount === 1 ? "" : "s"} will be combined into ${plans.length} kept brand${plans.length === 1 ? "" : "s"}.`,
+        ""
+      ];
+      let listings = 0;
+      let templates = 0;
+      let reviewRows = 0;
+      let complete = true;
+      for (const plan of plans) {
+        try {
+          const preview = await mergeDuplicateBusinesses(plan.targetId, plan.sourceIds, { preview: true });
+          listings += Number(preview?.listings_moved || 0);
+          templates += Number(preview?.templates_moved || 0);
+          reviewRows += Number(preview?.review_rows_moved || 0);
+          if (preview?.counts_complete === false) complete = false;
+        } catch (error) {
+          complete = false;
+        }
+      }
+      if (!complete) {
+        lines.push("Everything the duplicates hold - listings, saved templates and review rows - moves to the brand you kept.");
+        lines.push("We could not count all of it up front, so no totals are shown here.");
+      } else if (!listings && !templates && !reviewRows) {
+        lines.push("The duplicates hold no records, so nothing needs to move. Only the extra brand entries go away.");
+      } else {
+        lines.push("Moving to the brand you kept:");
+        lines.push(`\u2022 ${formatNumber(listings)} listing${listings === 1 ? "" : "s"}`);
+        lines.push(`\u2022 ${formatNumber(templates)} saved template${templates === 1 ? "" : "s"}`);
+        lines.push(`\u2022 ${formatNumber(reviewRows)} review row${reviewRows === 1 ? "" : "s"}`);
+      }
+      lines.push("");
+      lines.push("Nothing is deleted, and the duplicate brand entries are retired. This cannot be undone from this app.");
+      return lines.join("\n");
+    }
+
+async function mergeDuplicateBusinesses(targetId, sourceIds, options = {}) {
       const response = await fetch("/api/brands/merge", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ target_business_id: targetId, source_business_ids: sourceIds })
+        body: JSON.stringify({ target_business_id: targetId, source_business_ids: sourceIds, preview: !!options.preview })
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Could not merge brands.");
@@ -1197,7 +1276,7 @@ async function loadConnectorPackages(pyodide, code) {
       const requested = el("pythonPackages").value.split(",").map((name) => name.trim()).filter(Boolean);
       if (/^\s*(?:from\s+requests\s+import|import\s+requests\b)/m.test(code) && !requested.includes("requests")) requested.push("requests");
       if (requested.length) {
-        setConnectorFeedback("Loading packages...", "");
+        setConnectorFeedback("Loading packages", "");
         await pyodide.loadPackage(requested);
       }
     }
@@ -1208,7 +1287,7 @@ async function runPythonConnector() {
         setConnectorFeedback("Run cancelled.", "warn");
       });
       try {
-        setConnectorFeedback("Loading runtime...", "");
+        setConnectorFeedback("Loading runtime", "");
         pyodideRuntimePromise ||= window.loadPyodide ? window.loadPyodide() : Promise.reject(new Error("Browser Python runtime could not be loaded."));
         const pyodide = await pyodideRuntimePromise;
         await loadConnectorPackages(pyodide, code);
@@ -1345,8 +1424,11 @@ function restoreDraft() {
         setDominosLocked(jsonFunctionMode === "dominos");
         setLaCityDemoLocked((draft.pythonFunction || "new") === "la_city");
         renderTable("sourcePreview", sourceRows.slice(0, 10).map((row) => flattenObject(row)));
-        const restoredCount = draft.sourceRowCount ? ` ${formatNumber(draft.sourceRowCount)} parsed records were in the prior session; re-parse before saving if you need the full dataset in memory.` : "";
-        setStatus(`Draft restored.${restoredCount}`, "ok");
+        // "Draft restored." is the whole message. The old version explained
+        // the in-memory row count and told the user to re-parse - three
+        // clauses of internal detail for something that either worked or
+        // did not.
+        setStatus("Draft restored.", "ok");
       } catch (error) {
         sessionStorage.removeItem(draftStorageKey);
       }
@@ -1605,10 +1687,10 @@ function renderMappings() {
         select.value = selected;
       });
       grid.querySelectorAll("select").forEach((select) => {
-        select.addEventListener("change", () => {
+        select.addEventListener("change", async () => {
           const key = select.dataset.field;
           const nextValue = select.value;
-          applyMappingSelection(key, nextValue, select);
+          await applyMappingSelection(key, nextValue, select);
         });
       });
       grid.querySelectorAll("button[data-remove-field]").forEach((button) => {
@@ -1709,12 +1791,17 @@ function openBrandEditorForm(mode = "create") {
       el("createBrandBtn").classList.remove("hidden");
       updatePreParseBrandMode();
     }
-function applyMappingSelection(key, nextValue, selectElement) {
+// Async because the move prompt is now the themed dialog rather than the
+// browser's blocking confirm(); both call sites are event handlers, so
+// awaiting is safe.
+async function applyMappingSelection(key, nextValue, selectElement) {
       const previousOwner = Object.entries(mappingSelections).find(([otherKey, value]) => otherKey !== key && value === nextValue);
       if (nextValue && previousOwner) {
         const previousTarget = mappingTargets.find((target) => target.key === previousOwner[0]);
         const currentTarget = mappingTargets.find((target) => target.key === key);
-        const move = window.confirm(`${nextValue} is already mapped to ${previousTarget ? previousTarget.label : previousOwner[0]}. Move it to ${currentTarget ? currentTarget.label : key}?\n\nChoose Cancel to keep it mapped to ${previousTarget ? previousTarget.label : previousOwner[0]}.`);
+        const move = await showAppConfirm(
+          `${nextValue} is already mapped to ${previousTarget ? previousTarget.label : previousOwner[0]}. Move it to ${currentTarget ? currentTarget.label : key}? Cancel keeps it where it is.`,
+          "Move this mapping?");
         if (!move) {
           if (selectElement) selectElement.value = mappingSelections[key] || "";
           return;
@@ -1812,11 +1899,11 @@ function targetOptionsForSourceField(sourceField) {
         }))
         .join("");
     }
-function handleSourceFieldTargetSelection(sourceField, targetKey, selectElement) {
+async function handleSourceFieldTargetSelection(sourceField, targetKey, selectElement) {
       if (!targetKey) return;
       hiddenMappingKeys.delete(targetKey);
       if (!primaryMappingKeys.has(targetKey)) optionalMappingKeys.add(targetKey);
-      applyMappingSelection(targetKey, sourceField);
+      await applyMappingSelection(targetKey, sourceField);
     }
 function buildTargetRow(target, availableOptionsList, selected) {
       const row = document.createElement("div");
@@ -2079,6 +2166,7 @@ async function createNewBrand(brandNameOverride = "", extra = {}) {
         applyBusinessSourceType(selectedBrand);
         await refreshTemplatesForBusiness();
         setStatus(`Brand ${selectedBrand.name} is ready for mapping.`, "ok");
+        showAppNotice(`${formatBrandName(selectedBrand.name)} was created and is ready for mapping.`, "Brand saved");
         updateOutput();
         return selectedBrand;
       } catch (error) {
@@ -2132,6 +2220,7 @@ async function updateExistingBrand() {
         updatePresetBrandPanel(activeCsvPresetConfig?.brand || selectedBrand, true);
         updateOutput();
         setStatus(`Brand ${selectedBrand.name} updated.`, "ok");
+        showAppNotice(`${formatBrandName(selectedBrand.name)} was updated.`, "Brand updated");
         return selectedBrand;
       } catch (error) {
         setStatus(productSafeError(error.message, "Could not update business."), "error");
@@ -2548,7 +2637,7 @@ async function loadExcelSheets() {
       try {
         let payload;
         if (isUrlMode) {
-          el("sheetName").innerHTML = '<option value="">Loading sheets from URL...</option>';
+          el("sheetName").innerHTML = '<option value="">Loading sheets from URL</option>';
           const sourceUrl = el("sourceUrl").value.trim();
           const sourceResponse = await fetch("/api/source-url", {
             method: "POST",
@@ -2607,27 +2696,13 @@ async function loadSampleDataset(reset = false) {
       // of a full-screen overlay. The spinner + sliding bar (.report-status
       // .spinner / .loading::after) make clear it's actively working rather
       // than stuck, since the percentage alone is only an estimate.
-      const estimatedSeconds = reset ? 25 : 15;
-      const startedAt = Date.now();
-      const progressLabel = reset ? "Clearing and reloading sample dataset" : "Loading sample dataset";
-      // The percentage here was never a measurement: it was
-      // elapsed/estimate capped at Math.min(94, ...), so any load slower
-      // than the 15/25s guess parked on "94%" indefinitely and looked
-      // hung - reported repeatedly as "why does it always stop at 94%".
-      // Nothing was stuck; the bar had simply run out of guess. Show the
-      // estimate only while it is still an estimate, then switch to an
-      // honest elapsed-time readout rather than inventing a number.
-      const renderProgress = (elapsed) => {
-        const percent = Math.round(elapsed / estimatedSeconds * 100);
-        const detail = percent < 95
-          ? `about ${percent}%`
-          : `${elapsed}s elapsed - larger batches take longer, this keeps running`;
-        status.innerHTML = `<span class="spinner"></span> ${progressLabel} (${detail})`;
-      };
-      renderProgress(0);
-      const progressTimer = window.setInterval(() => {
-        renderProgress(Math.floor((Date.now() - startedAt) / 1000));
-      }, 1000);
+      // No progress readout at all. The percentage was never a measurement
+      // (elapsed/estimate, capped, so a slow load parked on "94%"), and the
+      // honest elapsed-time version that replaced it was still a running
+      // commentary nobody asked for. The button's own busy state says it is
+      // working; the completion dialog says what happened. Nothing in
+      // between earns the space.
+      const progressTimer = null;
       try {
         const response = await fetch("/api/sample/load", {
           method: "POST",
@@ -2637,7 +2712,10 @@ async function loadSampleDataset(reset = false) {
         });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not load sample dataset.");
-        status.textContent = `${progressLabel} (100%)`;
+        // Nothing written here either - the completion dialog reports the
+        // outcome, and the status band stays out of the layout entirely.
+        status.className = "report-status hidden";
+        status.textContent = "";
         await loadBrands();
         await loadTemplateFilters();
         reportLoaded = false;
@@ -2670,7 +2748,7 @@ async function loadSampleDataset(reset = false) {
         status.classList.remove("hidden");
         setStatus(message, error.name === "AbortError" ? "warn" : "error");
       } finally {
-        window.clearInterval(progressTimer);
+        if (progressTimer) window.clearInterval(progressTimer);
         clearButtonBusy(button, previousButton);
         clearButtonBusy(headerButton, previousHeaderButton);
         if (reloadLink) clearButtonBusy(reloadLink, previousReload);
@@ -2981,8 +3059,23 @@ async function saveMapper() {
           pendingUnsavedParse = false;
           loadJobHistory();
         } catch (error) {
+          // Read BEFORE hideProgress(), which resets the flag. A save the
+          // user sent to the background has to announce its own failure the
+          // same way it would have announced success: they are no longer
+          // looking at the mapper (resetMapping() returned them to the
+          // pre-parse layout), so the inline status line below is invisible
+          // to them. A failure must never be quieter than a success.
+          const wasBackgrounded = typeof saveProgressHiddenByUser !== "undefined" && saveProgressHiddenByUser;
           hideProgress();
-          setStatus(productSafeError(error.message, "Could not save template."), "error");
+          const message = productSafeError(error.message, "Could not save template.");
+          setStatus(message, "error");
+          if (wasBackgrounded) {
+            const brandLabel = mapper.brand ? formatBrandName(mapper.brand) : "This brand";
+            showAppNotice(`${brandLabel}: the save running in the background did not finish. ${message}`, "Save did not finish");
+            // The server records the failed attempt as a FAILED job, so the
+            // history panel is where the user can see it afterwards.
+            loadJobHistory();
+          }
         }
       } finally {
         clearButtonBusy(saveBtn, previousSaveBtn);
@@ -3097,7 +3190,7 @@ async function performMasterDeleteData() {
         status.className = "action-feedback ok";
         status.textContent = "Workspace reset complete.";
         setStatus("Workspace reset complete. You will be signed out so the app can reload cleanly.", "ok");
-        window.alert("Workspace reset complete. You will be signed out so the app can reload cleanly.");
+        showAppNotice("Workspace reset complete. You will be signed out so the app can reload cleanly.", "Reset complete");
         sourceRows = [];
         sourceFields = [];
         sourceParsed = false;

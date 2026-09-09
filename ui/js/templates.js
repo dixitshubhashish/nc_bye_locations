@@ -109,7 +109,7 @@ async function _loadTemplateLibraryOnce() {
       const originalBtnHtml = searchBtn ? searchBtn.innerHTML : "Search";
       if (searchBtn) setButtonBusy(searchBtn, "Searching");
       target.className = "status";
-      target.innerHTML = `${_templateSpinner()}Loading templates...`;
+      target.innerHTML = `${_templateSpinner()}Loading templates`;
       // Fresh paging state for this search/filter.
       templatePaging = {
         search: el("templateSearch").value.trim(),
@@ -177,12 +177,26 @@ async function _loadTemplateFiltersOnce() {
       populateSourceTypeSelects();
     }
 // Lock/unlock the business pickers while a saved template is being edited.
-function setTemplateEditBrandLock(locked) {
+function setTemplateEditBrandLock(locked, businessId = "", brandLabel = "") {
       ["brandSelect", "parserBusinessSelect", "preParseBrandSelect"].forEach((id) => {
         const node = el(id);
         if (!node) return;
         node.disabled = Boolean(locked);
         node.title = locked ? "This template belongs to this business and cannot be re-pointed here." : "";
+        // A locked picker must SHOW the brand, not the "Select an existing
+        // brand" placeholder. The option can be genuinely absent (this select
+        // hides duplicate brands, and the template may point at a hidden
+        // copy), so add it rather than leave the field looking unset.
+        if (locked && businessId) {
+          let option = node.querySelector(`option[value="${CSS.escape(businessId)}"]`);
+          if (!option) {
+            option = document.createElement("option");
+            option.value = businessId;
+            option.textContent = brandLabel || businessId;
+            node.appendChild(option);
+          }
+          node.value = businessId;
+        }
       });
       el("editExistingBrandLink")?.classList.toggle("hidden", Boolean(locked));
     }
@@ -207,8 +221,24 @@ function loadTemplateIntoEditor(template) {
       // #mapperView.template-edit-mode .source-parser-only). Cleared again
       // wherever templateEditMode goes back to false.
       el("mapperView")?.classList.add("template-edit-mode");
-      const brandOption = document.querySelector(`#brandSelect option[value="${CSS.escape(template.business_id)}"]`);
-      if (brandOption) el("brandSelect").value = template.business_id;
+      // The template's brand must be VISIBLE in the locked select, not the
+      // "Select an existing brand" placeholder. Its option can legitimately
+      // be absent - the dropdown hides duplicate brands, and the template may
+      // point at one of the hidden copies - so inject it when missing rather
+      // than leaving the field looking empty for a template that definitely
+      // has a brand.
+      const brandSelect = el("brandSelect");
+      if (brandSelect) {
+        let brandOption = brandSelect.querySelector(`option[value="${CSS.escape(template.business_id)}"]`);
+        if (!brandOption) {
+          brandOption = document.createElement("option");
+          brandOption.value = template.business_id;
+          brandOption.textContent = formatBrandName(
+            selectedBrand?.name || components.brand || template.business_id);
+          brandSelect.appendChild(brandOption);
+        }
+        brandSelect.value = template.business_id;
+      }
       applyBusinessSourceType(selectedBrand, { preserveSourceType: false });
       el("sourceName").value = components.source_name || template.name || "";
       mappingSelections = { ...(components.fields || {}) };
@@ -237,9 +267,12 @@ function loadTemplateIntoEditor(template) {
       // template, not a choice - changing it here would silently re-point
       // the template at a different business. Locked while editing; released
       // by exitTemplateEditMode().
-      setTemplateEditBrandLock(true);
+      setTemplateEditBrandLock(true, template.business_id,
+        formatBrandName(selectedBrand?.name || components.brand || template.business_id));
       switchView("mapperView");
-      setStatus(`Loaded ${template.name}. Edit the field mapping, then click Save Template to update.`, "ok");
+      // The raw template name is an internal slug ("spice_route_csv_csv_sample")
+      // - it means nothing to the reader and the mapping is on screen anyway.
+      setStatus("Edit the field mapping, then click Save Template to update.", "ok");
     }
 // With no live rows to preview, show the stored source columns so the editor
 // isn't a blank panel (the "source mapper view shows nothing" case) and it's
@@ -252,8 +285,39 @@ function renderTemplateEditSourcePreview() {
         return;
       }
       const mapped = new Set(Object.values(mappingSelections).filter(Boolean));
-      target.innerHTML = `<div style="font-size:12px; color: var(--muted); margin-bottom:8px;">Editing a saved template — showing its ${sourceFields.length} stored source column${sourceFields.length === 1 ? "" : "s"} (no live data rows). Parse a source file to bring in real records.</div>
-        <div style="display:flex; flex-wrap:wrap; gap:6px;">${sourceFields.map((field) => `<span style="display:inline-block; padding:2px 8px; border-radius:12px; font-size:11px; border:1px solid var(--line); background:${mapped.has(field) ? "#e6f4f1" : "#f5f5f5"}; color:${mapped.has(field) ? "#0f6d63" : "#555"};">${escapeHtml(field)}${mapped.has(field) ? " ✓" : ""}</span>`).join("")}</div>`;
+      const chips = `<div style="display:flex; flex-wrap:wrap; gap:6px;">${sourceFields.map((field) => `<span style="display:inline-block; padding:2px 8px; border-radius:12px; font-size:11px; border:1px solid var(--line); background:${mapped.has(field) ? "#e6f4f1" : "#f5f5f5"}; color:${mapped.has(field) ? "#0f6d63" : "#555"};">${escapeHtml(field)}${mapped.has(field) ? " ✓" : ""}</span>`).join("")}</div>`;
+      target.innerHTML = `<div id="templateSampleRecords" style="margin-bottom:12px;"><div class="status">${busyMarkup("Loading saved records for this template")}</div></div>
+        <div style="font-size:12px; color: var(--muted); margin-bottom:8px;">${sourceFields.length} stored source column${sourceFields.length === 1 ? "" : "s"} in this template</div>${chips}`;
+      loadTemplateSampleRecords();
+    }
+// The template editor used to show only column NAMES ("no live data rows"),
+// which is not enough to judge whether a mapping is right. The rows this
+// template already produced are in `listings` keyed by template_id (+
+// business_id), so show real examples instead of asking for a re-parse.
+async function loadTemplateSampleRecords() {
+      const host = el("templateSampleRecords");
+      if (!host || !activeTemplateId) return;
+      try {
+        const query = new URLSearchParams({ template_id: activeTemplateId, limit: "10" });
+        if (selectedBrand?.business_id) query.set("business_id", selectedBrand.business_id);
+        const response = await fetch(`/api/templates/sample-records?${query}`);
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not load sample records.");
+        const records = result.records || [];
+        if (!records.length) {
+          host.innerHTML = `<div class="status">No records saved under this template yet. Parse a source file to bring in records.</div>`;
+          return;
+        }
+        // Only columns that actually carry a value in this sample - a table
+        // of empty columns is worse than a narrower, honest one.
+        const columns = Object.keys(records[0]).filter((key) => records.some((row) => row[key] !== null && row[key] !== ""));
+        host.innerHTML = `
+          <div style="font-size:12px; color: var(--muted); margin-bottom:6px;">Showing ${records.length} record${records.length === 1 ? "" : "s"} already saved under this template.</div>
+          <div style="overflow-x:auto;"><table><thead><tr>${columns.map((c) => `<th>${escapeHtml(formatFieldLabel ? formatFieldLabel(c) : c)}</th>`).join("")}</tr></thead>
+          <tbody>${records.map((row) => `<tr>${columns.map((c) => `<td>${escapeHtml(row[c] ?? "")}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+      } catch (error) {
+        host.innerHTML = `<div class="status">${escapeHtml(productSafeError(error.message, "Could not load saved records for this template."))}</div>`;
+      }
     }
 async function saveEditedTemplate() {
       const response = await fetch("/api/templates/save", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workflow_template_id: activeTemplateId, components: { mapper: getMapper() } }) });

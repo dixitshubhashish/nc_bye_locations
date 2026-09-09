@@ -379,3 +379,84 @@ class HierarchyConflictTests(unittest.TestCase):
         # absence of evidence isn't evidence of a conflict.
         with sqlite_cache.get_db_connection() as conn:
             self.assertIsNone(detect_hierarchy_conflict("00000", "United States", 37.7, -123.0, conn))
+
+
+class WrappedCoordinateTests(unittest.TestCase):
+    """A longitude outside -180..180 is not "outside the US" - it is outside
+    the valid range altogether, so no lookup can ever match it. Reported
+    example: (40.776506, -245.22). -245.22 + 360 = 114.78, a real meridian:
+    the source wrapped the value, and folding it back recovers a usable
+    coordinate instead of discarding the row as unfixable.
+    """
+
+    def test_wrapped_longitude_folds_back_into_range(self) -> None:
+        from whitespace_tool.geo_enrichment import normalize_wrapped_longitude
+
+        value, wrapped = normalize_wrapped_longitude(-245.22)
+        self.assertTrue(wrapped)
+        self.assertAlmostEqual(value, 114.78, places=2)
+        # Either direction, any number of revolutions.
+        self.assertAlmostEqual(normalize_wrapped_longitude(200.0)[0], -160.0, places=6)
+        self.assertAlmostEqual(normalize_wrapped_longitude(-190.0)[0], 170.0, places=6)
+
+    def test_in_range_longitude_is_untouched(self) -> None:
+        from whitespace_tool.geo_enrichment import normalize_wrapped_longitude
+
+        for value in (-74.006, 0.0, 180.0, -180.0):
+            self.assertEqual(normalize_wrapped_longitude(value), (value, False))
+        self.assertEqual(normalize_wrapped_longitude(None), (None, False))
+
+    def test_impossible_latitude_is_reported_not_folded(self) -> None:
+        # Folding a latitude would silently move the point to another
+        # hemisphere, so it is reported unusable instead.
+        from whitespace_tool.geo_enrichment import normalize_wrapped_latitude
+
+        self.assertEqual(normalize_wrapped_latitude(95.0), (None, True))
+        self.assertEqual(normalize_wrapped_latitude(40.7), (40.7, False))
+
+    def test_normalize_location_repairs_a_wrapped_longitude(self) -> None:
+        from whitespace_tool.normalization import normalize_location
+
+        mapper = {"brand": "A", "business_id": "b", "source_name": "s", "source_type": "csv",
+                  "fields": {"name": "Name", "postal_code": "Zip", "latitude": "Lat",
+                             "longitude": "Lon", "city": "City", "state": "State", "country": "Country"}}
+        record = normalize_location(
+            {"Name": "S", "Zip": "78701", "City": "Austin", "State": "TX",
+             "Country": "United States", "Lat": "40.776506", "Lon": "-245.22"},
+            mapper, "s", 0)
+        self.assertAlmostEqual(record.longitude, 114.78, places=2)
+
+    def test_normalize_location_does_not_silently_clear_a_bad_latitude(self) -> None:
+        # Clearing it would make the bad data vanish instead of being flagged;
+        # validate_normalized_location() is what routes it to review.
+        from whitespace_tool.normalization import normalize_location
+
+        mapper = {"brand": "A", "business_id": "b", "source_name": "s", "source_type": "csv",
+                  "fields": {"name": "Name", "postal_code": "Zip", "latitude": "Lat",
+                             "longitude": "Lon", "city": "City", "state": "State", "country": "Country"}}
+        record = normalize_location(
+            {"Name": "S", "Zip": "78701", "City": "Austin", "State": "TX",
+             "Country": "", "Lat": "95.0", "Lon": "20.0"}, mapper, "s", 0)
+        self.assertIsNotNone(record.latitude)
+
+    def test_suggestion_radius_is_wider_than_the_automatic_snap(self) -> None:
+        # A snap happens silently, so it stays tight; a suggestion is
+        # confirmed by a person, so it may reach further.
+        from whitespace_tool.geo_enrichment import MAX_SNAP_DISTANCE_KM, MAX_SUGGESTION_DISTANCE_KM
+
+        self.assertEqual(MAX_SNAP_DISTANCE_KM, 50.0)
+        self.assertEqual(MAX_SUGGESTION_DISTANCE_KM, 100.0)
+        self.assertGreater(MAX_SUGGESTION_DISTANCE_KM, MAX_SNAP_DISTANCE_KM)
+
+    def test_default_radius_keeps_every_existing_caller_at_the_snap_distance(self) -> None:
+        # Widening the shared function outright would have loosened automatic
+        # snapping everywhere - a guarantee another test protects.
+        import inspect
+        from whitespace_tool import geo_enrichment
+
+        signature = inspect.signature(geo_enrichment.find_nearest_worldwide_city)
+        self.assertEqual(signature.parameters["max_distance_km"].default,
+                         geo_enrichment.MAX_SNAP_DISTANCE_KM)
+        # Only the confirm-me suggestion path opts into the wider radius.
+        server = inspect.getsource(__import__("whitespace_tool.workflow_server", fromlist=["x"]).reprocess_rejected)
+        self.assertIn("max_distance_km=MAX_SUGGESTION_DISTANCE_KM", server)

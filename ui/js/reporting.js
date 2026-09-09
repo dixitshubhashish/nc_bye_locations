@@ -1,6 +1,12 @@
 // Reporting tab: filters, KPI/table rendering, and the Leaflet location map.
 
 let reportLoaded = false;
+// Whether the report has EVER been painted. reportLoaded is reset on purpose
+// to force a re-fetch (auto-refresh, manual refresh, filter change), so it
+// cannot also decide whether to blank the screen - keying the blank off it
+// meant every refresh wiped the numbers to 0 and left a screen of empty
+// space behind the status line. This one is set once and never reset.
+let reportHasRenderedOnce = false;
 let reportingBrands = [];
 let enrichmentStatusTimer = null;
 let reportingCountdownTimer = null;
@@ -81,7 +87,7 @@ function renderEmptyReportingStructure() {
       if (el("reportCompetitorBenchmarkContent")) {
         el("reportCompetitorBenchmarkContent").innerHTML = `
           <div style="color: var(--muted); font-size: 13px; padding: 24px; text-align: center; background: #f8fafc; border: 1px solid var(--line); border-radius: 8px;">
-            Loading competitor benchmark view...
+            Loading competitor benchmark view
           </div>
         `;
       }
@@ -124,7 +130,7 @@ function renderEmptyReportingStructure() {
         { key: "county", label: "County" },
         { key: "city", label: "City" },
         { key: "zip_code", label: "ZIP Code" },
-        { key: "competitor_locations", label: "Competitor Stores", format: formatNumber },
+        { key: "competitor_locations", label: "Competitor Listings", format: formatNumber },
         { key: "brands_present", label: "Competitor Brands", format: formatBrandList },
         { key: "population", label: "Census Population", format: formatNumber },
         { key: "median_household_income", label: "Median Income", format: formatNumber },
@@ -147,13 +153,33 @@ function renderEmptyReportingStructure() {
     }
 
 function reportHasBusinessData(totals = {}) {
-      return Number(totals.total_stores || 0) > 0
+      return Number((totals.total_listings ?? totals.total_stores) || 0) > 0
         || Number(totals.total_brands || 0) > 0
         || Number(totals.active_market_locations || 0) > 0;
     }
 
+// Every other poll in the app has an attempt budget (the quality tab retries
+// 40x, the stale-refetch 3x). This one had none: each poll that came back
+// still "refreshing" scheduled another, forever - so a background pass that
+// never settles left the page re-fetching every few seconds and re-raising
+// the "Preparing reporting data" spinner each time it rendered. A poll that
+// has not converged after this many tries is not going to; say so once and
+// stop rather than spinning for the rest of the session.
+const REPORTING_WARMUP_POLL_LIMIT = 20;
+let reportingWarmupPolls = 0;
+
+function resetReportingWarmupPolls() {
+      reportingWarmupPolls = 0;
+      if (reportingWarmupTimer) {
+        clearTimeout(reportingWarmupTimer);
+        reportingWarmupTimer = null;
+      }
+    }
+
 function scheduleReportingWarmupPoll(delayMs = 5000) {
       if (reportingWarmupTimer) return;
+      if (reportingWarmupPolls >= REPORTING_WARMUP_POLL_LIMIT) return;
+      reportingWarmupPolls += 1;
       reportingWarmupTimer = window.setTimeout(() => {
         reportingWarmupTimer = null;
         if (document.getElementById("reportingView")?.classList.contains("hidden")) return;
@@ -878,7 +904,7 @@ function renderCompetitorBenchmarkView(primaryRow, competitorRows, totals = {}, 
               </td>
               <td>
                 <div class="comp-metric-cell">
-                  <span class="comp-metric-num">${formatNumber(totals.total_stores || totals.active_market_locations || 0)}</span>
+                  <span class="comp-metric-num">${formatNumber((totals.total_listings ?? totals.total_stores) || totals.active_market_locations || 0)}</span>
                 </div>
               </td>
               <td>
@@ -967,12 +993,12 @@ function renderCompetitorBenchmarkView(primaryRow, competitorRows, totals = {}, 
           <div class="comp-bench-brand-cell">
             <div class="comp-brand-row comp-brand-primary">
               <span class="comp-logo-icon" title="${escapeHtml(primaryName)}">${primaryLogo}</span>
-              <span class="comp-primary-name">${escapeHtml(primaryName)}</span>
+              <span class="comp-primary-name" title="${escapeHtml(primaryName)}">${escapeHtml(primaryName)}</span>
             </div>
             <div class="comp-brand-row comp-brand-vs">
               <span class="comp-vs-badge">VS</span>
               <span class="comp-logo-icon" title="${escapeHtml(compName)}">${compLogo}</span>
-              <a href="#" class="comp-link-name" data-competitor-brand="${escapeHtml(compName)}" title="Focus on ${escapeHtml(compName)}">${escapeHtml(compName)}</a>
+              <a href="#" class="comp-link-name" data-competitor-brand="${escapeHtml(compName)}" title="${escapeHtml(compName)} - click to focus">${escapeHtml(compName)}</a>
             </div>
           </div>
         </td>
@@ -1199,7 +1225,7 @@ function renderMarketGapsWithPagination(gaps = [], page = 1) {
     { key: "county", label: "County" },
     { key: "city", label: "City" },
     { key: "zip_code", label: "ZIP Code" },
-    { key: "competitor_locations", label: "Competitor Stores", format: formatNumber },
+    { key: "competitor_locations", label: "Competitor Listings", format: formatNumber },
     { key: "brands_present", label: "Competitor Brands", format: formatBrandList },
     { key: "population", label: "Census Population", format: (v) => (v ? formatNumber(v) : "N/A") },
     { key: "median_household_income", label: "Median Income", format: (v) => (v ? "$" + formatNumber(v) : "N/A") },
@@ -1308,7 +1334,7 @@ function setupSampleRecordsDownload() {
       btn.disabled = false;
       if (icon) icon.textContent = "📥";
       if (text) text.textContent = "Download Excel";
-      alert(`Excel export failed: ${err.message}`);
+      showAppNotice(productSafeError(err.message, "Excel export failed."), "Export failed");
     }
   });
 }
@@ -1322,27 +1348,47 @@ async function loadReporting({ interactive = false } = {}) {
       const previousApplyBtn = interactive && applyBtn ? setButtonBusy(applyBtn, "Applying Filters") : "";
       if (interactive) {
         status.className = "report-status loading";
-        status.innerHTML = '<span class="spinner"></span> Refreshing report...';
+        status.innerHTML = '<span class="spinner"></span> Refreshing report';
       } else {
         status.classList.add("hidden");
       }
-      renderEmptyReportingStructure();
+      // Only blank the screen when there is nothing on it yet. This ran
+      // unconditionally, BEFORE the fetch, on every loadReporting() - so the
+      // 5-minute auto-refresh reset every count to 0 (including "50 states",
+      // which is a global constant and can never legitimately be 0) and left
+      // it that way until the response landed. Reported as "auto refresh
+      // removed all data which was good".
+      if (!reportHasRenderedOnce) renderEmptyReportingStructure();
       try {
         const queryString = reportingQueryString();
         const response = await fetch(`/api/reporting${queryString ? `?${queryString}` : ""}`);
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not load reporting data.");
         syncReportingFilters(result);
-        el("reportContent").classList.remove("hidden");
         const totals = result.totals || {};
         const hasBusinessData = reportHasBusinessData(totals);
+        // Revealing #reportContent before knowing whether there IS data laid
+        // out the whole empty skeleton - every section reserving its height
+        // with nothing in it - so the "Preparing reporting data" line sat
+        // above a screen of blank space. Keep it hidden until there is
+        // something to put in it.
+        const preparing = Boolean(result.refreshing) && !hasBusinessData;
+        el("reportContent").classList.toggle("hidden", preparing);
         if (result.warning && !result.refreshing) {
           status.className = "report-status";
           status.textContent = result.warning;
-        } else if (result.refreshing && !hasBusinessData) {
-          status.className = "report-status loading";
-          status.innerHTML = '<span class="spinner"></span> Preparing reporting data...';
-          scheduleReportingWarmupPoll(3000);
+        } else if (preparing) {
+          if (reportingWarmupPolls >= REPORTING_WARMUP_POLL_LIMIT) {
+            // Budget spent and still nothing. Saying so once beats a spinner
+            // that implies work is progressing when it has stopped.
+            status.className = "report-status";
+            status.textContent = "Reporting data is taking longer than usual to prepare. Use Refresh Report to try again.";
+          } else {
+            status.className = "report-status loading";
+            // No trailing ellipsis - the spinner already says it is working.
+            status.innerHTML = '<span class="spinner"></span> Preparing reporting data';
+            scheduleReportingWarmupPoll(3000);
+          }
         } else if (interactive && result.refreshing) {
           // The Refresh Report button itself already shows "Refreshing
           // Reports" with a spinner while this is in flight - no need for a
@@ -1351,6 +1397,9 @@ async function loadReporting({ interactive = false } = {}) {
           scheduleReportingWarmupPoll(10000);
         } else {
           status.classList.add("hidden");
+          // Settled with real data: the next warm-up cycle starts from a
+          // clean budget rather than inheriting this one's spent attempts.
+          if (hasBusinessData) reportingWarmupPolls = 0;
           if (reportingWarmupTimer && hasBusinessData) {
             clearTimeout(reportingWarmupTimer);
             reportingWarmupTimer = null;
@@ -1365,7 +1414,7 @@ async function loadReporting({ interactive = false } = {}) {
         el("reportStates").textContent = formatNumber(Math.min(50, Number(totals.total_states || 0)));
         el("reportCities").textContent = formatNumber(totals.active_brand_cities != null ? totals.active_brand_cities : (totals.total_cities || 0));
         if (el("reportZips")) el("reportZips").textContent = formatNumber(totals.total_zips || 0);
-        if (el("reportStores")) el("reportStores").textContent = formatNumber(totals.total_stores || 0);
+        if (el("reportStores")) el("reportStores").textContent = formatNumber((totals.total_listings ?? totals.total_stores) || 0);
         if (el("reportBrandStates")) el("reportBrandStates").textContent = formatNumber(totals.active_brand_states || 0);
         if (el("reportWhitespaceGaps")) el("reportWhitespaceGaps").textContent = formatNumber(totals.gap_zips != null ? totals.gap_zips : (result.primary_kpis?.gap_zips ?? (totals.total_zips - totals.active_market_locations)));
 
@@ -1565,35 +1614,35 @@ async function loadReporting({ interactive = false } = {}) {
           }
         }
 
+        // Every row here is a COMPETITOR measured against the primary brand,
+        // so the sign and the sentiment are opposite: a competitor with MORE
+        // locations than you is bad news, not good. Colouring diff > 0 green
+        // read "+278 competitor locations" as an achievement. One helper for
+        // every column so the two can never drift apart again.
+        const competitorDiffCell = (value, diff, unit) => {
+          if (diff === 0) {
+            return `${formatNumber(value)} <span style="color: var(--muted); font-size: 11px; font-weight: 600;" title="Level with ${escapeHtml(primaryRow.brand)}">(Same vs ${escapeHtml(primaryRow.brand)})</span>`;
+          }
+          const ahead = diff > 0;
+          const color = ahead ? "var(--error)" : "var(--ok)";
+          const explain = ahead
+            ? `${escapeHtml(primaryRow.brand)} is behind by ${formatNumber(Math.abs(diff))} ${unit}`
+            : `${escapeHtml(primaryRow.brand)} is ahead by ${formatNumber(Math.abs(diff))} ${unit}`;
+          return `${formatNumber(value)} <span style="color: ${color}; font-size: 11px; font-weight: 600;" title="${explain}">(${ahead ? "+" : "-"}${formatNumber(Math.abs(diff))} vs ${escapeHtml(primaryRow.brand)})</span>`;
+        };
+        const competitorColumn = (key, label, unit) => ({
+          key, label, html: true,
+          format: (v, row) => (!primaryRow || row.brand === primaryRow.brand)
+            ? formatNumber(v)
+            : competitorDiffCell(v, row[key] - primaryRow[key], unit),
+        });
         renderSimpleTable("reportBrandsTable", [
           { key: "brand", label: "Brand" },
-          {
-            key: "locations",
-            label: "Number of Locations",
-            html: true,
-            format: (v, row) => {
-              if (!primaryRow || row.brand === primaryRow.brand) return formatNumber(v);
-              const diff = row.locations - primaryRow.locations;
-              const color = diff > 0 ? "var(--ok)" : "var(--error)";
-              const sign = diff > 0 ? "+" : "";
-              return `${formatNumber(v)} <span style="color: ${color}; font-size: 11px; font-weight: 600;">(${sign}${formatNumber(diff)} vs ${escapeHtml(primaryRow.brand)})</span>`;
-            }
-          },
-          {
-            key: "states",
-            label: "Number of States",
-            html: true,
-            format: (v, row) => {
-              if (!primaryRow || row.brand === primaryRow.brand) return formatNumber(v);
-              const diff = row.states - primaryRow.states;
-              const color = diff > 0 ? "var(--ok)" : (diff < 0 ? "var(--error)" : "var(--muted)");
-              const sign = diff > 0 ? "+" : "";
-              return `${formatNumber(v)} <span style="color: ${color}; font-size: 11px; font-weight: 600;">(${diff === 0 ? "Same" : `${sign}${diff}`} vs ${escapeHtml(primaryRow.brand)})</span>`;
-            }
-          },
-          { key: "counties", label: "Counties Covered", format: formatNumber },
-          { key: "cities", label: "Cities Covered", format: formatNumber },
-          { key: "zips", label: "ZIP Codes Covered", format: formatNumber }
+          competitorColumn("locations", "Number of Locations", "locations"),
+          competitorColumn("states", "Number of States", "states"),
+          competitorColumn("counties", "Counties Covered", "counties"),
+          competitorColumn("cities", "Cities Covered", "cities"),
+          competitorColumn("zips", "ZIP Codes Covered", "ZIP codes")
         ], brandRows);
 
         // Render market gaps with client-side pagination
@@ -1630,6 +1679,7 @@ async function loadReporting({ interactive = false } = {}) {
         if (interactive && !result.refreshing && hasBusinessData) status.classList.add("hidden");
         el("reportContent").classList.remove("hidden");
         reportLoaded = true;
+        reportHasRenderedOnce = true;
       } catch (error) {
         renderEmptyReportingStructure();
         status.className = "report-status";
@@ -1670,13 +1720,18 @@ function startReportingAutoRefreshCountdown() {
 async function refreshReportingNow() {
       const status = el("reportStatus");
       const refreshBtn = el("refreshReportBtn");
+      // An explicit click is the user asking again, so it always gets a full
+      // poll budget - otherwise a session that exhausted it once could never
+      // recover without a page reload.
+      resetReportingWarmupPolls();
       const previousRefreshBtn = setButtonBusy(refreshBtn, "Starting Refresh");
       reportingCountdownSeconds = 300;
       renderReportingCountdown();
-      if (status) {
-        status.className = "report-status loading";
-        status.innerHTML = '<span class="spinner"></span> Starting report refresh...';
-      }
+      // No status line here: the Refresh button itself is already showing
+      // "Starting Refresh" with a spinner, and the countdown sits right
+      // under it. A second line saying the same thing was pure duplication -
+      // and its reserved height was the empty band under the button.
+      if (status) status.classList.add("hidden");
       try {
         const response = await fetch("/api/reporting/refresh", {
           method: "POST",
@@ -1686,12 +1741,10 @@ async function refreshReportingNow() {
         let result = {};
         try { result = await response.json(); } catch (_) {}
         if (!response.ok) throw new Error(result.error || "Could not start report refresh.");
-        if (status) {
-          status.className = "report-status loading";
-          status.innerHTML = result.started === false
-            ? '<span class="spinner"></span> Report refresh is already running...'
-            : '<span class="spinner"></span> Report refresh started. Updating numbers...';
-        }
+        // Same reasoning: the button carries the in-flight state. Only an
+        // "already running" case is worth a word, and even that goes on the
+        // button rather than opening a second status band.
+        if (status) status.classList.add("hidden");
         reportLoaded = false;
         await loadReporting({ interactive: true });
         if (typeof window.reportingRefreshQuality === "function") window.reportingRefreshQuality();

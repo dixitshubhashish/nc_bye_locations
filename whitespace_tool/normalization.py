@@ -241,7 +241,8 @@ def _apply_semantic_cleaning(record: LocationRecord) -> LocationRecord:
 
 
 def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name: str, index: int) -> LocationRecord | None:
-    from whitespace_tool.geo_enrichment import detect_and_fix_inverted_coords, normalize_state_code
+    from whitespace_tool.geo_enrichment import (detect_and_fix_inverted_coords, normalize_state_code,
+                                                normalize_wrapped_longitude)
     from whitespace_tool.sqlite_cache import lookup_cached_city_state
 
     fields = mapper["fields"]
@@ -267,6 +268,18 @@ def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name:
     raw_lat = optional_float(get_nested(row, fields.get("latitude", ""), ""))
     raw_lon = optional_float(get_nested(row, fields.get("longitude", ""), ""))
     if raw_lat is not None and raw_lon is not None:
+        # Fold a wrapped longitude back into range FIRST. A value like
+        # -245.22 is not "outside the US", it is outside the valid longitude
+        # range entirely (-245.22 + 360 = 114.78, a real meridian), so no
+        # lookup could ever match it and the inversion check below would be
+        # reasoning about an impossible pair.
+        raw_lon, _lon_wrapped = normalize_wrapped_longitude(raw_lon)
+        # Latitude is deliberately NOT cleared here. A value like 95 has no
+        # safe repair (folding it would move the point to another
+        # hemisphere), and clearing it would make the bad data vanish
+        # silently instead of being flagged - validate_normalized_location()
+        # already raises "coordinates outside US boundary" for it, which is
+        # what sends the row to review.
         raw_lat, raw_lon, _ = detect_and_fix_inverted_coords(raw_lat, raw_lon)
 
     record = LocationRecord(

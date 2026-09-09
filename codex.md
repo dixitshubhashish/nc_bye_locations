@@ -125,6 +125,169 @@ New test files added 2026-09-09 (run targeted, not the full suite, per project c
 
 ## Remaining Gaps
 
+### Seventeenth batch (2026-09-09) — nine live-reported bugs, plus brand-independent content_hash
+
+Reported by the user while working in the app; every one traced to a cause
+before being changed, and **measured** where a number was in doubt. Full
+per-bug detail is in `docs/bug_tracker.md` (B23-B32). The ones worth knowing:
+
+**`business_id` removed from `CONTENT_HASH_FIELDS` (user instruction).** The
+hash now answers "is this the same physical place?" independently of which
+brand filed the record — which is exactly what made the cross-brand duplicate
+signal (old O2) impossible before. Per-brand dedupe is unaffected:
+`_dedupe_listings_against_bronze()` keys on the composite
+`(business_id, content_hash)`, so the brand is still carried explicitly.
+Removing a field changes **every stored hash**, so `LEGACY_CONTENT_HASH_FIELDS`
+/ `legacy_content_hash()` reproduce the old definition and the dedupe matches
+either, upgrading a matched legacy row to the new hash in place. That closes
+the real risk (a re-save inserting a duplicate copy of the entire warehouse).
+A one-shot backfill for rows never re-observed is the remaining piece — see
+O8; recompute in Python, not SQL, because reproducing `json.dumps(sort_keys=True)`
+plus Python `str()` float formatting in BigQuery is a trap.
+
+**"Is clear cache happening always?" — yes, and it was measurable.**
+`query_cache` held **only** the exempt `reporting_quality:*` keys; every
+`reporting_summary:*` entry was gone. `invalidate_cache()` is a blanket
+DELETE and the background loops called it every pass. Background callers now
+go through `_invalidate_cache_background()` (120s floor); user actions still
+clear immediately, and a test enforces that split.
+
+**Numbers that disagreed on screen were wiring, not data.** The review cards
+showed "-" while the mirror held correct, reconciling values
+(`ai_fixed=110, manual_fixed=155, manual_pending=130, total=395`) — they were
+read off the heavy `/api/reporting/quality` and failed with it; they now have
+their own mirror-backed `GET /api/review/fix-states`. "AI Fixed by Total
+Error" showed 0.00% beside 110 AI fixes because it divided the *current
+auto-repair batch* (which resets per batch) instead of the cumulative counts;
+it is 27.85%.
+
+**Head-to-Head colours were inverted.** Every row is a competitor measured
+against the primary brand, so a competitor with MORE locations is bad news —
+`diff > 0` was green. One shared helper now drives all five columns.
+
+**Top States: same root cause, third time.** `container.clientWidth` is 0
+while the panel is hidden. Rewritten as a fixed-viewBox plain SVG so nothing
+is measured — deliberately the one chart here that is not d3.
+
+**The brand form had three mode flags and a button that read one.**
+`presetBrandEditMode` was never consulted by `#createBrandBtn`, so the preset
+"Edit Brand Details" path left it on its create branch and saving filed a
+second copy of the brand on screen.
+
+Suite: **518 passed**. `node --check` clean on all 7 UI JS files, `py_compile`
+clean, `git diff --check` clean. **No server restart taken** (standing rule),
+so none of the backend half is live yet.
+
+### Sixteenth batch (2026-09-09) — one dialog shell, merge confirmation, store-level enrichment, failed-save visibility
+
+**Measured, not estimated:** coverage is **53%** overall
+(`workflow_server.py` 48%, 4151 statements / 2150 missed), taken with
+`.venv/bin/python -m coverage run --source=whitespace_tool -m pytest unit_tests/ -q`.
+The ~110 tests added since the last 52% reading moved the total by one point,
+because `workflow_server.py` dominates the statement count. Suite is now
+**508 passed** (was 498).
+
+**1. Every dialog is on one shell (the user-reported bug, now fixed).** Five
+dialogs carried bespoke frames that ignored the app theme:
+`pythonConnectorDialog` and `editRecordDialog` (`connector-editor-dialog`),
+and `dangerDialog` / `masterDeleteCredentialsDialog` /
+`masterDeleteConfirmDialog` (`danger-dialog`). All twelve dialogs now use
+`<dialog class="app-help-dialog"> > .app-help-content > .app-help-header >
+<h2 id>`, varied only by three modifier classes — `--editor` (the 1200x800
+code-editor size), `--form` (mid-width record form), `--danger` (red border,
+red rule, red title, so a destructive action stays visibly destructive while
+on the blue/white shell). Both retired frames were deleted from the CSS
+outright, and every dialog gained `aria-labelledby`. Guarded by
+`test_every_dialog_uses_the_one_birdeye_shell`, which asserts the two retired
+class names appear **nowhere** in the file and walks every `<dialog>` in the
+markup rather than spot-checking ids.
+
+**2. Merge now has an explicit confirmation naming what moves (O3).**
+`merge_brands()` takes `preview: true` and answers with per-table COUNTs
+instead of running the UPDATEs; the rail's "Combine selected" runs it for
+every group before showing a themed confirm. A table whose count cannot be
+read reports **None**, not 0, and the dialog then declines to show totals at
+all — reporting an unreadable table as zero would let the dialog say "nothing
+will move" about data that is actually there. Mutation-tested: forcing that
+path to 0 fails the test.
+
+**3. Store-level idle enrichment (O6/Q9), and what it actually could be.**
+The stated plan was to refill fields cleared by semantic cleaning using
+`raw.__meta.semantically_cleared_fields`. **That breadcrumb never reaches the
+warehouse for a valid listing** — `listings` has no `raw` column (57 columns,
+verified); only `error_listings.raw_record` keeps the raw payload. So the
+refill cannot be driven off the marker for saved rows, and is driven off the
+blank column itself instead. New `enrich_location_contact()` in
+`brand_enrichment.py` queries Overpass **around the listing's own
+coordinates** and requires a shared meaningful word between the listing name
+and the POI name, so a neighbouring business cannot donate its phone number;
+a name-matched POI carrying no contact tag is not an answer either.
+`_idle_location_enrichment_pass()` fills only blank columns and **re-asserts
+the blank-only guard in the SQL WHERE**, because the row was read moments
+earlier and a concurrent user edit must win. It shares the existing
+`brand-enrichment` thread rather than adding a second idle worker on a 512MB
+box. Both guards mutation-tested.
+
+**4. A failed save left no trace anywhere (O1).** `record_save_event()` was
+reached only *after* a successful `push_to_bigquery`, so a save that failed
+produced **no Job History row at all** — indistinguishable from never having
+been started. It is now also recorded on the failure path
+(`mapped_rows=0` with rows present is what `record_save_event()` already
+derives `FAILED` from, so no new status vocabulary), narrowly around the push
+so an argument-validation raise still never becomes a job. On the UI side, a
+save the user dismissed to the background now announces its own failure
+through the themed dialog and refreshes Job History — previously the only
+signal was an inline `#status` line, and `resetMapping()` had already
+returned the user to the pre-parse layout where they were not looking at it.
+The dismissal flag is read *before* `hideProgress()` resets it.
+
+**5. O2 is not "unwired", it is impossible as specified — do not revive it.**
+`duplicateContentHashGroups()` grouped listings by shared `content_hash` to
+find one physical store filed under two brands. But `business_id` **is** one
+of `CONTENT_HASH_FIELDS`, so two brand records can never collide on a hash by
+construction — verified: the identical listing under `brand-A` and `brand-B`
+produces two different hashes. The helper could never have fired. It has been
+removed with the reasoning left at the call site, and the test now asserts its
+**absence** plus the hash property itself. A real cross-brand overlap signal
+needs a hash over physical identity *excluding* `business_id`, computed
+warehouse-side, plus a product call on whether a shared street address is
+evidence of a duplicate brand or just a shared strip mall. Both still open.
+
+Also confirmed **already done but still listed as open** in the tracker: O4
+(per-table downloads — `data-table-export` on Top States, Top Cities, Brand
+Comparison and Market Gaps) and O5 (Extended Coverage Metrics panel removed;
+`loadExtendedMetrics()` now serves only the Top States chart).
+
+**Settled by the user (2026-09-09):** sample-load halves keep the **automatic
+second half**. `load_sample_dataset(load_half=1|2)` splits via `NTILE(2)`;
+half 1 returns fast so the app is usable and half 2 self-starts in a
+background thread. No second click. Current code already does this — no change
+was needed, and this is no longer an open question.
+
+### Fifteenth batch (2026-09-09) — see `docs/bug_tracker.md` SESSION HANDOFF
+
+Landed: five-state cumulative counters (`was_ever_invalid`/`resolution_status`)
+on both the reporting and review tabs; per-brand counts switched to the same
+cumulative model so Quality-by-Brand and the headline card stop disagreeing;
+adopted AI suggestions now count as AI fixes; auto-refresh no longer blanks the
+report (`reportHasRenderedOnce`); NTILE(2) half-loading for sample data;
+keyless brand enrichment (OSM + DuckDuckGo, never invents a value); generic
+`run_sql`/`run_sql_dml` helpers; deferred `user_reviewed` save; server-side
+session enforcement; concurrency cap on heavy reads (peak 432MB -> 261MB on a
+512MB box); wrapped-longitude repair; pagination on every reporting table;
+themed notice/confirm dialogs; per-table ZIP exports.
+
+**Reverted deliberately:** bulk migration of ~85 `client.query()` call sites to
+`run_sql`. It broke test doubles whose `query()` accepts only SQL. The helper
+stays and `merge_brands` uses it; adopt the rest incrementally with tests
+between batches.
+
+**Still open:** 5 dialogs not on the Birdeye blue/white shell (user-reported,
+unfixed); coverage unmeasured since ~110 tests were added; sample-load second
+half automatic vs second-click unresolved; idle enrichment does not yet refill
+semantically-cleared fields.
+
+
 **See `docs/bug_tracker.md` for the live fixed-vs-open status table.** Batch entries below carry the detail.
 
 ### Fourteenth batch (2026-09-09) — per-column-type validation, repair and clearing

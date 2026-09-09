@@ -148,7 +148,19 @@
       .dq-intro h2{margin:0 0 5px;font-size:20px;color:var(--navy,var(--ink))}
       .dq-intro p{margin:0;color:var(--muted);max-width:760px}
       .reporting-tab-panel{display:block;width:100%;max-width:none;box-sizing:border-box}.dq-body,.dq-section{width:100%;max-width:none;box-sizing:border-box}.dq-grid{display:grid;grid-template-columns:repeat(4,minmax(190px,1fr));gap:14px;margin:14px 0 20px;width:100%;max-width:none}
-      .dq-card{background:#fff;border:1px solid var(--line);border-radius:8px;padding:14px;min-height:92px}
+      .dq-card{background:#fff;border:1px solid var(--line);border-radius:8px;padding:14px;min-height:92px;position:relative}
+      /* Colour carries meaning, not decoration: green resolved, blue AI
+         resolved, amber waiting on a person. */
+      .dq-card.state-ai-fixed{background:#eff6ff;border-color:#bfdbfe}
+      .dq-card.state-ai-fixed strong{color:#1d4ed8}
+      .dq-card.state-ai-suggested-fixed{background:#eef2ff;border-color:#c7d2fe}
+      .dq-card.state-ai-suggested-fixed strong{color:#4338ca}
+      .dq-card.state-manual-fixed{background:#ecfdf5;border-color:#a7f3d0}
+      .dq-card.state-manual-fixed strong{color:#047857}
+      .dq-card.state-ai-pending{background:#f8fafc;border-color:#cbd5e1}
+      .dq-card.state-ai-pending strong{color:#475569}
+      .dq-card.state-manual-pending{background:#fff7ed;border-color:#fed7aa}
+      .dq-card.state-manual-pending strong{color:#b45309}
       .dq-card strong{display:block;font-size:25px;line-height:1.1;color:var(--navy,var(--ink));font-weight:800}
       .dq-card span{display:block;margin-top:6px;color:var(--muted);font-size:11px;font-weight:750;text-transform:uppercase;letter-spacing:.02em}
       .dq-card small{display:block;margin-top:4px;color:var(--muted);font-size:11px}
@@ -167,8 +179,18 @@
       .report-metric:hover .report-metric-download{display:inline-flex}
       .report-metric .report-metric-download:hover{color:var(--accent);border-color:var(--accent)}
       .dq-table{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(--line);border-radius:8px}
+      /* Wide tables scroll inside their own box rather than overflowing the
+         panel - tab 1 already did this via div:has(> table); tab 2 injects
+         bare tables, so it needs its own rule. */
+      .dq-section > div:has(> table),.dq-main div:has(> .dq-table){overflow-x:auto;border-radius:8px;max-width:100%}
       .dq-table th,.dq-table td{padding:12px 14px;border-bottom:1px solid var(--line);font-size:14px;line-height:1.35;text-align:left}
       .dq-table th{background:#eef4fc;color:var(--navy,var(--ink));font-size:13px;font-weight:750}
+      /* Two-row alternating bands across every reporting table: scanning a
+         wide row left-to-right is where the eye slips a line, and a single
+         flat background gives it nothing to hold on to. */
+      .dq-table tbody tr:nth-child(4n+1),.dq-table tbody tr:nth-child(4n+2){background:linear-gradient(180deg,#fbfdff 0%,#f4f8fd 100%)}
+      .dq-table tbody tr:nth-child(4n+3),.dq-table tbody tr:nth-child(4n+4){background:#ffffff}
+      .dq-table tbody tr:hover{background:#e8f1fd}
       .dq-status{display:inline-flex;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:750}
       .dq-status.good{background:#dcfce7;color:#15803d}.dq-status.warn{background:#fef3c7;color:#a16207}.dq-status.bad{background:#fee2e2;color:#b91c1c}.dq-status.neutral{background:#f1f5f9;color:#64748b}
       .dq-improvements{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
@@ -185,18 +207,18 @@
          two different designs. Values mirror .reporting-sidebar-pane /
          .report-filter-group / .report-filter-label / .report-filter-control
          and .report-filter-category-title in integrations.html. */
-      .dq-filters{display:grid;grid-template-columns:1fr;gap:10px;align-items:stretch;margin:0 0 18px;padding:16px;background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.05)}
+      .dq-filters{display:grid;grid-template-columns:1fr;gap:12px;align-items:start;margin:0 0 18px;padding:16px;background:var(--accent-tint);border:1px solid var(--accent-tint-line);border-radius:10px}
       .dq-filters::before{content:'Report Filters';padding-bottom:8px;margin-bottom:2px;border-bottom:1px solid var(--line);color:#1e293b;font-size:15px;font-weight:700}
-      .dq-filter-field{display:grid;gap:4px;min-width:0;padding:8px;border:1px solid var(--line);border-radius:8px;background:#fff}
+      .dq-filter-field{display:grid;gap:4px;min-width:0;padding:8px;border:1px solid var(--line);border-radius:8px;background:#ffffff}
       .dq-filter-field label{display:block;font-size:11px;font-weight:600;color:var(--ink);margin-bottom:0}
       .dq-filters select,.dq-filters input{width:100%;box-sizing:border-box;padding:7px 10px;border:1px solid var(--line);border-radius:6px;font-size:11px;font-weight:600;font-family:inherit;color:var(--ink);background:var(--panel,#fff)}
       .dq-filters select:focus,.dq-filters input:focus{outline:2px solid #bfdbfe;outline-offset:1px}
       .dq-filters button{width:100%;box-sizing:border-box;padding:9px;border:1px solid var(--line);border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;background:#fff;color:var(--ink)}
-      .dq-filters #applyQualityFiltersBtn{background:var(--accent);color:#fff}.dq-filters #resetQualityFiltersBtn{background:#fff;color:var(--ink)}
+      .dq-filters #applyQualityFiltersBtn{background:var(--accent);color:#fff}.dq-filters #resetQualityFiltersBtn{background:#fff;color:var(--ink)}.dq-filters #autoApplyFiltersBtn[data-auto='on']{background:#fff;color:var(--ink)}.dq-filters #autoApplyFiltersBtn[data-auto='off']{background:#fff7ed;border-color:#f59e0b;color:#b45309}
       .dq-loading-panel{min-height:360px;display:flex;align-items:center;justify-content:center}
       .dq-loading-panel.hidden,.dq-body.hidden{display:none!important}
       .dq-loading-box{display:flex;align-items:center;gap:12px;padding:16px 20px;background:#fff;border:1px solid var(--line);border-radius:8px;color:var(--ink);font-weight:750;box-shadow:0 8px 24px rgba(15,23,42,.08)}
-      .dq-layout{display:grid;grid-template-columns:290px minmax(0,1fr);gap:24px;align-items:start;width:100%;max-width:none}.dq-sidebar{position:sticky;top:16px;min-width:0}.dq-main{display:block;min-width:0;width:100%;max-width:none}.dq-main .dq-table{width:100%;table-layout:auto}.dq-sidebar .dq-filters{display:grid;grid-template-columns:1fr;gap:12px;margin:0;padding:16px}.dq-sidebar .dq-filters::before{grid-column:1}.dq-sidebar .dq-filter-field{padding:12px}.dq-sidebar .dq-filters button{grid-column:1}.dq-sidebar .dq-filters #applyQualityFiltersBtn,.dq-sidebar .dq-filters #resetQualityFiltersBtn{width:100%}
+      .dq-layout{display:grid;grid-template-columns:290px minmax(0,1fr);gap:24px;align-items:start;width:100%;max-width:none}.dq-sidebar{position:sticky;top:16px;min-width:0}.dq-main{display:block;min-width:0;width:100%;max-width:none}.dq-main .dq-table{width:100%;table-layout:auto}.dq-sidebar .dq-filters{display:grid;grid-template-columns:1fr;gap:12px;margin:0;padding:16px}.dq-sidebar .dq-filters::before{grid-column:1}.dq-sidebar .dq-filter-field{padding:8px}.dq-sidebar .dq-filters button{grid-column:1}.dq-sidebar .dq-filters #applyQualityFiltersBtn,.dq-sidebar .dq-filters #resetQualityFiltersBtn{width:100%}
       .dq-history-grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(260px,1fr);gap:14px}.dq-history-chart{min-height:190px;padding:8px;border:1px solid var(--line);border-radius:8px;background:#fbfdff}.dq-history-chart svg{width:100%;height:175px;display:block}.dq-period-row{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);font-size:12px}.dq-period-row strong{color:var(--navy,var(--ink))}
       /* Trends Over Time is its own, bigger chart (explicit request) -
          #dqTrendChart shares .dq-history-chart's box styling but overrides
@@ -230,8 +252,48 @@
     return n >= goodThreshold ? 'good' : n >= warnThreshold ? 'warn' : 'bad';
   }
 
-  function metricCard(value, label, note = '') {
-    return `<div class="dq-card" data-metric-label="${escapeHtml(label)}"><strong>${value}</strong><span>${label}</span>${note ? `<small>${note}</small>` : ''}<button type="button" class="dq-metric-download" data-metric-label="${escapeHtml(label)}" title="Download the listings behind this number, with its metrics, as Excel">⬇ Excel</button></div>`;
+  // Paged table for the quality tab's hand-built tables. Keeps its own page
+  // per target so two tables side by side cannot fight over one counter.
+  const dqTablePages = new Map();
+  const dqTableData = new Map();
+  const DQ_TABLE_PAGE_SIZE = 10;
+
+  function renderPagedDqTable(targetId, headers, rows, emptyMessage) {
+    const host = $(targetId);
+    if (!host) return;
+    dqTableData.set(targetId, { headers, rows, emptyMessage });
+    if (!rows.length) {
+      host.innerHTML = `<table class="dq-table"><thead><tr>${headers.map((h) => `<th>${escapeHtml(h)}</th>`).join('')}</tr></thead><tbody><tr><td colspan="${headers.length}">${escapeHtml(emptyMessage)}</td></tr></tbody></table>`;
+      return;
+    }
+    const pageCount = Math.ceil(rows.length / DQ_TABLE_PAGE_SIZE);
+    const page = Math.min(Math.max(dqTablePages.get(targetId) || 0, 0), pageCount - 1);
+    dqTablePages.set(targetId, page);
+    const slice = rows.slice(page * DQ_TABLE_PAGE_SIZE, (page + 1) * DQ_TABLE_PAGE_SIZE);
+    const pager = pageCount > 1
+      ? `<div style="display:flex;justify-content:center;align-items:center;gap:8px;margin-top:8px;">
+           <button type="button" class="secondary" data-dq-page="prev" data-target="${escapeHtml(targetId)}"${page === 0 ? ' disabled' : ''}>Previous</button>
+           <span style="font-size:12px;color:var(--muted);">Page ${page + 1} of ${pageCount} &middot; ${rows.length.toLocaleString()} rows</span>
+           <button type="button" class="secondary" data-dq-page="next" data-target="${escapeHtml(targetId)}"${page >= pageCount - 1 ? ' disabled' : ''}>Next</button>
+         </div>`
+      : '';
+    host.innerHTML = `<div style="overflow-x:auto;"><table class="dq-table"><thead><tr>${headers.map((h) => `<th>${escapeHtml(h)}</th>`).join('')}</tr></thead><tbody>${slice.map((cells) => `<tr>${cells.map((c) => `<td>${escapeHtml(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` + pager;
+  }
+
+  document.addEventListener('click', (event) => {
+    const button = event.target?.closest?.('button[data-dq-page]');
+    if (!button) return;
+    event.preventDefault();
+    const targetId = button.dataset.target;
+    const stored = dqTableData.get(targetId);
+    if (!stored) return;
+    const current = dqTablePages.get(targetId) || 0;
+    dqTablePages.set(targetId, button.dataset.dqPage === 'next' ? current + 1 : current - 1);
+    renderPagedDqTable(targetId, stored.headers, stored.rows, stored.emptyMessage);
+  });
+
+  function metricCard(value, label, note = '', tone = '') {
+    return `<div class="dq-card${tone ? ` ${tone}` : ''}" data-metric-label="${escapeHtml(label)}"><strong>${value}</strong><span>${label}</span>${note ? `<small>${note}</small>` : ''}<button type="button" class="dq-metric-download" data-metric-label="${escapeHtml(label)}" title="Download the listings behind this number, with its metrics, as Excel">⬇ Excel</button></div>`;
   }
 
   function metricSlug(label) {
@@ -305,6 +367,58 @@
     }
   }
 
+  // Per-table downloads. A reporting TABLE exports its own shape (gap ZIPs,
+  // brand rows) rather than raw listings - shipping listing columns for a
+  // market-gap table would be noise. Same one-request-per-click guard as the
+  // metric cards.
+  const tableDownloadsInFlight = new Set();
+
+  document.addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-table-export]');
+    if (!button) return;
+    event.preventDefault();
+    const table = button.dataset.tableExport;
+    if (!table || tableDownloadsInFlight.has(table)) return;
+    tableDownloadsInFlight.add(table);
+    const previous = button.innerHTML;
+    button.disabled = true;
+    button.innerHTML = 'Preparing';
+    try {
+      let qs = '';
+      try { if (typeof window.reportingQueryString === 'function') qs = window.reportingQueryString(); } catch (_) {}
+      const query = new URLSearchParams(qs);
+      query.set('table', table);
+      const response = await fetch(`/api/reporting/table-export?${query.toString()}`);
+      if (!response.ok) {
+        let message = 'Could not build this table export.';
+        try { message = (await response.json()).error || message; } catch (_) {}
+        throw new Error(message);
+      }
+      const disposition = response.headers.get('Content-Disposition') || '';
+      const named = /filename="?([^"]+)"?/.exec(disposition);
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = named ? named[1] : `${table}.zip`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      const status = $('reportStatus') || $('dqStatus');
+      if (status) {
+        status.className = 'report-status error';
+        status.textContent = error.message || 'Could not build this table export.';
+        status.classList.remove('hidden');
+      }
+    } finally {
+      tableDownloadsInFlight.delete(table);
+      button.disabled = false;
+      button.innerHTML = previous;
+    }
+  });
+
   // One delegated listener - cards are re-rendered on every refresh, so
   // per-card listeners would leak and go stale. Covers both reporting tabs:
   // the quality cards and the location-intelligence cards, which previously
@@ -327,7 +441,7 @@
     panel.id = 'reportQualityPanel';
     panel.className = 'reporting-tab-panel hidden';
     panel.innerHTML = `
-      <div class="dq-layout"><aside class="dq-sidebar"><div class="dq-filters"><div class="dq-filter-field"><label for="dqBrandFilter">Primary Brand</label><select id="dqBrandFilter"><option value="">All impacted brands</option></select></div><div class="dq-filter-field"><label for="dqStateFilter">State</label><select id="dqStateFilter"><option value="">All impacted states</option></select></div><div class="dq-filter-field"><label for="dqReasonFilter">Issue Type</label><select id="dqReasonFilter"><option value="">All issue types</option></select></div><div class="dq-filter-field"><label for="dqStatusFilter">Review Status</label><select id="dqStatusFilter"><option value="all">All statuses</option><option value="needs_review">Needs review</option><option value="ai_fixed">AI fixed</option></select></div><div class="dq-filter-field"><label for="dqStartDate">From Date</label><input id="dqStartDate" type="date"></div><div class="dq-filter-field"><label for="dqEndDate">To Date</label><input id="dqEndDate" type="date"></div><div class="dq-filter-field"><label for="dqStaleDays">Stale after (days)</label><select id="dqStaleDays"><option value="1">1 day</option><option value="7">7 days</option><option value="30">30 days</option><option value="90" selected>90 days</option><option value="180">180 days</option><option value="365">365 days</option></select></div><button id="applyQualityFiltersBtn" type="button">Apply All Filters</button><button id="resetQualityFiltersBtn" class="secondary" type="button">Reset All</button></div></aside><main class="dq-main"><div class="dq-intro">
+      <div class="dq-layout"><aside class="dq-sidebar"><div class="dq-filters"><div class="dq-filter-field"><label for="dqBrandFilter">Primary Brand</label><select id="dqBrandFilter"><option value="">All impacted brands</option></select></div><div class="dq-filter-field"><label for="dqStateFilter">State</label><select id="dqStateFilter"><option value="">All impacted states</option></select></div><div class="dq-filter-field"><label for="dqReasonFilter">Issue Type</label><select id="dqReasonFilter"><option value="">All issue types</option></select></div><div class="dq-filter-field"><label for="dqStatusFilter">Review Status</label><select id="dqStatusFilter"><option value="all">All statuses</option><option value="needs_review">Needs review</option><option value="ai_fixed">AI fixed</option></select></div><div class="dq-filter-field"><label for="dqStartDate">From Date</label><input id="dqStartDate" type="date"></div><div class="dq-filter-field"><label for="dqEndDate">To Date</label><input id="dqEndDate" type="date"></div><div class="dq-filter-field"><label for="dqStaleDays">Stale after (days)</label><select id="dqStaleDays"><option value="1">1 day</option><option value="7">7 days</option><option value="30">30 days</option><option value="90" selected>90 days</option><option value="180">180 days</option><option value="365">365 days</option></select></div><button id="applyQualityFiltersBtn" type="button">Apply All Filters</button><button id="autoApplyFiltersBtn" class="secondary" type="button" data-auto="on">Stop auto apply</button><button id="resetQualityFiltersBtn" class="secondary" type="button">Reset All</button></div></aside><main class="dq-main"><div class="dq-intro">
         <div><h2>Data Quality &amp; Improvements</h2><p>Focus on invalid listings, unresolved issues, and measurable improvement from automatic and manual fixes.</p></div>
       </div><div id="dqStatus" class="report-status hidden"></div><div id="dqLoadingPanel" class="dq-loading-panel hidden"><div class="dq-loading-box"><span class="spinner"></span><span>Loading quality metrics</span></div></div>
       <div id="dqBody" class="dq-body hidden">
@@ -337,9 +451,9 @@
         <div class="dq-section"><h3>Fix State by Failure Field</h3><div id="dqFixStatePivot"></div></div>
         <div class="dq-section"><h3>Improvement Opportunities</h3><div id="dqImprovements" class="dq-improvements-list"></div></div>
         <div class="dq-section"><h3>Quality by Brand</h3><div id="dqBrandTable"></div></div>
-        <div class="dq-section"><h3>Most Impacted States and Cities</h3><div id="dqGeoTables" class="dq-improvements"></div></div>
+        <div class="dq-section"><h3>Most Impacted States and Cities</h3><div id="dqGeoTables" class="dq-improvements"><div id="dqGeoStates"></div><div id="dqGeoCities"></div></div></div>
         <div class="dq-section"><h3>Reconciliation</h3><div id="dqReconciliation"></div></div>
-        <div class="dq-section"><h3>Historical Quality &amp; Change Tracking</h3><div class="dq-history-grid"><div id="dqHistoryChart" class="dq-history-chart"><div class="report-status">No historical points yet.</div></div><div id="dqPeriodComparisons"><div class="dq-period-row"><span>Last 1 month</span><strong>0 records</strong></div><div class="dq-period-row"><span>Last quarter</span><strong>0 records</strong></div><div class="dq-period-row"><span>Last year</span><strong>0 records</strong></div><div class="dq-period-row"><span>YoY</span><strong>0 records</strong></div></div></div></div>
+
       </div></main></div>
     `;
     return panel;
@@ -455,50 +569,77 @@
     });
   }
 
-  function renderQualityHistory(history = [], current = {}) {
+  // Historical Quality & Change Tracking. Moved to tab 1 and rebuilt: it used
+  // to plot a single "invalid records" series from the quality snapshot, with
+  // no period control. It now plots LISTINGS over time from the same
+  // timeseries endpoint Trends uses, keeps errors as the quality line, and
+  // overlays a competitor series when competitors are selected - so it
+  // answers "is our footprint growing, and is quality keeping up".
+  let historyPeriod = '1Q';
+
+  async function loadQualityHistory() {
     const chart = $('dqHistoryChart');
     const comparisons = $('dqPeriodComparisons');
-    if (!chart || !comparisons) return;
-    const points = history.slice(-30);
-    if (!points.length) {
-      chart.innerHTML = '<div class="report-status">A historical point will be recorded after the first quality refresh.</div>';
-      comparisons.innerHTML = '<div class="report-status">No period comparison is available yet.</div>';
-      return;
+    if (!chart) return;
+    const mainBrand = $('reportMainBrandSelect')?.value || '';
+    const competitors = (typeof window.selectedCompetitorBrands === 'function')
+      ? window.selectedCompetitorBrands() : [];
+    const fetchSeries = async (brands) => {
+      const params = new URLSearchParams({ period: historyPeriod });
+      (brands || []).filter(Boolean).forEach((b) => params.append('brand', b));
+      const response = await fetch(`/api/reporting/timeseries?${params}`);
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || 'Unable to load history.');
+      return Array.isArray(payload.series) ? payload.series : [];
+    };
+    try {
+      const own = await fetchSeries(mainBrand ? [mainBrand] : []);
+      const pick = (label) => own.find((entry) => entry.label === label)?.points || [];
+      const series = [
+        { label: mainBrand ? `${mainBrand} listings` : 'Listings', color: '#1677ee', points: pick('Locations') },
+        { label: 'Errors', color: '#ef4444', points: pick('Errors') },
+      ];
+      if (competitors.length) {
+        // Competitors are fetched as one combined series rather than one per
+        // brand: the question here is "us versus the rest", and a line per
+        // competitor makes the chart unreadable past three or four.
+        const rival = await fetchSeries(competitors);
+        series.push({
+          label: `Competitors (${competitors.length})`,
+          color: '#8b5cf6',
+          points: rival.find((entry) => entry.label === 'Locations')?.points || [],
+        });
+      }
+      renderTimeSeriesChart(chart, series, {
+        height: 260,
+        ariaLabel: 'Listings and errors over time',
+        emptyMessage: 'No history for this period yet.',
+      });
+      if (comparisons) {
+        const listingPoints = series[0].points || [];
+        const latest = listingPoints[listingPoints.length - 1];
+        comparisons.innerHTML = listingPoints.length
+          ? [['Listings now', num(latest?.count)],
+             ['Change over period', num(latest?.count) - num(listingPoints[0]?.count)],
+             ['Points plotted', listingPoints.length]]
+              .map(([label, value]) => `<div class="dq-period-row"><span>${escapeHtml(label)}</span><strong>${value > 0 && label === 'Change over period' ? '+' : ''}${fmt(value)}</strong></div>`).join('')
+          : '<div class="report-status">No period comparison available yet.</div>';
+      }
+    } catch (error) {
+      chart.innerHTML = `<div class="report-status">${escapeHtml(typeof productSafeError === 'function' ? productSafeError(error.message, 'History is temporarily unavailable.') : 'History is temporarily unavailable.')}</div>`;
     }
-    // Same d3 helper as Trends Over Time, so both charts behave identically
-    // (real axes, a hoverable point per snapshot, tooltips).
-    renderTimeSeriesChart(chart, [{
-      label: 'Invalid records',
-      color: '#1677ee',
-      points: points.map((point) => ({ date: point.snapshot_date, count: num(point.invalid_records) })),
-    }], {
-      height: 260,
-      ariaLabel: 'Invalid listing history',
-      emptyMessage: 'A historical point will be recorded after the first quality refresh.',
-    });
-    const latest = points[points.length - 1] || current;
-    const latestTime = Date.parse(`${latest.snapshot_date}T00:00:00Z`);
-    comparisons.innerHTML = [[30, 'Last 1 month'], [91, 'Last quarter'], [365, 'Last year'], [730, 'YoY']].map(([days, label]) => {
-      const prior = [...points].reverse().find((point) => latestTime - Date.parse(`${point.snapshot_date}T00:00:00Z`) >= days * 86400000);
-      const delta = num(latest.invalid_records) - num(prior?.invalid_records ?? latest.invalid_records);
-      return `<div class="dq-period-row"><span>${label}</span><strong>${delta > 0 ? '+' : ''}${fmt(delta)} invalid records</strong></div>`;
-    }).join('');
   }
 
-  function renderExtraMetrics(totals = {}, gapsCount = 0) {
-    const grid = $('dqExtraGrid');
-    if (!grid) return;
-    grid.innerHTML = [
-      metricCard(fmt(totals.total_locations), 'Total mapped locations'),
-      metricCard(fmt(totals.active_market_locations), 'Active market locations'),
-      metricCard(fmt(totals.total_brands), 'Brands tracked'),
-      metricCard(fmt(totals.total_stores), 'Total stores'),
-      metricCard(fmt(totals.total_states), 'States covered'),
-      metricCard(fmt(totals.total_cities), 'Cities covered'),
-      metricCard(fmt(totals.total_zips), 'ZIP codes covered'),
-      metricCard(fmt(gapsCount), 'Whitespace ZIPs (no brand presence)')
-    ].join('');
-  }
+  document.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-history-period]');
+    if (!button) return;
+    event.preventDefault();
+    historyPeriod = button.dataset.historyPeriod;
+    document.querySelectorAll('[data-history-period]').forEach((node) => {
+      node.classList.toggle('active', node === button);
+    });
+    loadQualityHistory();
+  });
 
   // Per RPT-05, the legend is never brands - fixed colors per metric
   // dimension so "Locations" (say) is always the same color across period
@@ -520,10 +661,22 @@
     legend.innerHTML = active.map((s) => `<span><i style="background:${s.color}"></i>${escapeHtml(s.label)}</span>`).join('');
   }
 
+  // Plain SVG, deliberately not d3. Two previous versions of this chart were
+  // broken by the same root cause: they sized themselves from
+  // container.clientWidth, which is 0 while the panel is hidden - first
+  // producing a 900px viewBox the browser scaled into one solid block, then
+  // needing a ResizeObserver that could re-enter and stack a second chart on
+  // top of the first (overlapping full-height rectangles). A fixed-viewBox
+  // SVG scales to any container width without measuring anything, so there
+  // is no zero-width case and no re-entrancy to get wrong.
+  const TOP_STATES_VIEW_W = 1000;
+  const TOP_STATES_ROW_H = 34;
+  const TOP_STATES_LABEL_W = 150;
+  const TOP_STATES_VALUE_W = 86;
+
   function renderTopStatesBar(states = []) {
     const container = $('dqTopStatesBar');
     if (!container) return;
-    container.innerHTML = '';
     // top_states rows (from reporting_summary()/the gold mirror) carry the
     // ZIP-coverage count as "locations" - "zip_count"/"count" never existed
     // on this payload, so this always evaluated to 0 for every row.
@@ -531,94 +684,56 @@
       label: row.state_name || row.state || 'Unknown',
       value: num(row.locations),
     })).filter((row) => row.value > 0);
+    container.innerHTML = '';
     if (!rows.length) {
       container.innerHTML = '<div class="report-status" style="padding:12px 0;font-size:13px;">No state coverage data available yet.</div>';
       return;
     }
-    if (!hasD3()) {
-      container.innerHTML = '<div class="report-status">Charting library failed to load. Refresh the page to try again.</div>';
-      return;
-    }
-    const d3 = window.d3;
-    const rowH = 34;
-    const margin = { top: 8, right: 64, bottom: 24, left: 132 };
-    // clientWidth is 0 while the panel is still hidden (this renders before
-    // the tab is shown). The old Math.max(360, 0 || 900) produced a 900px
-    // viewBox that the browser then scaled up to the real width - which is
-    // why the bars appeared as one oversized solid block. Wait for a real
-    // width instead of guessing one.
-    if (!container.clientWidth) {
-      if (typeof ResizeObserver === 'function' && !container.dataset.awaitingWidth) {
-        container.dataset.awaitingWidth = '1';
-        const observer = new ResizeObserver(() => {
-          if (container.clientWidth) {
-            observer.disconnect();
-            delete container.dataset.awaitingWidth;
-            renderTopStatesBar(states);
-          }
-        });
-        observer.observe(container);
-      }
-      return;
-    }
-    delete container.dataset.awaitingWidth;
-    const width = container.clientWidth;
-    const innerW = Math.max(40, width - margin.left - margin.right);
-    const height = rows.length * rowH + margin.top + margin.bottom;
 
-    const svg = d3.select(container).append('svg')
-      .attr('viewBox', `0 0 ${width} ${height}`)
-      .attr('width', '100%')
-      .attr('height', height)
-      .attr('role', 'img')
-      .attr('aria-label', 'Top states by coverage');
-    const g = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`);
-    const x = d3.scaleLinear().domain([0, d3.max(rows, (r) => r.value) || 1]).nice().range([0, innerW]);
-    const y = d3.scaleBand().domain(rows.map((r) => r.label)).range([0, rows.length * rowH]).padding(0.28);
+    const max = Math.max(...rows.map((r) => r.value)) || 1;
+    const trackW = TOP_STATES_VIEW_W - TOP_STATES_LABEL_W - TOP_STATES_VALUE_W;
+    const height = rows.length * TOP_STATES_ROW_H + 8;
+    const barH = 20;
+    // Birdeye theme: one accent hue (--accent #0b70f0), stepped in lightness
+    // so the ranking reads at a glance without introducing colours that mean
+    // nothing. Darkest = biggest, which matches the sort order.
+    const fillFor = (index) => {
+      const step = rows.length > 1 ? index / (rows.length - 1) : 0;
+      return `hsl(213, 88%, ${34 + step * 30}%)`;
+    };
+
+    const bars = rows.map((row, index) => {
+      const y = index * TOP_STATES_ROW_H + 4;
+      const w = Math.max(2, (row.value / max) * trackW);
+      const label = escapeHtml(row.label);
+      return `
+        <g class="dq-state-bar" data-label="${label}" data-value="${fmt(row.value)}">
+          <text x="${TOP_STATES_LABEL_W - 12}" y="${y + barH / 2 + 4}" text-anchor="end"
+                font-size="13" fill="var(--ink)">${label}</text>
+          <rect x="${TOP_STATES_LABEL_W}" y="${y}" width="${trackW}" height="${barH}"
+                rx="4" fill="#eef2f7"></rect>
+          <rect class="dq-state-bar-fill" x="${TOP_STATES_LABEL_W}" y="${y}" width="${w.toFixed(1)}"
+                height="${barH}" rx="4" fill="${fillFor(index)}"></rect>
+          <text x="${TOP_STATES_LABEL_W + w + 10}" y="${y + barH / 2 + 4}" font-size="12"
+                font-weight="700" fill="var(--ink)"
+                style="font-variant-numeric: tabular-nums;">${fmt(row.value)}</text>
+        </g>`;
+    }).join('');
+
+    container.insertAdjacentHTML('beforeend', `
+      <svg viewBox="0 0 ${TOP_STATES_VIEW_W} ${height}" width="100%" height="${height}"
+           preserveAspectRatio="xMinYMin meet" role="img" aria-label="Top states by ZIP coverage">
+        ${bars}
+      </svg>`);
+
     const tip = chartTooltip(container);
-
-    g.append('g').call(d3.axisLeft(y).tickSize(0))
-      .call((sel) => sel.select('.domain').remove())
-      .selectAll('text').attr('fill', 'var(--ink)').attr('font-size', 13);
-    g.append('g').attr('transform', `translate(0,${rows.length * rowH})`)
-      .call(d3.axisBottom(x).ticks(5).tickFormat((v) => fmt(v)))
-      .selectAll('text').attr('fill', '#64748b').attr('font-size', 11);
-    g.selectAll('.domain').attr('stroke', '#cbd5e1');
-
-    g.selectAll('rect.dq-bar-track').data(rows).enter().append('rect')
-      .attr('class', 'dq-bar-track')
-      .attr('x', 0).attr('y', (r) => y(r.label))
-      .attr('width', innerW).attr('height', y.bandwidth())
-      .attr('rx', 5).attr('fill', '#eef2f7').attr('stroke', '#e2e8f0');
-    g.selectAll('rect.dq-bar-fill').data(rows).enter().append('rect')
-      .attr('class', 'dq-bar-fill')
-      .attr('x', 0).attr('y', (r) => y(r.label))
-      // One flat blue for every bar against a near-identical track made the
-      // chart read as a single block. A sequential ramp keeps the ranking
-      // legible at a glance and separates each bar from its neighbour.
-      .attr('height', y.bandwidth()).attr('rx', 5)
-      .attr('fill', (r, i) => d3.interpolateBlues(0.85 - (i / Math.max(rows.length - 1, 1)) * 0.45))
-      .style('cursor', 'pointer')
-      .attr('width', 0)
-      .on('mouseenter', function (event, r) {
-        d3.select(this).attr('fill', '#1d4ed8');
-        tip.show(`<strong>${escapeHtml(r.label)}</strong><br>${fmt(r.value)} ZIPs covered`, event);
-      })
-      .on('mousemove', (event, r) => tip.show(`<strong>${escapeHtml(r.label)}</strong><br>${fmt(r.value)} ZIPs covered`, event))
-      .on('mouseleave', function (event, r) {
-        const index = rows.indexOf(r);
-        d3.select(this).attr('fill', d3.interpolateBlues(0.85 - (index / Math.max(rows.length - 1, 1)) * 0.45));
-        tip.hide();
-      })
-      .transition().duration(450)
-      .attr('width', (r) => Math.max(2, x(r.value)));
-    g.selectAll('text.dq-bar-value').data(rows).enter().append('text')
-      .attr('class', 'dq-bar-value')
-      .attr('x', (r) => Math.max(2, x(r.value)) + 8)
-      .attr('y', (r) => y(r.label) + y.bandwidth() / 2 + 4)
-      .attr('font-size', 12).attr('font-weight', 700).attr('fill', 'var(--ink)')
-      .style('font-variant-numeric', 'tabular-nums')
-      .text((r) => fmt(r.value));
+    container.querySelectorAll('.dq-state-bar').forEach((group) => {
+      const show = (event) => tip.show(
+        `<strong>${group.dataset.label}</strong><br>${group.dataset.value} ZIPs covered`, event);
+      group.addEventListener('mouseenter', show);
+      group.addEventListener('mousemove', show);
+      group.addEventListener('mouseleave', () => tip.hide());
+    });
   }
 
   let trendState = { period: '1M' };
@@ -640,8 +755,14 @@
     }
   }
 
+  // Extended Coverage Metrics was removed: measured against the top row it
+  // held 3 exact duplicates (Active Brands, Total Stores, Covered Markets),
+  // restated Market ZIPs as "ZIP codes covered", and showed three figures
+  // that contradicted the correct ones - "States covered 57" and "Cities
+  // covered 21,788" are universe totals mislabelled as coverage, and
+  // "Whitespace ZIPs 100" was data.gaps.length, i.e. the PAGE SIZE, not the
+  // real uncovered count. This loader now serves only the Top States chart.
   async function loadExtendedMetrics() {
-    const grid = $('dqExtraGrid');
     const bars = $('dqTopStatesBar');
     try {
       let qs = '';
@@ -649,11 +770,9 @@
       const res = await fetch(`/api/reporting/summary${qs ? `?${qs}` : ''}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Unable to load coverage metrics.');
-      renderExtraMetrics(data.totals || {}, Array.isArray(data.gaps) ? data.gaps.length : 0);
       renderTopStatesBar(Array.isArray(data.top_states) ? data.top_states : []);
     } catch (err) {
       const message = typeof productSafeError === 'function' ? productSafeError(err.message, 'Coverage metrics are temporarily unavailable.') : 'Coverage metrics are temporarily unavailable.';
-      if (grid) grid.innerHTML = `<div class="report-status">${escapeHtml(message)}</div>`;
       if (bars) bars.innerHTML = `<div class="report-status">${escapeHtml(message)}</div>`;
     }
     loadTrendChart();
@@ -755,11 +874,25 @@
       // rest of the quality figures.
       const aiPending = num(q.ai_review_pending);
       const manualPending = num(q.manual_review_pending);
+      // Five mutually exclusive states over every listing that was EVER
+      // invalid, so the totals accumulate day over day instead of resetting
+      // when a record gets fixed (a fix soft-deletes the error row).
+      // Colour carries meaning: green = resolved, amber = waiting on a human,
+      // blue = AI resolved, grey-blue = AI suggestion waiting for review.
+      const fixStates = data.fix_states || {};
+      const statesComputed = fixStates.computed === true;
+      const stateCard = (key, label, tone, note) => metricCard(
+        statesComputed ? fmt(num(fixStates[key])) : '—', label, note, tone);
+      const totalEverInvalid = num(fixStates.total_ever_invalid);
+      const sharePct = (key) => (statesComputed && totalEverInvalid)
+        ? pct(num(fixStates[key]) * 100 / totalEverInvalid) : '';
       $('dqMetricGrid').innerHTML = [
-        metricCard(fmt(aiFixed), 'Fixed with AI', pct(num(q.ai_fixed_share_pct))),
-        metricCard(fmt(aiPending), 'AI review pending', pct(num(q.ai_review_pending_share_pct))),
-        metricCard(fmt(manualFixed), 'Manually fixed', pct(num(q.manual_fixed_share_pct))),
-        metricCard(fmt(manualPending), 'Manual review pending', pct(num(q.manual_review_pending_share_pct))),
+        stateCard('ai_fixed', 'Fixed by AI', 'state-ai-fixed', sharePct('ai_fixed')),
+        stateCard('ai_suggested_fixed', 'Fixed from AI suggestion', 'state-ai-suggested-fixed', sharePct('ai_suggested_fixed')),
+        stateCard('manual_fixed', 'Fixed manually', 'state-manual-fixed', sharePct('manual_fixed')),
+        stateCard('ai_suggested_pending', 'AI suggestion awaiting review', 'state-ai-pending', sharePct('ai_suggested_pending')),
+        stateCard('manual_pending', 'Awaiting manual review', 'state-manual-pending', sharePct('manual_pending')),
+        metricCard(statesComputed ? fmt(totalEverInvalid) : '—', 'Ever invalid (all time)', 'Cumulative across every load'),
         metricCard(fmt(raw), 'Invalid listings', 'Active validation and review population'),
         metricCard(fmt(needsReview), 'Needs manual review'),
         metricCard(pct(unresolvedRate), 'Unresolved rate'),
@@ -805,7 +938,13 @@
       // Full state names, not the raw 2-letter code stored on the row -
       // stateCodeToName is already defined globally in reporting.js.
       const stateLabel = (code) => (typeof stateCodeToName === 'object' && stateCodeToName[String(code).toUpperCase()]) || code || 'Unknown';
-      $('dqGeoTables').innerHTML = `<div><table class="dq-table"><thead><tr><th>State</th><th>Invalid listings</th></tr></thead><tbody>${states.slice(0, 10).map((row) => `<tr><td>${escapeHtml(stateLabel(row.state))}</td><td>${fmt(row.count)}</td></tr>`).join('') || '<tr><td colspan="2">No impacted states.</td></tr>'}</tbody></table></div><div><table class="dq-table"><thead><tr><th>City</th><th>Invalid listings</th></tr></thead><tbody>${cities.slice(0, 10).map((row) => `<tr><td>${escapeHtml(row.city)}</td><td>${fmt(row.count)}</td></tr>`).join('') || '<tr><td colspan="2">No impacted cities.</td></tr>'}</tbody></table></div>`;
+      // Was a hard .slice(0, 10) on both tables: rows 11+ were simply hidden
+      // with no pager and no indication they existed. Paginated instead, so
+      // every impacted state/city is reachable.
+      renderPagedDqTable('dqGeoStates', ['State', 'Invalid listings'],
+        states.map((row) => [stateLabel(row.state), fmt(row.count)]), 'No impacted states.');
+      renderPagedDqTable('dqGeoCities', ['City', 'Invalid listings'],
+        cities.map((row) => [row.city, fmt(row.count)]), 'No impacted cities.');
 
       const improvements = [];
       if (needsReview) improvements.push(['Reduce manual review', `${fmt(needsReview)} invalid listings remain unresolved and require attention.`]);
@@ -825,7 +964,6 @@
         <tr><td>Review status</td><td>${fmt(needsReview)} unresolved</td><td>Only records still requiring user attention are counted here.</td></tr>
         <tr><td>Change history</td><td>${fmt((data.history || []).length)} snapshots</td><td>Daily quality points are retained for period comparisons.</td></tr>
       </tbody></table>`;
-      renderQualityHistory(data.history || [], q);
 
       if (loadingPanel) loadingPanel.classList.add('hidden');
       if (body) body.classList.remove('hidden');
@@ -889,6 +1027,7 @@
         // on this tab (RPT-05/06/07) and read the summary + timeseries
         // endpoints, so they load with it rather than with the quality tab.
         loadExtendedMetrics();
+        loadQualityHistory();
         if (typeof window.reportingMap?.invalidateSize === 'function') setTimeout(() => window.reportingMap.invalidateSize(), 100);
       }
     }
@@ -904,7 +1043,36 @@
       $('dqTrendPeriod').querySelectorAll('[data-period]').forEach((b) => b.classList.toggle('active', b === btn));
       loadTrendChart();
     });
-    $('applyQualityFiltersBtn')?.addEventListener('click', loadQuality);
+    $('applyQualityFiltersBtn')?.addEventListener('click', () => loadQuality());
+    // Filters apply themselves as they change; the button stays for an
+    // explicit re-run. Auto-apply can be stopped (the same button turns into
+    // "Restart auto apply") for anyone setting several filters at once who
+    // does not want a query fired after every keystroke.
+    let autoApplyFilters = true;
+    let autoApplyTimer = null;
+    const QUALITY_FILTER_IDS = ['dqBrandFilter', 'dqStateFilter', 'dqReasonFilter', 'dqStatusFilter', 'dqStartDate', 'dqEndDate'];
+    const scheduleAutoApply = () => {
+      if (!autoApplyFilters) return;
+      // Debounced: changing three filters in a row is one query, not three.
+      window.clearTimeout(autoApplyTimer);
+      autoApplyTimer = window.setTimeout(() => loadQuality(), 400);
+    };
+    QUALITY_FILTER_IDS.forEach((id) => {
+      $(id)?.addEventListener('change', scheduleAutoApply);
+    });
+    $('autoApplyFiltersBtn')?.addEventListener('click', () => {
+      const button = $('autoApplyFiltersBtn');
+      autoApplyFilters = !autoApplyFilters;
+      button.dataset.auto = autoApplyFilters ? 'on' : 'off';
+      button.textContent = autoApplyFilters ? 'Stop auto apply' : 'Restart auto apply';
+      if (autoApplyFilters) {
+        // Restarting applies whatever was changed while it was off, so the
+        // view can never sit out of step with the controls.
+        scheduleAutoApply();
+      } else {
+        window.clearTimeout(autoApplyTimer);
+      }
+    });
     // Stale-after-days is a persisted setting, not a per-view filter: load
     // the saved value, and save + recompute whenever it's changed.
     (async () => {
