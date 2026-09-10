@@ -207,11 +207,14 @@ async function init() {
     return;
   }
   prepareReferenceData();
-  el("loginBtn").addEventListener("click", login);
-  el("testDbBtn")?.addEventListener("click", testDbConnection);
-  el("loginPassword").addEventListener("keydown", (event) => {
-    if (event.key === "Enter") login();
+  // A real <form> (added alongside the username/password autocomplete fix)
+  // means Enter submits from either field natively, for free - the old
+  // keydown listener only covered Enter from the password field.
+  el("loginForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    login();
   });
+  el("testDbBtn")?.addEventListener("click", testDbConnection);
 }
 
 init();
