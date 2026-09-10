@@ -35,6 +35,21 @@ def _shared_strings(zf: zipfile.ZipFile) -> list[str]:
     return values
 
 
+def _normalize_xlsx_part_path(target: str, base: str = "xl") -> str:
+    """Resolve OOXML relationship targets to archive paths.
+
+    Relationship targets may be relative to the workbook folder
+    (`worksheets/sheet1.xml`) or absolute from the package root
+    (`/xl/worksheets/sheet1.xml`).
+    """
+    target = target.strip()
+    if target.startswith("/"):
+        return target.lstrip("/")
+    if target.startswith(f"{base}/"):
+        return target
+    return f"{base}/{target}"
+
+
 def _cell_value(cell: ElementTree.Element, shared: list[str]) -> str:
     cell_type = cell.attrib.get("t")
     value = ""
@@ -103,9 +118,7 @@ def _xlsx_sheet_map(zf: zipfile.ZipFile) -> dict[str, str]:
         name = sheet.attrib["name"]
         rel_id = sheet.attrib["{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"]
         target = rel_targets[rel_id]
-        if not target.startswith("xl/"):
-            target = f"xl/{target.lstrip('/')}"
-        sheets[name] = target
+        sheets[name] = _normalize_xlsx_part_path(target)
     return sheets
 
 
@@ -163,4 +176,4 @@ def preview(content: bytes, record_path: str | None = None, file_name: str = "",
                 width = max(values) + 1
                 rows_as_lists.append([values.get(index, "") for index in range(width)])
 
-    return _table_from_rows(rows_as_lists, selected_sheet)
+    return _table_from_rows(rows_as_lists, selected_sheet, fields_only=fields_only)

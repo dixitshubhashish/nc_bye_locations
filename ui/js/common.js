@@ -744,6 +744,19 @@ function clearButtonBusy(button, previousHtml) {
 
 function switchView(viewId, isBootRestore = false) {
       if (!viewId) viewId = "mapperView";
+      // Leaving Review Queue clears the "jump to this save's errors" search
+      // handoff (el("reviewEventId").value, set by saveMapper() right after
+      // a save) - explicit user ask, 2026-09-10: it was surviving the rest
+      // of a long session regardless of what else happened in between,
+      // reading as a stray leftover ID rather than the deliberate "just
+      // saved" shortcut it actually is. Read BEFORE overwriting
+      // sessionStorage below, and skipped on a boot restore (a page reload
+      // while already on Review Queue is not "leaving" it).
+      let previousViewId = "";
+      try { previousViewId = sessionStorage.getItem("activeTab") || ""; } catch (_) {}
+      if (!isBootRestore && previousViewId === "reviewView" && viewId !== "reviewView" && el("reviewEventId")) {
+        el("reviewEventId").value = "";
+      }
       try {
         sessionStorage.setItem("activeTab", viewId);
         const urlParams = new URLSearchParams(window.location.search);
@@ -766,10 +779,17 @@ function switchView(viewId, isBootRestore = false) {
       // simplification, but the user explicitly asked for it to be
       // scoped back to Mapper only.
       el("resetMappingBtn")?.classList.toggle("hidden", viewId !== "mapperView");
-      // Reset Fields Mapping's grid slot must not stay reserved as an
-      // empty gap once the button itself is hidden outside Mapper - see
-      // .header-data-actions.reset-mapping-hidden.
-      document.querySelector(".header-data-actions")?.classList.toggle("reset-mapping-hidden", viewId !== "mapperView");
+      // Restart Mapping only makes sense on Mapper and Template Library -
+      // both work with a mapping in progress, but Review Queue and
+      // Reporting have nothing to restart (explicit user ask, 2026-09-10).
+      const hideMappingButtons = viewId === "reviewView" || viewId === "reportingView";
+      el("restartMappingBtn")?.classList.toggle("hidden", hideMappingButtons);
+      // Grid slots must not stay reserved as empty gaps once their buttons
+      // are hidden - see .header-data-actions.reset-mapping-hidden and
+      // .header-data-actions.mapping-buttons-hidden.
+      const headerDataActions = document.querySelector(".header-data-actions");
+      headerDataActions?.classList.toggle("reset-mapping-hidden", viewId !== "mapperView" && !hideMappingButtons);
+      headerDataActions?.classList.toggle("mapping-buttons-hidden", hideMappingButtons);
       if (viewId === "mapperView" && typeof renderMappings === "function") renderMappings();
       if (viewId === "reportingView" && !reportLoaded) loadReporting();
       // A genuine nav click into Reporting always lands on the first inner
@@ -1066,11 +1086,26 @@ async function prepareReferenceData() {
       }
     }
 
+// Everything here is per-browser UI state (last-seen counts, which tab was
+// open, snoozed items) - not the server-side reporting/dropdown query cache
+// (SQLite query_cache, keyed by request, invalidated on real data changes),
+// which this deliberately leaves alone since it is what keeps those fast for
+// the NEXT session too, whoever logs in. Explicit user ask (2026-09-10):
+// clear the former on logout and on the login page loading, not the latter.
+function clearNonCacheSessionState() {
+      localStorage.removeItem("review_error_count_last");
+      localStorage.removeItem("whitespace.duplicateBrands.snoozed.v1");
+      sessionStorage.removeItem("activeTab");
+      sessionStorage.removeItem("reportingInnerTab");
+      sessionStorage.removeItem("reviewInnerTab");
+    }
+
 function logout() {
       localStorage.removeItem("mapper_login_remembered");
       sessionStorage.removeItem(loginSessionStorageKey);
       sessionStorage.removeItem(mappingSessionStorageKey);
       sessionStorage.removeItem(draftStorageKey);
+      clearNonCacheSessionState();
       window.location.replace("/login");
     }
 

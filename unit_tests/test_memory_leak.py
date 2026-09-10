@@ -353,6 +353,100 @@ class AutoRepairLaunchPacingAndHeavyLoadTests(unittest.TestCase):
         self.assertIs(closed_clients[0], created_clients[0], "The first close should be the heavy-load release, not the end-of-run cleanup")
         self.assertIs(closed_clients[1], created_clients[1], "The second close should be end-of-run cleanup of the reacquired client")
 
+    def test_sleep_checkpointed_is_interruptible_not_just_bounded(self) -> None:
+        # 2026-09-10 coverage gap: the bound-only test above proves the
+        # initial delay isn't shorter than promised, but not that Stop/
+        # shutdown can actually cut it short. _sleep_checkpointed() is
+        # documented to check ENRICHMENT_STOP_REQUESTED between every `step`
+        # chunk specifically so a long warm-up delay doesn't block Stop for
+        # its full duration - prove that directly: a 300s delay in 5s steps
+        # is 60 chunks, but a stop signal raised after the 2nd chunk must
+        # abort well before the 60th.
+        sleep_calls: list[float] = []
+
+        def fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+            if len(sleep_calls) == 2:
+                workflow_server.ENRICHMENT_STOP_REQUESTED.set()
+
+        try:
+            with patch.object(workflow_server, "sleep", side_effect=fake_sleep):
+                with self.assertRaises(RuntimeError):
+                    workflow_server._sleep_checkpointed(300.0, step=5.0)
+        finally:
+            workflow_server.ENRICHMENT_STOP_REQUESTED.clear()
+
+        # Interrupted after the 2nd chunk - nowhere near the 60 chunks a full,
+        # uninterrupted 300s/5s wait would need.
+        self.assertEqual(len(sleep_calls), 2, "Expected the stop signal to cut the wait short, not run out the full duration")
+
+    def test_three_consecutive_light_load_passes_escalate_to_heavy(self) -> None:
+        # 2026-09-10 coverage gap: the "sustained, not a blip" escalation
+        # logic (AUTO_REPAIR_HEAVY_LOAD_STREAK_THRESHOLD = 3) was untested -
+        # only the single-recent-action LIGHT case (older test classes above)
+        # and the immediate REPORTING_REFRESHING HEAVY case (this class) had
+        # coverage. Drive three consecutive batch cycles that each find
+        # recent foreground activity (LIGHT on its own) and prove the worker
+        # only escalates to a HEAVY backoff (client release + long sleep) on
+        # the 3rd, not the 1st or 2nd.
+        created_clients: list[FakeBigQueryClient] = []
+        closed_clients: list[FakeBigQueryClient] = []
+
+        class TrackedFakeClient(FakeBigQueryClient):
+            def close(self) -> None:
+                closed_clients.append(self)
+
+        def fake_create_client(*args: Any, **kwargs: Any) -> TrackedFakeClient:
+            client = TrackedFakeClient()
+            created_clients.append(client)
+            return client
+
+        batch_calls: list[Any] = []
+
+        def fake_batch(limit: int = 10, offset: int = 0, *, client: Any = None) -> dict[str, int]:
+            batch_calls.append(client)
+            # 3 total error rows, one resolved per batch call - keeps the
+            # outer `while offset < total` loop alive for exactly 3 real
+            # batches (interleaved with the LIGHT/HEAVY checks below) before
+            # naturally finishing.
+            return {"attempted": 1, "resolved": 1, "remaining": 0}
+
+        sleep_calls: list[float] = []
+
+        def fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+            # Keep "recent foreground activity" true across every grace-
+            # period wait this test triggers, so idle_seconds never crosses
+            # FOREGROUND_IDLE_GRACE_SECONDS on its own - the only thing that
+            # should stop the streak from advancing is the code under test.
+            workflow_server.LAST_FOREGROUND_ACTIVITY_AT = workflow_server.wall_clock_time()
+
+        workflow_server.LAST_FOREGROUND_ACTIVITY_AT = workflow_server.wall_clock_time()
+        workflow_server.REPORTING_REFRESHING = False
+        with patch.object(workflow_server, "_warehouse_settings", return_value=("test-proj", "test-dataset", None)), \
+             patch.object(workflow_server, "_new_scoped_bigquery_client", side_effect=fake_create_client), \
+             patch.object(workflow_server, "_count_error_listings_live", return_value=3), \
+             patch.object(workflow_server, "auto_repair_error_batch", side_effect=fake_batch), \
+             patch.object(workflow_server, "AUTO_REPAIR_BATCH_PAUSE_SECONDS", 0.0), \
+             patch.object(workflow_server, "AUTO_REPAIR_INITIAL_DELAY_MIN_SECONDS", 0.0), \
+             patch.object(workflow_server, "AUTO_REPAIR_INITIAL_DELAY_MAX_SECONDS", 0.0), \
+             patch.object(workflow_server, "AUTO_REPAIR_HEAVY_LOAD_BACKOFF_SECONDS", 0.0), \
+             patch.object(workflow_server, "sleep", side_effect=fake_sleep), \
+             patch.object(workflow_server, "_schedule_quality_fix_metrics_refresh"), \
+             patch.object(workflow_server, "refresh_error_count"), \
+             patch.object(workflow_server, "invalidate_cache"), \
+             patch.object(workflow_server, "_refresh_silver_background"):
+            workflow_server.AUTO_REPAIR_THREAD = None
+            workflow_server.start_auto_repair()
+            for thread in list(threading.enumerate()):
+                if thread.name == "automatic-review-repair":
+                    thread.join(timeout=5)
+
+        # The 1st and 2nd LIGHT passes must NOT release a client (only wait
+        # out the grace period and proceed) - only the 3rd, sustained pass
+        # escalates to HEAVY and releases it.
+        self.assertEqual(len(closed_clients), 2, "Expected exactly one heavy-load release (plus end-of-run cleanup), not one per LIGHT pass")
+
 
 if __name__ == "__main__":
     unittest.main()

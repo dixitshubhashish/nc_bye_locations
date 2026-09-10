@@ -225,6 +225,19 @@ class GoldMirrorReportingTests(unittest.TestCase):
         self.assertEqual({r["brand"] for r in result["map_records"]}, {"Acme"})
         self.assertEqual(len(result["map_records"]), 3)
 
+    def test_map_records_include_country_for_non_us_marker_coloring(self) -> None:
+        # 2026-09-10: the non-US marker coloring feature (ui/js/reporting.js)
+        # colors a map marker state-primary/country-secondary, which requires
+        # `country` to actually survive the mirror round trip - not just be
+        # present in the BigQuery map_query SELECT list (already true, see
+        # workflow_server.py's map_query). Every LOCATION_ROWS fixture row
+        # carries country="United States", so every map_records row returned
+        # here must carry it straight through, unmangled.
+        result = self._fetch()
+        self.assertTrue(result["map_records"], "expected at least one map record")
+        for record in result["map_records"]:
+            self.assertEqual(record["country"], "United States")
+
     def test_present_states_reflects_full_filtered_base_set(self) -> None:
         result = self._fetch()
         self.assertEqual(result["present_states"], {"TX", "MO"})

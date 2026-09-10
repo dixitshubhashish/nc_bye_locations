@@ -188,6 +188,15 @@
        tab. Outside Mapper, drop that slot from the template entirely and
        let Restart Mapping span the full second column instead. */
     .header-data-actions.reset-mapping-hidden { grid-template-areas: "sample restart zipstatus" "sample restart zipsync"; }
+    /* Reset Fields Mapping AND Restart Mapping only make sense on the
+       Mapper and Template Library tabs, not Review Queue or Reporting
+       (explicit user ask, 2026-09-10: "this button should not be visible
+       on review queue and reporting tabs, other two should have as it is").
+       Same orphaned-gap problem as reset-mapping-hidden above, but with
+       BOTH the reset and restart columns gone this time - collapse to just
+       two columns (sample, zip status/sync) rather than reserving a middle
+       column for nothing. */
+    .header-data-actions.mapping-buttons-hidden { grid-template-columns: 132px 158px; grid-template-areas: "sample zipstatus" "sample zipsync"; }
     .header-data-actions .sample-dataset-stack { grid-area: sample; display: flex; flex-direction: column; gap: 5px; }
     .header-data-actions .header-zip-status { display: contents; }
     #loadSampleDatasetHeaderBtn.sample-state-idle { border-color: #d97706; color: #b45309; background: #fffbeb; }
@@ -1503,9 +1512,9 @@
       gap: 10px;
       margin-bottom: 10px;
       padding: 8px 10px;
-      border: 1px solid #bae6fd;
+      border: 1px solid var(--accent-tint-line);
       border-radius: 6px;
-      background: #ecfeff;
+      background: var(--accent-tint);
     }
     .source-input-options label {
       display: inline-flex;
@@ -1513,10 +1522,9 @@
       gap: 6px;
       width: auto;
       margin: 0;
-      color: #075985;
       font-weight: 700;
     }
-    .source-input-options input { width: auto; accent-color: #0284c7; }
+    .source-input-options input { width: auto; }
     .source-input-mode-select {
       display: none;
     }
@@ -1796,19 +1804,17 @@
        760px shell left them mostly empty space with the text stretched across
        it - the box and its contents were sized independently. These size to
        the message instead, and the content is what sets the width. */
-    #appNoticeDialog, #appConfirmDialog, #saveCompletionDialog, #sampleLoadedDialog {
+    #appNoticeDialog, #appConfirmDialog, #saveCompletionDialog {
       width: auto;
       min-width: min(320px, calc(100vw - 32px));
       max-width: min(460px, calc(100vw - 32px));
     }
     #appNoticeDialog .app-help-content,
     #appConfirmDialog .app-help-content,
-    #saveCompletionDialog .app-help-content,
-    #sampleLoadedDialog .app-help-content { padding: 20px; }
+    #saveCompletionDialog .app-help-content { padding: 20px; }
     #appNoticeDialog .app-help-header h2,
     #appConfirmDialog .app-help-header h2,
-    #saveCompletionDialog .app-help-header h2,
-    #sampleLoadedDialog .app-help-header h2 { font-size: 18px; }
+    #saveCompletionDialog .app-help-header h2 { font-size: 18px; }
     /* The unsaved-changes dialog holds three buttons in a row, so it needs a
        little more room than a plain confirm but still nothing like 760px. */
     #unsavedChangesDialog { width: auto; max-width: min(560px, calc(100vw - 32px)); }
@@ -2211,6 +2217,18 @@
        this hides them by id rather than by class. */
     #mapperView.template-edit-mode #brandSelectSearch,
     #mapperView.template-edit-mode #brandSelectSuggestions { display: none !important; }
+    /* Real bug (2026-09-10, user reported this three times): hiding the
+       search box above left NOTHING visible for the brand at all, because
+       .searchable-select-wrap > select { display: none; } (see that rule
+       below) independently hides the raw <select> underneath it too, on
+       every load, search box or not. The two rules stacked to a genuinely
+       empty "Brand" field - the locked value was correct in the DOM
+       (setTemplateEditBrandLock sets it) but nothing on screen showed it.
+       Un-hide the raw select as the fallback display specifically here: a
+       disabled <select> holding the locked brand's option is exactly the
+       "brand disabled and locked, selected" appearance the rest of the app
+       already uses for a fixed value, and needs no search UI to show it. */
+    #mapperView.template-edit-mode #brandSelectSearchWrap > select { display: block !important; }
 
     /* Duplicate entry point into the same edit-brand form as the CSV-preset
        panel's "Edit Brand Details" button (both call fillBrandFields() /
@@ -3010,9 +3028,15 @@ result = [
         <h2>Job History</h2>
         <div class="mapping-note">Recent save jobs — check status here instead of watching the save progress bar.</div>
         <div id="jobHistoryList" style="display: grid; gap: 6px; max-height: 220px; overflow-y: auto;">
-          <div class="report-status" style="padding: 8px 0; font-size: 12px;">No jobs yet this session.</div>
+          <div class="report-status" style="padding: 8px 0; font-size: 12px;">No jobs yet.</div>
         </div>
-        <button type="button" id="jobHistoryShowMoreBtn" class="text-link hidden" style="margin-top: 8px;">Show More</button>
+        <!-- Always visible (2026-09-10 fix, user ask): get_recent_save_events()
+             is the full persisted history, not scoped to this browser
+             session, so hiding this link whenever the small panel happened
+             to be empty blocked the one way to reach that real past history
+             - the popup below (#jobHistoryDialog) already IS the "small
+             table popup with a close button" this opens. -->
+        <button type="button" id="jobHistoryShowMoreBtn" class="text-link" style="margin-top: 8px;">View Job History</button>
       </div>
 
       <div class="panel data-danger-panel left-rail-persistent">
@@ -3043,11 +3067,24 @@ result = [
         <div class="panel-title-row">
           <h2>Template Components</h2>
           <span class="mandatory-note">* indicates mandatory fields required</span>
-          <!-- Shown only when there are parsed columns and nothing is mapped
-               to them - the one moment where the grid is useless and there is
-               no other way back to the suggestions. -->
-          <button id="autoMapFieldsBtn" class="secondary hidden" type="button"
-                  title="Match the parsed columns to fields automatically">Auto-map fields</button>
+          <!-- Grouped together so `.panel-title-row`'s space-between spreads
+               title / note / this pair apart, not all four items - the two
+               buttons stay adjacent, right-aligned as one unit. -->
+          <div style="display: flex; gap: 8px;">
+            <!-- Shown only when there are parsed columns and nothing is mapped
+                 to them - the one moment where the grid is useless and there is
+                 no other way back to the suggestions. -->
+            <button id="autoMapFieldsBtn" class="secondary hidden" type="button"
+                    title="Match the parsed columns to fields automatically">Auto-map fields</button>
+            <!-- Template edit only: a different way back from an in-progress
+                 edit than Auto-map fields - this restores exactly what the
+                 template has saved right now, rather than what the learning
+                 engine would newly suggest. Often the same result, but not
+                 always (a manually-corrected mapping the learner would not
+                 have picked on its own). -->
+            <button id="restoreSavedMappingBtn" class="secondary hidden" type="button"
+                    title="Restore the mapping to what this template currently has saved">Restore Saved Mapping</button>
+          </div>
         </div>
         <div class="mapping-grid" id="mappingGrid"></div>
       </div>
@@ -3109,7 +3146,7 @@ result = [
       <div class="app-help-content">
         <div class="app-help-header">
           <h2 id="appHelpTitle">How this works</h2>
-          <button class="secondary app-help-close" id="appHelpCloseBtn" type="button">Close</button>
+          <button class="secondary app-help-close" id="appHelpCloseBtn" type="button">OK</button>
         </div>
         <h3>1. Pick a brand and a file</h3>
         <p>Choose which brand this data belongs to, then tell us where the data is coming from — an uploaded file, a public link, an API, or a custom script. Click Parse and we'll take a quick look to see what's inside.</p>
@@ -3118,7 +3155,7 @@ result = [
         <h3>3. Save, then review</h3>
         <p>Saving processes your entire file, not just the quick preview. Good records go straight into your reporting. Anything that needs a second look shows up in Review Error Listings — nothing is ever silently dropped.</p>
         <h3>4. AI cleans up and enriches your data</h3>
-        <p>In the background, AI repairs common problems automatically: ZIP codes and state names normalized, swapped or inverted coordinates fixed, offshore/wrong coordinates snapped to the nearest real city, and likely-duplicate brand entries flagged for a safe merge. Anything it can't confidently fix lands in Review with a suggested fix already attached — accept it, or fix it by hand and retry.</p>
+        <p>In the background, AI repairs common problems automatically: ZIP codes and state names normalized, swapped or inverted coordinates fixed, offshore/wrong coordinates snapped to the nearest real city, and likely-duplicate brand entries flagged for a safe merge. A value that plainly can't be real for its field — a coordinate no place on Earth actually has, a date that isn't a date — is cleared rather than kept, so the system can fill in a real one instead of storing junk. Anything it can't confidently fix lands in Review with a suggested fix already attached — accept it, or fix it by hand and retry.</p>
         <h3>5. Where things live</h3>
         <ul>
           <li><strong>Mappings:</strong> bring in your data, match its fields, and manage brands.</li>
@@ -3127,16 +3164,7 @@ result = [
           <li><strong>Reporting:</strong> see how brands compare, spot coverage gaps, and check data quality.</li>
         </ul>
         <h3>6. About the numbers you'll see</h3>
-        <p>Reporting shows the latest data we have. It updates quietly in the background, and you can always hit refresh for the newest numbers. Filters only affect the report you're currently looking at.</p>
-      </div>
-    </dialog>
-    <dialog id="sampleLoadedDialog" class="app-help-dialog" aria-labelledby="sampleLoadedTitle">
-      <div class="app-help-content">
-        <div class="app-help-header">
-          <h2 id="sampleLoadedTitle">Sample Dataset Ready</h2>
-          <button class="secondary app-help-close" id="sampleLoadedCloseBtn" type="button">Close</button>
-        </div>
-        <p id="sampleLoadedDialogText">Sample dataset loaded.</p>
+        <p>Reporting shows the latest data we have. It updates quietly in the background, and you can always hit refresh for the newest numbers. Filters only affect the report you're currently looking at. In Data Quality, the breakdown table can be viewed by Brand, City, State, or Country — switch the dropdown above the table to see the same invalid / needs-review / AI-fixed counts sliced whichever way is useful.</p>
       </div>
     </dialog>
     <dialog id="unsavedChangesDialog" class="app-help-dialog" aria-labelledby="unsavedChangesTitle">
@@ -3174,7 +3202,7 @@ result = [
           <div style="display: flex; gap: 8px;">
             <button class="secondary" id="jobHistoryDialogPrevBtn" type="button">Previous</button>
             <button class="secondary" id="jobHistoryDialogNextBtn" type="button">Next</button>
-            <button id="jobHistoryDialogCloseBtn" type="button">Close</button>
+            <button id="jobHistoryDialogCloseBtn" type="button">OK</button>
           </div>
         </div>
       </div>
@@ -3478,7 +3506,13 @@ result = [
            fail silver-layer validation (missing_state, unresolved
            coordinates, etc.). Reusing the same sub-tab pattern the
            Reporting view already uses for its two inner tabs. -->
-      <div class="reporting-inner-tabs" id="reviewInnerTabs">
+      <!-- Needs Review tab dropped (explicit user ask, 2026-09-10): its own
+           counter never matched the records it was actually showing, and
+           with only one real tab left there's nothing for a switcher to
+           switch between - Review Error Listings' own metrics show
+           directly below instead. #needsReviewPanel markup is left in
+           place below (unreferenced, always hidden) rather than deleted. -->
+      <div class="reporting-inner-tabs hidden" id="reviewInnerTabs">
         <button type="button" class="reporting-inner-tab active" data-review-tab="errors">Review Error Listings (<span id="reviewCount">0</span>)</button>
         <button type="button" class="reporting-inner-tab" data-review-tab="needsReview">Needs Review (<span id="needsReviewTabCount">0</span>)</button>
       </div>
@@ -3805,6 +3839,7 @@ result = [
           if (pendingUnsavedNavTarget && typeof pendingUnsavedParse !== "undefined" && !pendingUnsavedParse) switchView(pendingUnsavedNavTarget);
         });
     el("autoMapFieldsBtn")?.addEventListener("click", () => autoMapUnmappedFields());
+    el("restoreSavedMappingBtn")?.addEventListener("click", () => restoreSavedTemplateMapping());
     el("addOptionalFieldBtn").addEventListener("click", () => {
           const key = el("optionalFieldSelect").value;
           if (!key) return;
@@ -4191,7 +4226,6 @@ result = [
     el("clearSampleDatasetLink")?.addEventListener("click", () => clearSampleDataset());
     el("appHelpBtn")?.addEventListener("click", () => el("appHelpDialog")?.showModal());
     el("appHelpCloseBtn")?.addEventListener("click", () => el("appHelpDialog")?.close());
-    el("sampleLoadedCloseBtn")?.addEventListener("click", () => el("sampleLoadedDialog")?.close());
     el("saveCompletionOk")?.addEventListener("click", () => {
       el("saveCompletionDialog")?.close();
       // The save is finished, so the mapping workspace has nothing left to

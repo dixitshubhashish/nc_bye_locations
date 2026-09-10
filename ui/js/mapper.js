@@ -1,12 +1,27 @@
 // Mappings tab: source onboarding, brand/connector setup, mapping builder,
 // draft save/restore, and save-to-warehouse logic.
 
+// required: false on address/city/state/postal_code below (2026-09-10 fix,
+// user: "primary location fields already defined which were mandatory
+// before, not any more") - this hardcoded fallback list (used only before
+// the real field_catalog() API response replaces it, see `mappingTargets =
+// result.fields` below) still marked these four `required: true`,
+// contradicting both the backend (REQUIRED_LOCATION_VALUES is now empty)
+// and the real config/field_registry.json, which already correctly lists
+// them as required: false. Left stale here, it drove two visible bugs: a
+// "Required" badge on fields that aren't, and (via getVisibleTargets()'s
+// now-removed required-first sort) these fields jumping ahead of
+// latitude/longitude and the rest of fieldDisplayOrder's canonical order.
+// "name" (Brand Name) stays required: true - it genuinely is the one thing
+// still mandatory (see normalize_location() rejecting a row with no brand);
+// it is what the __brand sentinel fills (mappingSelections.name =
+// "__brand" below), not a per-row free-text name distinct from the brand.
 let mappingTargets = [
       { key: "name", table: "listings", field: "name", label: "Brand Name", required: true, hints: ["name", "restaurantname", "storename", "displayname"] },
-      { key: "address", table: "listings", field: "address", label: "Street Address", required: true, hints: ["address", "addressdescription", "line1", "street"] },
-      { key: "city", table: "listings", field: "city_name", label: "City", required: true, hints: ["city", "town"] },
-      { key: "state", table: "listings", field: "state_code", label: "State", required: true, hints: ["state", "region", "province", "state_code"] },
-      { key: "postal_code", table: "listings", field: "zip_code", label: "ZIP Code", required: true, hints: ["zip", "zipcode", "zip_code", "postalcode", "postal_code"] },
+      { key: "address", table: "listings", field: "address", label: "Street Address", required: false, hints: ["address", "addressdescription", "line1", "street"] },
+      { key: "city", table: "listings", field: "city_name", label: "City", required: false, hints: ["city", "town"] },
+      { key: "state", table: "listings", field: "state_code", label: "State", required: false, hints: ["state", "region", "province", "state_code"] },
+      { key: "postal_code", table: "listings", field: "zip_code", label: "ZIP Code", required: false, hints: ["zip", "zipcode", "zip_code", "postalcode", "postal_code"] },
       { key: "country", table: "listings", field: "country", label: "Country", required: false, hints: ["country", "countrycode"] },
       { key: "location_id", table: "listings", field: "location_key", label: "Store ID", required: false, hints: ["locationid", "storeid", "store_id", "id", "number"] },
       { key: "town", table: "listings", field: "town", label: "Town", required: false, hints: ["town", "locality"] },
@@ -125,6 +140,20 @@ function syncParserBusinessSelect() {
   const sourceSelect = el("brandSelect");
   const parserSelect = el("parserBusinessSelect");
   if (!sourceSelect || !parserSelect) return;
+  // A locked template-edit brand can be a hidden/merged duplicate that
+  // isn't in brandSelect's cached option list - rebuilding parserSelect
+  // from that list below then silently dropped the value (a <select>
+  // ignores .value when no matching <option> exists), leaving the
+  // left-rail Brand blank even though the right-side mapping loaded
+  // correctly (real regression, 2026-09-10). setTemplateEditBrandLock()
+  // already knows how to add the missing option and set both the select
+  // and its visible search box, so re-assert that instead of clobbering it.
+  if (templateEditMode && selectedBrand?.business_id) {
+    if (typeof setTemplateEditBrandLock === "function") {
+      setTemplateEditBrandLock(true, selectedBrand.business_id, formatBrandName(selectedBrand.name || selectedBrand.business_id));
+    }
+    return;
+  }
   // Copy the FULL option list, not whatever #brandSelect currently shows.
   // Its options are rebuilt in place as the user types in its own search box,
   // so copying innerHTML while a filter was active handed the pre-parse
@@ -1947,6 +1976,9 @@ function resetFieldMappingsOnly() {
       customAliases = {};
       pendingUnsavedParse = true;
       renderMappings();
+      if (templateEditMode && selectedBrand?.business_id && typeof setTemplateEditBrandLock === "function") {
+        setTemplateEditBrandLock(true, selectedBrand.business_id, formatBrandName(selectedBrand.name || selectedBrand.business_id));
+      }
       updateOutput();
       setStatus('All fields cleared to unmapped. Use "Auto-map fields" to match the parsed columns automatically.', "ok");
     }
@@ -1972,8 +2004,8 @@ function autoMapUnmappedFields() {
 function updateAutoMapButton() {
       const button = el("autoMapFieldsBtn");
       if (!button) return;
-      const mappedCount = Object.values(mappingSelections).filter(Boolean).length;
-      button.classList.toggle("hidden", !(sourceFields.length && mappedCount === 0));
+      const realMappedCount = Object.values(mappingSelections).filter((value) => value && sourceFields.includes(value)).length;
+      button.classList.toggle("hidden", !(sourceFields.length && realMappedCount === 0));
     }
 // BB1: one source column can own exactly ONE target field.
 //
@@ -2099,6 +2131,9 @@ function renderMappings() {
         usedFields.delete("__brand");
       }
       updateAutoMapButton();
+      // Only meaningful mid-edit of a saved template - there is nothing
+      // "saved" to restore back to on a fresh, unsaved parse.
+      el("restoreSavedMappingBtn")?.classList.toggle("hidden", !templateEditMode);
       if (droppedDuplicates.length) {
         const first = droppedDuplicates[0];
         setStatus(`${first.column} can only fill one field - kept on ${formatFieldLabel(first.keptBy)}, cleared from ${droppedDuplicates.map((entry) => formatFieldLabel(entry.target)).join(", ")}.`, "warn");
@@ -2178,17 +2213,10 @@ function syncPreParseWorkspace(hasMappingContent) {
         });
         brandPanel.classList.remove("hidden");
         parserHost.classList.remove("hidden");
-        // parserBusinessField (BB13) duplicated "Brand" as a second control
-        // mirroring brandSelect, in the Source Parser column - reported as
-        // confusing (two boxes, one working search, one plain dropdown,
-        // side by side under what reads as one "Brand" label). Keep it
-        // hidden and let the Brand Model panel's own control (which already
-        // has the working search) be the only Brand picker on screen.
-        // syncParserBusinessSelect() still runs so parserBusinessSelect's
-        // VALUE stays correct for anything that reads it directly, even
-        // though it is never shown.
+        parserBusinessField?.classList.remove("hidden");
         syncParserBusinessSelect();
         brandHost.classList.add("wide-brand-selector");
+        parserBusinessField?.classList.add("wide-brand-selector");
         const parserTitle = parserHost.querySelector("h2");
         if (parserTitle) parserTitle.textContent = "Source Parser";
         updatePreParseBrandMode();
@@ -2196,7 +2224,24 @@ function syncPreParseWorkspace(hasMappingContent) {
       } else if (hasMappingContent && preParseRelocatedNodes) {
         brandHost.classList.remove("wide-brand-selector");
         parserBusinessField?.classList.remove("wide-brand-selector");
-        preParseRelocatedNodes.sort((left, right) => left.index - right.index).forEach(({ node }) => sourcePanel.appendChild(node));
+        // Real bug, 2026-09-10 (user reported repeatedly - brand not shown
+        // on the left rail in template-edit mode): the snapshot above can
+        // hold the BARE #brandSelect (captured on the very first relocation,
+        // before the async brand list finished loading and
+        // attachSearchableSelect() had a chance to wrap it). By the time
+        // this reversal runs, that wrap now exists and sits between the
+        // select and its old position - moving just the bare select back
+        // left the now-empty #brandSelectSearchWrap stranded in the
+        // relocated panel, and attachSearchableSelect()'s own self-healing
+        // ("put the select back inside its own wrap") then dragged the
+        // select right back into that stranded wrap on its very next call,
+        // undoing this reversal entirely. Move the WRAP (select and all)
+        // when one has since grown around the snapshotted node, not just
+        // the node itself.
+        preParseRelocatedNodes.sort((left, right) => left.index - right.index).forEach(({ node }) => {
+          const wrap = node.id ? el(`${node.id}SearchWrap`) : null;
+          sourcePanel.appendChild(wrap && wrap.contains(node) ? wrap : node);
+        });
         preParseRelocatedNodes = null;
         // Re-home both brand searches after the move. The snapshot above was
         // taken before they existed, so they are not in the list that just
@@ -2336,8 +2381,20 @@ function getVisibleTargets() {
       return unique
         .map((target, index) => ({ target, index }))
         .sort((a, b) => {
-          const requiredOrder = Number(Boolean(b.target.required)) - Number(Boolean(a.target.required));
-          if (requiredOrder) return requiredOrder;
+          // Real bug, 2026-09-10 (user: "the order shouldn't be disturbed
+          // ... primary location fields already defined which were
+          // mandatory before, not any more ... that order should be
+          // retained"): sorting required fields first was stale logic from
+          // when several fields were backend-mandatory (now only brand is
+          // - see REQUIRED_LOCATION_VALUES in workflow_server.py). It
+          // pulled Brand/Street/City/State/ZIP ahead of latitude/longitude
+          // and everything else in fieldDisplayOrder, disturbing the
+          // canonical default order this same list is supposed to show.
+          // required-ness is still shown per row (the "Required" badge in
+          // buildTargetRow) - it just no longer reorders anything. A field
+          // with a current validation error is not treated specially here
+          // either, by design: it stays in its normal position rather than
+          // jumping up "to get fixed."
           const aAddedOptional = optionalOrder.has(a.target.key) && !primaryMappingKeys.has(a.target.key);
           const bAddedOptional = optionalOrder.has(b.target.key) && !primaryMappingKeys.has(b.target.key);
           if (aAddedOptional !== bAddedOptional) return aAddedOptional ? 1 : -1;
@@ -2368,8 +2425,8 @@ function targetOptionsForSourceField(sourceField) {
         .filter((target) => target.required || visibleKeys.has(target.key) || !hiddenMappingKeys.has(target.key))
         .map((target, index) => ({ target, index }))
         .sort((a, b) => {
-          const requiredOrder = Number(Boolean(b.target.required)) - Number(Boolean(a.target.required));
-          if (requiredOrder) return requiredOrder;
+          // Same fix as getVisibleTargets() above, same reason: required-
+          // ness no longer reorders the list, only fieldDisplayOrder does.
           const fieldOrder = (fieldOrderIndex.get(a.target.key) ?? 999) - (fieldOrderIndex.get(b.target.key) ?? 999);
           return fieldOrder || a.index - b.index;
         })
@@ -3324,27 +3381,13 @@ async function loadSampleDataset(reset = false) {
         await loadTemplateFilters();
         reportLoaded = false;
         await loadReporting();
-        const sourceTypesSummary = Object.entries(result.source_types || {}).map(([name, count]) => `${name}: ${count}`).join(", ");
-        const reportingRows = result.silver?.rows;
-        const reportingStatusSuffix = reportingRows !== undefined
-          ? `, ${formatNumber(reportingRows)} ready for reporting`
-          : (result.silver?.status === "refreshing" ? ", reporting is updating in the background" : "");
-        const message = result.already_loaded
-          ? `Sample dataset already loaded${reportingStatusSuffix}.`
-          : `Sample dataset loaded: ${formatNumber(result.locations)} records, ${formatNumber(result.errors)} in review${reportingStatusSuffix}${sourceTypesSummary ? ` (${sourceTypesSummary})` : ""}.`;
-        // The confirmation dialog below is the single acknowledgement for
-        // this action now - a second, persistent bordered status card
-        // repeating the same text underneath the button just lingered on
-        // screen with nothing to dismiss it. Keep the status area hidden.
+        // Explicit user ask (2026-09-10): no popup at all for this action -
+        // completion is visible purely through the button/panel state
+        // change (updateSampleDatasetControls() below), not a separate
+        // acknowledgement to dismiss.
         status.className = "report-status hidden";
         status.textContent = "";
         updateSampleDatasetControls(result);
-        const dialog = el("sampleLoadedDialog");
-        if (dialog) {
-          const dialogText = el("sampleLoadedDialogText");
-          if (dialogText) dialogText.textContent = message;
-          dialog.showModal();
-        }
       } catch (error) {
         status.className = "report-status";
         const message = error.name === "AbortError" ? "Cancelled. No changes." : productSafeError(error.message, "Could not load sample dataset.");
@@ -3467,16 +3510,10 @@ async function loadJobHistory() {
         if (!response.ok) throw new Error(result.error || "Could not load job history.");
         const jobs = Array.isArray(result.jobs) ? result.jobs : [];
         if (!jobs.length) {
-          target.innerHTML = '<div class="report-status" style="padding: 8px 0; font-size: 12px;">No jobs yet this session.</div>';
-          el("jobHistoryShowMoreBtn")?.classList.add("hidden");
+          target.innerHTML = '<div class="report-status" style="padding: 8px 0; font-size: 12px;">No jobs yet.</div>';
           return;
         }
         target.innerHTML = jobs.map(renderJobHistoryRow).join("");
-        // "Show More" only matters once there could be more than the panel
-        // already shows - total comes straight from the same response so
-        // there's no separate count round-trip just to decide visibility.
-        const total = Number(result.total || 0);
-        el("jobHistoryShowMoreBtn")?.classList.toggle("hidden", total <= jobs.length);
       } catch (error) {
         target.innerHTML = `<div class="report-status" style="padding: 8px 0; font-size: 12px;">${escapeHtml(productSafeError(error.message, "Job history is temporarily unavailable."))}</div>`;
         el("jobHistoryShowMoreBtn")?.classList.add("hidden");
@@ -3631,10 +3668,27 @@ async function saveMapper() {
             const batchStartedAt = Date.now();
             const renderBatchProgress = () => {
               const elapsed = Date.now() - batchStartedAt;
-              const withinBatchFraction = Math.min(0.98, elapsed / batchEstimatedMs);
+              // Real complaint, 2026-09-10: "this maths on seconds left
+              // isnt left with the speed... it should optimise on the go".
+              // The first (often only) batch has no real pace to go on yet
+              // (priorMsPerRow's 20ms/row fallback above is a pure guess),
+              // so a save genuinely slower than that guess hit the fixed
+              // 0.98 cap below and just sat there showing the SAME stale
+              // "Xs remaining" for the rest of the wait - the estimate
+              // never revisited itself once elapsed time proved the
+              // original guess wrong. Recompute the effective total on
+              // every tick instead of trusting the one-time guess forever:
+              // once elapsed approaches it, grow the assumed total just
+              // enough to keep ~8% of it ahead of elapsed, so the
+              // remaining-time number keeps shrinking-then-holding-small
+              // and credible instead of freezing. A batch that finishes
+              // faster than the original guess is unaffected (elapsed
+              // never gets close enough to trigger this).
+              const effectiveEstimatedMs = Math.max(batchEstimatedMs, elapsed / 0.92);
+              const withinBatchFraction = Math.min(0.98, elapsed / effectiveEstimatedMs);
               const rowsEstimate = Math.min(totalToProcess, batchStartProcessed + Math.round(withinBatchFraction * batch.rows.length));
               const progress = Math.min(90, 20 + Math.round(rowsEstimate / Math.max(totalToProcess, 1) * 65));
-              const remainingMs = Math.max(0, batchEstimatedMs - elapsed) + (batches.length - 1 - index) * batchEstimatedMs;
+              const remainingMs = Math.max(0, effectiveEstimatedMs - elapsed) + (batches.length - 1 - index) * batchEstimatedMs;
               const etaSeconds = Math.round(remainingMs / 1000);
               setProgress(progress, `${rowsEstimate} of ${totalToProcess} records processed, about ${etaSeconds}s remaining`);
             };
@@ -3737,7 +3791,7 @@ function clearBackgroundSaveNotice() {
     }
 function showSaveCompletion(message) {
       // saveCompletionDialog is now a static <dialog class="app-help-dialog">
-      // in integrations.html (same theme as appHelpDialog/sampleLoadedDialog),
+      // in integrations.html (same theme as appHelpDialog),
       // with a centered OK button - previously built ad hoc in JS with its
       // own inline styles and a right-aligned button, out of step with
       // every other confirmation popup in the app.

@@ -134,7 +134,7 @@
       sessionStorage.setItem(LOGIN_SESSION_KEY, "true");
       sessionStorage.setItem(MAPPING_SESSION_KEY, newSessionId());
       sessionStorage.removeItem(DRAFT_KEY);
-      sessionStorage.removeItem("activeTab");
+      clearNonCacheSessionState();
       setLoginStatus("Signed in successfully.", "ok");
       showAuthenticatedApp();
     } catch (error) {
@@ -145,8 +145,26 @@
     }
   }
 
+  // Per-browser UI state (last-seen counts, which tab was open, snoozed
+  // items) - not the server-side reporting/dropdown query cache (SQLite
+  // query_cache), which this deliberately leaves alone. The login page is
+  // the one place guaranteed to run whether the previous session ended via
+  // the Logout button (which already clears this itself) or abnormally (a
+  // closed tab, an expired cookie) - clearing it here too, on the login
+  // page's own load, means a stale snooze list or wrong initial tab can
+  // never leak into whoever logs in next on this browser. Explicit user
+  // ask, 2026-09-10.
+  function clearNonCacheSessionState() {
+    localStorage.removeItem("review_error_count_last");
+    localStorage.removeItem("whitespace.duplicateBrands.snoozed.v1");
+    sessionStorage.removeItem("activeTab");
+    sessionStorage.removeItem("reportingInnerTab");
+    sessionStorage.removeItem("reviewInnerTab");
+  }
+
   function install() {
     injectLogoGuard();
+    clearNonCacheSessionState();
 
     const button = document.getElementById("loginBtn");
     const username = document.getElementById("loginUser");

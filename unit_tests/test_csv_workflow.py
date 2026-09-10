@@ -488,13 +488,28 @@ class CsvWorkflowTests(unittest.TestCase):
         self.assertTrue(any(e["field"] == "postal_code" for e in errors_zip))
         self.assertIn("invalid US ZIP code", [e["reason"] for e in errors_zip])
 
-        # 2. Out-of-bounds US Coordinates (Lat 95.0, Lon 20.0 - inside Europe/Asia)
-        row_bad_coords = {**VALID_ROW, "latitude": "95.0", "longitude": "20.0"}
+        # 2. Out-of-bounds US coordinates, but a REAL place (Berlin) - not
+        # geometrically impossible, so normalize_location() must not clear
+        # it (see the 95.0-latitude case below, which IS impossible and IS
+        # cleared instead of flagged as of 2026-09-10).
+        row_bad_coords = {**VALID_ROW, "latitude": "52.5200", "longitude": "13.4050"}
         loc_bad_coords = normalize_location(row_bad_coords, VALID_MAPPER, "example_csv", 0)
         self.assertIsNotNone(loc_bad_coords)
         errors_coords = validate_normalized_location(loc_bad_coords, load_field_registry())
         self.assertTrue(any(e["field"] == "coordinates" for e in errors_coords))
         self.assertIn("coordinates outside US boundary", [e["reason"] for e in errors_coords])
+
+        # 2b. A geometrically IMPOSSIBLE latitude (95.0 - no real place on
+        # Earth has this) is cleared to None instead of flagged (explicit
+        # user decision, 2026-09-10) - there's nothing a human could
+        # meaningfully retype it to, so it's left for the existing ZIP/
+        # city/state auto-repair path to resolve instead.
+        row_impossible_coords = {**VALID_ROW, "latitude": "95.0", "longitude": "20.0"}
+        loc_impossible_coords = normalize_location(row_impossible_coords, VALID_MAPPER, "example_csv", 0)
+        self.assertIsNotNone(loc_impossible_coords)
+        assert loc_impossible_coords is not None
+        self.assertIsNone(loc_impossible_coords.latitude)
+        self.assertIsNone(loc_impossible_coords.longitude)
 
         # 3. Malformed dates and seating capacities are cleared, not
         # rejected - every field validate_source_row() checks is optional,
@@ -513,8 +528,12 @@ class CsvWorkflowTests(unittest.TestCase):
     def test_out_of_us_coordinates_are_exempt_when_country_is_explicitly_non_us(self) -> None:
         # Same out-of-bounds coordinates as the US-boundary test above, but
         # with a real non-US country set - this is legitimate worldwide
-        # data, not a validation failure, and must not be flagged.
-        row_non_us = {**VALID_ROW, "latitude": "95.0", "longitude": "20.0", "country": "United Kingdom"}
+        # data, not a validation failure, and must not be flagged. A real
+        # place (Berlin), not a geometrically impossible latitude like
+        # 95.0 - that case is cleared before this check ever runs (see
+        # test_csv_workflow's 2b case above), so it would pass here
+        # vacuously rather than actually exercising the country exemption.
+        row_non_us = {**VALID_ROW, "latitude": "52.5200", "longitude": "13.4050", "country": "United Kingdom"}
         loc_non_us = normalize_location(row_non_us, VALID_MAPPER, "example_csv", 0)
         self.assertIsNotNone(loc_non_us)
         errors_non_us = validate_normalized_location(loc_non_us, load_field_registry())
@@ -524,8 +543,10 @@ class CsvWorkflowTests(unittest.TestCase):
         # No country at all is not the same as an explicit non-US country -
         # without evidence this is deliberately worldwide data, the US
         # boundary check must still fire (this is the "try US first"
-        # ordering: only an explicit non-US country exempts the record).
-        row_blank_country = {**VALID_ROW, "latitude": "95.0", "longitude": "20.0", "country": ""}
+        # ordering: only an explicit non-US country exempts the record). A
+        # real place (Berlin), not a geometrically impossible latitude -
+        # same reasoning as the test above.
+        row_blank_country = {**VALID_ROW, "latitude": "52.5200", "longitude": "13.4050", "country": ""}
         loc_blank_country = normalize_location(row_blank_country, VALID_MAPPER, "example_csv", 0)
         self.assertIsNotNone(loc_blank_country)
         errors_blank = validate_normalized_location(loc_blank_country, load_field_registry())

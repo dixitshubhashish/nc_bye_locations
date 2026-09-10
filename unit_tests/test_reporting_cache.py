@@ -65,7 +65,7 @@ class ReportingCacheTests(unittest.TestCase):
         reporting_source = inspect.getsource(workflow_server.reporting_summary)
         gold_source = inspect.getsource(workflow_server.build_gold_layer)
 
-        self.assertIn("reporting_summary:v3", reporting_source)
+        self.assertIn("reporting_summary:v4", reporting_source)
         self.assertIn("vw_reporting_filter_options", reporting_source)
         self.assertIn("FROM `{bronze_ref}.businesses`", gold_source)
         self.assertIn("UNION DISTINCT", gold_source)
@@ -85,6 +85,17 @@ class ReportingCacheTests(unittest.TestCase):
     def test_total_brands_falls_back_to_catalog_only_when_filtered_count_is_zero(self) -> None:
         source = inspect.getsource(workflow_server.reporting_summary)
         self.assertIn("COALESCE(NULLIF(COUNT(DISTINCT brand), 0), (SELECT COUNT(DISTINCT brand_name) FROM {gold_brand_ref}))", source)
+
+    def test_map_query_selects_country_for_non_us_marker_coloring(self) -> None:
+        # 2026-09-10: non-US marker coloring (ui/js/reporting.js) colors a
+        # marker state-primary/country-secondary, which only works if the
+        # BigQuery-path map_query actually selects `country` in the first
+        # place - the SQLite-mirror path is covered separately in
+        # test_gold_mirror.py's test_map_records_include_country_for_non_us_marker_coloring.
+        source = inspect.getsource(workflow_server.reporting_summary)
+        map_query_start = source.index("map_query = f\"\"\"")
+        map_query_select = source[map_query_start:source.index("FROM {gold_location_ref}", map_query_start)]
+        self.assertIn("country", map_query_select)
 
     def test_data_quality_respects_selected_brands_filter(self) -> None:
         source = inspect.getsource(workflow_server.reporting_summary)
@@ -108,7 +119,7 @@ class ReportingCacheTests(unittest.TestCase):
         self.assertIn('threading.Thread(target=warm_cold_quality, name="quality-mirror-cold-warm", daemon=True).start()', cold_branch)
         self.assertIn('reporting_quality_summary(params, _skip_cache=True)', cold_branch)
         # The placeholder must be an honest empty shape, not fabricated data.
-        self.assertIn('"reasons": [], "brands": [], "states": [], "cities": [], "history": []', cold_branch)
+        self.assertIn('"reasons": [], "brands": [], "states": [], "cities": [], "countries": [], "history": []', cold_branch)
 
     def test_explicit_refresh_is_excluded_from_the_cold_cache_placeholder(self) -> None:
         source = inspect.getsource(workflow_server.reporting_quality_summary)
@@ -135,7 +146,7 @@ class ReportingCacheTests(unittest.TestCase):
         So: a cache HIT must re-read fix_states on the way out.
         """
         params = {"status": ["all"]}
-        cache_key = f"reporting_quality:v1:{json.dumps(params, sort_keys=True)}"
+        cache_key = f"reporting_quality:v2:{json.dumps(params, sort_keys=True)}"
         # The poisoned entry, exactly as the cold mirror wrote it.
         cached = {
             "scope": "invalid_listings",

@@ -61,10 +61,38 @@ MIRROR_BUSINESS_COLUMNS = (
 )
 
 
+_CONNECT_RETRY_ATTEMPTS = 3
+_CONNECT_RETRY_BACKOFF_SECONDS = 0.25
+
+
 @contextmanager
 def get_db_connection() -> Generator[sqlite3.Connection, None, None]:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH), timeout=10.0)
+    # A fresh sqlite3.connect() per call (not a pooled/reused connection) is
+    # the existing design here - real incident, 2026-09-10: under heavy
+    # concurrent load a live-QA pass caught two threads simultaneously
+    # wedged inside SQLite's own connection-open path (findReusableFd),
+    # making every endpoint that touches this mirror unresponsive for
+    # several minutes; a critically-low host disk at the same time is a
+    # plausible shared contributor (now resolved separately). A full
+    # connection-pool rewrite is a bigger change than is safe hours before
+    # a live demo, so this adds only a small, bounded retry with backoff on
+    # sqlite3.OperationalError (the concrete symptom observed) - it changes
+    # nothing about the success path, only gives a transient contention a
+    # few short chances to clear before the caller sees a real error,
+    # instead of hanging or failing on the very first attempt. A genuine
+    # connection-pool/thread-local-reuse fix remains a real, larger
+    # follow-up, not attempted here.
+    attempt = 0
+    while True:
+        try:
+            conn = sqlite3.connect(str(DB_PATH), timeout=10.0)
+            break
+        except sqlite3.OperationalError:
+            attempt += 1
+            if attempt >= _CONNECT_RETRY_ATTEMPTS:
+                raise
+            time.sleep(_CONNECT_RETRY_BACKOFF_SECONDS * attempt)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.row_factory = sqlite3.Row
@@ -911,10 +939,37 @@ def invalidate_cache(cache_key: str | None = None) -> None:
             # away the brand list, and the next time the dropdown opened it
             # paid a full BigQuery read. Measured: 6.0s cold versus 6ms warm
             # for 1,000 brands.
+            # reporting_heatmap:* is spared for the same reason again (real
+            # incident, 2026-09-10 - "taking to load from BQ to start with"):
+            # unlike reporting_quality it has no self-rewarming background
+            # loop, so once wiped it stayed a genuinely cold, expensive
+            # national ZIP-grid recompute until someone happened to view the
+            # map with refresh=True. It only changes when the data underneath
+            # it does (a save/reprocess), so sparing it here and relying on
+            # those same paths' existing invalidate_cache() call - which
+            # still fires, this only narrows what ONE blanket call clears -
+            # is enough; nothing else references this key.
+            # reporting_summary:* is spared too: it already carries the exact
+            # same self-heal reporting_quality does - every warm hit kicks
+            # _refresh_silver_background() and returns the (possibly stale
+            # for a few seconds) cached payload immediately rather than
+            # blocking on a cold recompute - so once it has ANY entry it
+            # never needs the blanket wipe to eventually catch up. The only
+            # thing that self-heal can't do is recover from having NO entry
+            # at all, which is exactly what the blanket wipe caused.
+            # reporting_timeseries:* has no self-heal of its own (dashboard
+            # trend charts), so it is spared here too and instead
+            # invalidated explicitly (see invalidate_reporting_metrics_cache
+            # below) from the same choke point real data changes route
+            # through, so a stale copy still gets dropped, just not on every
+            # unrelated save elsewhere in the app.
             conn.execute(
                 "DELETE FROM query_cache "
                 "WHERE cache_key NOT LIKE 'reporting_quality:%' "
-                "AND cache_key NOT LIKE 'list_brands:%';")
+                "AND cache_key NOT LIKE 'list_brands:%' "
+                "AND cache_key NOT LIKE 'reporting_heatmap:%' "
+                "AND cache_key NOT LIKE 'reporting_summary:%' "
+                "AND cache_key NOT LIKE 'reporting_timeseries:%';")
         conn.commit()
 
 
@@ -928,6 +983,41 @@ def invalidate_brand_cache() -> None:
     init_sqlite_cache()
     with get_db_connection() as conn:
         conn.execute("DELETE FROM query_cache WHERE cache_key LIKE 'list_brands:%';")
+        conn.commit()
+
+
+def invalidate_heatmap_cache() -> None:
+    """Drop the reporting_heatmap:* payload that invalidate_cache() spares.
+
+    Unlike reporting_quality, the heatmap has no self-rewarming background
+    loop, so sparing it from the blanket wipe with no explicit trigger would
+    make it correct once and stale forever. Called from
+    _rebuild_gold_and_mirror() - the one choke point every gold/mirror
+    refresh path (hourly tick, background refresh, sample load) already
+    routes through - so this covers every path that can change the data the
+    heatmap reads without needing to be called from each one individually.
+    """
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        conn.execute("DELETE FROM query_cache WHERE cache_key LIKE 'reporting_heatmap:%';")
+        conn.commit()
+
+
+def invalidate_timeseries_cache() -> None:
+    """Drop the reporting_timeseries:* payloads that invalidate_cache() spares.
+
+    Unlike reporting_summary/reporting_quality, the trend-chart timeseries
+    has no self-rewarming background loop, so it is spared from the blanket
+    wipe but still needs an explicit trigger to avoid going stale forever.
+    Called from the same gold/mirror-rebuild choke point as the heatmap.
+    Not proactively rewarmed like the heatmap - its cache key includes an
+    open-ended brand-selection combination, so eagerly recomputing every
+    combination isn't practical; the next real read of whichever combination
+    is being viewed pays one cold recompute and stays warm from there.
+    """
+    init_sqlite_cache()
+    with get_db_connection() as conn:
+        conn.execute("DELETE FROM query_cache WHERE cache_key LIKE 'reporting_timeseries:%';")
         conn.commit()
 
 

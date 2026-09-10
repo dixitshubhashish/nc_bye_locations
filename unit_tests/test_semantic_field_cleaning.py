@@ -156,6 +156,20 @@ class ValueRepairTests(unittest.TestCase):
             self.assertIsNone(value, f"{column}={raw}")
             self.assertEqual(action, CLEARED, f"{column}={raw}")
 
+    def test_a_bare_number_in_a_date_or_timestamp_column_is_cleared_not_kept(self) -> None:
+        # Real incident, 2026-09-10: a numeric value (already an int/float,
+        # not a string) landing in "Observed At" survived clean_field_value
+        # as OK because the numeric-value branch's clear-eligible kind
+        # whitelist omitted "date"/"timestamp" - the value then failed a
+        # later, stricter type check with an opaque "does not match required
+        # type timestamp" reject instead of being cleared up front the way
+        # this module exists to do.
+        for column, raw in [("observed_at", 49), ("observed_at", "49"),
+                             ("opened_date", 49), ("opened_date", "49")]:
+            value, action, _ = clean_field_value(column, raw)
+            self.assertIsNone(value, f"{column}={raw}")
+            self.assertEqual(action, CLEARED, f"{column}={raw}")
+
     def test_a_valid_value_is_left_exactly_as_it_is(self) -> None:
         for column, raw in [("loyalty_tier", "gold"), ("opening_date", "2020-05-01"),
                             ("store_name", "Downtown Store")]:

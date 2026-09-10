@@ -51,7 +51,7 @@ from whitespace_tool.sqlite_cache import (
     seed_enrichment_cycle, claim_enrichment_batch, complete_enrichment_claim, enrichment_cycle_counts,
     get_cached_worldwide_city_count, cache_worldwide_cities,
     record_save_event, get_recent_save_events, count_save_events,
-    get_app_setting, set_app_setting, get_stale_after_days, invalidate_quality_cache, invalidate_brand_cache, invalidate_template_cache, DEFAULT_STALE_AFTER_DAYS,
+    get_app_setting, set_app_setting, get_stale_after_days, invalidate_quality_cache, invalidate_brand_cache, invalidate_template_cache, invalidate_heatmap_cache, invalidate_timeseries_cache, DEFAULT_STALE_AFTER_DAYS,
     record_field_discovery_gap,
     record_mapping_confidence_events, get_mapping_confidence,
 )
@@ -3031,6 +3031,7 @@ def _load_sample_dataset_impl(reset: bool = False) -> dict[str, Any]:
         LOGGER.error("sample_source_schema_incompatible missing=%s", ", ".join(missing_source_columns))
     businesses_count = 0
     listings_count = 0
+    source_type_counts: dict[str, int] = {}
     try:
         # Verify source sample_locations table exists
         src_table_ref = f"{source_project_id}.{source_sample_dataset}.listings"
@@ -3160,6 +3161,18 @@ def _load_sample_dataset_impl(reset: bool = False) -> dict[str, Any]:
         list_row = next(iter(client.query(f"SELECT COUNT(1) AS cnt FROM `{project_id}.{dataset_id}.listings` WHERE is_sample_data IS TRUE AND is_deleted IS NOT TRUE").result()))
         businesses_count = int(biz_row["cnt"])
         listings_count = int(list_row["cnt"])
+        # Real per-source-type business counts, not a guess: this used to be
+        # a hardcoded 50/50 split (businesses_count // 2 for both labels)
+        # regardless of what actually loaded - real incident, 2026-09-10,
+        # user noticed the numbers looked too even to be measured.
+        source_type_rows = client.query(f"""
+            SELECT COALESCE(st.name, 'Unknown') AS label, COUNT(DISTINCT b.business_id) AS cnt
+            FROM `{project_id}.{dataset_id}.businesses` b
+            LEFT JOIN `{project_id}.{dataset_id}.source_types` st ON st.source_type_id = b.source_type_id
+            WHERE b.is_sample_data IS TRUE AND b.is_deleted IS NOT TRUE
+            GROUP BY label
+        """).result()
+        source_type_counts = {row["label"]: int(row["cnt"]) for row in source_type_rows}
         ingested_from_sample_locations = True
         LOGGER.info("sample_locations_ingested_to_bronze businesses=%d listings=%d",
                     businesses_count, listings_count)
@@ -3350,7 +3363,7 @@ def _load_sample_dataset_impl(reset: bool = False) -> dict[str, Any]:
         "locations": listings_count,
         "valid": listings_count,
         "errors": 0,
-        "source_types": {"CSV Source": businesses_count // 2, "JSON API Source": businesses_count // 2},
+        "source_types": source_type_counts,
         "countries": 1,
         "validation_success_pct": 100.0,
         "zips": zip_result,
@@ -4315,6 +4328,23 @@ def sync_gold_mirror(force: bool = False) -> dict[str, Any]:
     return result
 
 
+def _rewarm_heatmap_cache_background() -> None:
+    """Recompute the heatmap cell/state/city scores in a background thread
+    right after the gold data they're built from changes, so the local
+    SQLite copy (cells, state_scores, city_scores - every color layer the
+    map draws) is warm again BEFORE the next viewer opens the map, instead
+    of that viewer paying the cold BigQuery recompute themselves. One-shot,
+    not a loop - bounded the same way every other background job in this
+    file that creates its own BigQuery client is (see the module note on
+    reusing a client per worker lifecycle, not per call)."""
+    def _run() -> None:
+        try:
+            reporting_heatmap(refresh=True)
+        except Exception as exc:
+            LOGGER.warning("heatmap_background_rewarm_failed error=%s", exc)
+    threading.Thread(target=_run, name="heatmap-cache-rewarm", daemon=True).start()
+
+
 def _rebuild_gold_and_mirror(force_mirror: bool = False) -> dict[str, Any]:
     """Rebuild gold, then immediately sync the local SQLite mirror from it -
     the single choke point every silver/gold refresh path routes through
@@ -4327,6 +4357,28 @@ def _rebuild_gold_and_mirror(force_mirror: bool = False) -> dict[str, Any]:
     except Exception as exc:
         LOGGER.warning("gold_mirror_sync_failed error=%s", exc)
         mirror_result = {"error": str(exc)}
+    # The heatmap reads from the same gold-mirror view this just rebuilt, so
+    # its cached colors are now stale. invalidate_heatmap_cache() drops the
+    # stale copy immediately; the background rewarm below repopulates it
+    # right away rather than leaving the next map view to pay a cold
+    # multi-second BigQuery recompute (same "sync on the go in background,
+    # not the whole DB" ask this was built for, applied to this one layer).
+    try:
+        invalidate_heatmap_cache()
+        _rewarm_heatmap_cache_background()
+    except Exception as exc:
+        LOGGER.warning("heatmap_cache_invalidate_failed error=%s", exc)
+    # Same reasoning for the trend-chart timeseries - it reads the same
+    # underlying listings/error data this rebuild just changed, and (unlike
+    # reporting_summary/reporting_quality) has no self-heal of its own, so
+    # it needs the same explicit drop. Not proactively rewarmed: its cache
+    # key spans an open-ended brand-selection combination, so the next real
+    # read of whichever combination is being viewed pays one cold recompute
+    # and stays warm from there.
+    try:
+        invalidate_timeseries_cache()
+    except Exception as exc:
+        LOGGER.warning("timeseries_cache_invalidate_failed error=%s", exc)
     return {"gold": gold_result, "mirror": mirror_result}
 
 
@@ -4470,6 +4522,47 @@ def ease_enrichment(enabled: bool = True) -> dict[str, Any]:
 SILVER_GOLD_REFRESH_INTERVAL_SECONDS = 600
 AUTO_REPAIR_BATCH_PAUSE_SECONDS = 5
 AUTO_REPAIR_BATCH_SIZE = 10
+# Success-rate-adaptive full-speed batch sizing (explicit user ask,
+# 2026-09-10): "if the success is getting higher increase the sample size...
+# if that again fail reduce again... play in size of 5 to 50 samples". Grows
+# the batch after a run of mostly-successful fixes (more rows resolved per
+# pause, faster overall progress while it's on a hot streak), shrinks it
+# after a run of mostly-failed ones (fewer wasted BigQuery round trips on
+# rows that keep failing), and is bounded so a bad run never throttles
+# itself down to not running at all ("should not fall that below that it
+# dont even run") and a hot streak never grows past a size that would start
+# monopolising the shared BigQuery client. Only the full-speed path adapts;
+# AUTO_REPAIR_EASED_BATCH_SIZE below is a deliberate user-requested trickle
+# (the Stop button's ease-off) and is not touched by this.
+AUTO_REPAIR_ADAPTIVE_MIN_BATCH_SIZE = 5
+AUTO_REPAIR_ADAPTIVE_MAX_BATCH_SIZE = 50
+AUTO_REPAIR_ADAPTIVE_STEP = 5
+AUTO_REPAIR_ADAPTIVE_HIGH_SUCCESS_THRESHOLD = 0.7
+AUTO_REPAIR_ADAPTIVE_LOW_SUCCESS_THRESHOLD = 0.3
+_ENRICHMENT_ADAPTIVE_BATCH_SIZE: int = AUTO_REPAIR_BATCH_SIZE
+
+
+def _record_enrichment_batch_result(attempted: int, resolved: int) -> None:
+    """Adjust _ENRICHMENT_ADAPTIVE_BATCH_SIZE for the NEXT full-speed batch,
+    based on how well THIS one did. Only the single automatic-review-repair
+    worker thread ever calls this (same ownership pattern as the plain
+    _AUTO_REPAIR_BACKOFF_SECONDS global below), so a plain module global is
+    enough - no lock needed. A mid-range success rate (neither clearly good
+    nor clearly bad) leaves the size where it is, rather than oscillating on
+    noise every single batch.
+    """
+    global _ENRICHMENT_ADAPTIVE_BATCH_SIZE
+    if attempted <= 0:
+        return
+    success_rate = resolved / attempted
+    if success_rate >= AUTO_REPAIR_ADAPTIVE_HIGH_SUCCESS_THRESHOLD:
+        _ENRICHMENT_ADAPTIVE_BATCH_SIZE = min(
+            AUTO_REPAIR_ADAPTIVE_MAX_BATCH_SIZE, _ENRICHMENT_ADAPTIVE_BATCH_SIZE + AUTO_REPAIR_ADAPTIVE_STEP
+        )
+    elif success_rate < AUTO_REPAIR_ADAPTIVE_LOW_SUCCESS_THRESHOLD:
+        _ENRICHMENT_ADAPTIVE_BATCH_SIZE = max(
+            AUTO_REPAIR_ADAPTIVE_MIN_BATCH_SIZE, _ENRICHMENT_ADAPTIVE_BATCH_SIZE - AUTO_REPAIR_ADAPTIVE_STEP
+        )
 # Eased pacing: few enough rows per pass that a batch cannot monopolise the
 # BigQuery client, and a long enough gap that the process is effectively
 # invisible to anyone using the app. Progress still happens - roughly 4 rows a
@@ -4516,11 +4609,13 @@ def _enrichment_pacing() -> tuple[int, float]:
     """(batch size, pause) for this pass, re-read every iteration.
 
     Re-read rather than captured once, so easing off takes effect on the
-    batch after the button is pressed instead of only on the next run.
+    batch after the button is pressed instead of only on the next run, and
+    so the full-speed size reflects the latest adaptive adjustment from
+    _record_enrichment_batch_result().
     """
     if ENRICHMENT_THROTTLED.is_set():
         return AUTO_REPAIR_EASED_BATCH_SIZE, float(AUTO_REPAIR_EASED_PAUSE_SECONDS)
-    return AUTO_REPAIR_BATCH_SIZE, float(AUTO_REPAIR_BATCH_PAUSE_SECONDS)
+    return _ENRICHMENT_ADAPTIVE_BATCH_SIZE, float(AUTO_REPAIR_BATCH_PAUSE_SECONDS)
 
 
 def _quality_fix_event_id(fix_type: str, event_id: str, row_number: int) -> str:
@@ -4742,9 +4837,23 @@ def _start_silver_gold_scheduler() -> None:
     floor under the existing on-demand refresh (_refresh_silver_background,
     triggered opportunistically when a stale cached reporting query is
     served). Call once from serve() only - never at import time, so
-    importing this module in tests doesn't start a background thread."""
+    importing this module in tests doesn't start a background thread.
+
+    The first tick runs immediately rather than after the first full
+    interval (real gap, 2026-09-10 - user: "db mirroring should get started
+    when server is getting live itself ... for crucial layers along with
+    zip loading etc, but it should not block the login and general flow").
+    Previously this slept the full SILVER_GOLD_REFRESH_INTERVAL_SECONDS
+    (10 minutes) before ever running once, so a freshly-started server with
+    no one having hit a stale reporting query yet served a genuinely stale
+    or empty gold mirror for up to 10 minutes. Still entirely
+    non-blocking - this is a daemon thread serve() fires and moves straight
+    on from into httpd.serve_forever(), the same as the ZIP/worldwide
+    reference syncs right above it in serve().
+    """
 
     def run_forever() -> None:
+        _run_silver_gold_tick()
         while True:
             sleep(SILVER_GOLD_REFRESH_INTERVAL_SECONDS)
             _run_silver_gold_tick()
@@ -5037,7 +5146,16 @@ def _mirror_top_states(
         for (state, state_name), group in groups.items()
     ]
     rows.sort(key=lambda r: r["locations"], reverse=True)
-    return rows[:15]
+    # Real bug, 2026-09-10 (user: "CO ... doesn't have listing which is not
+    # true ... other states also have listing data as well, dont take
+    # listing counter as only way to collate them"): this same payload is
+    # what draws EVERY state bubble on the national map, not just a top-N
+    # leaderboard row. A state outside this cut gets no entry AT ALL in the
+    # response (not a real zero), so the map rendered it as flat "no data"
+    # white regardless of its actual count. 60 comfortably covers all 50
+    # states + DC + the inhabited territories with room to spare, so this
+    # is effectively "no meaningful cap" rather than a new, larger one.
+    return rows[:60]
 
 
 def _mirror_top_cities(
@@ -5594,7 +5712,15 @@ def reporting_heatmap(refresh: bool = False) -> dict[str, Any]:
 
 def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, Any]:
     params = params or {}
-    cache_key = f"reporting_summary:v3:{json.dumps(params, sort_keys=True)}"
+    # v4 (2026-09-10): bumped from v3 so every existing cached entry
+    # (computed under the old top-15-states cap, real incident - CO and
+    # other real states with data outside the old top 15 rendered as flat
+    # "no data" on the map) auto-invalidates on next read, everywhere,
+    # without relying on a manual/targeted invalidate_cache() call -
+    # reporting_summary:* is deliberately exempt from the blanket wipe (see
+    # invalidate_cache()'s docstring), so nothing else would have expired
+    # this on its own.
+    cache_key = f"reporting_summary:v4:{json.dumps(params, sort_keys=True)}"
     cached_payload = get_cached_query(cache_key)
     if cached_payload:
         cached_totals = cached_payload.get("totals") if isinstance(cached_payload.get("totals"), dict) else {}
@@ -5815,7 +5941,7 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
     ) sp ON b.zip_state = sp.state_code
     GROUP BY state, state_name
     ORDER BY locations DESC
-    LIMIT 15
+    LIMIT 60
     """
 
     top_cities_query = base_cte + f"""
@@ -6092,7 +6218,7 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
         FROM zip_dedup
         GROUP BY state, state_name
         ORDER BY locations DESC
-        LIMIT 15
+        LIMIT 60
         """
         zip_cities_query = f"""
         SELECT
@@ -7171,7 +7297,16 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
     from google.cloud import bigquery
 
     params = params or {}
-    quality_cache_key = f"reporting_quality:v1:{json.dumps(params, sort_keys=True)}"
+    # v2 (2026-09-10): bumped from v1 so every existing cached entry
+    # (computed before the brand/state/city/country dimension unification,
+    # and before the states/cities count cap was raised) auto-invalidates
+    # on next read, everywhere - reporting_quality:* is deliberately exempt
+    # from invalidate_cache()'s blanket wipe (self-heals on a warm hit
+    # instead), so nothing else would have expired a stale pre-fix entry on
+    # its own. Same lesson as BUG-121's reporting_summary:v3->v4 bump -
+    # any fix to a function feeding an exempt cache key needs its version
+    # bumped as part of that same fix.
+    quality_cache_key = f"reporting_quality:v2:{json.dumps(params, sort_keys=True)}"
     force_refresh = str(params.get("refresh", [""])[0] or "").lower() in {"1", "true", "yes"}
     cached_quality = get_cached_query(quality_cache_key)
     if cached_quality and not _skip_cache and not force_refresh:
@@ -7237,7 +7372,7 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
         return {
             "scope": "invalid_listings",
             "metrics": {"invalid_listings": 0, "needs_manual_review": 0, "ai_fixed": 0, "manual_fixed": 0, "unresolved_rate_pct": 0.0, "invalid_record_rate_pct": 0.0},
-            "reasons": [], "brands": [], "states": [], "cities": [], "history": [],
+            "reasons": [], "brands": [], "states": [], "cities": [], "countries": [], "history": [],
             "filters": {"brands": [], "states": [], "counties": [], "cities": [], "zips": [], "reasons": []},
             # The fix-state counts are GLOBAL - they count every listing ever
             # invalid, across all brands - so they do not depend on the
@@ -7300,11 +7435,26 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
     raw_value = _quality_raw_value
 
     reason_counts: dict[str, int] = {}
+    # brand/state/city/country share one shape (invalid/needs_review/
+    # ai_enriched) so the frontend can switch between them as one dropdown-
+    # driven table instead of separate, differently-shaped sections
+    # (explicit user ask, 2026-09-10: "brand city state country at same
+    # metric ... rather than making 4"). county/zip stay plain counts -
+    # only used for filter dropdowns elsewhere, not part of that ask.
     brand_counts: dict[str, dict[str, int]] = {}
-    state_counts: dict[str, int] = {}
+    state_counts: dict[str, dict[str, int]] = {}
+    city_counts: dict[str, dict[str, int]] = {}
+    country_counts: dict[str, dict[str, int]] = {}
     county_counts: dict[str, int] = {}
-    city_counts: dict[str, int] = {}
     zip_counts: dict[str, int] = {}
+
+    def _bump_quality_bucket(counts: dict[str, dict[str, int]], key: str, is_ai_enriched: bool) -> None:
+        bucket = counts.setdefault(key, {"invalid": 0, "needs_review": 0, "ai_enriched": 0})
+        bucket["invalid"] += 1
+        if is_ai_enriched:
+            bucket["ai_enriched"] += 1
+        else:
+            bucket["needs_review"] += 1
     filtered: list[dict[str, Any]] = []
     _schedule_quality_fix_metrics_refresh()
     repair_stats = get_auto_repair_stats()
@@ -7319,6 +7469,7 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
         item_state = raw_value(item.get("raw_record"), "state", "state_code", "state_name").upper()
         item_county = raw_value(item.get("raw_record"), "county", "county_name").lower()
         item_city = raw_value(item.get("raw_record"), "city", "city_name").lower()
+        item_country = raw_value(item.get("raw_record"), "country", "country_code", "country_name").upper()
         item_zip = raw_value(item.get("raw_record"), "zip", "zip_code", "postal_code", "zipcode")
         item_reasons = _quality_reasons_from_errors(item.get("errors"))
         for label in item_reasons:
@@ -7346,16 +7497,13 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
         if status == "needs_review" and item.get("is_ai_enriched"):
             continue
         filtered.append(item)
-        state_counts[item_state or "Unknown"] = state_counts.get(item_state or "Unknown", 0) + 1
+        is_ai_enriched = bool(item.get("is_ai_enriched"))
         county_counts[item_county.title() if item_county else "Unknown"] = county_counts.get(item_county.title() if item_county else "Unknown", 0) + 1
-        city_counts[item_city.title() if item_city else "Unknown"] = city_counts.get(item_city.title() if item_city else "Unknown", 0) + 1
         zip_counts[item_zip or "Unknown"] = zip_counts.get(item_zip or "Unknown", 0) + 1
-        bucket = brand_counts.setdefault(brand_name, {"invalid": 0, "needs_review": 0, "ai_enriched": 0})
-        bucket["invalid"] += 1
-        if item.get("is_ai_enriched"):
-            bucket["ai_enriched"] += 1
-        else:
-            bucket["needs_review"] += 1
+        _bump_quality_bucket(brand_counts, brand_name, is_ai_enriched)
+        _bump_quality_bucket(state_counts, item_state or "Unknown", is_ai_enriched)
+        _bump_quality_bucket(city_counts, item_city.title() if item_city else "Unknown", is_ai_enriched)
+        _bump_quality_bucket(country_counts, item_country or "Unknown", is_ai_enriched)
 
     # Give the per-brand table the SAME cumulative definition the headline
     # cards use, instead of counting open rows flagged is_ai_enriched. Under
@@ -7533,7 +7681,67 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
         with_zip = int(coverage_row.get("with_zip", 0) or 0)
         with_coords = int(coverage_row.get("with_coordinates", 0) or 0)
         stale = int(coverage_row.get("stale_records", 0) or 0)
+        stale_threshold_days = stale_after_days
+        # Explicit user ask (2026-09-10): a demo dataset can legitimately have
+        # zero records stale at the configured threshold (e.g. everything was
+        # freshly loaded today), which reads as "the freshness metric doesn't
+        # work" rather than "correctly zero." If the configured threshold
+        # finds nothing, keep halving it (10d -> 5d -> 2.5d -> ...) down to a
+        # 30-minute floor and report whichever threshold actually found
+        # something (or the floor, still zero, if none did) - the UI shows
+        # which threshold produced the number so this is never presented as
+        # "always 10 days" when it wasn't.
+        #
+        # All candidate thresholds are checked in ONE query (one COUNTIF per
+        # threshold, single pass over the table), not one query per halving
+        # step - a real incident, same day: a sequential per-step version
+        # (up to ~9 round trips to reach the 30-minute floor from 10 days)
+        # made this single request block the server for many seconds, and
+        # this app's dev server handles one request at a time, so every
+        # OTHER endpoint queued up behind it and looked hung too.
+        FLOOR_STALE_DAYS = 30 / (24 * 60)  # 30 minutes, expressed in days
+        if stale == 0 and tr > 0:
+            candidate_days = []
+            probe_days = stale_after_days
+            while probe_days > FLOOR_STALE_DAYS:
+                probe_days = max(probe_days / 2, FLOOR_STALE_DAYS)
+                candidate_days.append(probe_days)
+            if candidate_days:
+                probe_columns = ",\n                    ".join(
+                    f"COUNTIF(last_observed_at < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {round(days * 24 * 60)} MINUTE)) AS stale_{index}"
+                    for index, days in enumerate(candidate_days)
+                )
+                probe_row = next(iter(client.query(f"""
+                    SELECT {probe_columns}
+                    FROM `{project_id}.{dataset_id}.listings`
+                    WHERE is_deleted IS NOT TRUE
+                """).result()), {})
+                for index, days in enumerate(candidate_days):
+                    probe_stale = int(probe_row.get(f"stale_{index}", 0) or 0)
+                    stale_threshold_days = days
+                    if probe_stale > 0:
+                        stale = probe_stale
+                        break
+        coverage_metrics["stale_after_days_used"] = round(stale_threshold_days, 4)
         dup = int(coverage_row.get("duplicate_records", 0) or 0)
+        # Brand-merge activity: the durable record of every completed
+        # Duplicate Brands merge (source_business_id -> target_business_id),
+        # already written by merge_brands()/_record_brand_merges() - reused
+        # here rather than re-derived, per explicit user ask that "duplicate
+        # rate" cover both the physical-location content_hash signal AND
+        # actual merge activity, using flags the pipeline already carries.
+        try:
+            merges_row = next(iter(client.query(f"""
+                SELECT COUNT(*) AS merge_count
+                FROM `{project_id}.{dataset_id}.brand_merges`
+            """).result()), {})
+            brand_merges_count = int(merges_row.get("merge_count", 0) or 0)
+        except Exception as merges_exc:
+            # brand_merges may not exist yet on a fresh warehouse - absence
+            # means zero merges have ever happened, not an error.
+            LOGGER.info("brand_merges_count_unavailable error=%s", merges_exc)
+            brand_merges_count = 0
+        coverage_metrics["brand_merges_count"] = brand_merges_count
         req_fields = int(coverage_row.get("with_required_fields", 0) or 0)
         geo_enriched = int(coverage_row.get("geo_enriched", 0) or 0)
         coord_acc = int(coverage_row.get("coord_accurate", 0) or 0)
@@ -7548,7 +7756,19 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
         invalid_total = len(rows)
         zip_pct = pct(with_zip, tr)
         coord_pct = pct(with_coords, tr)
-        dup_pct = pct(dup, tr)
+        # Duplicate rate is the average of two independent duplicate signals
+        # (explicit user ask, 2026-09-10): the content_hash-based physical
+        # duplicate rate among ingested records, and the brand-merge rate
+        # (brands actually merged as duplicates, out of all active brands).
+        # A signal with nothing to report (exactly 0) is excluded from the
+        # average rather than counted as a real 0 - otherwise "11 brand
+        # merges applied" alongside a genuine 0% content_hash collision rate
+        # averaged down to a misleadingly low combined number instead of
+        # reflecting the real merge activity that did happen.
+        content_hash_dup_pct = pct(dup, tr)
+        brand_merge_rate_pct = pct(brand_merges_count, active_brands)
+        duplicate_signals = [v for v in (content_hash_dup_pct, brand_merge_rate_pct) if v > 0]
+        dup_pct = round(sum(duplicate_signals) / len(duplicate_signals), 2) if duplicate_signals else 0.0
         freshness = pct(tr - stale, tr)
         req_pct = pct(req_fields, tr)
         geo_pct = pct(geo_enriched, tr)
@@ -7731,9 +7951,17 @@ def reporting_quality_summary(params: dict[str, list[str]] | None = None, *, _sk
             {"reason": key, **value, "total": sum(value.values())}
             for key, value in sorted(fix_state_pivot.items(), key=lambda pair: (-sum(pair[1].values()), pair[0]))
         ],
+        # Same shape (invalid/needs_review/ai_enriched) across all four
+        # dimensions - lets one dropdown-driven table switch between them
+        # (explicit user ask, 2026-09-10) instead of each needing its own
+        # bespoke section. States/cities/countries raised from a hard 25 to
+        # 60 (same reasoning as BUG-121's map state cap) - a genuinely
+        # impacted state/city/country getting cut off entirely, not just
+        # off page 1, is the same class of bug that hid CO on the map.
         "brands": [{"brand": key, **value} for key, value in sorted(brand_counts.items(), key=lambda pair: (-pair[1]["invalid"], pair[0]))],
-        "states": [{"state": key, "count": value} for key, value in sorted(state_counts.items(), key=lambda pair: (-pair[1], pair[0]))[:25]],
-        "cities": [{"city": key, "count": value} for key, value in sorted(city_counts.items(), key=lambda pair: (-pair[1], pair[0]))[:25]],
+        "states": [{"state": key, **value} for key, value in sorted(state_counts.items(), key=lambda pair: (-pair[1]["invalid"], pair[0]))[:60]],
+        "cities": [{"city": key, **value} for key, value in sorted(city_counts.items(), key=lambda pair: (-pair[1]["invalid"], pair[0]))[:60]],
+        "countries": [{"country": key, **value} for key, value in sorted(country_counts.items(), key=lambda pair: (-pair[1]["invalid"], pair[0]))[:60]],
         "history": history,
         "filters": {
             "brands": sorted({str(row.get("brand") or "Unknown") for row in rows}),
@@ -8688,7 +8916,12 @@ def auto_repair_error_batch(limit: int = 10, offset: int = 0, *, client: Any = N
     if client is None:
         client = _bigquery_client(project_id, credentials_json)
 
-    batch_limit = max(1, min(int(limit), 10))
+    # Ceiling raised from a fixed 10 to AUTO_REPAIR_ADAPTIVE_MAX_BATCH_SIZE
+    # (50) so the adaptive sizing in _enrichment_pacing() can actually reach
+    # its documented upper bound on a hot streak - a caller passing a large
+    # `limit` was previously being silently clamped back down to 10 here
+    # regardless of what _enrichment_pacing() computed.
+    batch_limit = max(1, min(int(limit), AUTO_REPAIR_ADAPTIVE_MAX_BATCH_SIZE))
     cycle_id, pending_count = seed_or_swap_enrichment_cycle()
     claimed_ids = claim_enrichment_batch(cycle_id, limit=batch_limit)
     if not claimed_ids and pending_count == 0:
@@ -8892,6 +9125,13 @@ def start_auto_repair(manual: bool = False) -> dict[str, Any]:
 
                 _schedule_quality_fix_metrics_refresh(force=True)
                 client = _new_scoped_bigquery_client(project_id, credentials_json)
+                # Fresh run, fresh starting point - a previous run's grown or
+                # shrunk adaptive size (e.g. shrunk down chasing a batch of
+                # rows that turned out to be unfixable) shouldn't carry over
+                # into an unrelated new run against what may now be a very
+                # different queue.
+                global _ENRICHMENT_ADAPTIVE_BATCH_SIZE
+                _ENRICHMENT_ADAPTIVE_BATCH_SIZE = AUTO_REPAIR_BATCH_SIZE
                 current_stats = get_auto_repair_stats()
                 base_fixed = int(current_stats.get("fixed", 0) or 0)
                 base_processed = int(current_stats.get("processed", 0) or 0)
@@ -8952,6 +9192,7 @@ def start_auto_repair(manual: bool = False) -> dict[str, Any]:
                     batch = auto_repair_error_batch(batch_size, client=client)
                     if not batch["attempted"]:
                         break
+                    _record_enrichment_batch_result(batch["attempted"], batch["resolved"])
                     fixed += batch["resolved"]
                     processed = offset + batch["attempted"]
                     # Remaining means unresolved review rows, not merely the
@@ -9922,6 +10163,16 @@ def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_inval
         len(rows),
         len(source_fields),
     )
+    # Phase timing (2026-09-10): a real large save (9,825 rows) was reported
+    # taking ~5 minutes with no way to tell WHICH phase - the per-row
+    # validate/normalize loop, the dedupe query, or the actual BigQuery load
+    # job(s) - was responsible. Investigation confirmed the write path is
+    # already a genuine batch load (load_table_from_dataframe, not per-row
+    # inserts) and the dedupe check is one query, not one per row - so
+    # nothing obviously wrong was found in the code shape itself. Rather
+    # than guess further, this logs each phase's real duration so the NEXT
+    # slow save gives concrete numbers to act on instead of speculation.
+    _save_phase_t0 = perf_counter()
     mapper = _resolve_mapper_source_fields(mapper, source_fields)
     # BUG-101 backend hardening: the browser always fills in a non-blank
     # source_name before save (see fallbackSourceName() in ui/js/mapper.js);
@@ -10048,17 +10299,20 @@ def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_inval
         elif location is not None:
             locations.append(location)
 
+    _save_phase_row_loop_s = perf_counter() - _save_phase_t0
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = client or _bigquery_client(project_id, credentials_json)
 
     mapper_id = f"mapper_{uuid4().hex}"
     mapping_id = mapping_id or mapper_id
     config_json = _scrub_mapper(mapper)
+    _save_phase_t1 = perf_counter()
     try:
         demographics = _load_mapped_zip_demographics({location.zip5 for location in locations})
     except Exception as exc:
         LOGGER.warning("zip_enrichment_lookup_failed_continuing error=%s", exc)
         demographics = {}
+    _save_phase_demographics_s = perf_counter() - _save_phase_t1
     sample_row_meta = {
         "template_id": template_id,
         "ingestion_id": ingestion_id,
@@ -10071,8 +10325,12 @@ def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_inval
     for location in locations:
         if isinstance(location.raw, dict):
             location.raw.setdefault("__meta", sample_row_meta)
+    _save_phase_t2 = perf_counter()
     rows_by_table = build_table_rows(locations, demographics)
+    _save_phase_build_rows_s = perf_counter() - _save_phase_t2
+    _save_phase_t3 = perf_counter()
     rows_by_table["listings"], duplicate_listings_skipped = _dedupe_listings_against_bronze(client, project_id, dataset_id, rows_by_table["listings"])
+    _save_phase_dedupe_s = perf_counter() - _save_phase_t3
     rows_by_table["businesses"] = []
     for record in error_listings:
         record["source_type_id"] = source_type_id
@@ -10107,6 +10365,7 @@ def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_inval
         "created_at": utc_now_iso(), "updated_at": utc_now_iso(),
     }] if save_template else []
     rows_by_table["error_listings"] = error_listings
+    _save_phase_t4 = perf_counter()
     try:
         push_to_bigquery(project_id, dataset_id, rows_by_table, credentials_json, client=client, skip_empty_table_checks=assume_tables_exist)
     except Exception:
@@ -10127,6 +10386,7 @@ def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_inval
             except Exception as record_exc:
                 LOGGER.warning("failed_save_event_record_failed event_id=%s error=%s", event_id, record_exc)
         raise
+    _save_phase_push_s = perf_counter() - _save_phase_t4
     _maybe_refresh_after_save(skip_cache_invalidation)
     LOGGER.info(
         "save_succeeded mapper_id=%s dataset=%s mapped_rows=%d mapped_fields=%d duplicate_listings_skipped=%d",
@@ -10135,6 +10395,11 @@ def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_inval
         len(locations),
         len(mapper["fields"]),
         duplicate_listings_skipped,
+    )
+    LOGGER.info(
+        "save_phase_timing rows=%d row_loop_s=%.2f demographics_s=%.2f build_rows_s=%.2f dedupe_s=%.2f push_to_bigquery_s=%.2f total_s=%.2f",
+        len(rows), _save_phase_row_loop_s, _save_phase_demographics_s, _save_phase_build_rows_s,
+        _save_phase_dedupe_s, _save_phase_push_s, perf_counter() - _save_phase_t0,
     )
     try:
         record_save_event(

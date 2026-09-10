@@ -240,6 +240,18 @@
          tables for no reason other than one used h2 and the other h3.
          Charts/cards keep their own styling; this is table sections only. */
       .dq-section{margin:22px 0}.dq-section h3{margin:0 0 10px;font-size:15px;font-weight:700;color:var(--ink)}
+      /* Issue Type Breakdown (a compact donut+legend) and Improvement
+         Opportunities (a handful of short one-line cards) side by side
+         instead of each full-width and stacked (explicit user ask,
+         2026-09-10) - both left a lot of unused horizontal space on their
+         own row. flex, not a rigid 50/50 grid, so each shares space by its
+         own actual content width ("auto resize... pie chart right space is
+         empty") rather than forcing the donut's mostly-empty right half to
+         stay exactly half the row. Wraps to stacked full-width below
+         1000px, matching this file's existing breakpoint. */
+      .dq-section-row{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}
+      .dq-section-row>.dq-section{flex:1 1 380px;min-width:0;margin:0}
+      @media(max-width:1000px){.dq-section-row{flex-direction:column}}
       /* Shared d3 chart tooltip (all charts use chartTooltip()). */
       .dq-chart-tooltip{position:absolute;display:none;z-index:20;pointer-events:none;background:#0f172a;color:#fff;padding:7px 10px;border-radius:6px;font-size:12px;line-height:1.45;box-shadow:0 6px 18px rgba(15,23,42,.28);white-space:nowrap}
       /* Number cards expose a download of the data behind the figure. */
@@ -323,6 +335,36 @@
   const dqTablePages = new Map();
   const dqTableData = new Map();
   const DQ_TABLE_PAGE_SIZE = 10;
+  // "Quality by <dimension>" dropdown (explicit user ask, 2026-09-10):
+  // brand/city/state/country all now come back from the backend in the
+  // SAME shape (invalid/needs_review/ai_enriched), so one table swaps
+  // rows on dropdown change instead of needing four bespoke sections.
+  // Data is stashed here on every loadQuality() so the dropdown's own
+  // change listener (wired once, outside the render pass) always reads
+  // the latest fetch, not a stale closure over the render that happened
+  // to be running when the user switched dimensions.
+  const dqDimensionData = { brands: [], cities: [], states: [], countries: [] };
+  const DQ_DIMENSION_LABELS = { brands: 'Brand', cities: 'City', states: 'State', countries: 'Country' };
+  const DQ_DIMENSION_KEYS = { brands: 'brand', cities: 'city', states: 'state', countries: 'country' };
+  function renderDimensionTable(resetPage = false) {
+    // resetPage only on an actual dropdown switch (below) - a plain data
+    // refresh on the SAME dimension should not jar the user back to page 1.
+    if (resetPage) dqTablePages.delete('dqDimensionTable');
+    const dimension = $('dqDimensionSelect')?.value || 'brands';
+    const rows = dqDimensionData[dimension] || [];
+    const labelKey = DQ_DIMENSION_KEYS[dimension];
+    const label = DQ_DIMENSION_LABELS[dimension];
+    const formatLabel = dimension === 'brands' ? formatBrandName : (v) => v || 'Unknown';
+    renderPagedDqTable('dqDimensionTable', [label, 'Invalid', 'Needs review', 'AI fixed'],
+      rows.map((row) => [formatLabel(row[labelKey]), fmt(row.invalid), fmt(row.needs_review), fmt(row.ai_enriched)]),
+      `No invalid ${label.toLowerCase()} records are available for this filter.`);
+  }
+  if (!window.__dqDimensionSelectWired) {
+    window.__dqDimensionSelectWired = true;
+    document.addEventListener('change', (event) => {
+      if (event.target && event.target.id === 'dqDimensionSelect') renderDimensionTable(true);
+    });
+  }
 
   function renderPagedDqTable(targetId, headers, rows, emptyMessage) {
     const host = $(targetId);
@@ -555,11 +597,22 @@
       <div id="dqBody" class="dq-body hidden">
         <div id="dqMetricGrid" class="dq-grid">${[['0','Invalid listings'],['0','Needs manual review'],['0','Listings fixed automatically'],['0','Listings fixed manually'],['0.00%','Unresolved rate'],['0.00%','ZIP completeness'],['0.00%','Coordinate completeness'],['0.00%','Duplicate rate'],['0','Stale records'],['0','Entity-resolution attempts'],['0.00%','Entity-resolution success'],['0','Active issue types']].map(([value,label]) => metricCard(value,label)).join('')}</div>
         <div class="dq-section"><h3>Quality Signals</h3><div id="dqSignals"></div></div>
-        <div class="dq-section"><h3>Issue Type Breakdown</h3><div id="dqReasonsChart"></div></div>
+        <div class="dq-section-row">
+          <div class="dq-section"><h3>Issue Type Breakdown</h3><div id="dqReasonsChart"></div></div>
+          <div class="dq-section"><h3>Improvement Opportunities</h3><div id="dqImprovements" class="dq-improvements-list"></div></div>
+        </div>
         <div class="dq-section"><h3>Fix State by Failure Field</h3><div id="dqFixStatePivot"></div></div>
-        <div class="dq-section"><h3>Improvement Opportunities</h3><div id="dqImprovements" class="dq-improvements-list"></div></div>
-        <div class="dq-section"><h3>Quality by Brand</h3><div id="dqBrandTable"></div></div>
-        <div class="dq-section"><h3>Most Impacted States and Cities</h3><div id="dqGeoTables" class="dq-improvements"><div id="dqGeoStates"></div><div id="dqGeoCities"></div></div></div>
+        <div class="dq-section">
+          <h3 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">Quality by
+            <select id="dqDimensionSelect" aria-label="Group quality metrics by" style="font-size:13px;padding:4px 8px;border:1px solid var(--line);border-radius:6px;font-weight:600;">
+              <option value="brands">Brand</option>
+              <option value="cities">City</option>
+              <option value="states">State</option>
+              <option value="countries">Country</option>
+            </select>
+          </h3>
+          <div id="dqDimensionTable"></div>
+        </div>
         <div class="dq-section"><h3>Reconciliation</h3><div id="dqReconciliation"></div></div>
 
       </div></main></div>
@@ -920,26 +973,25 @@
   let qualityStaleRefetches = 0;
   const QUALITY_STALE_REFETCH_LIMIT = 3;
   const QUALITY_STALE_REFETCH_DELAY_MS = 6000;
-  // Set once real data has rendered here at least once this page load. User
-  // asked (twice) for the "Loading quality metrics" spinner to go away -
-  // it was correctly reporting a genuine backend deadlock earlier today
-  // (now fixed), but the UI behavior itself was ALSO wrong independent of
-  // that: every call, not just the true first one, blanked the existing
-  // body behind a full-panel spinner - so even a fast, healthy background
-  // refresh or a tab re-open made already-correct numbers flash to a
-  // loading state for no reason. Only the genuine first load (nothing to
-  // show yet) earns the blocking spinner now; every call after that keeps
-  // the existing body up and swaps in fresh numbers silently once they land.
+  // Set once real data has rendered here at least once this page load.
+  // Superseded twice now by explicit user ask: first, that the blocking
+  // spinner should not reappear on every call, only the true first one
+  // (fixed by gating it on this flag); then, that it should not exist even
+  // ON the true first load either - the static #dqBody markup already ships
+  // with the full table/card structure at "0" (see the panel() builder
+  // above), so tab 2 must show that same structure immediately on open, the
+  // same way it is never blank on tab 1, rather than a full-panel spinner
+  // hiding it. Real numbers replace the zeros silently once they land,
+  // whether this is the first load, a background refresh, or a warm-cache
+  // poll retry - there is no longer a load state that hides the body.
   let dqQualityLoadedOnce = false;
   async function loadQuality(forceRefresh = false) {
     const status = $('dqStatus');
     if (!status) return;
     const loadingPanel = $('dqLoadingPanel');
     const body = $('dqBody');
-    if (!dqQualityLoadedOnce) {
-      if (loadingPanel) loadingPanel.classList.remove('hidden');
-      if (body) body.classList.add('hidden');
-    }
+    if (loadingPanel) loadingPanel.classList.add('hidden');
+    if (body) body.classList.remove('hidden');
     status.className = 'report-status hidden';
     status.textContent = '';
       try {
@@ -1009,12 +1061,40 @@
       const zipCompleteness = num(q.zip_completeness_pct);
       const coordinateCompleteness = num(q.coordinate_completeness_pct);
       const duplicateRate = num(q.duplicate_rate_pct);
+      const brandMergesCount = num(q.brand_merges_count);
       const staleRecords = num(q.stale_records);
+      // The backend halves the configured stale-after threshold (down to a
+      // 30-minute floor) when nothing is stale at the configured one, so
+      // this can legitimately differ from the saved setting - state which
+      // threshold actually produced the number rather than always saying
+      // "days" when it might have been minutes.
+      const staleThresholdDays = num(q.stale_after_days_used ?? q.stale_after_days);
+      // Below 1 day the halving sequence still spans a wide range (up to
+      // ~23.9 hours down to a 30-minute floor) - always showing raw minutes
+      // there produced unreadable labels like ">675 min" instead of a
+      // "Listings older than 11.3 hrs" scale appropriate to the magnitude
+      // (user ask, 2026-09-10: plain "older than X min/hr/days" language,
+      // no ">" symbol).
+      const staleThresholdLabel = (() => {
+        if (staleThresholdDays >= 1) {
+          const days = staleThresholdDays % 1 === 0 ? staleThresholdDays : staleThresholdDays.toFixed(1);
+          return `Listings older than ${days} day${staleThresholdDays === 1 ? '' : 's'}`;
+        }
+        const totalMinutes = Math.max(1, Math.round(staleThresholdDays * 24 * 60));
+        if (totalMinutes >= 60) {
+          const hours = totalMinutes / 60;
+          const hoursLabel = hours % 1 === 0 ? hours : hours.toFixed(1);
+          return `Listings older than ${hoursLabel} hr${hours === 1 ? '' : 's'}`;
+        }
+        return `Listings older than ${totalMinutes} min`;
+      })();
       const entityAttempts = num(q.entity_resolution_attempts);
       const entitySuccess = num(q.entity_resolution_success_rate_pct);
       const reasons = Array.isArray(data.reasons) ? data.reasons : [];
       const states = Array.isArray(data.states) ? data.states : [];
       const cities = Array.isArray(data.cities) ? data.cities : [];
+      const countries = Array.isArray(data.countries) ? data.countries : [];
+      const brandsForDimension = Array.isArray(data.brands) ? data.brands : [];
       // Per-filter option labels. States read as full names, because that is
       // what the Location rail's State dropdown shows and what its search box
       // matches on - a rail that says "CA" next to one that says "California"
@@ -1061,8 +1141,8 @@
         metricCard(pct(unresolvedRate), 'Unresolved rate'),
         metricCard(coverageMeasured ? pct(zipCompleteness) : '—', 'ZIP completeness'),
         metricCard(coverageMeasured ? pct(coordinateCompleteness) : '—', 'Coordinate completeness'),
-        metricCard(coverageMeasured ? pct(duplicateRate) : '—', 'Duplicate rate'),
-        metricCard(coverageMeasured ? fmt(staleRecords) : '—', 'Stale records'),
+        metricCard(coverageMeasured ? pct(duplicateRate) : '—', 'Duplicate rate', `${fmt(brandMergesCount)} brand merge${brandMergesCount === 1 ? '' : 's'} applied`),
+        metricCard(coverageMeasured ? fmt(staleRecords) : '—', 'Stale records', staleThresholdLabel),
         metricCard(entityAttempts ? fmt(entityAttempts) : '—', 'Entity-resolution attempts'),
         metricCard(entityAttempts ? pct(entitySuccess) : '—', 'Entity-resolution success'),
         metricCard(fmt(reasons.length), 'Active issue types')
@@ -1096,15 +1176,19 @@
       renderReasonsDonut('dqReasonsChart', reasons.filter((b) => num(b.count) > 0));
       renderFixStatePivot(data.fix_state_pivot);
 
-      const brandRows = Array.isArray(data.brands) ? data.brands : [];
-      $('dqBrandTable').innerHTML = `<table class="dq-table"><thead><tr><th>Brand</th><th>Invalid</th><th>Needs review</th><th>AI fixed</th></tr></thead><tbody>${brandRows.length ? brandRows.map((brand) => `<tr><td>${escapeHtml(formatBrandName(brand.brand))}</td><td>${fmt(brand.invalid)}</td><td>${fmt(brand.needs_review)}</td><td>${fmt(brand.ai_enriched)}</td></tr>`).join('') : '<tr><td colspan="4">No invalid brand records are available for this filter.</td></tr>'}</tbody></table>`;
-      // Was a hard .slice(0, 10) on both tables: rows 11+ were simply hidden
-      // with no pager and no indication they existed. Paginated instead, so
-      // every impacted state/city is reachable.
-      renderPagedDqTable('dqGeoStates', ['State', 'Invalid listings'],
-        states.map((row) => [stateLabel(row.state), fmt(row.count)]), 'No impacted states.');
-      renderPagedDqTable('dqGeoCities', ['City', 'Invalid listings'],
-        cities.map((row) => [row.city, fmt(row.count)]), 'No impacted cities.');
+      // One dropdown-driven table instead of separate Brand/State/City
+      // sections (explicit user ask, 2026-09-10) - stash this load's data
+      // for all four dimensions, then render whichever one the dropdown
+      // is currently set to (defaults to Brand, matching the old default
+      // section). Was a hard .slice(0, 10)/no pagination on the old
+      // per-dimension tables - rows past 10 were simply hidden with no
+      // pager and no indication they existed; renderPagedDqTable (already
+      // used elsewhere on this tab) fixes that for all four dimensions now.
+      dqDimensionData.brands = brandsForDimension;
+      dqDimensionData.cities = cities;
+      dqDimensionData.states = states.map((row) => ({ ...row, state: stateLabel(row.state) }));
+      dqDimensionData.countries = countries;
+      renderDimensionTable();
 
       const improvements = [];
       if (needsReview) improvements.push(['Reduce manual review', `${fmt(needsReview)} invalid listings remain unresolved and require attention.`]);

@@ -1086,16 +1086,22 @@ async function openEditRecordModal(record) {
       // rejected - but it never appeared, because it is a TARGET field with no
       // matching key in raw_record, so neither this list nor the raw-key
       // fallback loop could produce a box for it.
+      // Only `brand` is actually mandatory now (see workflow_server.py's
+      // REQUIRED_LOCATION_VALUES = () and normalize_location()). Kept
+      // deliberately generic (2026-09-10, explicit user ask): no per-field
+      // prose explaining what the box is for or where its value came from -
+      // a placeholder showing the expected shape when it's not plain string,
+      // and the error itself when the field is flagged, is enough.
       const LOCATION_FIELD_SPECS = {
-        brand: { label: "Brand Name", note: "Select the brand to associate with this record.", required: true },
-        name: { label: "Location Name", note: "Required.", required: true },
-        address: { label: "Address", note: "Required.", required: true },
-        city: { label: "City", note: "Required.", required: true },
-        state: { label: "State", note: "Required (2-letter code or state name).", required: true },
-        postal_code: { label: "ZIP Code", note: "Required (5-digit US ZIP code).", required: true },
-        country: { label: "Country", note: "Optional. Validation can infer it when enough location data is available.", required: false },
-        latitude: { label: "Latitude", note: `Decimal latitude coordinate (e.g. ${(Math.random() * 180 - 90).toFixed(4)}).`, required: false },
-        longitude: { label: "Longitude", note: `Decimal longitude coordinate (e.g. ${(Math.random() * 360 - 180).toFixed(4)}).`, required: false },
+        brand: { label: "Brand Name", required: true },
+        name: { label: "Location Name", placeholder: "e.g. Domino's Pizza #4821" },
+        address: { label: "Address", placeholder: "e.g. 123 Main St" },
+        city: { label: "City", placeholder: "e.g. Austin" },
+        state: { label: "State", placeholder: "e.g. TX or Texas" },
+        postal_code: { label: "ZIP Code", placeholder: "e.g. 78701" },
+        country: { label: "Country", placeholder: "e.g. United States" },
+        latitude: { label: "Latitude", placeholder: "e.g. 30.2672" },
+        longitude: { label: "Longitude", placeholder: "e.g. -97.7431" },
       };
       // Core fields are always offered even when the template omits them: they
       // are what US validation needs to pass (a ZIP or a coordinate pair is
@@ -1104,20 +1110,78 @@ async function openEditRecordModal(record) {
       // unrepairable. Everything BEYOND them comes from the template.
       const CORE_FIELD_ORDER = ["brand", "name", "address", "city", "state", "postal_code", "latitude", "longitude", "country"];
       const templateTargetKeys = Object.keys(mapperFields).filter((key) => key && typeof mapperFields[key] === "string");
-      const fieldKeys = [...new Set([...CORE_FIELD_ORDER, ...templateTargetKeys, ...templateUnmappedFields])];
-      // A flagged field first, wherever it sits in the template - the user
-      // should not have to scroll a 20-box form to find the one that failed.
-      fieldKeys.sort((a, b) => (errorsByField.has(b) ? 1 : 0) - (errorsByField.has(a) ? 1 : 0));
+      // Real gap (2026-09-10, live user report): the top hint banner names
+      // every flagged field (from errorsByField, built straight off
+      // record.errors), but the form body only offered a box for fields
+      // this template happens to map/declare - a validator-only field like
+      // observed_at, named at the top as needing attention, had nowhere to
+      // actually fix it. Every flagged field now gets a box guaranteed,
+      // whether or not the template itself mapped it.
+      // "coordinates" excluded here (2026-09-10 fix) - it is a combined
+      // lat+longitude check with no source column of its own; its error
+      // now attaches to the Latitude/Longitude boxes instead (see
+      // fieldErrorHtml/combinedErrorKeysFor below) rather than rendering
+      // its own empty, non-functional duplicate box.
+      const fieldKeys = [...new Set([...CORE_FIELD_ORDER, ...templateTargetKeys, ...templateUnmappedFields, ...errorsByField.keys()])]
+        .filter((key) => key !== "coordinates");
+      // Deliberately NOT reordered to put flagged fields first (explicit
+      // user ask, 2026-09-10: "if column has error let it be ... rearranging
+      // column out of template is not needed") - a field stays exactly
+      // where the template's own field order puts it. The banner above
+      // this form already names which field(s) need attention, so a
+      // reorder-to-the-top isn't needed to find them.
 
       const renderedPaths = new Set();
       // Per-field error markup: red label, red border, and the backend's own
       // hint plus the rejected value printed under the box it belongs to.
+      // "coordinates" is a combined lat+longitude boundary check from the
+      // backend (validate_normalized_location()) - it has no source column
+      // or raw key of its own, so it never gets its own input box (see
+      // fieldKeys below). Its error attaches to BOTH the Latitude and
+      // Longitude boxes instead, which already show and allow editing the
+      // real values - fixed 2026-09-10 after a genuinely valid non-US
+      // coordinate (or, before that same day's normalize_location() fix,
+      // a since-cleared geometrically impossible one) rendered as an
+      // empty, non-functional duplicate "Coordinates" box with no visible
+      // value at all.
+      const combinedErrorKeysFor = (key) => (key === "latitude" || key === "longitude") ? [key, "coordinates"] : [key];
       const fieldErrorHtml = (key) => {
-        const entries = errorsByField.get(key);
-        if (!entries || !entries.length) return "";
+        const entries = combinedErrorKeysFor(key).flatMap((k) => errorsByField.get(k) || []);
+        if (!entries.length) return "";
         return entries.map((entry) => `
           <span style="font-size: 11px; color: #cf1322; margin-top: 3px;">⚠️ ${escapeHtml(entry.hint || entry.reason || "Invalid value")}${entry.value ? ` <em>(received: ${escapeHtml(String(entry.value))})</em>` : ""}</span>
         `).join("");
+      };
+
+      // Template-specific fields (anything beyond the 9 core ones in
+      // LOCATION_FIELD_SPECS) had no format guidance at all - the note just
+      // said which source column fed them ("Mapped from source column
+      // 'Rating'."), which is where a value came FROM, not what it should
+      // LOOK LIKE, so it didn't help fix a value that failed exactly because
+      // it came from the wrong column. Matches whitespace_tool/data_
+      // validation/semantic_types.py's NAME_PATTERNS on the frontend side
+      // for the common, non-core, non-plain-string kinds that show up in
+      // review often enough to be worth a real placeholder here (kept
+      // deliberately small, not a full parallel semantic-kind system) - a
+      // short example value, same style as the core-field placeholders
+      // above, not a sentence explaining the rule.
+      const NON_CORE_FIELD_HINTS = [
+        [/hours?|hrs\b/, "e.g. Mon-Sun: 10:00-23:00, or 24/7"],
+        [/rating|score|stars/, "e.g. 4.2"],
+        [/phone|mobile|telephone|fax/, "e.g. 512-555-0100"],
+        [/e.?mail/, "e.g. name@example.com"],
+        [/website|url|link/, "e.g. https://example.com"],
+        [/zip|postal|postcode/, "e.g. 78701"],
+        [/revenue|income|cost|price|salary|amount|rent|lease|budget|sales/, "e.g. 12500.00"],
+        [/capacity|count|footfall|traffic|seats|employees|population|units|households|quantity|qty/, "e.g. 42"],
+        [/percent|pct|_rate$|^rate_|share/, "e.g. 12.5"],
+        [/date|opened|opening/, "e.g. 2024-03-15"],
+        [/_at$|timestamp|datetime|observed/, "e.g. 2026-09-10T14:30:00Z"],
+      ];
+      const nonCoreFieldHint = (key) => {
+        const normalized = key.toLowerCase();
+        const match = NON_CORE_FIELD_HINTS.find(([pattern]) => pattern.test(normalized));
+        return match ? match[1] : "";
       };
 
       const requiredFieldHtml = fieldKeys
@@ -1130,9 +1194,13 @@ async function openEditRecordModal(record) {
           // edit to operating_hours has to be written back into `Rating` or
           // the mapper will never see it.
           const path = source || key;
-          const note = spec.note || (source ? `Mapped from source column "${source}".` : "Declared by this template with no source column - fill it in to supply a value.");
+          // Generic, not prose (2026-09-10, explicit user ask): a
+          // placeholder showing the expected shape when the field isn't
+          // plain string, nothing when it is - no sentence about where the
+          // value came from or why a field can't be edited.
+          const placeholder = spec.placeholder || nonCoreFieldHint(key);
           const required = Boolean(spec.required);
-          const flagged = errorsByField.has(key);
+          const flagged = combinedErrorKeysFor(key).some((k) => errorsByField.has(k));
           renderedPaths.add(path);
           if (key === "brand") {
             // A record's brand is fixed by its event_id -> business_id
@@ -1147,11 +1215,10 @@ async function openEditRecordModal(record) {
               const lockedLabel = formatBrandName(matchedBrand ? matchedBrand.name : rawBrandVal);
               return `
         <div style="display: flex; flex-direction: column;">
-          <label style="font-size: 12px; font-weight: 700; color: var(--ink); margin-bottom: 4px;">${escapeHtml(label)} <span style="font-weight: 400; color: var(--muted);">(${escapeHtml(path)})</span></label>
+          <label style="font-size: 12px; font-weight: 700; color: var(--ink); margin-bottom: 4px;">${escapeHtml(label)}</label>
           <select id="editRecordBrandSelect" data-raw-key="${escapeHtml(path)}" data-field-type="brand" disabled style="padding: 6px; border: 1px solid var(--line); border-radius: 4px; font-size: 13px; background: #f4f6f8; color: var(--muted);">
             <option value="${escapeHtml(matchedBrand ? matchedBrand.name : rawBrandVal)}" selected>${escapeHtml(lockedLabel || 'Unknown brand')}</option>
           </select>
-          <span style="font-size: 11px; color: var(--muted, #6b7280); margin-top: 2px;">Brand is fixed by this record's business and can't be changed here.</span>
         </div>
       `;
             }
@@ -1163,11 +1230,10 @@ async function openEditRecordModal(record) {
               .join('');
             return `
         <div style="display: flex; flex-direction: column;">
-          <label style="font-size: 12px; font-weight: 700; color: var(--ink); margin-bottom: 4px;">${escapeHtml(label)} <span style="font-weight: 400; color: ${required ? '#cf1322' : 'var(--muted)'};">(${escapeHtml(path)})${required ? ' *' : ''}</span></label>
+          <label style="font-size: 12px; font-weight: 700; color: var(--ink); margin-bottom: 4px;">${escapeHtml(label)}${required ? ' *' : ''}</label>
           <select id="editRecordBrandSelect" data-raw-key="${escapeHtml(path)}" data-field-type="brand" style="padding: 6px; border: 1px solid var(--line); border-radius: 4px; font-size: 13px; background: #fff;">
             ${optionsHtml}
           </select>
-          <span style="font-size: 11px; color: var(--muted, #6b7280); margin-top: 2px;">${escapeHtml(note)}</span>
         </div>
       `;
           }
@@ -1181,13 +1247,23 @@ async function openEditRecordModal(record) {
           const fieldType = LOCATION_FIELD_SPECS[key] ? key : "";
           return `
         <div style="display: flex; flex-direction: column;">
-          <label style="font-size: 12px; font-weight: 700; color: ${flagged ? '#cf1322' : 'var(--ink)'}; margin-bottom: 4px;">${flagged ? '⚠️ ' : ''}${escapeHtml(label)} <span style="font-weight: 400; color: ${required ? '#cf1322' : 'var(--muted)'};">(${escapeHtml(path)})${required ? ' *' : ''}</span></label>
-          <input type="text" data-raw-key="${escapeHtml(path)}" data-field-type="${escapeHtml(fieldType)}" value="${escapeHtml(rawVal !== null && rawVal !== undefined ? String(rawVal) : '')}" style="padding: 6px; border: 1px solid ${flagged ? '#ffa39e' : 'var(--line)'}; border-radius: 4px; font-size: 13px; ${flagged ? 'background: #fff1f0;' : ''}">
+          <label style="font-size: 12px; font-weight: 700; color: ${flagged ? '#cf1322' : 'var(--ink)'}; margin-bottom: 4px;">${flagged ? '⚠️ ' : ''}${escapeHtml(label)}${required ? ' *' : ''}</label>
+          <input type="text" data-raw-key="${escapeHtml(path)}" data-field-type="${escapeHtml(fieldType)}" value="${escapeHtml(rawVal !== null && rawVal !== undefined ? String(rawVal) : '')}"${placeholder ? ` placeholder="${escapeHtml(placeholder)}"` : ""} style="padding: 6px; border: 1px solid ${flagged ? '#ffa39e' : 'var(--line)'}; border-radius: 4px; font-size: 13px; ${flagged ? 'background: #fff1f0;' : ''}">
           ${fieldErrorHtml(key)}
-          <span style="font-size: 11px; color: var(--muted, #6b7280); margin-top: 2px;">${escapeHtml(note)}</span>
         </div>
       `;
         }).join('');
+
+      // Real bug (2026-09-10, live user report): requiredFieldHtml was fully
+      // built above but never actually written into the DOM - the dialog
+      // opened with the hint banner updated but an empty form underneath it,
+      // every time, since this assignment did not exist. formEl is declared
+      // here (not earlier) because everything above only needed the fields
+      // it read from - el("editRecordForm") itself - not a name for it; the
+      // zip-suggestion code below expects formEl to already hold this
+      // content so it can append its own suggestion box into the same node.
+      const formEl = el("editRecordForm");
+      formEl.innerHTML = requiredFieldHtml;
 
       const feedbackEl = el("editRecordFeedback");
       if (feedbackEl) {
@@ -1704,7 +1780,15 @@ async function _refreshNeedsReviewSummaryOnce() {
 }
 
 function switchReviewInnerTab(tab) {
-  const target = tab === "needsReview" ? "needsReview" : "errors";
+  // Needs Review tab dropped (explicit user ask, 2026-09-10): its own
+  // "Needs Review (0)" counter never matched the records it actually
+  // returned/rendered. Forcing target to "errors" unconditionally - rather
+  // than deleting the needsReview-specific functions below, which stay in
+  // place unreferenced - means this can never be reached again even via a
+  // stale sessionStorage["reviewInnerTab"]="needsReview" from before this
+  // change, not just via the now-hidden tab button.
+  void tab;
+  const target = "errors";
   document.querySelectorAll("#reviewInnerTabs [data-review-tab]").forEach((button) => {
     button.classList.toggle("active", button.dataset.reviewTab === target);
   });
