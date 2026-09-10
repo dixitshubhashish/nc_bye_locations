@@ -347,11 +347,28 @@ class BigQueryBootstrapTests(unittest.TestCase):
         def fake_reset(client, project_id, dataset_id):
             reset_called.append((project_id, dataset_id))
 
+        # clear_sample_dataset() fires a real daemon thread (clear_worker())
+        # that goes on to call invalidate_cache()/_invoke_silver_layer()/
+        # _rebuild_gold_and_mirror()/refresh_error_count() for real, entirely
+        # outside this test's own `with patch.object(...)` scope (nothing
+        # joins it - it's fire-and-forget by design in production). Left
+        # unmocked, that thread races the SQLite mirror against whatever
+        # OTHER test happens to be running concurrently once this test
+        # returns and its mocks are torn down - a real, reproduced
+        # multi-second hang (2026-09-10, full-suite stress run + a
+        # PYTHONFAULTHANDLER thread dump caught it stuck inside
+        # sqlite_cache.get_db_connection() at the same time as an unrelated
+        # test in this same file). Mocking threading.Thread itself is the
+        # correct fix here (not mocking each individual downstream call,
+        # which would just move the leak) - this test only asserts on
+        # clear_sample_dataset()'s own return value, not on anything
+        # clear_worker() does.
         with patch.object(workflow_server, "_warehouse_settings", return_value=("project", "bronze", None)):
             with patch.object(workflow_server, "_bigquery_client", return_value=object()):
                 with patch.object(workflow_server, "_reset_sample_data", side_effect=fake_reset):
                     with patch.object(workflow_server, "_background_medallion_refresh_status", return_value={"status": "refreshing"}):
-                        result = workflow_server.clear_sample_dataset()
+                        with patch.object(workflow_server.threading, "Thread"):
+                            result = workflow_server.clear_sample_dataset()
 
         self.assertTrue(result["cleared"])
         self.assertEqual(reset_called, [("project", "bronze")])

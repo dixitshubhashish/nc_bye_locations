@@ -147,7 +147,7 @@ function syncParserBusinessSelect() {
   // the brand is actually chosen, so it needs the search at least as much as
   // the mapping-view select does.
   if (typeof attachSearchableSelect === "function") {
-    attachSearchableSelect("parserBusinessSelect", { threshold: 15, minChars: 1 });
+    attachSearchableSelect("parserBusinessSelect", { threshold: 15, minChars: 1, hasMore: true });
   }
 }
 function setBusinessSelectValue(value, dispatch = true) {
@@ -379,19 +379,86 @@ function businessMergeChoiceLabel(brand = {}, newestCreatedAt = 0, oldestCreated
     }
 // How many duplicate groups are visible before the list starts scrolling.
 const DUPLICATE_BRAND_VISIBLE_GROUPS = 5;
+
+// "Review Later" state: not every duplicate group has to be resolved the
+// moment it's detected, so a group can be set aside instead of forced
+// through the Combine flow. Persisted (not just held in memory) so
+// dismissing a group actually sticks across reloads, the same way
+// rememberedBrands() persists the brand list itself - a per-viewer
+// preference, not warehouse data, so localStorage is the right layer for
+// it rather than a backend column.
+const DUPLICATE_BRAND_SNOOZE_KEY = "whitespace.duplicateBrands.snoozed.v1";
+function _duplicateGroupSignature(group) {
+      return group.map((brand) => brand.business_id).filter(Boolean).sort().join("|");
+    }
+function _snoozedDuplicateGroupSignatures() {
+      try {
+        const raw = window.localStorage.getItem(DUPLICATE_BRAND_SNOOZE_KEY);
+        const parsed = raw ? JSON.parse(raw) : [];
+        return new Set(Array.isArray(parsed) ? parsed : []);
+      } catch (_) {
+        return new Set();
+      }
+    }
+function _setDuplicateGroupSnoozed(signature, snoozed) {
+      const current = _snoozedDuplicateGroupSignatures();
+      if (snoozed) current.add(signature); else current.delete(signature);
+      try {
+        window.localStorage.setItem(DUPLICATE_BRAND_SNOOZE_KEY, JSON.stringify([...current]));
+      } catch (_) {
+        // A full/disabled localStorage must never block the merge flow itself.
+      }
+    }
+
 // DAT-04: render the duplicate groups into the left rail, one at a time.
 // Detail (business id, listing count, newest/oldest created_at) is hover
 // text on each option rather than inline, per the explicit ask.
-function renderDuplicateBrandRail(groups = []) {
+// The panel itself (hidden/shown) tracks whether there is anything to act
+// on at all; #duplicateBrandBody (collapsed by default) tracks whether the
+// user has actually asked to see it - two different questions. A brand
+// audit is not urgent enough to force open on every mapper visit, but it
+// should stay visible AS an action item (the toggle + count) rather than
+// disappear, so it doesn't get forgotten.
+function _updateDuplicateBrandToggle(count) {
+      const toggle = el("duplicateBrandToggleBtn");
+      const body = el("duplicateBrandBody");
+      if (!toggle || !body) return;
+      const isOpen = !body.classList.contains("hidden");
+      toggle.textContent = isOpen ? "Hide" : (count ? `Show (${count})` : "Show");
+      toggle.onclick = () => {
+        body.classList.toggle("hidden");
+        _updateDuplicateBrandToggle(count);
+      };
+    }
+function renderDuplicateBrandRail(allGroups = []) {
       const panel = el("duplicateBrandPanel");
       const list = el("duplicateBrandList");
       if (!panel || !list) return;
-      if (!groups.length) {
+      if (!allGroups.length) {
         panel.classList.add("hidden");
         list.innerHTML = "";
         return;
       }
+      const snoozed = _snoozedDuplicateGroupSignatures();
+      const groups = allGroups.filter((group) => !snoozed.has(_duplicateGroupSignature(group)));
+      const snoozedCount = allGroups.length - groups.length;
+      if (!groups.length) {
+        // Every group in this batch was set aside - the panel still shows
+        // the "N set aside" line and a way back in, rather than vanishing
+        // and making it look like nothing needs attention at all.
+        panel.classList.remove("hidden");
+        _updateDuplicateBrandToggle(0);
+        list.innerHTML = snoozedCount
+          ? `<div style="font-size: 12px; color: var(--muted);">${snoozedCount} duplicate group${snoozedCount === 1 ? "" : "s"} set aside for later. <button type="button" class="text-link" id="duplicateBrandShowSnoozedBtn">Review them now</button></div>`
+          : "";
+        el("duplicateBrandShowSnoozedBtn")?.addEventListener("click", () => {
+          window.localStorage.removeItem(DUPLICATE_BRAND_SNOOZE_KEY);
+          renderDuplicateBrandRail(allGroups);
+        });
+        return;
+      }
       panel.classList.remove("hidden");
+      _updateDuplicateBrandToggle(groups.length);
       // One row per candidate brand, radio-selected, every group submitted
       // together. Handling groups one at a time meant ten duplicates cost ten
       // round trips; the decision for each is independent, so they may as
@@ -430,10 +497,16 @@ function renderDuplicateBrandRail(groups = []) {
               </span>
             </label>`;
         }).join("");
-        // Name shown once per group, not repeated on every row.
+        // Name shown once per group, not repeated on every row. "Review
+        // Later" is a third option alongside picking which record to keep -
+        // not every duplicate has to be resolved right now, and setting one
+        // aside removes it from THIS group's Combine submission without
+        // touching any other group's choice.
         return `
-          <div class="dup-brand-group" data-dup-group="${groupIndex}">
-            <div class="dup-brand-name">${escapeHtml(formatBrandName(group[0].name || "Similar brand"))} <span class="dup-brand-count">${group.length} copies</span></div>
+          <div class="dup-brand-group" data-dup-group="${groupIndex}" data-dup-signature="${escapeHtml(_duplicateGroupSignature(group))}">
+            <div class="dup-brand-name">${escapeHtml(formatBrandName(group[0].name || "Similar brand"))} <span class="dup-brand-count">${group.length} copies</span>
+              <button type="button" class="text-link dup-brand-review-later" data-dup-group="${groupIndex}" style="float: right; font-size: 11px;">Review later</button>
+            </div>
             ${rows}
           </div>`;
       }).join("") + `</div>`;
@@ -455,13 +528,38 @@ function renderDuplicateBrandRail(groups = []) {
         // the brand list reloads.
         if (visibleHeight > 0) {
           scroller.style.maxHeight = `${visibleHeight}px`;
-          scroller.style.overflowY = "auto";
+          // "scroll", not "auto" - the user asked for the scrollbar to
+          // stay visible always when there's more to scroll to, not only
+          // while actively scrolling/hovering (the default OS overlay
+          // scrollbar behavior "auto" gets on most systems). Paired with
+          // the always-visible-thumb CSS on #duplicateBrandScroll below.
+          scroller.style.overflowY = "scroll";
           scroller.style.overscrollBehavior = "contain";
         }
       }
+      const snoozedNote = snoozedCount
+        ? `<div style="font-size: 11px; color: var(--muted); margin-top: 4px;">${snoozedCount} group${snoozedCount === 1 ? "" : "s"} set aside for later. <button type="button" class="text-link" id="duplicateBrandShowSnoozedBtn">Review them now</button></div>`
+        : "";
       list.insertAdjacentHTML("beforeend", `
         <button type="button" class="secondary" id="duplicateBrandMergeBtn">Combine selected</button>
-        <div style="font-size: 11px; color: var(--muted); margin-top: 6px;">Pick the one to keep in each group. Everything from the others moves into it. Nothing is lost. We recommend the one with the most listings, or the older record when counts match.</div>`);
+        <div style="font-size: 11px; color: var(--muted); margin-top: 6px;">Pick the one to keep in each group, or set it aside with Review Later. Everything from the others moves into it. Nothing is lost. We recommend the one with the most listings, or the older record when counts match.</div>${snoozedNote}`);
+      el("duplicateBrandShowSnoozedBtn")?.addEventListener("click", () => {
+        window.localStorage.removeItem(DUPLICATE_BRAND_SNOOZE_KEY);
+        renderDuplicateBrandRail(allGroups);
+      });
+      list.querySelectorAll(".dup-brand-review-later").forEach((button) => {
+        button.addEventListener("click", () => {
+          const groupIndex = Number(button.dataset.dupGroup);
+          const group = groups[groupIndex];
+          if (!group) return;
+          _setDuplicateGroupSnoozed(_duplicateGroupSignature(group), true);
+          // Re-render from the ORIGINAL full list, not the already-filtered
+          // one - allGroups still has every group this function was called
+          // with, so the just-snoozed one is correctly excluded and nothing
+          // else is lost.
+          renderDuplicateBrandRail(allGroups);
+        });
+      });
       el("duplicateBrandMergeBtn")?.addEventListener("click", async () => {
         const button = el("duplicateBrandMergeBtn");
         const status = el("duplicateBrandStatus");
@@ -874,6 +972,32 @@ function remoteFileNameForSource(sourceResult, sourceUrl, fallbackName = "remote
         // Keep the server-provided name when the URL is not parseable in this browser.
       }
       return rawName;
+    }
+function sourceNameSlug(value) {
+      return String(value || "")
+        .trim()
+        .replace(/\.[a-z0-9]+$/i, "")
+        .replace(/[^a-z0-9]+/gi, "_")
+        .replace(/^_+|_+$/g, "")
+        .toLowerCase();
+    }
+function fallbackSourceName() {
+      const typed = el("sourceName")?.value.trim();
+      if (typed) return typed;
+      const previewName = sourceNameSlug(lastSourcePreviewPayload?.file_name || "");
+      if (previewName) return previewName;
+      if (el("sourceInputMode")?.value === "url") {
+        try {
+          const urlPath = new URL(el("sourceUrl")?.value.trim() || "").pathname;
+          const urlName = sourceNameSlug(urlPath.split("/").filter(Boolean).pop() || "");
+          if (urlName) return urlName;
+        } catch (_error) {
+          // Fall back to the format-derived name below when the URL is blank or partial.
+        }
+      }
+      const fileName = sourceNameSlug(el("fileInput")?.files?.[0]?.name || "");
+      if (fileName) return fileName;
+      return sourceNamePlaceholders[el("sourceType")?.value] || "restaurant_locations";
     }
 function setSourceUrlLocked(locked) {
       el("sourceUrl").toggleAttribute("readonly", Boolean(locked));
@@ -2034,13 +2158,17 @@ function syncPreParseWorkspace(hasMappingContent) {
       const parserHost = el("preParseParserHost");
       const parserBusinessField = el("parserBusinessField");
       if (!sourcePanel || !brandPanel || !brandHost || !parserHost) return;
-      // brandSelectSearch is created by attachSearchableSelect() as a SIBLING
-      // of #brandSelect, so it is a child of this panel too. Leaving it out of
-      // this set sent it to the parser host while its select went to the brand
-      // host - the search box ended up in a different panel from the list it
-      // filters, which is why brand search "stopped working" in the 40/60
-      // layout. It has to travel with the select.
-      const brandIds = new Set(["brandSelectLabel", "brandSelect", "brandSelectSearch", "editExistingBrandLink", "presetBrandPanel", "newBrandFields"]);
+      // attachSearchableSelect() (common.js) wraps #brandSelect and its
+      // search box together in #brandSelectSearchWrap, which is what's
+      // actually a direct child of this panel now - #brandSelect itself is
+      // nested a level down, inside that wrap. Both ids are listed (the
+      // wrap for the normal case, the bare select as a fallback for the
+      // rare case this runs before attachSearchableSelect ever has) so
+      // whichever one is actually the top-level node travels with the rest
+      // of the brand controls - leaving either out sent the search box to
+      // the parser host while the rest of the brand picker went to the
+      // brand host, splitting a filter from the list it filters.
+      const brandIds = new Set(["brandSelectLabel", "brandSelectSearchWrap", "brandSelect", "brandSelectSearch", "editExistingBrandLink", "presetBrandPanel", "newBrandFields"]);
       if (!hasMappingContent && !preParseRelocatedNodes) {
         preParseRelocatedNodes = Array.from(sourcePanel.children).map((node, index) => ({ node, index }));
         preParseRelocatedNodes.forEach(({ node }) => {
@@ -2050,10 +2178,17 @@ function syncPreParseWorkspace(hasMappingContent) {
         });
         brandPanel.classList.remove("hidden");
         parserHost.classList.remove("hidden");
-        parserBusinessField?.classList.remove("hidden");
+        // parserBusinessField (BB13) duplicated "Brand" as a second control
+        // mirroring brandSelect, in the Source Parser column - reported as
+        // confusing (two boxes, one working search, one plain dropdown,
+        // side by side under what reads as one "Brand" label). Keep it
+        // hidden and let the Brand Model panel's own control (which already
+        // has the working search) be the only Brand picker on screen.
+        // syncParserBusinessSelect() still runs so parserBusinessSelect's
+        // VALUE stays correct for anything that reads it directly, even
+        // though it is never shown.
         syncParserBusinessSelect();
         brandHost.classList.add("wide-brand-selector");
-        parserBusinessField?.classList.add("wide-brand-selector");
         const parserTitle = parserHost.querySelector("h2");
         if (parserTitle) parserTitle.textContent = "Source Parser";
         updatePreParseBrandMode();
@@ -2068,8 +2203,8 @@ function syncPreParseWorkspace(hasMappingContent) {
         // moved back - attachSearchableSelect() puts each one beside its own
         // select again.
         if (typeof attachSearchableSelect === "function") {
-          attachSearchableSelect("brandSelect", { threshold: 15, minChars: 1 });
-          attachSearchableSelect("parserBusinessSelect", { threshold: 15, minChars: 1 });
+          attachSearchableSelect("brandSelect", { threshold: 15, minChars: 1, hasMore: true });
+          attachSearchableSelect("parserBusinessSelect", { threshold: 15, minChars: 1, hasMore: true });
         }
         brandPanel.classList.add("hidden");
         parserHost.classList.add("hidden");
@@ -2419,7 +2554,7 @@ function getMapper() {
         brand: resolvedBrand,
         business_id: selectedBrand?.business_id || (selectedOption && selectedOption.value !== "__create_new__" ? selectedOption.value : "") || "",
         source_type_id: currentSourceTypeId(),
-        source_name: el("sourceName").value.trim(),
+        source_name: fallbackSourceName(),
         source_type: el("sourceType").value,
         record_extraction_mode: recordExtractionMode,
         fields,
@@ -2482,7 +2617,7 @@ function renderBrandOptions(brands) {
         // FLT-05: only a plain list below the threshold, so a short list
         // doesn't gain unnecessary search chrome - explicit 1-character
         // threshold for this dropdown (FLT-02/FLT-03 use 2).
-        if (typeof attachSearchableSelect === "function") attachSearchableSelect("brandSelect", { threshold: 15, minChars: 1 });
+        if (typeof attachSearchableSelect === "function") attachSearchableSelect("brandSelect", { threshold: 15, minChars: 1, hasMore: true });
         syncParserBusinessSelect();
         el("editExistingBrandLink")?.classList.toggle("hidden", !selectedBrand);
         syncCustomFieldBusinessPickers();

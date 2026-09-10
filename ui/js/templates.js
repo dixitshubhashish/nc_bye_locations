@@ -3,6 +3,12 @@
 let templateBrandNames = {};
 let loadTemplateLibraryPromise = null;
 let templateLibraryLoaded = false;
+// BUG-97: true only for a template whose backend components carry
+// structure_unavailable (backfill_sample_template_source_structure() in
+// workflow_server.py) - a bulk-loaded/backfilled template with zero listings
+// to derive source_fields from, not merely "not parsed yet". Reset on every
+// loadTemplateIntoEditor() call so it never leaks between templates.
+let templateStructureUnavailable = false;
 const templatePageCache = new Map();
 const TEMPLATE_CACHE_TTL_MS = 60 * 1000;
 // login-hotfix.js and integrations.html's own bootstrap script can each
@@ -197,12 +203,25 @@ function setTemplateEditBrandLock(locked, businessId = "", brandLabel = "") {
           }
           node.value = businessId;
         }
+        // attachSearchableSelect() (common.js) hides this <select> entirely
+        // and shows a search <input> instead - locking/unlocking the select
+        // alone is invisible to the user and does not stop them typing a
+        // different brand into the box that's actually on screen. The
+        // search input's own id is a fixed `${id}Search` convention; update
+        // and disable/enable it here in lockstep, since it's the only
+        // control the user can actually see or interact with.
+        const searchInput = el(`${id}Search`);
+        if (searchInput) {
+          searchInput.disabled = Boolean(locked);
+          if (locked && businessId) searchInput.value = brandLabel || businessId;
+        }
       });
       el("editExistingBrandLink")?.classList.toggle("hidden", Boolean(locked));
     }
 
 function loadTemplateIntoEditor(template) {
       const components = template.components?.mapper || template.components || {};
+      templateStructureUnavailable = Boolean((template.components || {}).structure_unavailable);
       const brands = JSON.parse(el("brandSelect").dataset.brands || "[]");
       selectedBrand = brands.find((brand) => brand.business_id === template.business_id) || { business_id: template.business_id, name: components.brand || "", source_type_id: template.source_type_id };
       activeTemplateId = template.workflow_template_id;
@@ -287,7 +306,13 @@ function renderTemplateEditSourcePreview() {
       const target = el("sourcePreview");
       if (!target) return;
       if (!sourceFields.length) {
-        target.innerHTML = `<div class="status">This template has no stored source columns. Parse a source file to remap it.</div>`;
+        // BUG-97: structure_unavailable means the bronze layer genuinely has
+        // nothing to derive columns from (zero listings on this template) -
+        // "parse a source file to remap it" is actively wrong advice there,
+        // since it was never parsed from a file in the first place.
+        target.innerHTML = templateStructureUnavailable
+          ? `<div class="status">No data was ever recorded for this template.</div>`
+          : `<div class="status">This template has no stored source columns. Parse a source file to remap it.</div>`;
         return;
       }
       const mapped = new Set(Object.values(mappingSelections).filter(Boolean));

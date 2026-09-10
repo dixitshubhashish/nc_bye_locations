@@ -92,7 +92,11 @@ def test_reporting_quality_uses_existing_single_internal_view_module():
     server_py = (ROOT / "whitespace_tool" / "workflow_server.py").read_text()
     schema_py = (ROOT / "whitespace_tool" / "warehouse_bigquery.py").read_text()
 
-    assert 'src="reporting-tabs.js?v=quality-layout-v4"' in HTML
+    # Cache-busting is now automatic (server-side content-hash on every
+    # request, see _cache_bust_local_assets() in workflow_server.py), so the
+    # literal manual ?v=... suffix is no longer meaningful - only that the
+    # script tag itself still points at reporting-tabs.js.
+    assert 'src="reporting-tabs.js?v=' in HTML
     assert "tabs.id = 'reportingInnerTabs'" in reporting_tabs_js
     assert 'data-report-tab="location"' in reporting_tabs_js
     assert 'data-report-tab="quality"' in reporting_tabs_js
@@ -929,7 +933,11 @@ def test_trends_and_top_states_live_on_tab_one():
     for marker in ('id="dqTrendChart"', 'id="dqTopStatesBar"'):
         assert marker in html, f"{marker} should now live in tab 1's markup"
         assert marker not in reporting_tabs_js, f"{marker} still in the Data Quality panel"
-    tab_one = html.split('<div id="reportContent" class="hidden">', 1)[1].split("<!-- Location Map Section -->", 1)[0]
+    # Bounded by the next top-level section after these two, not by the
+    # (now earlier-in-document) map section comment - the map moved ahead
+    # of Trends/Top States within tab 1, but both are still inside
+    # #reportContent, i.e. still tab 1, not the Data Quality panel.
+    tab_one = html.split('<div id="reportContent" class="hidden">', 1)[1].split('<!-- Top States Section', 1)[0]
     assert 'id="dqTrendChart"' in tab_one
     assert 'id="dqTopStatesBar"' in tab_one
     # Trends sits before Top States within tab 1.
@@ -1251,9 +1259,16 @@ def test_brand_select_gets_the_shared_searchable_select_component():
     # 1-character threshold for this dropdown per the user's direct ask
     # (FLT-02/FLT-03 use 2).
     common_js = (ROOT / "ui" / "js" / "common.js").read_text()
-    assert "function attachSearchableSelect(selectId, { threshold = 15, minChars = 2 } = {})" in common_js
+    # A later fix (BB9/BB10) added `hasMore`: the brand pickers start with
+    # just 2 placeholder options before the network round trip resolves, so
+    # they need to force the search box to exist immediately rather than
+    # wait for >threshold real options to exist. threshold/minChars are
+    # unchanged - still one shared function, still a prop.
+    assert "function attachSearchableSelect(selectId, { threshold = 15, minChars = 2, hasMore = false } = {})" in common_js
     mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
-    assert 'attachSearchableSelect("brandSelect", { threshold: 15, minChars: 1 })' in mapper_js
+    # BB9/BB10's hasMore:true was added to this call so the search box
+    # exists immediately, before the real brand list has loaded.
+    assert 'attachSearchableSelect("brandSelect", { threshold: 15, minChars: 1, hasMore: true })' in mapper_js
 
 
 def test_created_and_updated_timestamps_display_down_to_the_second():
@@ -1570,19 +1585,41 @@ def test_source_input_uses_radio_choices_with_url_default():
 
 
 def test_pre_parse_brand_selectors_split_search_and_selected_brand_only_when_wide():
+    # Superseded by the later "one box only" fix (explicit user report: two
+    # boxes side by side under one "Brand" label read as broken/confusing).
+    # The search input and the (now hidden) <select> no longer split across
+    # the two grid columns as separate children - attachSearchableSelect()
+    # bundles them into one .searchable-select-wrap that spans both columns
+    # as a single flex row and handles the dropdown-left/search-right
+    # arrangement internally. This test now asserts that spanning wrap
+    # instead of the old two-column split.
     css = HTML.split(".wide-brand-selector {", 1)[1].split("@media (max-width: 900px)", 1)[0]
     assert "grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);" in css
-    assert '.wide-brand-selector > input[type="search"]' in HTML
-    assert "grid-column: 1;" in HTML.split('.wide-brand-selector > input[type="search"]', 1)[1].split("}", 1)[0]
-    assert ".wide-brand-selector > select" in HTML
-    assert "grid-column: 2;" in HTML.split(".wide-brand-selector > select", 1)[1].split("}", 1)[0]
+    assert ".wide-brand-selector > .searchable-select-wrap" in HTML
+    assert "grid-column: 1 / -1;" in HTML.split(".wide-brand-selector > .searchable-select-wrap", 1)[1].split("}", 1)[0]
 
     mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
     sync = mapper_js.split("function syncPreParseWorkspace", 1)[1].split("\nfunction ", 1)[0]
     assert 'brandHost.classList.add("wide-brand-selector");' in sync
-    assert 'parserBusinessField?.classList.add("wide-brand-selector");' in sync
     assert 'brandHost.classList.remove("wide-brand-selector");' in sync
-    assert 'parserBusinessField?.classList.remove("wide-brand-selector");' in sync
+    # parserBusinessField is permanently hidden now (its own "one box only"
+    # fix - it duplicated the Brand picker as a confusing second control),
+    # so it no longer toggles this class at all; it only ever gets re-hidden.
+    assert 'parserBusinessField?.classList.add("hidden");' in sync
+
+
+def test_blank_source_name_gets_frontend_fallback_before_save():
+    mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
+    assert "function fallbackSourceName()" in mapper_js
+    fallback = mapper_js.split("function fallbackSourceName()", 1)[1].split("\nfunction ", 1)[0]
+    assert 'const typed = el("sourceName")?.value.trim();' in fallback
+    assert "if (typed) return typed;" in fallback
+    assert "lastSourcePreviewPayload?.file_name" in fallback
+    assert 'new URL(el("sourceUrl")?.value.trim() || "").pathname' in fallback
+    assert 'el("fileInput")?.files?.[0]?.name' in fallback
+    assert 'return sourceNamePlaceholders[el("sourceType")?.value] || "restaurant_locations";' in fallback
+    assert 'source_name: fallbackSourceName(),' in mapper_js
+    assert 'source_name: el("sourceName").value.trim(),' not in mapper_js
 
 
 def test_unsaved_parse_navigation_guard():
@@ -2712,13 +2749,19 @@ def test_readme_does_not_advertise_shipped_work_as_a_gap():
     # The audit found it still listed the job-history panel and duplicate
     # messaging as "scoped but not yet built" long after both shipped - a
     # presentation built from it would have been wrong.
+    #
+    # README.md was later (2026-09-10, explicit user instruction) rewritten
+    # from an engineering handoff doc into a short, end-user-facing overview
+    # - backend field names like was_ever_invalid/custom_fields and radius
+    # constants now belong in internal-docs/, not here, per the user's own
+    # "without exposing any backend/technical detail to the user" framing.
+    # This test now checks the plain-English behavior those rules produce
+    # is still stated, not the internal names/numbers that implement it.
     readme = (ROOT / "README.md").read_text()
     assert "a save-job history panel" not in readme
     assert "duplicate-detection messaging on save are scoped but not yet built" not in readme
-    # And it now documents the rules that actually govern the data.
-    assert "was_ever_invalid" in readme
-    assert "custom_fields" in readme
-    assert "100km" in readme and "50km" in readme
+    assert "A record fixed once won't need fixing again after a refresh" in readme
+    assert "internal-docs/" in readme
 
 
 def test_the_sample_dataset_loads_in_one_statement_not_two_halves():
@@ -3430,10 +3473,17 @@ def test_brand_search_survives_the_panel_relocation():
     """BB7 follow-up: the search box "doesn't pop up". syncPreParseWorkspace()
     moves nodes using a snapshot of the panel's children taken once - an input
     created after that snapshot is not in the list that moves back, so it was
-    stranded in the hidden panel. The component now re-homes itself."""
+    stranded in the hidden panel. The component now re-homes itself.
+
+    The re-homing mechanism later changed shape (single-box combobox rebuild):
+    the select and its search input are now both children of one
+    `${selectId}SearchWrap` element, and self-healing means putting the
+    <select> back inside that wrap rather than inserting the search input
+    next to a bare <select> - same guarantee (a stale relocation snapshot
+    can't strand the search box), different implementation."""
     common_js = (ROOT / "ui" / "js" / "common.js").read_text()
-    assert "if (search && search.parentNode !== select.parentNode) {" in common_js
-    assert "select.parentNode.insertBefore(search, select);" in common_js
+    assert "wrap.parentNode == null || select.parentNode !== wrap" in common_js
+    assert "wrap.appendChild(select);" in common_js
 
     mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
     restore = mapper_js.split("        preParseRelocatedNodes = null;", 1)[1][:700]
@@ -3586,56 +3636,53 @@ def test_the_searchable_select_suppresses_the_native_dropdown_popup():
     native popup at all - preventDefault() on mousedown - and hand the click
     to the panel, which does have a fixed max-height and its own scroll.
     """
+    """Superseded (2026-09-10 full combobox rebuild): rather than suppress
+    the native popup via onmousedown while keeping the <select> visible, the
+    <select> is now hidden entirely (`.searchable-select-wrap > select {
+    display: none }`) and the search input is the ONLY visible/interactive
+    control - so there is no longer a click surface that could open the
+    native OS popup in the first place. Same guarantee (no unbounded native
+    popup), stronger fix (nothing left to click that would open one)."""
     common_js = (ROOT / "ui" / "js" / "common.js").read_text()
     attach = common_js.split("function attachSearchableSelect(", 1)[1].split("\nfunction ", 1)[0]
 
-    assert "select.onmousedown = (event) => {" in attach, "the native popup is no longer suppressed"
-    mousedown = attach.split("select.onmousedown = (event) => {", 1)[1].split("\n      };", 1)[0]
-    # The suppression itself - without this the OS popup opens regardless.
-    assert "event.preventDefault();" in mousedown
-    # ...but NOT for a locked select: template review pins the brand to the
-    # template's own business_id, and a disabled control must not offer a
-    # list to pick from. Right-click is left alone too.
-    assert "if (event.button !== 0 || select.disabled) return;" in mousedown
-    bail_at = mousedown.index("select.disabled")
-    prevent_at = mousedown.index("event.preventDefault();")
-    assert bail_at < prevent_at, "a disabled select must bail out BEFORE preventDefault"
-    # The bounded panel opens in the native popup's place, showing everything
-    # (showAll=true) - clicking the control is how you browse the full list.
-    assert "search.focus();" in mousedown
-    assert "renderSuggestions(search.value.trim().toLowerCase().replace(/\\s+/g, \" \"), true);" in mousedown
-
-    # Keyboard use of the select is deliberately untouched - only mousedown
-    # is intercepted, so no onkeydown/onclick handler may be added here.
+    # A locked control (template review pins the brand) disables the search
+    # input itself now, since it is the only visible/interactive surface.
+    assert "if (search.disabled) return;" in attach
     assert "select.onclick" not in attach
     assert "select.onkeydown" not in attach
 
-    # The panel it opens instead is the one CSS can actually bound.
+    # The <select> is hidden; the search input stands in for it entirely.
+    rule = HTML.split(".searchable-select-wrap > select {", 1)[1].split("}", 1)[0]
+    assert "display: none;" in rule
+
+    # The bounded panel is the one CSS can actually cap in height/scroll.
     rule = HTML.split(".select-suggestions {", 1)[1].split("}", 1)[0]
     assert "max-height:" in rule
     assert "overflow-y: auto;" in rule
 
 
 def test_focusing_the_search_box_shows_nothing_until_something_is_typed():
-    """Explicit instruction: "on click on search icon should not show any
-    suggestion, unless something is inputted".
+    """Originally: "on click on search icon should not show any suggestion,
+    unless something is inputted" - true while the <select> was still a
+    separate, independently-clickable dropdown next to the search box.
 
-    Focus must NOT open the full list. Dumping 1,000 names under the cursor
-    the moment the box is clicked is the same wall of text the native popup
-    gave, just in a different container - the panel is for narrowing.
+    Superseded (2026-09-10 full combobox rebuild): the <select> is now
+    hidden and the search input is the ONLY visible control, so it has to
+    double as the dropdown - a bare click/focus with nothing typed must
+    behave like opening a native <select> (show everything), or there would
+    be no way to browse the list at all without already knowing what to
+    type. Live-verified via Playwright across every brand-picker location.
     """
     common_js = (ROOT / "ui" / "js" / "common.js").read_text()
     attach = common_js.split("function attachSearchableSelect(", 1)[1].split("\nfunction ", 1)[0]
 
     focus = attach.split("search.onfocus = () => {", 1)[1].split("\n      };", 1)[0]
-    assert "if (query) renderSuggestions(query);" in focus
-    assert "else hideSuggestions();" in focus
-    # showAll is reserved for the click that replaced the native popup; focus
-    # must never pass it, or the "nothing until typed" rule is gone.
-    assert ", true)" not in focus, "focus opens the full list again"
+    assert "renderSuggestions(search.value.trim().toLowerCase().replace(/\\s+/g, \" \"), true);" in focus
 
-    # And the renderer backs that up: an empty query without showAll closes
-    # the panel rather than listing everything.
+    # The renderer still closes on an empty query UNLESS told to show all -
+    # typing-to-narrow behavior for oninput() is unchanged, only focus/click
+    # now passes showAll=true.
     render = attach.split("const renderSuggestions = (query, showAll = false) => {", 1)[1].split("\n      };", 1)[0]
     assert "if (!query && !showAll) return hideSuggestions();" in render
 
@@ -3683,7 +3730,10 @@ def test_suggestion_empty_text_is_generic_not_brand_specific():
     # The placeholder is generic for the same reason - only the two brand
     # pickers name what they search.
     assert 'search.placeholder = (selectId === "brandSelect" || selectId === "parserBusinessSelect")' in common_js
-    assert '? "Search brand" : "Search";' in common_js
+    # Text later changed to "Select or search brand" per direct user ask,
+    # once the box became the sole visible control standing in for the
+    # hidden <select> too.
+    assert '? "Select or search brand" : "Search";' in common_js
 
 
 def test_brand_suggest_threshold_is_declared_not_just_referenced():
@@ -3720,9 +3770,13 @@ def test_saving_a_brand_leaves_it_selectable_and_searchable():
         assert 'el("brandSelect").value = selectedBrand.business_id;' in body, path
 
     # The cache is refreshed before the threshold bail-out, never after.
+    # (The bail-out later gained a `hasMore` override - BB9/BB10's own fix
+    # needed the search box to exist immediately for the brand pickers even
+    # before threshold real options had loaded - but the refresh-before-bail
+    # ordering this test exists to pin is unchanged.)
     attach = common_js.split("function attachSearchableSelect(", 1)[1].split("\nfunction ", 1)[0]
     refresh_at = attach.index("existing.dataset.allOptions = JSON.stringify(liveOptions)")
-    bail_at = attach.index("if (liveOptions.length <= threshold) return;")
+    bail_at = attach.index("if (!hasMore && liveOptions.length <= threshold) return;")
     assert refresh_at < bail_at, "a short list must still refresh the cache"
 
 
@@ -3847,7 +3901,10 @@ def test_the_pre_parse_layout_says_brand_on_both_sides_not_business():
         return re.sub(r"<[^>]*>", " ", without_attribute_values)
 
     assert 'id="parserBusinessSelect"' in html
-    left_pane = html.split('<div id="mapperView" class="pre-parse-active">', 1)[1].split("</aside>", 1)[0]
+    # mapperView's class list later gained "preparse-booting" (hides #status
+    # until the pre-parse workspace is ready) - match on the id/class prefix
+    # actually present rather than the exact full class string.
+    left_pane = html.split('<div id="mapperView" class="pre-parse-active', 1)[1].split("</aside>", 1)[0]
     text = visible_text(left_pane)
     assert "parserBusinessSelect" not in text
     assert "Brand" in text, "the pre-parse pane markup was not found"
@@ -3900,13 +3957,16 @@ def test_the_map_never_swaps_to_an_empty_layer_when_zooming_in():
     assert "let tier =" in sync
     assert "const tier =" not in sync
 
-    # The thresholds themselves are unchanged; only emptiness overrides them.
-    assert "currentZoom >= 9.5" in sync
-    assert 'currentZoom >= 6.0 ? "city" : "state"' in sync
+    # The thresholds themselves are named constants now (BUG-102 added the
+    # ZIP tier between city and listing); only emptiness overrides them.
+    assert "currentZoom >= LISTING_TIER_ZOOM_THRESHOLD" in sync
+    assert "currentZoom >= ZIP_TIER_ZOOM_THRESHOLD" in sync
+    assert 'currentZoom >= CITY_TIER_ZOOM_THRESHOLD ? "city" : "state"' in sync
     assert "Boolean(activeCityFilter || activeZipFilter) ||" in sync
 
-    # BOTH aggregate tiers are guarded, not just the one that was reported.
+    # ALL THREE aggregate tiers are guarded, not just the one that was reported.
     assert 'if (tier === "listing" && !layerHasContentInView(storeMarkersLayerGroup)) {' in sync
+    assert 'if (tier === "zip" && !layerHasContentInView(zipCirclesLayerGroup)) {' in sync
     assert 'if (tier === "city" && !layerHasContentInView(cityCirclesLayerGroup)) {' in sync
     assert 'tier = "state";' in sync
 
@@ -3921,6 +3981,7 @@ def test_the_map_never_swaps_to_an_empty_layer_when_zooming_in():
     # Only the aggregates are tier-gated.
     assert 'toggleMapLayer(stateCirclesLayerGroup, tier === "state");' in sync
     assert 'toggleMapLayer(cityCirclesLayerGroup, tier === "city");' in sync
+    assert 'toggleMapLayer(zipCirclesLayerGroup, tier === "zip");' in sync
     # No hand-rolled add/removeLayer pairs in here - that inconsistency is
     # exactly what cross-named the groups; everything goes through the helper.
     assert "addLayer(" not in sync
@@ -3932,6 +3993,66 @@ def test_the_map_never_swaps_to_an_empty_layer_when_zooming_in():
     # to re-decide it too.
     assert 'reportingMap.on("moveend", syncMapLayersByZoom);' in reporting_js
     assert "syncMapLayersByZoom();" in reporting_js
+
+
+def test_zip_tier_extends_the_city_tooltip_pattern_down_one_level():
+    """BUG-102: zooming past the city tier used to jump straight to raw,
+    unlabeled per-listing pins with no aggregate in between. A ZIP tier now
+    sits between city and listing, built the same way the city tier is
+    (aggregate circle + hover tooltip naming the ZIP, city/state and the
+    exact listing count), so drill-down stays consistent city -> ZIP ->
+    listing instead of dropping the label the moment you zoom past city."""
+    reporting_js = (ROOT / "ui" / "js" / "reporting.js").read_text()
+
+    assert "let zipCirclesLayerGroup = null;" in reporting_js
+    assert "zipCirclesLayerGroup = L.layerGroup().addTo(reportingMap);" in reporting_js
+    assert "clearMapLayerGroup(zipCirclesLayerGroup);" in reporting_js
+
+    zip_block = reporting_js.split("const zipAggregates = new Map();", 1)[1].split(
+        "// 3. INDIVIDUAL STORE & GAP PIN MARKERS", 1
+    )[0]
+    # Aggregated by ZIP, not city - the whole point of the new tier.
+    assert "rec.zip_code" in zip_block
+    # Same interaction pattern as the city circles: a hover tooltip, not a
+    # click-required popup, carrying the ZIP and the exact listing count.
+    assert "zipMarker.bindTooltip(" in zip_block
+    assert "ZIP ${escapeHtml(item.zip)}" in zip_block
+    assert "${formatNumber(item.count)} Listing" in zip_block
+    assert "zipCirclesLayerGroup.addLayer(zipMarker);" in zip_block
+
+
+def test_hiding_or_clearing_a_map_layer_closes_its_open_tooltips_first():
+    """Live-reported follow-up to BUG-102: zooming (mouse never moves, e.g.
+    scroll-wheel) past a tier boundary hid/cleared that tier's aggregate
+    circles, but a sticky tooltip already open on one of them is not torn
+    down for free just because its layer is removed - it kept showing the
+    OLD tier's (stale) city/ZIP/state count on screen with the pins now
+    actually underneath the cursor belonging to a different tier entirely.
+    `toggleMapLayer()` and the new `clearMapLayerGroup()` must both close
+    every open tooltip/popup on a group before removing/clearing it."""
+    reporting_js = (ROOT / "ui" / "js" / "reporting.js").read_text()
+
+    assert "function closeGroupOverlays(group)" in reporting_js
+    overlays = reporting_js.split("function closeGroupOverlays(group)", 1)[1].split("\nfunction ", 1)[0]
+    assert "closeTooltip" in overlays
+    assert "closePopup" in overlays
+
+    assert "function clearMapLayerGroup(group)" in reporting_js
+    clear_fn = reporting_js.split("function clearMapLayerGroup(group)", 1)[1].split("\nfunction ", 1)[0]
+    assert "closeGroupOverlays(group);" in clear_fn
+    assert "group.clearLayers();" in clear_fn
+
+    toggle_fn = reporting_js.split("function toggleMapLayer(group, visible)", 1)[1].split("\nfunction ", 1)[0]
+    assert "closeGroupOverlays(group);" in toggle_fn
+    assert "reportingMap.removeLayer(group);" in toggle_fn
+
+    # The per-render rebuild must use the safe clear everywhere, not the bare
+    # Leaflet call that skips closing what is open.
+    assert "clearMapLayerGroup(stateCirclesLayerGroup);" in reporting_js
+    assert "clearMapLayerGroup(cityCirclesLayerGroup);" in reporting_js
+    assert "clearMapLayerGroup(zipCirclesLayerGroup);" in reporting_js
+    assert "clearMapLayerGroup(storeMarkersLayerGroup);" in reporting_js
+    assert "clearMapLayerGroup(gapMarkersLayerGroup);" in reporting_js
 
 
 def test_both_reporting_tabs_apply_their_filters_automatically():

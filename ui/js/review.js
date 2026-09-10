@@ -171,6 +171,7 @@ async function autoRepairReviewBatch() {
       } finally {
         if (button?.dataset.autoRepairing !== "true") clearButtonBusy(button, previousButton);
       }
+}
 
 // Cumulative five-state counts for the review tab's cards.
 let reviewFixStates = null;
@@ -186,8 +187,21 @@ async function refreshReviewFixStates() {
         // that endpoint's heavy aggregation. That coupling is why every card
         // showed "-" while the correct values sat on disk.
         const response = await fetch("/api/review/fix-states", { cache: "no-store" });
+        // A genuine HTTP failure (a transient 401, a 500, anything) used to
+        // give up permanently right here - unlike the "refreshing" case
+        // just below, nothing ever retried it, so a single bad response on
+        // the FIRST call of a session left every card at "-" for the rest
+        // of it with no way to recover short of a manual page reload. Route
+        // it through the same bounded retry the "still computing" case
+        // already uses instead of a silent, permanent give-up.
+        if (!response.ok) {
+          if (reviewFixStateRetries < REVIEW_FIX_STATE_RETRY_LIMIT) {
+            reviewFixStateRetries += 1;
+            window.setTimeout(refreshReviewFixStates, REVIEW_FIX_STATE_RETRY_DELAY_MS);
+          }
+          return;
+        }
         const data = await response.json();
-        if (!response.ok) return;
         if (data.computed === true) {
           reviewFixStateRetries = 0;
           reviewFixStates = data;
@@ -315,7 +329,6 @@ async function pollAutoRepairStatus() {
     await loadRejectedRecords();
   } catch (_) {}
 }
-    }
 
 async function loadReviewBrandFilter() {
       const select = el("reviewBrandFilter");
@@ -1579,5 +1592,344 @@ el("acceptAsReviewedBtn")?.addEventListener("click", async () => {
   } finally {
     // Cleared immediately: the flag must never leak into the next retry.
     window.__acceptAsReviewed = false;
+  }
+});
+
+// ---------------------------------------------------------------------
+// Needs Review (silver-validation population) - a second, GENUINELY
+// DIFFERENT failure population from Review Error Listings above. Error
+// Listings are rows rejected at parse/mapping time and never reach
+// `listings` at all; Needs Review rows DID reach bronze `listings` but fail
+// the silver validity gate (missing_state, missing_zip,
+// unresolved_coordinates, etc. - see `vw_listings_needs_review` in
+// workflow_server.py). Kept as its own sub-tab, its own table, its own edit
+// dialog, and its own counters throughout, per codex.md's explicit
+// instruction not to conflate the two counts/lists.
+// ---------------------------------------------------------------------
+
+const NEEDS_REVIEW_PAGE_SIZE = 50;
+let needsReviewPage = 0;
+let needsReviewLoadPromise = null;
+// Rendered page, keyed by listing_id - read by the edit-button click
+// delegate below, same pattern as reviewRecordsByKey above.
+const needsReviewRecordsByKey = new Map();
+let needsReviewCurrentRecord = null;
+// Set true the first time either the list or the summary counts have been
+// fetched at least once, so a page refresh that restores this sub-tab
+// doesn't need a second trigger to populate it.
+let needsReviewLoaded = false;
+// {total, pending, reviewed, approximate}. Null fields render as "-" (not
+// computed yet), never as 0 - a bare 0 would claim nothing needs review.
+let needsReviewCounts = { total: null, pending: null, reviewed: null, approximate: false };
+let needsReviewSummaryPromise = null;
+
+// Whitelisted, editable fields on a needs-review record - mirrors
+// `_NEEDS_REVIEW_EDITABLE_FIELDS` in workflow_server.py exactly. Widening
+// this client-side would just have the server silently drop the extra
+// fields (fix_needs_review_record() filters to its own whitelist), so
+// keeping the two lists in sync is what keeps the form honest about what a
+// fix can actually change.
+const NEEDS_REVIEW_FIELD_SPECS = [
+  ["name", "Location Name"],
+  ["address", "Address"],
+  ["city_name", "City"],
+  ["county", "County"],
+  ["state_code", "State Code"],
+  ["state_name", "State Name"],
+  ["zip_code", "ZIP Code"],
+  ["country", "Country"],
+  ["latitude", "Latitude"],
+  ["longitude", "Longitude"],
+];
+
+// rejection_reason arrives as a short machine token list (e.g.
+// "missing_state,unresolved_coordinates"); humanize each token with the same
+// field-label formatter the rest of the app uses so it reads like the other
+// hint text instead of a raw snake_case string.
+function formatRejectionReason(reason) {
+  if (!reason) return "—";
+  const parts = String(reason).split(/[,;]\s*/).map((p) => p.trim()).filter(Boolean);
+  if (!parts.length) return "—";
+  return parts.map((p) => (typeof formatFieldLabel === "function" ? (formatFieldLabel(p) || p) : p)).join(", ");
+}
+
+function renderNeedsReviewCounts() {
+  const fmt = (value) => (typeof value === "number" ? `${value.toLocaleString()}${needsReviewCounts.approximate ? "+" : ""}` : "-");
+  if (el("needsReviewTotalCount")) el("needsReviewTotalCount").textContent = fmt(needsReviewCounts.total);
+  if (el("needsReviewPendingCount")) el("needsReviewPendingCount").textContent = fmt(needsReviewCounts.pending);
+  if (el("needsReviewReviewedCount")) el("needsReviewReviewedCount").textContent = fmt(needsReviewCounts.reviewed);
+  if (el("needsReviewTabCount")) el("needsReviewTabCount").textContent = typeof needsReviewCounts.total === "number" ? `${needsReviewCounts.total.toLocaleString()}${needsReviewCounts.approximate ? "+" : ""}` : "0";
+}
+
+// No dedicated count endpoint exists for this population yet (flagged in
+// codex.md, not guessed around). `/api/review/needs-review`'s `limit` is
+// deliberately allowed up to 50000 server-side - comfortably above the
+// measured ~13.7k population - specifically so an exact split can be read
+// off two full, filtered reads instead of hand-paginating or estimating.
+// If a read ever comes back with `has_more` true, the true count exceeds
+// what was read; `approximate` marks the displayed numbers as a floor
+// rather than silently understating them as final.
+function refreshNeedsReviewSummary() {
+  if (needsReviewSummaryPromise) return needsReviewSummaryPromise;
+  needsReviewSummaryPromise = _refreshNeedsReviewSummaryOnce().finally(() => { needsReviewSummaryPromise = null; });
+  return needsReviewSummaryPromise;
+}
+async function _refreshNeedsReviewSummaryOnce() {
+  needsReviewLoaded = true;
+  const button = el("refreshNeedsReviewCountsBtn");
+  const originalHtml = button ? button.innerHTML : "Refresh Counts";
+  if (button) setButtonBusy(button, "Counting");
+  try {
+    const [pendingRes, reviewedRes] = await Promise.all([
+      reviewFetch("/api/review/needs-review?reviewed=false&limit=50000&offset=0", { cache: "no-store" }),
+      reviewFetch("/api/review/needs-review?reviewed=true&limit=50000&offset=0", { cache: "no-store" }),
+    ]);
+    const [pendingData, reviewedData] = await Promise.all([pendingRes.json(), reviewedRes.json()]);
+    if (!pendingRes.ok || !reviewedRes.ok) throw new Error(pendingData.error || reviewedData.error || "Could not count needs-review records.");
+    const pending = Array.isArray(pendingData.records) ? pendingData.records.length : 0;
+    const reviewed = Array.isArray(reviewedData.records) ? reviewedData.records.length : 0;
+    needsReviewCounts = {
+      total: pending + reviewed,
+      pending,
+      reviewed,
+      approximate: Boolean(pendingData.has_more || reviewedData.has_more),
+    };
+    renderNeedsReviewCounts();
+  } catch (error) {
+    // Leave whatever is already on screen (dashes on first load, or the
+    // last good count) - a transient failure must not blank a real number.
+  } finally {
+    if (button) clearButtonBusy(button, originalHtml);
+  }
+}
+
+function switchReviewInnerTab(tab) {
+  const target = tab === "needsReview" ? "needsReview" : "errors";
+  document.querySelectorAll("#reviewInnerTabs [data-review-tab]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.reviewTab === target);
+  });
+  el("reviewErrorsPanel")?.classList.toggle("hidden", target !== "errors");
+  el("needsReviewPanel")?.classList.toggle("hidden", target !== "needsReview");
+  try { sessionStorage.setItem("reviewInnerTab", target); } catch (_) {}
+  if (target === "needsReview") {
+    loadNeedsReviewRecords();
+    if (!needsReviewLoaded) refreshNeedsReviewSummary();
+  }
+}
+
+// See switchView()'s reviewView branch in common.js: a genuine nav click
+// always resets to "errors" (matching Reporting's own inner-tab
+// convention); only a same-view page refresh (isBootRestore) restores
+// whichever sub-tab was actually open.
+function restoreReviewInnerTab(isBootRestore) {
+  let saved = "errors";
+  try { saved = sessionStorage.getItem("reviewInnerTab") || "errors"; } catch (_) {}
+  switchReviewInnerTab(isBootRestore ? saved : "errors");
+}
+
+function loadNeedsReviewRecords() {
+  if (needsReviewLoadPromise) return needsReviewLoadPromise;
+  needsReviewLoadPromise = _loadNeedsReviewRecordsOnce().finally(() => { needsReviewLoadPromise = null; });
+  return needsReviewLoadPromise;
+}
+
+async function _loadNeedsReviewRecordsOnce() {
+  needsReviewLoaded = true;
+  const target = el("needsReviewResults");
+  const searchBtn = el("needsReviewSearchBtn");
+  const originalHtml = searchBtn ? searchBtn.innerHTML : "Search Records";
+  if (searchBtn) setButtonBusy(searchBtn, "Searching");
+  if (target) {
+    target.className = "status";
+    target.textContent = "Loading needs-review records";
+  }
+  try {
+    const businessId = el("needsReviewBusinessId")?.value.trim() || "";
+    const state = el("needsReviewState")?.value.trim() || "";
+    const reviewed = el("needsReviewReviewedFilter")?.value || "";
+    const response = await reviewFetch(`/api/review/needs-review?business_id=${encodeURIComponent(businessId)}&state=${encodeURIComponent(state)}&reviewed=${encodeURIComponent(reviewed)}&limit=${NEEDS_REVIEW_PAGE_SIZE}&offset=${needsReviewPage * NEEDS_REVIEW_PAGE_SIZE}`);
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Could not load needs-review records.");
+    const records = Array.isArray(result.records) ? result.records : [];
+    needsReviewRecordsByKey.clear();
+    records.forEach((record) => needsReviewRecordsByKey.set(String(record.listing_id), record));
+    if (!records.length) {
+      target.className = "";
+      target.innerHTML = `
+        <div class="review-empty-ok">
+          <div class="review-empty-ok-emoji" aria-hidden="true">\u{1F389}</div>
+          <strong>No needs-review records found</strong>
+          <span>Nothing in this population matches the current filters.</span>
+        </div>`;
+      return;
+    }
+    target.className = "";
+    target.innerHTML = `<table><thead><tr>
+        <th data-sort-key="brand">Brand</th>
+        <th>Address</th>
+        <th data-sort-key="city">City</th>
+        <th data-sort-key="state">State</th>
+        <th data-sort-key="zip">ZIP</th>
+        <th>Rejection Reason</th>
+        <th data-sort-key="reviewed">Reviewed</th>
+        <th>Action</th>
+      </tr></thead><tbody>${records.map((record) => {
+        const brand = formatBrandName(record.brand_name || record.business_id || "—");
+        const reviewedBadge = record.user_reviewed
+          ? `<span style="color:#047857; font-weight:700;">Reviewed</span>`
+          : `<span style="color:#b45309; font-weight:700;">Needs Attention</span>`;
+        return `<tr data-needs-review-row="${escapeHtml(record.listing_id)}">
+            <td data-sort-value="${escapeHtml(brand)}"><strong>${escapeHtml(brand)}</strong></td>
+            <td style="max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(record.address || "—")}</td>
+            <td data-sort-value="${escapeHtml(record.city_name || "")}">${escapeHtml(record.city_name || "—")}</td>
+            <td data-sort-value="${escapeHtml(record.state_code || "")}">${escapeHtml(record.state_code || "—")}</td>
+            <td data-sort-value="${escapeHtml(record.zip_code || "")}">${escapeHtml(record.zip_code || "—")}</td>
+            <td style="max-width: 260px;">${formatRejectionReason(record.rejection_reason)}</td>
+            <td data-sort-value="${record.user_reviewed ? 1 : 0}">${reviewedBadge}</td>
+            <td class="review-row-actions"><button type="button" class="secondary" data-needs-review-edit="${escapeHtml(record.listing_id)}">Edit</button></td>
+          </tr>`;
+      }).join("")}</tbody></table>`;
+    enableSortableTable(target.querySelector("table"));
+    target.insertAdjacentHTML("beforeend", `<div class="review-pagination" style="display:flex; justify-content:center; gap:8px; margin-top:12px;"><button type="button" class="secondary" data-needs-review-page="prev" ${needsReviewPage === 0 ? "disabled" : ""}>Previous</button><span style="padding:8px 4px; color:var(--muted);">Page ${needsReviewPage + 1}</span><button type="button" class="secondary" data-needs-review-page="next" ${result.has_more ? "" : "disabled"}>Next</button></div>`);
+    target.querySelector('[data-needs-review-page="prev"]')?.addEventListener("click", () => { needsReviewPage -= 1; loadNeedsReviewRecords(); });
+    target.querySelector('[data-needs-review-page="next"]')?.addEventListener("click", () => { needsReviewPage += 1; loadNeedsReviewRecords(); });
+  } catch (error) {
+    target.className = "status error";
+    target.textContent = error.name === "AbortError"
+      ? "Loading needs-review records took too long. Please try Search Records again."
+      : productSafeError(error.message, "Could not load needs-review records.");
+    addStatusClose(target);
+  } finally {
+    if (searchBtn) clearButtonBusy(searchBtn, originalHtml);
+  }
+}
+
+function openNeedsReviewEditModal(record) {
+  needsReviewCurrentRecord = record;
+  const hintsEl = el("needsReviewEditHints");
+  if (hintsEl) {
+    const brand = escapeHtml(formatBrandName(record.brand_name || record.business_id || "—"));
+    const reasons = formatRejectionReason(record.rejection_reason);
+    hintsEl.innerHTML = `<strong>${brand}</strong> — listing <code>${escapeHtml(record.listing_id || "—")}</code><br>Flagged: <strong>${reasons}</strong>${record.user_reviewed ? " <em>(already marked reviewed — you can still adjust it)</em>" : ""}`;
+  }
+  const feedbackEl = el("needsReviewEditFeedback");
+  if (feedbackEl) {
+    feedbackEl.style.display = "none";
+    feedbackEl.textContent = "";
+    feedbackEl.className = "action-feedback";
+  }
+  const formEl = el("needsReviewEditForm");
+  if (formEl) {
+    formEl.innerHTML = NEEDS_REVIEW_FIELD_SPECS.map(([key, label]) => {
+      const value = record[key];
+      return `
+        <div style="display: flex; flex-direction: column;">
+          <label style="font-size: 12px; font-weight: 700; color: var(--ink); margin-bottom: 4px;">${escapeHtml(label)} <span style="font-weight: 400; color: var(--muted);">(${escapeHtml(key)})</span></label>
+          <input type="text" data-needs-review-field="${escapeHtml(key)}" value="${escapeHtml(value !== null && value !== undefined ? String(value) : "")}" style="padding: 6px; border: 1px solid var(--line); border-radius: 4px; font-size: 13px;">
+        </div>`;
+    }).join("");
+  }
+  el("needsReviewEditForm").scrollTop = 0;
+  el("needsReviewEditDialog")?.showModal();
+}
+
+// ONE document-level, capture-phase listener installed at load, same
+// reasoning as the Review Error Listings delegate near the top of this
+// file: a throw between rendering the table and attaching a listener must
+// never leave a visible-but-dead Edit button.
+document.addEventListener("click", (event) => {
+  const button = event.target?.closest?.("button[data-needs-review-edit]");
+  if (!button) return;
+  event.preventDefault();
+  const record = needsReviewRecordsByKey.get(button.dataset.needsReviewEdit);
+  if (record) {
+    openNeedsReviewEditModal(record);
+  } else {
+    console.warn("needs-review: no record for", button.dataset.needsReviewEdit);
+  }
+}, true);
+
+document.querySelectorAll("#reviewInnerTabs [data-review-tab]").forEach((button) => {
+  button.addEventListener("click", () => switchReviewInnerTab(button.dataset.reviewTab));
+});
+el("needsReviewSearchBtn")?.addEventListener("click", () => { needsReviewPage = 0; loadNeedsReviewRecords(); });
+el("needsReviewReviewedFilter")?.addEventListener("change", () => { needsReviewPage = 0; loadNeedsReviewRecords(); });
+el("refreshNeedsReviewCountsBtn")?.addEventListener("click", () => refreshNeedsReviewSummary());
+el("closeNeedsReviewEditBtn")?.addEventListener("click", () => el("needsReviewEditDialog").close());
+el("cancelNeedsReviewEditBtn")?.addEventListener("click", () => el("needsReviewEditDialog").close());
+el("submitNeedsReviewEditBtn")?.addEventListener("click", async () => {
+  const record = needsReviewCurrentRecord;
+  if (!record) return;
+  const formEl = el("needsReviewEditForm");
+  const feedbackEl = el("needsReviewEditFeedback");
+  const showDialogError = (message) => {
+    if (!feedbackEl) return;
+    feedbackEl.className = "action-feedback error";
+    feedbackEl.textContent = message;
+    feedbackEl.style.display = "block";
+  };
+
+  const updates = {};
+  formEl?.querySelectorAll("[data-needs-review-field]").forEach((input) => {
+    updates[input.dataset.needsReviewField] = input.value.trim();
+  });
+  if (updates.latitude) {
+    const lat = parseFloat(updates.latitude);
+    if (Number.isNaN(lat)) { showDialogError("Latitude must be a number."); return; }
+    updates.latitude = lat;
+  } else {
+    delete updates.latitude;
+  }
+  if (updates.longitude) {
+    const lon = parseFloat(updates.longitude);
+    if (Number.isNaN(lon)) { showDialogError("Longitude must be a number."); return; }
+    updates.longitude = lon;
+  } else {
+    delete updates.longitude;
+  }
+
+  const submitBtn = el("submitNeedsReviewEditBtn");
+  const cancelBtn = el("cancelNeedsReviewEditBtn");
+  const originalBtnHtml = submitBtn ? submitBtn.innerHTML : "Save Fix";
+  if (submitBtn) setButtonBusy(submitBtn, "Saving");
+  if (cancelBtn) cancelBtn.disabled = true;
+  try {
+    const response = await fetch("/api/review/needs-review/fix", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ listing_id: record.listing_id, updates }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Could not save this record.");
+    if (!result.updated) {
+      showDialogError("No matching record was found to update - it may have already been removed or resolved elsewhere.");
+      return;
+    }
+    el("needsReviewEditDialog")?.close();
+    setStatus(`Saved fix for ${formatBrandName(record.brand_name || record.business_id || "this record")} — marked reviewed.`, "ok");
+    needsReviewRecordsByKey.delete(String(record.listing_id));
+    // The fixed row disappears from the list immediately, either because it
+    // no longer belongs under the current "Needs Attention" filter, or (any
+    // other filter) because its own row is removed directly - satisfies
+    // "the row should disappear once fixed, or show as reviewed" without
+    // waiting on a full reload.
+    if ((el("needsReviewReviewedFilter")?.value || "") === "false") {
+      loadNeedsReviewRecords();
+    } else {
+      document.querySelector(`tr[data-needs-review-row="${CSS.escape(String(record.listing_id))}"]`)?.remove();
+    }
+    // Rebalance the summary cards locally instead of re-paying the two
+    // full-population reads refreshNeedsReviewSummary() costs - only a
+    // record that was NOT already reviewed changes the split.
+    if (!record.user_reviewed && typeof needsReviewCounts.pending === "number" && typeof needsReviewCounts.reviewed === "number") {
+      needsReviewCounts.pending = Math.max(0, needsReviewCounts.pending - 1);
+      needsReviewCounts.reviewed += 1;
+      renderNeedsReviewCounts();
+    }
+  } catch (error) {
+    showDialogError(productSafeError(error.message, "Could not save this record."));
+  } finally {
+    if (submitBtn) clearButtonBusy(submitBtn, originalBtnHtml);
+    if (cancelBtn) cancelBtn.disabled = false;
   }
 });

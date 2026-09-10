@@ -212,6 +212,7 @@
       .reporting-inner-tabs{display:flex;gap:8px;margin:0 0 18px;padding:6px;background:#eef3f8;border:1px solid var(--line);border-radius:8px;width:max-content;max-width:100%}
       .reporting-inner-tab{border:0;background:transparent;color:var(--muted);padding:9px 14px;border-radius:6px;font-size:13px;font-weight:750;cursor:pointer}
       .reporting-inner-tab.active{background:#fff;color:var(--navy,var(--ink));box-shadow:0 1px 4px rgba(15,23,42,.10)}
+      .reporting-inner-tab:not(.active):hover{background:#005fd3;color:#fff}
       .reporting-tab-panel.hidden{display:none!important}
       .dq-intro{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;margin:4px 0 16px;padding:16px;border:1px solid var(--line);border-radius:8px;background:#fff}
       .dq-intro h2{margin:0 0 5px;font-size:20px;color:var(--navy,var(--ink))}
@@ -233,7 +234,12 @@
       .dq-card strong{display:block;font-size:25px;line-height:1.1;color:var(--navy,var(--ink));font-weight:800}
       .dq-card span{display:block;margin-top:6px;color:var(--muted);font-size:11px;font-weight:750;text-transform:uppercase;letter-spacing:.02em}
       .dq-card small{display:block;margin-top:4px;color:var(--muted);font-size:11px}
-      .dq-section{margin:22px 0}.dq-section h3{margin:0 0 10px;font-size:18px;color:var(--navy,var(--ink))}
+      /* Matches the plain h2 style Location Intelligence's table sections
+         use (15px/700 weight, var(--ink)) - was 18px with no explicit
+         weight, a visibly different header style between the two tabs'
+         tables for no reason other than one used h2 and the other h3.
+         Charts/cards keep their own styling; this is table sections only. */
+      .dq-section{margin:22px 0}.dq-section h3{margin:0 0 10px;font-size:15px;font-weight:700;color:var(--ink)}
       /* Shared d3 chart tooltip (all charts use chartTooltip()). */
       .dq-chart-tooltip{position:absolute;display:none;z-index:20;pointer-events:none;background:#0f172a;color:#fff;padding:7px 10px;border-radius:6px;font-size:12px;line-height:1.45;box-shadow:0 6px 18px rgba(15,23,42,.28);white-space:nowrap}
       /* Number cards expose a download of the data behind the figure. */
@@ -253,7 +259,11 @@
          bare tables, so it needs its own rule. */
       .dq-section > div:has(> table),.dq-main div:has(> .dq-table){overflow-x:auto;border-radius:8px;max-width:100%}
       .dq-table th,.dq-table td{padding:12px 14px;border-bottom:1px solid var(--line);font-size:14px;line-height:1.35;text-align:left}
-      .dq-table th{background:#eef4fc;color:var(--navy,var(--ink));font-size:13px;font-weight:750}
+      /* Matched to Location Intelligence's .comp-bench-table th (font-size
+         14px, font-weight 700) - these two tabs' table headers must read as
+         one visual system, not two (2026-09-10 UI parity ask). Background/
+         color left as-is; only the size/weight mismatch was the reported gap. */
+      .dq-table th{background:#eef4fc;color:var(--navy,var(--ink));font-size:14px;font-weight:700}
       /* Two-row alternating bands across every reporting table: scanning a
          wide row left-to-right is where the eye slips a line, and a single
          flat background gives it nothing to hold on to. */
@@ -910,16 +920,26 @@
   let qualityStaleRefetches = 0;
   const QUALITY_STALE_REFETCH_LIMIT = 3;
   const QUALITY_STALE_REFETCH_DELAY_MS = 6000;
+  // Set once real data has rendered here at least once this page load. User
+  // asked (twice) for the "Loading quality metrics" spinner to go away -
+  // it was correctly reporting a genuine backend deadlock earlier today
+  // (now fixed), but the UI behavior itself was ALSO wrong independent of
+  // that: every call, not just the true first one, blanked the existing
+  // body behind a full-panel spinner - so even a fast, healthy background
+  // refresh or a tab re-open made already-correct numbers flash to a
+  // loading state for no reason. Only the genuine first load (nothing to
+  // show yet) earns the blocking spinner now; every call after that keeps
+  // the existing body up and swaps in fresh numbers silently once they land.
+  let dqQualityLoadedOnce = false;
   async function loadQuality(forceRefresh = false) {
     const status = $('dqStatus');
     if (!status) return;
     const loadingPanel = $('dqLoadingPanel');
     const body = $('dqBody');
-    // Both first load and a shared-refresh fully hide the body behind the
-    // spinner - the tab switcher itself stays clickable throughout, this
-    // only hides this panel's own content while its data is in flight.
-    if (loadingPanel) loadingPanel.classList.remove('hidden');
-    if (body) body.classList.add('hidden');
+    if (!dqQualityLoadedOnce) {
+      if (loadingPanel) loadingPanel.classList.remove('hidden');
+      if (body) body.classList.add('hidden');
+    }
     status.className = 'report-status hidden';
     status.textContent = '';
       try {
@@ -1109,6 +1129,7 @@
       if (body) body.classList.remove('hidden');
       status.className = 'report-status hidden';
       status.textContent = '';
+      dqQualityLoadedOnce = true;
     } catch (err) {
       if (loadingPanel) loadingPanel.classList.add('hidden');
       if (body) body.classList.remove('hidden');
