@@ -239,6 +239,56 @@ class SilverEnrichmentTests(unittest.TestCase):
         # an unbounded loop (which would mean pending never gets cleared).
         self.assertEqual(len(pass_count), 2)
 
+    def test_a_third_save_arriving_during_the_guaranteed_followup_pass_also_coalesces(self) -> None:
+        # 2026-09-10 coverage gap: the test above proves a single mid-flight
+        # save gets exactly one guaranteed follow-up pass. It does NOT prove
+        # what happens if ANOTHER save arrives while that follow-up pass is
+        # itself still running - the real risk cases are: (a) the second
+        # pending flag gets silently dropped (a save's data never reaches
+        # gold until the next hourly tick, same class of bug this feature
+        # exists to fix), or (b) it causes an unbounded chain of passes. The
+        # actual mechanism (REPORTING_REFRESH_PENDING re-checked INSIDE the
+        # lock right before the loop in refresh() would otherwise exit) means
+        # a save arriving during ANY in-flight pass - the first or a
+        # follow-up - sets the same flag and earns exactly one more pass:
+        # three total passes for three overlapping requests, not two and not
+        # unbounded.
+        pass_count = []
+
+        def fake_invoke(low_priority=False):
+            pass_count.append(1)
+            if len(pass_count) == 1:
+                # A second save arrives while the ORIGINAL pass is running.
+                second_call_started = workflow_server._refresh_silver_background(low_priority=True)
+                self.assertFalse(second_call_started, "must coalesce into the same run, not spawn a second thread")
+            elif len(pass_count) == 2:
+                # A third save arrives while the GUARANTEED FOLLOW-UP pass
+                # (triggered by the second save) is itself still running -
+                # the exact scenario this test exists to cover.
+                third_call_started = workflow_server._refresh_silver_background(low_priority=True)
+                self.assertFalse(third_call_started, "must coalesce into the same run, not spawn a second thread")
+            return {"rows": 1}
+
+        with patch.object(workflow_server, "_invoke_silver_layer", side_effect=fake_invoke):
+            with patch.object(workflow_server, "_rebuild_gold_and_mirror", return_value={"gold": {}, "mirror": {}}):
+                with patch.object(workflow_server, "auto_repair_error_batch", return_value={"attempted": 0, "resolved": 0, "remaining": 0}):
+                    with patch.object(workflow_server, "refresh_error_count", return_value=0):
+                        with patch.object(workflow_server, "reporting_quality_summary", return_value={}):
+                            workflow_server.REPORTING_REFRESHING = False
+                            workflow_server.REPORTING_REFRESH_PENDING = False
+                            started = workflow_server._refresh_silver_background(low_priority=True)
+                            for thread in workflow_server.threading.enumerate():
+                                if thread.name == "reporting-silver-refresh":
+                                    thread.join(timeout=5)
+                            workflow_server.REPORTING_REFRESHING = False
+                            workflow_server.REPORTING_REFRESH_PENDING = False
+
+        self.assertTrue(started)
+        # Exactly three passes: the original, plus one guaranteed follow-up
+        # per overlapping save - neither silently dropped to two nor an
+        # unbounded chain.
+        self.assertEqual(len(pass_count), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

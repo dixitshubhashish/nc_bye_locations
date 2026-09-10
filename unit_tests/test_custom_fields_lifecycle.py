@@ -27,6 +27,26 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import whitespace_tool.workflow_server as ws
+# Root-caused 2026-09-10 (previously an undiagnosed "KNOWN FLAKE" on
+# IdleLocationEnrichmentPassTests, see that class's docstring history):
+# unittest.mock.patch.dict(sys.modules, {...}) - used by
+# _FakeBigQueryModuleMixin below to fake google.cloud.bigquery - restores
+# sys.modules on .stop() by clearing the WHOLE dict and replaying a snapshot
+# taken at .start() time. Any module imported for the first time *during* a
+# mixin-active test (e.g. whitespace_tool.brand_enrichment, imported inside
+# IdleLocationEnrichmentPassTests._run()) is not in that snapshot, so it gets
+# wiped from sys.modules the moment that test's cleanup runs. The next test's
+# `from whitespace_tool.brand_enrichment import enrich_location_contact`
+# (a dotted import, which always re-checks sys.modules) then silently
+# re-executes brand_enrichment.py from scratch and gets the pristine,
+# unpatched function - any patch.object() applied to the orphaned old module
+# object has no effect, and the real function runs and hits the real
+# network (the ~8s timeouts the old docstring blamed on flakiness).
+# Fix: import it here, at module load time, before any test (and therefore
+# before the mixin's first .start()) runs, so it is already a member of the
+# very first snapshot patch.dict ever takes and survives every clear+restore
+# cycle.
+import whitespace_tool.brand_enrichment  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -1222,24 +1242,31 @@ class IdleLocationEnrichmentPassTests(_FakeBigQueryModuleMixin):
     in SQL - the row was read a moment earlier, so a concurrent user edit has
     to win.
 
-    KNOWN FLAKE (2026-09-10, not yet root-caused): `test_a_resolved_listing_
-    gets_both_the_fill_and_the_cooldown_in_one_statement` and
-    `test_fills_only_the_blank_columns_and_guards_them_again_in_sql`
-    sometimes make a REAL network call to OSM and time out (~8s,
-    `location_enrichment_osm_unavailable ... The read operation timed out`)
-    instead of using the `patch.object(brand_enrichment,
-    "enrich_location_contact", ...)` mock in `_run()` - deterministic in
-    some orderings, not others (isolated single-test runs pass reliably).
-    This is a TEST-INFRASTRUCTURE issue, not a production bug: the
-    production logic these tests exercise is separately confirmed correct
-    by `test_candidate_query_excludes_rows_still_in_cooldown` and
-    `test_a_listing_osm_does_not_know_is_left_blank_but_cooldown_still_set`,
-    both of which pass every ordering tried. Not root-caused before this
-    session ran out of time on it - re-investigate the patch scoping
-    between `_run()`'s `from whitespace_tool import brand_enrichment` and
-    `_idle_location_enrichment_pass()`'s own `from
-    whitespace_tool.brand_enrichment import enrich_location_contact`
-    before assuming it's simply flaky."""
+    ROOT-CAUSED AND FIXED 2026-09-10 (previously logged here as a "KNOWN
+    FLAKE, not yet root-caused"): `test_a_resolved_listing_gets_both_the_
+    fill_and_the_cooldown_in_one_statement` and `test_fills_only_the_blank_
+    columns_and_guards_them_again_in_sql` were deterministically (not just
+    "sometimes") making a REAL network call to OSM and timing out (~8s)
+    whenever run after another test in this class, because `patch.object`'s
+    mock on `enrich_location_contact` silently had no effect. Root cause was
+    in the shared `_FakeBigQueryModuleMixin`, not in these tests or in
+    production code: `patch.dict(sys.modules, {...})` restores `sys.modules`
+    on `.stop()` by clearing the WHOLE dict and replaying a snapshot taken at
+    `.start()` time - so `whitespace_tool.brand_enrichment`, imported for the
+    first time inside `_run()` while the mixin was active, was never part of
+    that snapshot and got wiped from `sys.modules` the moment this class's
+    first test finished. The next test's dotted import inside
+    `_idle_location_enrichment_pass()` then silently re-executed
+    `brand_enrichment.py` from scratch, producing a pristine, unpatched
+    `enrich_location_contact` that `patch.object` (applied to the now-orphaned
+    old module object) never touched. Fixed by importing
+    `whitespace_tool.brand_enrichment` once at this test file's module level
+    (see the comment there), before any test - and therefore before the
+    mixin's first `.start()` - ever runs, so it is already present in the
+    very first snapshot `patch.dict` takes and survives every clear+restore
+    cycle. Verified: 20/20 clean runs of this class alone, in every method
+    order pytest uses, 0.00-0.01s each (down from one real ~8s network hit
+    per run before the fix)."""
 
     def _run(self, client, resolved):
         from whitespace_tool import brand_enrichment

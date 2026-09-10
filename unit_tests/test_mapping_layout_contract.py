@@ -79,11 +79,18 @@ def test_sample_dataset_button_has_idle_loading_ready_color_states():
     assert "sampleButton.classList.toggle('sample-state-idle', !loaded);" in mapper_js
 
 
-def test_sample_load_success_shows_confirmation_popup():
+def test_sample_load_success_has_no_popup_only_button_state_change():
+    """Superseded (2026-09-10, explicit user ask): a sample load used to end
+    with a confirmation popup (sampleLoadedDialog) as the sole
+    acknowledgement. The user asked for no popup at all here - completion
+    must be visible purely through the button/panel state change
+    (updateSampleDatasetControls()), nothing to read and dismiss. The dialog
+    markup, its CSS, and its close handler were removed entirely rather than
+    left dead, since nothing can ever open it again."""
     mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
-    assert '<dialog id="sampleLoadedDialog"' in HTML
-    assert 'const dialog = el("sampleLoadedDialog");' in mapper_js
-    assert 'dialog.showModal();' in mapper_js
+    assert 'sampleLoadedDialog' not in HTML
+    assert 'sampleLoadedDialog' not in mapper_js
+    assert 'updateSampleDatasetControls(result);' in mapper_js
 
 
 def test_reporting_quality_uses_existing_single_internal_view_module():
@@ -404,6 +411,42 @@ def test_selected_brand_locks_required_brand_name_mapping():
     assert 'source_fields: mapper.source_fields || sourceFields,' in save_fn
 
 
+def test_brand_locking_is_scoped_to_template_and_review_flows_not_normal_40_60():
+    html = (ROOT / "ui" / "integrations.html").read_text()
+    mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
+    templates_js = (ROOT / "ui" / "js" / "templates.js").read_text()
+    review_js = (ROOT / "ui" / "js" / "review.js").read_text()
+    sync_workspace = mapper_js.split("function syncPreParseWorkspace", 1)[1].split("\nfunction ", 1)[0]
+
+    # Normal 40/60: both Brand Model and Source Parser show the same synced
+    # brand selector, so the brand being parsed against is visible on both
+    # halves. The parser-side selector is hidden again after parse.
+    assert 'id="parserBrandReference"' not in html
+    assert 'parserBusinessField?.classList.remove("hidden");' in sync_workspace
+    assert 'parserBusinessField?.classList.add("hidden");' in sync_workspace
+    assert 'parserBusinessField?.classList.add("wide-brand-selector");' in sync_workspace
+    assert 'parserBusinessField?.classList.remove("wide-brand-selector");' in sync_workspace
+
+    # Template Library Review: the template's brand is locked because the
+    # saved template belongs to a business_id and should not be re-pointed.
+    assert 'function setTemplateEditBrandLock(locked, businessId = "", brandLabel = "")' in templates_js
+    assert "setTemplateEditBrandLock(true, template.business_id," in templates_js
+    assert "node.disabled = Boolean(locked);" in templates_js
+    assert "searchInput.disabled = Boolean(locked);" in templates_js
+    assert mapper_js.count('setTemplateEditBrandLock(false)') == mapper_js.count('classList.remove("template-edit-mode")')
+
+    # Review Queue edit: a record already tied to a business_id gets a locked
+    # brand field in the edit dialog; no mapper-side brand selection leaks in.
+    review_brand_block = review_js.split('if (key === "brand") {', 1)[1].split("// Value:", 1)[0]
+    assert "const brandLocked = Boolean(targetBusinessId);" in review_brand_block
+    assert 'select id="editRecordBrandSelect"' in review_brand_block
+    assert "disabled" in review_brand_block
+    # The explanatory sentence was removed (2026-09-10, explicit user ask
+    # to keep the form generic, no prose) - the field simply renders
+    # disabled with the locked brand pre-selected, same information, no
+    # caption explaining why.
+
+
 def test_brand_selection_does_not_auto_open_edit_form_before_parse():
     html = (ROOT / "ui" / "integrations.html").read_text()
     brand_change = html.split('el("brandSelect").addEventListener("change"', 1)[1].split('el("parserBusinessSelect")?.addEventListener("change"', 1)[0]
@@ -551,16 +594,21 @@ def test_single_shared_refresh_report_button_drives_both_reporting_tabs():
     assert "window.reportingRefreshQuality" in refresh_now
 
 
-def test_quality_tab_loading_hides_body_without_blocking_tab_switch():
-    # Both the first load and a shared refresh must fully hide #dqBody
-    # behind #dqLoadingPanel (no stale numbers visible underneath), while
-    # switchTab itself stays reachable - it must not be gated on any
-    # "is quality data loading" flag.
+def test_quality_tab_never_hides_its_structure_behind_a_loading_panel():
+    # Superseded (2026-09-10, explicit user ask): a genuine first load used
+    # to hide #dqBody behind a blocking #dqLoadingPanel spinner. The static
+    # #dqBody markup already ships with the full card/table structure at
+    # "0" (same convention as tab 1, which is never blank either) - the fix
+    # keeps that structure visible from the very first call, on every path
+    # (first load, forced refresh, a warm-cache poll retry), and lets real
+    # numbers replace the zeros silently once they land instead of hiding
+    # the shell behind a spinner at any point.
     reporting_tabs_js = (ROOT / "ui" / "reporting-tabs.js").read_text()
     load_quality = reporting_tabs_js.split("async function loadQuality", 1)[1].split("\n  function init()", 1)[0]
 
-    assert "if (loadingPanel) loadingPanel.classList.remove('hidden');" in load_quality
-    assert "if (body) body.classList.add('hidden');" in load_quality
+    assert "if (loadingPanel) loadingPanel.classList.add('hidden');" in load_quality
+    assert "if (body) body.classList.remove('hidden');" in load_quality
+    assert "if (body) body.classList.add('hidden');" not in load_quality
 
     switch_tab = reporting_tabs_js.split("function switchTab(name)", 1)[1].split("\n    tabs.addEventListener", 1)[0]
     assert "loading" not in switch_tab.lower()
@@ -1161,12 +1209,13 @@ def test_issue_type_donut_is_interactive_with_aligned_legend_columns():
 def test_improvement_opportunities_is_a_single_column_list():
     # Live-reported ("should be a proper down list"): a 2-column grid left an
     # odd-numbered last card orphaned next to empty space. Given its own
-    # class (not the shared .dq-improvements 2-up used by the States/Cities
-    # table pair, which is a genuine even 2-up and must stay untouched).
+    # class, distinct from the generic dq-section-row it now sits inside
+    # alongside Issue Type Breakdown (2026-09-10 layout change) - that flex
+    # row shares space between the two SECTIONS; this card list stays a
+    # single column WITHIN its own section regardless.
     reporting_tabs_js = (ROOT / "ui" / "reporting-tabs.js").read_text()
     assert ".dq-improvements-list{display:grid;grid-template-columns:1fr;gap:10px}" in reporting_tabs_js
     assert 'id="dqImprovements" class="dq-improvements-list"' in reporting_tabs_js
-    assert 'id="dqGeoTables" class="dq-improvements"' in reporting_tabs_js
     assert ".dq-improvement strong{display:block;font-size:15px;" in reporting_tabs_js
 
 
@@ -1210,15 +1259,17 @@ def test_global_hotels_preset_lat_long_are_pruned_against_the_real_csv_fields():
 
 
 def test_template_library_button_always_reads_review_never_load():
-    # TPL-02: the action opens the template for viewing/review, so it should
-    # never read "Load" - not as the initial label, and not as its busy
-    # state while loadTemplateIntoEditor() runs.
+    # TPL-02: the action opens the template for viewing/editing, so it
+    # should never read "Load" - not as the initial label, and not as its
+    # busy state while loadTemplateIntoEditor() runs. Relabeled from
+    # "Review"/"Reviewing" to "Edit"/"Opening" (2026-09-10, explicit user
+    # ask) - the button opens the field-mapping editor, not a read-only view.
     templates_js = (ROOT / "ui" / "js" / "templates.js").read_text()
     row_fn = templates_js.split("function _templateRowHtml(template)", 1)[1].split("\n    }", 1)[0]
-    assert ">Review</button>" in row_fn
+    assert ">Edit</button>" in row_fn
     assert ">Load</button>" not in row_fn
     click_handler = templates_js.split('button.addEventListener("click", () => {', 1)[1].split("\n        });", 1)[0]
-    assert 'setButtonBusy(button, "Reviewing")' in click_handler
+    assert 'setButtonBusy(button, "Opening")' in click_handler
     assert '"Loading"' not in click_handler
 
 
@@ -1309,7 +1360,14 @@ def test_header_navigation_is_larger_than_utility_buttons():
     common_js = (ROOT / "ui" / "js" / "common.js").read_text()
     switch_view_fn = common_js.split("function switchView(viewId, isBootRestore = false) {", 1)[1].split("\n    }\n", 1)[0]
     assert 'el("resetMappingBtn")?.classList.toggle("hidden", viewId !== "mapperView");' in switch_view_fn
-    assert '.classList.toggle("reset-mapping-hidden", viewId !== "mapperView");' in switch_view_fn
+    # Restart Mapping dropped from Review Queue and Reporting too (explicit
+    # user ask, 2026-09-10) - both header buttons are gone on those two
+    # tabs, so the grid collapses to mapping-buttons-hidden rather than the
+    # narrower reset-mapping-hidden (which still reserves Restart's column).
+    assert 'const hideMappingButtons = viewId === "reviewView" || viewId === "reportingView";' in switch_view_fn
+    assert 'el("restartMappingBtn")?.classList.toggle("hidden", hideMappingButtons);' in switch_view_fn
+    assert '.classList.toggle("reset-mapping-hidden", viewId !== "mapperView" && !hideMappingButtons);' in switch_view_fn
+    assert '.classList.toggle("mapping-buttons-hidden", hideMappingButtons);' in switch_view_fn
 
 
 def test_fix_counters_also_refresh_unconditionally_at_boot():
@@ -1370,9 +1428,20 @@ def test_edit_record_form_uses_the_records_own_saved_template_mapping():
     # (what US validation needs, always offered) plus everything the template
     # maps plus everything it declares unmapped - never the raw JSON keys. That
     # is what makes a flagged field appear under the name the error text uses.
+    # Also unioned with errorsByField's own keys (2026-09-10 fix): a field the
+    # top hint banner names as flagged is not guaranteed to be one the
+    # template happens to map/declare (e.g. a validator-only field like
+    # observed_at) - every flagged field now gets a box guaranteed, not just
+    # ones the template's own mapping covers.
     assert 'const templateTargetKeys = Object.keys(mapperFields).filter((key) => key && typeof mapperFields[key] === "string");' in modal_fn
     assert "templateUnmappedFields = reviewUnmappedFieldsFor(record, templates);" in modal_fn
-    assert "const fieldKeys = [...new Set([...CORE_FIELD_ORDER, ...templateTargetKeys, ...templateUnmappedFields])];" in modal_fn
+    assert "const fieldKeys = [...new Set([...CORE_FIELD_ORDER, ...templateTargetKeys, ...templateUnmappedFields, ...errorsByField.keys()])]" in modal_fn
+    # "coordinates" excluded (2026-09-10 fix): it's a combined lat+longitude
+    # check with no source column of its own - its error now attaches to
+    # the Latitude/Longitude boxes instead of rendering its own empty,
+    # non-functional duplicate box.
+    assert '.filter((key) => key !== "coordinates");' in modal_fn
+    assert "const combinedErrorKeysFor = (key) => (key === \"latitude\" || key === \"longitude\") ? [key, \"coordinates\"] : [key];" in modal_fn
     # Each box is labelled from the TARGET key ("Seating Capacity"), not the
     # source column ("seats")...
     assert 'const label = spec.label || (typeof formatFieldLabel === "function" ? formatFieldLabel(key) : key) || key;' in modal_fn
@@ -1382,8 +1451,12 @@ def test_edit_record_form_uses_the_records_own_saved_template_mapping():
     assert "const source = mapperFields[key];" in modal_fn
     assert "const path = source || key;" in modal_fn
     assert "const rawVal = getNestedRawValue(rawObj, path);" in modal_fn
-    # The flagged field is surfaced first rather than buried in a 20-box form.
-    assert "fieldKeys.sort((a, b) => (errorsByField.has(b) ? 1 : 0) - (errorsByField.has(a) ? 1 : 0));" in modal_fn
+    # Deliberately NOT reordered to put a flagged field first (explicit user
+    # ask, 2026-09-10: "if column has error let it be ... rearranging column
+    # out of template is not needed") - a field stays exactly where the
+    # template's own order puts it; the hint banner above the form is what
+    # names which field(s) need attention, not its position in the list.
+    assert "fieldKeys.sort(" not in modal_fn
     # Falls back to the live Mapper UI state only when no saved mapping
     # was found (e.g. a legacy row with no template_id) - never silently
     # skips populating fields altogether. Resolved BEFORE that branch, not
@@ -1451,8 +1524,16 @@ def test_unmeasured_coverage_metrics_show_no_data_not_a_fabricated_zero():
         row = [line for line in reporting_tabs_js.split("\n") if f"['{signal}'," in line][0]
         assert "totalRecords ?" in row, signal
         assert "!totalRecords ? 'neutral'" in row, signal
+    # Duplicate rate/Stale records later (2026-09-10) gained a third
+    # metricCard() argument (a note: brand-merge count / the stale
+    # threshold actually used) - matched on the label alone now, not on the
+    # label immediately preceding metricCard()'s closing paren. Scoped to
+    # loadQuality()'s own body so the static #dqMetricGrid skeleton (which
+    # reuses the same card labels at generic metricCard(value,label) calls)
+    # can't be matched instead of the real, coverage-gated rendering.
+    load_quality_body = reporting_tabs_js.split("async function loadQuality", 1)[1].split("\n  function init()", 1)[0]
     for card in ["ZIP completeness", "Coordinate completeness", "Duplicate rate", "Stale records"]:
-        card_line = [line for line in reporting_tabs_js.split("\n") if f"'{card}')" in line and "metricCard(" in line][0]
+        card_line = [line for line in load_quality_body.split("\n") if f"'{card}'" in line and "metricCard(" in line][0]
         assert "coverageMeasured ?" in card_line, card
 
 
@@ -1460,9 +1541,11 @@ def test_most_impacted_states_shows_full_names_not_two_letter_codes():
     reporting_tabs_js = (ROOT / "ui" / "reporting-tabs.js").read_text()
     assert "const stateLabel = (code) =>" in reporting_tabs_js
     assert "stateCodeToName[String(code).toUpperCase()]" in reporting_tabs_js
-    # The geo tables moved to the paginated renderer, which escapes in one
-    # place - the label conversion still happens at the call site.
-    assert "states.map((row) => [stateLabel(row.state), fmt(row.count)])" in reporting_tabs_js
+    # State/city/brand/country now share one paginated table behind a
+    # dimension dropdown (2026-09-10) - the label conversion happens once,
+    # before the data is stashed for renderDimensionTable() to read later
+    # (on a dropdown switch, not just the render pass that just fetched it).
+    assert "dqDimensionData.states = states.map((row) => ({ ...row, state: stateLabel(row.state) }));" in reporting_tabs_js
 
 
 def test_top_states_bar_reads_the_real_locations_field_not_a_nonexistent_one():
@@ -1503,11 +1586,11 @@ def test_mapping_confidence_snapshot_and_diff_are_wired_into_save():
 
 def test_template_load_button_stops_being_stuck_on_loading():
     # loadTemplateIntoEditor() is synchronous, but nothing ever restored
-    # this button after setButtonBusy() - it stayed reading "Reviewing"
-    # (disabled) even after navigating back to Template Library later.
-    # (Button now reads "Review" from the start, not "Load" - see
-    # test_template_library_button_always_reads_review_never_load - so
-    # restoring just re-applies the same label rather than relabeling it.)
+    # this button after setButtonBusy() - it stayed reading its busy label
+    # ("Reviewing", now "Opening") disabled even after navigating back to
+    # Template Library later. (Button now reads "Edit" from the start, not
+    # "Load" - see test_template_library_button_always_reads_review_never_load
+    # - so restoring just re-applies the same label rather than relabeling it.)
     templates_js = (ROOT / "ui" / "js" / "templates.js").read_text()
     load_click_fn = templates_js.split('button.addEventListener("click", () => {', 1)[1].split("});", 1)[0]
     assert "clearButtonBusy(button, previousHtml);" in load_click_fn
@@ -1573,6 +1656,13 @@ def test_source_input_uses_radio_choices_with_url_default():
     assert '<select id="sourceInputMode" class="source-input-mode-select" aria-hidden="true" tabindex="-1">' in HTML
     assert ".source-input-mode-select {" in HTML
     assert "display: none;" in HTML.split(".source-input-mode-select {", 1)[1].split("}", 1)[0]
+    source_input_css = HTML.split(".source-input-options {", 1)[1].split("}", 1)[0]
+    assert "border: 1px solid var(--accent-tint-line);" in source_input_css
+    assert "background: var(--accent-tint);" in source_input_css
+    source_input_label_css = HTML.split(".source-input-options label {", 1)[1].split("}", 1)[0]
+    source_input_radio_css = HTML.split(".source-input-options input {", 1)[1].split("}", 1)[0]
+    assert "color:" not in source_input_label_css
+    assert "accent-color:" not in source_input_radio_css
 
     mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
     assert "function syncSourceInputModeRadios()" in mapper_js
@@ -2915,7 +3005,7 @@ def test_the_merge_confirmation_states_the_decision_not_the_statistics():
 
 def test_small_dialogs_are_sized_by_their_content():
     html = (ROOT / "ui" / "integrations.html").read_text()
-    rule = html.split("#appNoticeDialog, #appConfirmDialog, #saveCompletionDialog, #sampleLoadedDialog {", 1)[1].split("}", 1)[0]
+    rule = html.split("#appNoticeDialog, #appConfirmDialog, #saveCompletionDialog {", 1)[1].split("}", 1)[0]
     assert "width: auto;" in rule
     assert "max-width: min(460px" in rule
     # Long unbroken text must wrap rather than widen the box.
@@ -3453,9 +3543,12 @@ def test_auto_map_button_reuses_the_parse_time_suggestion_pass():
     assert 'el("autoMapFieldsBtn")?.addEventListener("click", () => autoMapUnmappedFields());' in html
 
     action = mapper_js.split("function autoMapUnmappedFields()", 1)[1].split("\nfunction ", 1)[0]
+    reset_action = mapper_js.split("function resetFieldMappingsOnly()", 1)[1].split("\nfunction ", 1)[0]
     assert "if (!mappingSelections[key]) delete mappingSelections[key];" in action
     assert "forceAutoMapOnce = true;" in action
     assert "renderMappings();" in action
+    assert 'if (templateEditMode && selectedBrand?.business_id && typeof setTemplateEditBrandLock === "function") {' in reset_action
+    assert "setTemplateEditBrandLock(true, selectedBrand.business_id" in reset_action
     # It must NOT contain its own matching logic.
     assert "suggestField(" not in action
 
@@ -3463,10 +3556,26 @@ def test_auto_map_button_reuses_the_parse_time_suggestion_pass():
     assert "if (sourceParsed || forceAutoMapOnce) {" in mapper_js
     assert "forceAutoMapOnce = false;" in mapper_js
 
-    # Offered only when it can help: parsed columns and nothing mapped.
+    # Offered only when it can help: parsed columns and no real source column
+    # mapped. A selected brand locks Brand Name to __brand, but that synthetic
+    # mapping must not hide the button when every parsed column is unmapped.
     visibility = mapper_js.split("function updateAutoMapButton()", 1)[1].split("\nfunction ", 1)[0]
-    assert 'button.classList.toggle("hidden", !(sourceFields.length && mappedCount === 0));' in visibility
+    assert "sourceFields.includes(value)" in visibility
+    assert 'button.classList.toggle("hidden", !(sourceFields.length && realMappedCount === 0));' in visibility
     assert "updateAutoMapButton();" in mapper_js.split("function renderMappings", 1)[1][:6000]
+
+    templates_js = (ROOT / "ui" / "js" / "templates.js").read_text()
+    load_editor = templates_js.split("function loadTemplateIntoEditor(template)", 1)[1].split("\n// With no live rows", 1)[0]
+    # "__brand" is a sentinel (filled by the locked brand, not a real parsed
+    # column) that leaked into source_fields/unmapped_fields on saved
+    # templates - excludeBrandSentinel() filters it out of all three inputs
+    # here, not just the freshly-computed mappedValues (real incident,
+    # 2026-09-10: excluding it only from mappedValues looked like a fix but
+    # did nothing for a template that already has it stored).
+    assert "const storedUnmappedFields = excludeBrandSentinel(Array.isArray(components.unmapped_fields) ? components.unmapped_fields : []);" in load_editor
+    assert "sourceFields = Array.from(new Set([...storedSourceFields, ...storedUnmappedFields, ...mappedValues]));" in load_editor
+    assert "function excludeBrandSentinel(fields) {" in templates_js
+    assert 'return fields.filter((field) => field && field !== "__brand");' in templates_js
 
 
 def test_brand_search_survives_the_panel_relocation():
@@ -3920,11 +4029,21 @@ def test_the_map_never_swaps_to_an_empty_layer_when_zooming_in():
     to show exactly ONE of three groups, which is how crossing a threshold
     could reveal a layer holding nothing: a blank map, no error.
 
-    Two things fix that, and both are asserted here. (1) The two AGGREGATE
-    layers (state / city bubbles) are the only zoom-gated ones, and the tier
-    falls back when the tier it picked has nothing IN THE CURRENT VIEW.
-    (2) The real-row layers - listing markers and whitespace gap ZIPs - are
-    shown unconditionally at every tier, so there is always something drawn.
+    The fix: ALL FOUR layers (state/city/zip bubbles, plus the listing-level
+    store/gap pin markers) are tier-gated, and the tier falls back when the
+    tier it picked has nothing IN THE CURRENT VIEW - so a blank frame is
+    never shown. Listing-level markers were originally left unconditionally
+    `true` regardless of tier (2026-09-09) specifically to guarantee
+    something was always drawn, but that was NEVER what the surrounding
+    comment (see "INDIVIDUAL STORE & GAP PIN MARKERS: Shown at zoom >=
+    LISTING_TIER_ZOOM_THRESHOLD") actually described, and it meant ~1,000
+    individual listing pins rendered on top of the state bubbles even at the
+    default national zoom - real user complaint, 2026-09-10 ("show less
+    markers... more UI beautiful"). Now genuinely gated to `tier ===
+    "listing"` like the comment always said; the pre-existing
+    listing-tier-emptiness fallback (asserted below) still demotes the tier
+    when there is nothing in view at listing level, so the blank-map
+    regression this test guards against still cannot happen.
 
     The two marker groups also used to be cross-named: the store loop filled
     `gapMarkersLayerGroup` and the gap loop filled `pinMarkersLayerGroup`, so
@@ -3974,11 +4093,14 @@ def test_the_map_never_swaps_to_an_empty_layer_when_zooming_in():
     # deciding after the swap would still show the blank frame first.
     assert sync.index("layerHasContentInView") < sync.index("toggleMapLayer(")
 
-    # Listing markers and gap ZIPs are not zoom levels: shown at every tier,
-    # unconditionally, and never gated on the tier value.
-    assert "toggleMapLayer(storeMarkersLayerGroup, true);" in sync
-    assert "toggleMapLayer(gapMarkersLayerGroup, true);" in sync
-    # Only the aggregates are tier-gated.
+    # ALL FOUR layers are tier-gated now (2026-09-10) - listing markers and
+    # gap ZIPs only show at the listing tier, matching what the "INDIVIDUAL
+    # STORE & GAP PIN MARKERS" comment always said and fixing the national-
+    # view clutter of showing every individual listing pin regardless of
+    # zoom. The tier-demotion-on-empty-view logic above is what still
+    # prevents this from reintroducing BB14's blank-map bug.
+    assert 'toggleMapLayer(storeMarkersLayerGroup, tier === "listing");' in sync
+    assert 'toggleMapLayer(gapMarkersLayerGroup, tier === "listing");' in sync
     assert 'toggleMapLayer(stateCirclesLayerGroup, tier === "state");' in sync
     assert 'toggleMapLayer(cityCirclesLayerGroup, tier === "city");' in sync
     assert 'toggleMapLayer(zipCirclesLayerGroup, tier === "zip");' in sync
@@ -4201,3 +4323,29 @@ def test_the_brand_helpers_are_declared_and_not_merely_referenced():
         # because several of these are called from common.js, not mapper.js.
         uses = len(re.findall(r"\b%s\b" % re.escape(symbol), all_ui_js))
         assert uses > 1, f"{symbol} is declared but never used"
+
+
+def test_pre_parse_workspace_reversal_moves_the_search_wrap_not_just_the_bare_select():
+    """Real bug, 2026-09-10, reported repeatedly by the user: the brand
+    picker went genuinely invisible (not just unlocked/unpopulated) on the
+    left rail in template-edit mode.
+
+    Root cause, found by live-tracing DOM ancestry: syncPreParseWorkspace()'s
+    forward relocation runs on the FIRST render, before the async brand list
+    has loaded and before attachSearchableSelect() has had a chance to wrap
+    #brandSelect in #brandSelectSearchWrap - so its snapshot
+    (preParseRelocatedNodes) captures the BARE <select>. By the time the
+    reversal runs (entering template-edit mode), the wrap now exists around
+    that same select. Moving just the bare node back left the now-empty wrap
+    stranded in the relocated (hidden) panel - and attachSearchableSelect()'s
+    own self-healing ("put the select back inside its own wrap") then
+    dragged the select right back into that stranded wrap on its very next
+    call, undoing the reversal every time and leaving nothing visible.
+
+    The fix: when reversing, move the WRAP (select and all) if one has since
+    grown around the snapshotted node, not just the node itself."""
+    mapper_js = (ROOT / "ui" / "js" / "mapper.js").read_text()
+    reversal = mapper_js.split("} else if (hasMappingContent && preParseRelocatedNodes) {", 1)[1].split("\n      }", 1)[0]
+    assert "SearchWrap" in reversal, "reversal must account for a wrap that may have grown around a snapshotted node"
+    assert "wrap.contains(node)" in reversal
+    assert "sourcePanel.appendChild(wrap" in reversal or "sourcePanel.appendChild(wrap && wrap.contains(node) ? wrap : node)" in reversal

@@ -274,13 +274,29 @@ def normalize_location(row: dict[str, Any], mapper: dict[str, Any], source_name:
         # lookup could ever match it and the inversion check below would be
         # reasoning about an impossible pair.
         raw_lon, _lon_wrapped = normalize_wrapped_longitude(raw_lon)
-        # Latitude is deliberately NOT cleared here. A value like 95 has no
-        # safe repair (folding it would move the point to another
-        # hemisphere), and clearing it would make the bad data vanish
-        # silently instead of being flagged - validate_normalized_location()
-        # already raises "coordinates outside US boundary" for it, which is
-        # what sends the row to review.
         raw_lat, raw_lon, _ = detect_and_fix_inverted_coords(raw_lat, raw_lon)
+        # Geometrically impossible values cleared to None (2026-09-10,
+        # explicit user decision - supersedes an earlier "deliberately NOT
+        # cleared" choice this comment used to explain). A latitude/
+        # longitude outside the range ANY real point on Earth could have
+        # (-90..90 / -180..180 - e.g. 999.999) is not "a real place outside
+        # the US" the way a genuine foreign coordinate is; there is no
+        # geometric repair for it (unlike a wrapped longitude, folded back
+        # above), so keeping it around only made a human read and manually
+        # retype a value that was never recoverable in the first place.
+        # Clearing it here lets the row save normally instead of being
+        # rejected; the silver layer's own "unresolved_coordinates" check
+        # then routes it to Needs Review, where the EXISTING auto-repair
+        # path (enrich_raw_listing_row's ZIP/city/state -> coordinate
+        # resolution) fills in a real coordinate automatically, counted
+        # under AI Fixed like any other automatic repair - not silent, just
+        # not requiring a human to retype an unrecoverable number.
+        # A genuinely VALID non-US coordinate (e.g. a real point in Canada)
+        # is untouched by this check and still flows through unchanged to
+        # validate_normalized_location()'s "outside US boundary" flag and
+        # the existing worldwide-enrich / "Save as Non-US Data" review flow.
+        if not (-90.0 <= raw_lat <= 90.0) or not (-180.0 <= raw_lon <= 180.0):
+            raw_lat, raw_lon = None, None
 
     record = LocationRecord(
         brand=brand,

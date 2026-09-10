@@ -82,6 +82,21 @@ class MirrorTopStatesMetricsTests(unittest.TestCase):
         self.assertEqual(rows[0]["state_population"], 0)
         self.assertEqual(rows[0]["median_household_income"], 0)
 
+    def test_covers_every_us_state_not_just_a_top_fifteen(self) -> None:
+        # Real bug, 2026-09-10: this same payload draws EVERY state bubble on
+        # the national map, not just a top-N leaderboard row. A state outside
+        # a small cut gets no entry AT ALL in the response (not a real zero),
+        # so a real state like CO rendered as flat "no data" white on the map
+        # even though it had genuine listings - just not enough to place in
+        # the old top 15. 30 distinct states here must all survive.
+        base_rows = [
+            _row(f"{10000 + i}", f"City{i}", f"S{i}", f"State {i}", "", "Acme", i + 1)
+            for i in range(30)
+        ]
+        rows = workflow_server._mirror_top_states(base_rows, {}, {})
+        self.assertEqual(len(rows), 30, "every state must survive, not just a top-15 cut")
+        self.assertIn("S0", {r["state"] for r in rows})
+
 
 class MirrorTopCitiesMetricsTests(unittest.TestCase):
     def test_population_is_deduped_per_zip_before_summing(self) -> None:

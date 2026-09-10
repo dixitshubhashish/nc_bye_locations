@@ -124,6 +124,26 @@ def _repair_text(value: str) -> str | None:
     return cleaned if re.search(r"[A-Za-z0-9]", cleaned) else None
 
 
+_BARE_NUMBER = re.compile(r"^-?\d+(\.\d+)?%?$")
+
+
+def _repair_hours(value: str) -> str | None:
+    """Operating hours has no one valid shape ("Mon-Sun: 10:00-23:00",
+    "24/7", "9am-5pm" are all legitimate free text), so this does not
+    whitelist a format the way phone/email/url do - it only clears the one
+    shape that is unambiguously NOT hours: a bare number with nothing else
+    (real incident, 2026-09-10 - a Rating column mismapped onto Operating
+    Hours put plain values like "3.6" into this field; there is no plausible
+    reading of a bare decimal as a schedule, so it is cleared rather than
+    kept as free text). Anything with even one letter, a colon, or a
+    separator survives untouched.
+    """
+    cleaned = " ".join(value.split())
+    if not cleaned:
+        return None
+    return None if _BARE_NUMBER.match(cleaned) else cleaned
+
+
 # column-name pattern -> semantic kind. Order matters: the first match wins,
 # so put the specific patterns above the general ones (e.g. "postal_code"
 # before the generic "code", "average_ticket_size" before "size").
@@ -135,9 +155,28 @@ NAME_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"(website|url|link|homepage|web_?site|maps_link)", "url"),
     (r"(zip|postal|postcode)", "postal_code"),
     (r"(percent|pct|_rate$|^rate_|share)", "percent"),
-    (r"(rating|score|stars)", "rating"),
+    (r"(hours|hrs)", "hours"),
+    # Anchored to a whole underscore-separated token (with an optional
+    # trailing "s" for a plain plural, e.g. "ratings"), unlike the patterns
+    # above: an unanchored "rating" also matches inside "ope-RATING-_hours"
+    # (real incident, 2026-09-10 - "Operating Hours" was silently inferred
+    # as a rating, so a genuinely numeric-looking value like "3.6" read as a
+    # plausible rating and was never cleared, then failed a later, stricter
+    # type check as an opaque "does not match required type string" reject,
+    # instead of being cleared up front the way this whole module exists to
+    # do). `\b` alone does not fix this - Python regex treats "_" as a word
+    # character, so "phone" in "phone_number" has no \b between "e" and "_"
+    # either, but that pattern isn't anchored to a whole token so it still
+    # (correctly) matches; "rating" in "operating" has no separator between
+    # "e" and "r" at all, so anchoring to (^|_)...(s)?($|_) rejects it while
+    # still matching a leading/trailing/whole-token "rating".
+    (r"(^|_)(rating|score|stars)(s)?($|_)", "rating"),
     (r"(revenue|income|cost|price|salary|amount|ticket_size|rent|lease|budget|sales)", "money"),
-    (r"(capacity|count|footfall|traffic|seats|employees|population|units|households|quantity|qty)", "count"),
+    # Same anchoring, same reason: an unanchored "count" also matches inside
+    # "country"/"country_code" - currently harmless only because
+    # is_geo_owned() intercepts those two names first, but not a rule this
+    # pattern should depend on holding forever.
+    (r"(capacity|footfall|traffic|seats|employees|population|units|households|quantity|qty)|(^|_)count(s)?($|_)", "count"),
     (r"(^|_)(year|founded|established)($|_)", "year"),
     (r"(date|_on$|^opened|opening)", "date"),
     (r"(_at$|timestamp|datetime|observed)", "timestamp"),
@@ -157,6 +196,7 @@ REPAIRERS: dict[str, Callable[[str], Any]] = {
     "money": _repair_money,
     "count": _repair_count,
     "year": _repair_year,
+    "hours": _repair_hours,
     "boolean": _repair_boolean,
     "date": lambda v: optional_date(v),
     "timestamp": lambda v: optional_timestamp(v),
@@ -248,7 +288,7 @@ def clean_field_value(column: str, value: Any, declared_type: str | None = None)
     if isinstance(value, (int, float)):
         # Already a number: only range-checked kinds can reject it.
         repaired = REPAIRERS.get(kind, _repair_text)(str(value))
-        if kind in {"latitude", "longitude", "percent", "rating", "money", "count", "year"} and repaired is None:
+        if kind in {"latitude", "longitude", "percent", "rating", "money", "count", "year", "hours", "date", "timestamp"} and repaired is None:
             return None, CLEARED, kind
         return value, OK, kind
     if isinstance(value, (dict, list)):

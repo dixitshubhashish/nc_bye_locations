@@ -426,9 +426,16 @@ class WrappedCoordinateTests(unittest.TestCase):
             mapper, "s", 0)
         self.assertAlmostEqual(record.longitude, 114.78, places=2)
 
-    def test_normalize_location_does_not_silently_clear_a_bad_latitude(self) -> None:
-        # Clearing it would make the bad data vanish instead of being flagged;
-        # validate_normalized_location() is what routes it to review.
+    def test_normalize_location_clears_a_geometrically_impossible_latitude(self) -> None:
+        # Explicit user decision, 2026-09-10 - supersedes an earlier
+        # "deliberately NOT cleared" choice this test used to enforce. 95.0
+        # is not a valid latitude ANYWHERE on Earth (max is 90, the North
+        # Pole) - unlike a genuinely valid non-US coordinate, there is no
+        # real place this could resolve to, so there is nothing to "flag
+        # for review" that a human could meaningfully act on by retyping
+        # it. Cleared to None instead, so the row saves normally and the
+        # existing ZIP/city/state -> coordinate auto-repair path
+        # (enrich_raw_listing_row) resolves it automatically.
         from whitespace_tool.normalization import normalize_location
 
         mapper = {"brand": "A", "business_id": "b", "source_name": "s", "source_type": "csv",
@@ -437,7 +444,26 @@ class WrappedCoordinateTests(unittest.TestCase):
         record = normalize_location(
             {"Name": "S", "Zip": "78701", "City": "Austin", "State": "TX",
              "Country": "", "Lat": "95.0", "Lon": "20.0"}, mapper, "s", 0)
-        self.assertIsNotNone(record.latitude)
+        self.assertIsNone(record.latitude)
+        self.assertIsNone(record.longitude)
+
+    def test_normalize_location_keeps_a_genuinely_valid_non_us_coordinate(self) -> None:
+        # The counterpart to the impossible-value test above: a real point
+        # on Earth (Paris, France) outside the US is NOT geometrically
+        # impossible, so it must survive normalize_location() untouched -
+        # validate_normalized_location()'s "outside US boundary" flag and
+        # the worldwide-enrich / "Save as Non-US Data" review flow are what
+        # handle it from there, same as before this change.
+        from whitespace_tool.normalization import normalize_location
+
+        mapper = {"brand": "A", "business_id": "b", "source_name": "s", "source_type": "csv",
+                  "fields": {"name": "Name", "postal_code": "Zip", "latitude": "Lat",
+                             "longitude": "Lon", "city": "City", "state": "State", "country": "Country"}}
+        record = normalize_location(
+            {"Name": "S", "Zip": "75001", "City": "Paris", "State": "",
+             "Country": "France", "Lat": "48.8566", "Lon": "2.3522"}, mapper, "s", 0)
+        self.assertAlmostEqual(record.latitude, 48.8566, places=3)
+        self.assertAlmostEqual(record.longitude, 2.3522, places=3)
 
     def test_suggestion_radius_is_wider_than_the_automatic_snap(self) -> None:
         # A snap happens silently, so it stays tight; a suggestion is

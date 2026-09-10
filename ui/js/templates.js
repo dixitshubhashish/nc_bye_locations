@@ -39,7 +39,7 @@ function _templateSpinner() {
 
 function _templateRowHtml(template) {
       const label = templatePaging?.sourceTypeIdToLabel?.[template.source_type_id] || sourceTypeLabel(template.source_type_id);
-      return `<tr><td data-sort-value="${escapeHtml(template.name)}">${escapeHtml(template.name)}</td><td data-sort-value="${escapeHtml(templateBrandNames[template.business_id] || template.business_id)}">${escapeHtml(templateBrandNames[template.business_id] || template.business_id)}</td><td data-sort-value="${escapeHtml(label)}">${escapeHtml(label)}</td><td data-sort-value="${escapeHtml(template.created_at)}">${escapeHtml(formatTimestamp(template.created_at))}</td><td data-sort-value="${escapeHtml(template.updated_at)}">${escapeHtml(formatTimestamp(template.updated_at))}</td><td><button type="button" data-load-template="${escapeHtml(template.workflow_template_id)}">Review</button></td></tr>`;
+      return `<tr><td data-sort-value="${escapeHtml(template.name)}">${escapeHtml(template.name)}</td><td data-sort-value="${escapeHtml(templateBrandNames[template.business_id] || template.business_id)}">${escapeHtml(templateBrandNames[template.business_id] || template.business_id)}</td><td data-sort-value="${escapeHtml(label)}">${escapeHtml(label)}</td><td data-sort-value="${escapeHtml(template.created_at)}">${escapeHtml(formatTimestamp(template.created_at))}</td><td data-sort-value="${escapeHtml(template.updated_at)}">${escapeHtml(formatTimestamp(template.updated_at))}</td><td><button type="button" data-load-template="${escapeHtml(template.workflow_template_id)}">Edit</button></td></tr>`;
     }
 
 async function _fetchTemplatesPage(offset, limit) {
@@ -76,7 +76,7 @@ function _renderTemplateRows(templates) {
           // to this tab later. Restore it once done - re-opening the same
           // template again is harmless and lets the user re-check the
           // mapping - instead of leaving it in a busy state forever.
-          const previousHtml = setButtonBusy(button, "Reviewing");
+          const previousHtml = setButtonBusy(button, "Opening");
           loadTemplateIntoEditor(templatePaging.byId[button.dataset.loadTemplate]);
           clearButtonBusy(button, previousHtml);
         });
@@ -219,6 +219,15 @@ function setTemplateEditBrandLock(locked, businessId = "", brandLabel = "") {
       el("editExistingBrandLink")?.classList.toggle("hidden", Boolean(locked));
     }
 
+// "__brand" is a sentinel meaning "filled by the locked brand", not a real
+// parsed column - shared by loadTemplateIntoEditor() and
+// restoreSavedTemplateMapping(), since both rebuild sourceFields from a
+// template's stored components and both hit the same pollution (see the
+// call sites for the incident this guards against, 2026-09-10).
+function excludeBrandSentinel(fields) {
+      return fields.filter((field) => field && field !== "__brand");
+    }
+
 function loadTemplateIntoEditor(template) {
       const components = template.components?.mapper || template.components || {};
       templateStructureUnavailable = Boolean((template.components || {}).structure_unavailable);
@@ -266,9 +275,22 @@ function loadTemplateIntoEditor(template) {
       // older templates saved before source_fields was persisted. This is
       // what makes every mapping dropdown offer real options to switch to,
       // rather than only the single value already selected.
-      const storedSourceFields = Array.isArray(components.source_fields) ? components.source_fields : [];
-      const mappedValues = Object.values(mappingSelections).filter(Boolean);
-      sourceFields = Array.from(new Set([...storedSourceFields, ...mappedValues]));
+      // "__brand" is a sentinel meaning "filled by the locked brand", not a
+      // real parsed column - real incident, 2026-09-10: it leaked into
+      // sourceFields (mappingSelections.name is "__brand" on every
+      // brand-locked template), so updateAutoMapButton()'s real-mapped-count
+      // check counted it as a genuine mapped source column even after Reset
+      // Field Mapping cleared everything else, permanently hiding the
+      // Auto-map button it had just told the user to click. It had already
+      // been saved into source_fields/unmapped_fields on existing templates
+      // by the time this was found, so it has to be filtered out of all
+      // three inputs here, not just the freshly-computed one - excluding it
+      // only from mappedValues looked like a fix but did nothing for a
+      // template that already has it stored.
+      const storedSourceFields = excludeBrandSentinel(Array.isArray(components.source_fields) ? components.source_fields : []);
+      const storedUnmappedFields = excludeBrandSentinel(Array.isArray(components.unmapped_fields) ? components.unmapped_fields : []);
+      const mappedValues = excludeBrandSentinel(Object.values(mappingSelections).filter(Boolean));
+      sourceFields = Array.from(new Set([...storedSourceFields, ...storedUnmappedFields, ...mappedValues]));
       sourceFields.sort((a, b) => (fieldOrderIndex.get(a) ?? 999) - (fieldOrderIndex.get(b) ?? 999));
       sourceRows = [];
       resolvedRecordPath = "";
@@ -298,6 +320,32 @@ function loadTemplateIntoEditor(template) {
       // The raw template name is an internal slug ("spice_route_csv_csv_sample")
       // - it means nothing to the reader and the mapping is on screen anyway.
       setStatus("Edit the field mapping, then click Save Template to update.", "ok");
+    }
+
+// A different way back from an in-progress edit than "Auto-map fields":
+// that one asks the learning engine what IT would suggest fresh, which is
+// not always what THIS template actually has saved (a manually-corrected
+// mapping the learner would not have picked on its own). This re-derives
+// the mapping the exact same way loadTemplateIntoEditor() does, from the
+// same cached template object, without repeating the brand-lock/view-switch
+// side effects that function also does (already correct - we are still on
+// this same template).
+function restoreSavedTemplateMapping() {
+      const template = templatePaging?.byId?.[activeTemplateId];
+      if (!template) return;
+      const components = template.components?.mapper || template.components || {};
+      mappingSelections = { ...(components.fields || {}) };
+      const storedSourceFields = excludeBrandSentinel(Array.isArray(components.source_fields) ? components.source_fields : []);
+      const storedUnmappedFields = excludeBrandSentinel(Array.isArray(components.unmapped_fields) ? components.unmapped_fields : []);
+      const mappedValues = excludeBrandSentinel(Object.values(mappingSelections).filter(Boolean));
+      sourceFields = Array.from(new Set([...storedSourceFields, ...storedUnmappedFields, ...mappedValues]));
+      sourceFields.sort((a, b) => (fieldOrderIndex.get(a) ?? 999) - (fieldOrderIndex.get(b) ?? 999));
+      optionalMappingKeys = new Set(Object.keys(mappingSelections).filter((key) => !primaryMappingKeys.has(key)));
+      hiddenMappingKeys = new Set();
+      autoMappedKeys = new Set();
+      pendingUnsavedParse = false;
+      renderMappings();
+      setStatus("Mapping restored to what this template currently has saved.", "ok");
     }
 // With no live rows to preview, show the stored source columns so the editor
 // isn't a blank panel (the "source mapper view shows nothing" case) and it's

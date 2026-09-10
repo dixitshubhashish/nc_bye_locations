@@ -973,8 +973,17 @@ function syncMapLayersByZoom() {
   toggleMapLayer(stateCirclesLayerGroup, tier === "state");
   toggleMapLayer(cityCirclesLayerGroup, tier === "city");
   toggleMapLayer(zipCirclesLayerGroup, tier === "zip");
-  toggleMapLayer(storeMarkersLayerGroup, true);
-  toggleMapLayer(gapMarkersLayerGroup, true);
+  // Real bug, 2026-09-10 (user: "show less markers... more UI beautiful"):
+  // the section-3 comment above ("INDIVIDUAL STORE & GAP PIN MARKERS: Shown
+  // at zoom >= LISTING_TIER_ZOOM_THRESHOLD") documented the INTENT of a
+  // tier gate that was never actually wired here - both layers were
+  // unconditionally `true` regardless of `tier`, so ~1,000 individual
+  // listing pins rendered on top of the state bubbles even at the default
+  // national zoom. The state/city/zip drill-down above was already correct;
+  // this just makes the listing-level layers respect the same `tier` they
+  // were always supposed to.
+  toggleMapLayer(storeMarkersLayerGroup, tier === "listing");
+  toggleMapLayer(gapMarkersLayerGroup, tier === "listing");
 
   if (tier === "state") {
     // Zoomed back out to national tier: the sampled payload is the right
@@ -2714,15 +2723,11 @@ function startEnrichmentStatusPolling() {
             stopButton?.classList.remove("hidden");
           } else if (running) {
             target.className = "action-feedback";
-            // "Processed 0 records" is not a status, it's the absence of
-            // one - shown only once there is a real count (or at least a
-            // current record) to report, not on every render while a batch
-            // is still starting up.
-            const processed = Number(state.processed || 0);
-            const detail = processed > 0
-              ? ` <small>Processed ${processed} records${state.current_id ? `; current ${escapeHtml(state.current_id)}` : ""}.</small>`
-              : (state.current_id ? ` <small>Starting with ${escapeHtml(state.current_id)}.</small>` : "");
-            target.innerHTML = `${busyMarkup("Enriching in progress")}${detail}`;
+            // Explicit user ask (2026-09-10): the processed-record count is
+            // internal progress, not something to surface here at all - not
+            // "Processed 0 records", not "Processed 34 records" either.
+            // Just the busy state.
+            target.innerHTML = busyMarkup("Enriching in progress");
             stopButton?.classList.remove("hidden");
           } else if (state.state === "stopped") {
             target.className = "action-feedback warn";
