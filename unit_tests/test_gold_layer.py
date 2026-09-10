@@ -42,8 +42,10 @@ class GoldLayerTests(unittest.TestCase):
         self.assertIn("CREATE OR REPLACE VIEW `project.gold.vw_reporting_locations`", sql)
         self.assertIn("CREATE OR REPLACE VIEW `project.gold.vw_reporting_filter_options`", sql)
         self.assertIn("CREATE OR REPLACE VIEW `project.gold.vw_reporting_gap_base`", sql)
+        # Added 2026-09-10 for the Needs Review feature (list_needs_review()).
+        self.assertIn("CREATE OR REPLACE VIEW `project.gold.vw_listings_needs_review`", sql)
         self.assertEqual(result["gold_dataset"], "project.gold")
-        self.assertEqual(len(result["views"]), 5)
+        self.assertEqual(len(result["views"]), 6)
 
     def test_build_gold_layer_drops_the_views_nothing_ever_queried(self) -> None:
         # vw_state_summary, vw_city_summary, vw_listing_quality_summary,

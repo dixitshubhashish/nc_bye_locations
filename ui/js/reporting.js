@@ -446,6 +446,10 @@ let mapMarkerLayerGroup = null;
 let stateBoundaryLayerGroup = null;
 let stateCirclesLayerGroup = null;
 let cityCirclesLayerGroup = null;
+// ZIP-level drill-down tier (BUG-102): sits between the city circles and the
+// raw per-listing pins. Same aggregate-circle-with-tooltip pattern as the
+// city tier below, just keyed by zip_code instead of city+state.
+let zipCirclesLayerGroup = null;
 // These two were cross-named for a long time: the loop over map_records (the
 // individual listings) filled the group called "gap", and the loop over the
 // whitespace gap ZIPs filled the group called "pin". syncMapLayersByZoom()
@@ -456,6 +460,31 @@ let cityCirclesLayerGroup = null;
 // cannot be misled the same way.
 let gapMarkersLayerGroup = null;    // whitespace candidate ZIPs (orange)
 let storeMarkersLayerGroup = null;  // individual listings (blue/green/red)
+// National whitespace-strength heatmap overlay (opt-in, off by default - see
+// heatmapToggleBtn). Backed by GET /api/reporting/heatmap, ~31.6k square
+// cells nationwide (3km half-width from each cell's centroid). Two
+// perf choices, both deliberate given that cell count:
+//  1. A dedicated L.canvas() renderer instead of the default SVG one - SVG
+//     would mean 31k+ real DOM nodes (one per rectangle), which is the kind
+//     of thing that visibly freezes a browser tab; canvas draws all of them
+//     into one bitmap, so cost stays roughly constant regardless of how many
+//     shapes are in the layer.
+//  2. Every rectangle is built with `interactive: false`. Canvas hit-testing
+//     for mouse events on an interactive canvas layer is O(shapes-on-screen)
+//     PER mousemove - with 31k shapes that turns "hover the map" into a
+//     stutter. A per-cell tooltip was not worth that cost, so this overlay
+//     reads as pure color instead (bindHeatmapLegend() supplies the
+//     red-weak/green-strong key so the color still means something without
+//     hovering).
+// Data is fetched once and cached in heatmapCellsCache - toggling the layer
+// off/on again re-shows the already-built layer group rather than re-fetching
+// or rebuilding 31k rectangles a second time.
+let heatmapLayerGroup = null;
+let heatmapCanvasRenderer = null;
+let heatmapCellsCache = null;   // full /api/reporting/heatmap payload, once fetched
+let heatmapFetchPromise = null; // in-flight fetch, so a fast double-click can't fire two requests
+let heatmapVisible = false;
+let heatmapToggleListenerAttached = false;
 let staticMapZoom = 1;
 // Keep the complete contiguous US in view, with enough scale to read the
 // state-level layer without opening on an overly distant national view.
@@ -480,6 +509,13 @@ const MAP_RECORD_DISPLAY_CAP = 1000;
 // several thousand rows and the browser still has to render every marker.
 const SCOPED_MAP_ZOOM_THRESHOLD = 6.0;
 const SCOPED_MAP_FETCH_DEBOUNCE_MS = 450;
+// The four-tier zoom drill-down (BUG-102 adds the ZIP tier between city and
+// listing): nation -> state bubbles (< CITY_TIER_ZOOM_THRESHOLD) -> city
+// bubbles (< ZIP_TIER_ZOOM_THRESHOLD) -> ZIP bubbles (< LISTING_TIER_ZOOM_THRESHOLD)
+// -> individual listing pins. See syncMapLayersByZoom().
+const CITY_TIER_ZOOM_THRESHOLD = 6.0;
+const ZIP_TIER_ZOOM_THRESHOLD = 9.5;
+const LISTING_TIER_ZOOM_THRESHOLD = 13.0;
 // Per-scope caches so panning/zooming within a state already fetched does
 // not refire the request, and so switching scopes never mixes their rows.
 const scopedMapRecordsCache = new Map(); // scopeKey -> records[]
@@ -616,16 +652,286 @@ function layerHasContentInView(group) {
 // Add/remove without asking the caller to remember which state a layer is in.
 // The old add/remove pairs, written out three times per branch, are how the
 // two marker groups ended up being treated inconsistently in the first place.
+// A sticky hover tooltip tracks the mouse via a listener the tooltip itself
+// owns, not something that is torn down for free just because its marker is
+// about to be hidden/removed - if the user zooms (mouse never moves, e.g.
+// scroll-wheel/pinch) right as this group's tier is hidden, or a scoped
+// re-fetch rebuilds the layers under an open tooltip, an already-open
+// tooltip/popup on one of its markers can be left rendered on screen with
+// the OLD tier's aggregate count, while the layer actually now underneath
+// the cursor is a different tier (e.g. individual listing pins) - the "hover
+// info doesn't match what's in the background" report. Close them explicitly
+// before the layer is removed/cleared so nothing stale can linger.
+function closeGroupOverlays(group) {
+  if (!group) return;
+  group.eachLayer((layer) => {
+    if (typeof layer.closeTooltip === "function") layer.closeTooltip();
+    if (typeof layer.closePopup === "function") layer.closePopup();
+  });
+}
+
+// clearLayers() alone can leave the same stale-tooltip trace as removeLayer()
+// does below - always close what is open on a group before wiping it.
+function clearMapLayerGroup(group) {
+  if (!group) return;
+  closeGroupOverlays(group);
+  group.clearLayers();
+}
+
 function toggleMapLayer(group, visible) {
   if (!group || !reportingMap) return;
   const attached = reportingMap.hasLayer(group);
-  if (visible && !attached) reportingMap.addLayer(group);
-  else if (!visible && attached) reportingMap.removeLayer(group);
+  if (visible && !attached) {
+    reportingMap.addLayer(group);
+  } else if (!visible && attached) {
+    closeGroupOverlays(group);
+    reportingMap.removeLayer(group);
+  }
 }
 
-// The drill-down: nation -> state bubbles, state -> city bubbles, city ->
-// individual listings. Only the two AGGREGATE layers are zoom-gated; the
-// markers that represent real rows are not.
+// Red (score 0, weak market) -> green (score 1, strong market), a simple HSL
+// hue sweep (0=red to 120=green). Fixed, readable saturation/lightness so the
+// scale stays legible over the light OSM basemap at typical zoom levels
+// rather than washing out pale or turning near-black.
+// Exact 10-color decile palette, user-specified (2026-09-10) - discrete
+// bins by percentile rank ("Ntile"), not a continuous gradient. Index 0 is
+// RED and is used for the HIGHEST-scoring decile; index 9 is GREEN, for the
+// LOWEST-scoring decile - user-directed ordering ("red having highest
+// score and ending green"), the reverse of the red=weak/green=strong
+// framing this map used earlier today. If that reads backwards later,
+// this is the one place to flip: reverse HEATMAP_DECILE_COLORS.
+const HEATMAP_DECILE_COLORS = [
+  "#E53935", "#F4511E", "#FB8C00", "#FFA726", "#FDD835",
+  "#D4E157", "#9CCC65", "#7CB342", "#43A047", "#2E7D32",
+];
+function heatmapScoreColor(percentile) {
+  const clamped = Math.max(0, Math.min(1, Number(percentile) || 0));
+  // 10 even bins: [0, .1) -> bin 0, ... [.9, 1] -> bin 9. Math.min guards
+  // the exact percentile===1 edge case (which would otherwise compute
+  // bin 10, one past the array).
+  const bin = Math.min(9, Math.floor(clamped * 10));
+  // Reversed: bin 9 (top decile, highest scores) -> palette index 0 (red).
+  return HEATMAP_DECILE_COLORS[9 - bin];
+}
+
+// State/city strength coloring (2026-09-10): the state/city zoom-tier bubbles
+// reuse the EXACT SAME 0..1 score `/api/reporting/heatmap` already computes
+// per 6km cell (backend rolls it up with a listing_count+zip_count weighted
+// average - see reporting_heatmap()'s docstring in workflow_server.py for the
+// weighting reasoning), rescaled through the SAME percentile ranking as the
+// square-cell layer below so a state/city bubble's color means exactly the
+// same thing as a cell's color on the same map.
+//
+// Percentile rank, not linear min-max (user-directed): this dataset's raw
+// scores cluster tightly (measured live: 0.0-0.54, most cells well under
+// 0.3), so a straight (value-lo)/(hi-lo) rescale still leaves the bulk of
+// cells crammed into a narrow slice of the color range if that bulk itself
+// is skewed toward one end - exactly what "auto broken into percentile, not
+// hardcoded" is asking to fix. Ranking by WHERE a score falls among every
+// other score (its percentile) guarantees the visible color range is always
+// used evenly, regardless of how skewed the underlying value distribution
+// is. heatmapScoreSorted is set once buildHeatmapLayer() has seen the
+// payload; until then rescaleHeatmapScore() returns a neutral midpoint and
+// callers fall back to their pre-existing static styling.
+let heatmapScoreSorted = [];
+
+function computeHeatmapScoreRange(payload) {
+  const cells = Array.isArray(payload?.cells) ? payload.cells : [];
+  const usCells = cells.filter((cell) => isUSLatLong(Number(cell.lat), Number(cell.lon)));
+  const rawScores = usCells.map((cell) => Number(cell.score) || 0);
+  rawScores.sort((a, b) => a - b);
+  return rawScores;
+}
+
+// Percentile rank of `score` within the sorted distribution, via binary
+// search - O(log n) per lookup, done once per cell/state/city at render
+// time (tens of thousands of cells, this stays fast).
+function rescaleHeatmapScore(score) {
+  const sorted = heatmapScoreSorted;
+  if (!sorted.length) return 0.5;
+  const value = Number(score) || 0;
+  let lo = 0, hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (sorted[mid] < value) lo = mid + 1; else hi = mid;
+  }
+  return sorted.length > 1 ? lo / (sorted.length - 1) : 0.5;
+}
+
+function heatmapColorForState(stateCode) {
+  const rows = heatmapCellsCache && Array.isArray(heatmapCellsCache.state_scores) ? heatmapCellsCache.state_scores : null;
+  if (!rows) return null;
+  const row = rows.find((r) => String(r.state || "").toUpperCase() === String(stateCode || "").toUpperCase());
+  if (!row) return null; // no cell data resolved for this state - fall back to static styling
+  return { color: heatmapScoreColor(rescaleHeatmapScore(row.score)), row };
+}
+
+function heatmapColorForCity(cityName, stateCode) {
+  const rows = heatmapCellsCache && Array.isArray(heatmapCellsCache.city_scores) ? heatmapCellsCache.city_scores : null;
+  if (!rows) return null;
+  const wantCity = String(cityName || "").trim().toLowerCase();
+  const wantState = String(stateCode || "").toUpperCase();
+  const row = rows.find((r) => String(r.city || "").trim().toLowerCase() === wantCity && String(r.state || "").toUpperCase() === wantState);
+  if (!row) return null;
+  return { color: heatmapScoreColor(rescaleHeatmapScore(row.score)), row };
+}
+
+// Rebuilds one state bubble's divIcon in place (color only) once heatmap
+// scores land after the bubble was already drawn - see
+// applyHeatmapScoreColorsToCircleTiers().
+function buildStateBubbleIcon(stateCode, hasRecords, size, bg, border, textColor) {
+  const html = hasRecords
+    ? `<div style="width:${size}px; height:${size}px; line-height:${size - 4}px; border-radius:50%; background:${bg}; border:2px solid ${border}; color:${textColor}; font-size:11px; font-weight:800; text-align:center; box-sizing:border-box; cursor:pointer; box-shadow:0 1px 4px rgba(0,0,0,0.15);">${escapeHtml(stateCode)}</div>`
+    : `<div style="width:${size}px; height:${size}px; line-height:${size - 2}px; border-radius:50%; background:${bg}; border:1px solid ${border}; color:${textColor}; font-size:10px; font-weight:700; text-align:center; box-sizing:border-box; cursor:pointer; box-shadow:0 1px 2px rgba(0,0,0,0.08);">${escapeHtml(stateCode)}</div>`;
+  return L.divIcon({ className: "", html, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
+}
+
+// Registries populated fresh on every renderReportingMap() call, so a
+// heatmap payload landing AFTER that render (the common case - it's fetched
+// once, async, in showHeatmapLayerByDefault) can still recolor the
+// already-drawn bubbles in place instead of waiting for the next full
+// re-render. Keyed by state code / "city|STATE".
+let stateBubbleRegistry = new Map();
+let cityCircleRegistry = new Map();
+
+// Called once after fetchHeatmapCells() first resolves, and harmlessly a
+// no-op if the state/city layers have not been built yet or already carry
+// the right colors from being built after the payload landed.
+function applyHeatmapScoreColorsToCircleTiers() {
+  stateBubbleRegistry.forEach((entry, stateCode) => {
+    const scored = entry.hasRecords ? heatmapColorForState(stateCode) : null;
+    if (!scored) return;
+    const bg = scored.color;
+    entry.marker.setIcon(buildStateBubbleIcon(stateCode, entry.hasRecords, entry.size, bg, bg, "#ffffff"));
+    entry.marker.setTooltipContent(stateBubbleTooltipHtml(entry.stateName, entry.storeCount, entry.hasRecords, scored.row));
+  });
+  cityCircleRegistry.forEach((entry) => {
+    const scored = heatmapColorForCity(entry.city, entry.state);
+    if (!scored) return;
+    entry.marker.setStyle({ fillColor: scored.color, color: scored.color });
+    entry.marker.setTooltipContent(cityBubbleTooltipHtml(entry.city, entry.state, entry.count, scored.row));
+  });
+}
+
+// Shared tooltip builders so the initial render and the post-fetch recolor
+// above produce byte-identical markup - a whitespace-strength line is only
+// added when a rolled-up score actually exists for that state/city.
+function heatmapStrengthLine(row) {
+  if (!row) return "";
+  const pct = Math.round((Number(row.score) || 0) * 100);
+  return `<br/><span style="color:#334155; font-size:12px;">Whitespace strength: <strong>${pct}%</strong> <span style="color:#94a3b8;">(${formatNumber(row.zip_count || 0)} ZIPs, ${formatNumber(row.cell_count || 0)} cells)</span></span>`;
+}
+
+function stateBubbleTooltipHtml(stateName, storeCount, hasRecords, scoreRow) {
+  return `
+    <div style="font-family: system-ui, -apple-system, sans-serif; font-size: 13px; line-height: 1.4; padding: 2px 4px;">
+      <strong style="color: #0f172a; font-size: 14px;">${escapeHtml(stateName)}</strong><br/>
+      <span style="color: ${hasRecords ? '#2563eb' : '#64748b'}; font-weight: 700; font-size: 13px;">${formatNumber(storeCount)} Listing${storeCount === 1 ? "" : "s"}</span>
+      ${heatmapStrengthLine(scoreRow)}
+    </div>
+  `;
+}
+
+function cityBubbleTooltipHtml(city, state, count, scoreRow) {
+  return `
+    <div style="font-family: system-ui, -apple-system, sans-serif; font-size: 13px; line-height: 1.4; padding: 2px 4px;">
+      <strong style="color: #0f172a; font-size: 14px;">${escapeHtml(city)}, ${escapeHtml(state)}</strong><br/>
+      <span style="color: #7c3aed; font-weight: 700; font-size: 13px;">${formatNumber(count)} Listing${count === 1 ? "" : "s"}</span>
+      ${heatmapStrengthLine(scoreRow)}
+    </div>
+  `;
+}
+
+// Builds the 31k-ish rectangles once from a cached /api/reporting/heatmap
+// payload. See the heatmapLayerGroup comment above for why canvas +
+// non-interactive shapes were chosen over the default SVG/interactive path.
+function buildHeatmapLayer(payload) {
+  if (!heatmapLayerGroup) return;
+  clearMapLayerGroup(heatmapLayerGroup);
+  const cells = Array.isArray(payload?.cells) ? payload.cells : [];
+  const halfWidthKm = Number(payload?.cell_half_width_km) || 3.0;
+  const KM_PER_DEGREE_LAT = 111.32;
+  // The backend's score is min-max normalized across ALL cells nationwide,
+  // but the real spread of that normalization (measured live) only reaches
+  // about 0.0-0.54, never approaching 1.0 - no single 6km cell is uniformly
+  // "the strongest possible" on every one of listings/income/population at
+  // once. Feeding that narrow band straight into a 0=red/1=green hue scale
+  // meant almost every cell landed in the red-to-orange third of the scale,
+  // which is why this read as "all squares the same color." Re-stretching
+  // the OBSERVED min/max of THIS payload across the full color range (not
+  // the theoretical 0..1) is what actually makes weak vs. strong markets
+  // visually distinguishable - a relative "strongest area on the current
+  // map" comparison, same spirit as the backend's own per-payload
+  // normalization, just carried one step further for the part a human eye
+  // actually has to be able to tell apart.
+  const usCells = cells.filter((cell) => isUSLatLong(Number(cell.lat), Number(cell.lon)));
+  // Shared with the state/city bubble coloring below (heatmapColorForState/
+  // heatmapColorForCity) so a state bubble's color and a cell's color mean
+  // exactly the same position on the same rescaled 0..1 range - "consistent
+  // strength story at every zoom level" per the 2026-09-10 ask, not two
+  // scales that happen to look similar.
+  heatmapScoreSorted = computeHeatmapScoreRange(payload);
+  usCells.forEach((cell) => {
+    const lat = Number(cell.lat);
+    const lon = Number(cell.lon);
+    if (!isFinite(lat) || !isFinite(lon)) return;
+    const halfLatDeg = halfWidthKm / KM_PER_DEGREE_LAT;
+    // Degrees of longitude shrink toward the poles - computed per-cell off
+    // that cell's own latitude so every square reads approximately square in
+    // real-world km, from the Gulf Coast up to the Canadian border, matching
+    // how the backend gridded these cells in the first place.
+    const halfLonDeg = halfWidthKm / (KM_PER_DEGREE_LAT * Math.max(0.01, Math.cos(lat * Math.PI / 180)));
+    const bounds = [[lat - halfLatDeg, lon - halfLonDeg], [lat + halfLatDeg, lon + halfLonDeg]];
+    const color = heatmapScoreColor(rescaleHeatmapScore(Number(cell.score) || 0));
+    L.rectangle(bounds, {
+      renderer: heatmapCanvasRenderer,
+      stroke: false,
+      fillColor: color,
+      fillOpacity: 0.55,
+      interactive: false
+    }).addTo(heatmapLayerGroup);
+  });
+}
+
+async function fetchHeatmapCells() {
+  if (heatmapCellsCache) return heatmapCellsCache;
+  if (heatmapFetchPromise) return heatmapFetchPromise;
+  heatmapFetchPromise = fetch("/api/reporting/heatmap")
+    .then((response) => (response.ok ? response.json() : null))
+    .then((data) => {
+      if (data && Array.isArray(data.cells)) heatmapCellsCache = data;
+      return heatmapCellsCache;
+    })
+    .catch(() => null)
+    .finally(() => { heatmapFetchPromise = null; });
+  return heatmapFetchPromise;
+}
+
+// Default ON, no toggle button (user-directed, 2026-09-10 - this used to
+// be opt-in behind #heatmapToggleBtn; the button and every reference to it
+// are gone now, this just shows the layer the first time the map itself is
+// ready). Still fetched/built only once and cached, same performance
+// approach as before (L.canvas(), non-interactive rectangles) - showing it
+// by default doesn't change the cost of building it, only when that cost
+// is paid.
+async function showHeatmapLayerByDefault() {
+  if (!reportingMap || !heatmapLayerGroup || heatmapVisible) return;
+  const payload = await fetchHeatmapCells();
+  if (!payload) return; // fetch failed - leave it off rather than show nothing
+  if (heatmapLayerGroup.getLayers().length === 0) buildHeatmapLayer(payload);
+  heatmapVisible = true;
+  reportingMap.addLayer(heatmapLayerGroup);
+  // The state/city bubbles for the CURRENT render were almost certainly
+  // built already (this fetch is async and this is the only place it's
+  // triggered) using their pre-heatmap fallback colors - recolor them now
+  // that state_scores/city_scores actually exist, in place, without waiting
+  // for the next full renderReportingMap() call.
+  applyHeatmapScoreColorsToCircleTiers();
+}
+
+// The drill-down: nation -> state bubbles, state -> city bubbles, city -> ZIP
+// bubbles (BUG-102), ZIP -> individual listings. Only the three AGGREGATE
+// layers are zoom-gated; the markers that represent real rows are not.
 //
 // The listing markers (blue when no primary brand is chosen, green for the
 // primary brand, red for competitors) and the whitespace gap ZIPs (orange)
@@ -640,17 +946,25 @@ function syncMapLayersByZoom() {
   const activeCityFilter = String(el("reportCityFilter")?.value || "").trim();
   const activeZipFilter = String(el("reportZipFilter")?.value || "").trim();
   // Filtering to one city or ZIP means the user is already "there", whatever
-  // the zoom reads - summarising a single city as one bubble helps nobody.
-  const isListingLevel = Boolean(activeCityFilter || activeZipFilter) || currentZoom >= 9.5;
-  let tier = isListingLevel ? "listing" : (currentZoom >= 6.0 ? "city" : "state");
+  // the zoom reads - summarising a single city/ZIP as one bubble helps nobody.
+  const isListingLevel = Boolean(activeCityFilter || activeZipFilter) || currentZoom >= LISTING_TIER_ZOOM_THRESHOLD;
+  let tier = isListingLevel
+    ? "listing"
+    : (currentZoom >= ZIP_TIER_ZOOM_THRESHOLD
+        ? "zip"
+        : (currentZoom >= CITY_TIER_ZOOM_THRESHOLD ? "city" : "state"));
 
-  // BB14 guard, kept: never hand over to a tier that has nothing in it. The
-  // layers are built from different payloads (state bubbles from top_states,
-  // city bubbles and listing markers from map_records, which the server caps
-  // at 1000 rows), so a tier can legitimately be empty while the one below it
-  // is full. Falling back beats handing the user a blank map.
+  // BB14 guard, kept and extended for the new ZIP tier: never hand over to a
+  // tier that has nothing in it. The layers are built from different
+  // payloads (state bubbles from top_states, city/ZIP bubbles and listing
+  // markers from map_records, which the server caps), so a tier can
+  // legitimately be empty while the one below it is full. Falling back beats
+  // handing the user a blank map.
   if (tier === "listing" && !layerHasContentInView(storeMarkersLayerGroup)) {
-    tier = currentZoom >= 6.0 ? "city" : "state";
+    tier = currentZoom >= ZIP_TIER_ZOOM_THRESHOLD ? "zip" : (currentZoom >= CITY_TIER_ZOOM_THRESHOLD ? "city" : "state");
+  }
+  if (tier === "zip" && !layerHasContentInView(zipCirclesLayerGroup)) {
+    tier = currentZoom >= CITY_TIER_ZOOM_THRESHOLD ? "city" : "state";
   }
   if (tier === "city" && !layerHasContentInView(cityCirclesLayerGroup)) {
     tier = "state"; // and if the state bubbles are empty too, there was genuinely nothing to draw
@@ -658,6 +972,7 @@ function syncMapLayersByZoom() {
 
   toggleMapLayer(stateCirclesLayerGroup, tier === "state");
   toggleMapLayer(cityCirclesLayerGroup, tier === "city");
+  toggleMapLayer(zipCirclesLayerGroup, tier === "zip");
   toggleMapLayer(storeMarkersLayerGroup, true);
   toggleMapLayer(gapMarkersLayerGroup, true);
 
@@ -766,9 +1081,16 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [],
         stateBoundaryLayerGroup = L.layerGroup().addTo(reportingMap);
         stateCirclesLayerGroup = L.layerGroup().addTo(reportingMap);
         cityCirclesLayerGroup = L.layerGroup().addTo(reportingMap);
+        zipCirclesLayerGroup = L.layerGroup().addTo(reportingMap);
         gapMarkersLayerGroup = L.layerGroup().addTo(reportingMap);
         storeMarkersLayerGroup = L.layerGroup().addTo(reportingMap);
+        // Not added to the map yet - showHeatmapLayerByDefault() (below)
+        // fetches and attaches it once the map itself is ready. Built once
+        // and left attached from then on, never rebuilt.
+        heatmapCanvasRenderer = L.canvas({ padding: 0.5 });
+        heatmapLayerGroup = L.layerGroup();
       }
+      showHeatmapLayerByDefault();
       if (!mapZoomListenerAttached && reportingMap) {
         // moveend as well as zoomend: which tier is worth showing now depends
         // on what is in the current view (layerHasContentInView), so panning
@@ -780,12 +1102,17 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [],
         reportingMap.on("moveend", syncMapLayersByZoom);
         mapZoomListenerAttached = true;
       }
-      if (mapMarkerLayerGroup) mapMarkerLayerGroup.clearLayers();
-      if (stateBoundaryLayerGroup) stateBoundaryLayerGroup.clearLayers();
-      if (stateCirclesLayerGroup) stateCirclesLayerGroup.clearLayers();
-      if (cityCirclesLayerGroup) cityCirclesLayerGroup.clearLayers();
-      if (gapMarkersLayerGroup) gapMarkersLayerGroup.clearLayers();
-      if (storeMarkersLayerGroup) storeMarkersLayerGroup.clearLayers();
+      clearMapLayerGroup(mapMarkerLayerGroup);
+      clearMapLayerGroup(stateBoundaryLayerGroup);
+      clearMapLayerGroup(stateCirclesLayerGroup);
+      clearMapLayerGroup(cityCirclesLayerGroup);
+      // Rebuilt fresh below - stale entries here would recolor markers that
+      // no longer exist if a heatmap fetch resolves after this render.
+      stateBubbleRegistry = new Map();
+      cityCircleRegistry = new Map();
+      clearMapLayerGroup(zipCirclesLayerGroup);
+      clearMapLayerGroup(gapMarkersLayerGroup);
+      clearMapLayerGroup(storeMarkersLayerGroup);
 
       const primaryBrand = selectedPrimaryBrand(filters);
       const primaryBrandKey = primaryBrand.toLowerCase();
@@ -813,12 +1140,28 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [],
       getUSStatesGeoJSON()
         .then((geojson) => {
           if (!geojson || !stateBoundaryLayerGroup) return;
-          stateBoundaryLayerGroup.clearLayers();
+          clearMapLayerGroup(stateBoundaryLayerGroup);
           L.geoJSON(geojson, {
             style: (feature) => {
               const code = stateNameToCode[feature?.properties?.name] || "";
               const isSelected = activeStateFilter && code === activeStateFilter;
               const hasData = (boundaryStateCounts.get(code) || 0) > 0;
+              // Paint the ENTIRE state shape with its strength-decile color
+              // (user-directed, 2026-09-10 - "paint entire state on that
+              // layer color", not just the small centroid bubble/circle
+              // elsewhere on this map). heatmapColorForState() returns null
+              // until the heatmap payload has loaded, or if this state
+              // resolved no cells at all - the pre-existing blue/gray
+              // styling below is the fallback for both cases.
+              const heat = typeof heatmapColorForState === "function" ? heatmapColorForState(code) : null;
+              if (heat) {
+                return {
+                  color: isSelected ? "#16a34a" : "#374151",
+                  weight: isSelected ? 2.4 : 0.9,
+                  fillColor: heat.color,
+                  fillOpacity: isSelected ? 0.85 : 0.65
+                };
+              }
               return {
                 color: isSelected ? "#16a34a" : (hasData ? "#2563eb" : "#94a3b8"),
                 weight: isSelected ? 2.2 : (hasData ? 1.4 : 0.8),
@@ -859,26 +1202,25 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [],
 
         const radius = hasRecords ? Math.max(13, Math.min(26, Math.round(Math.sqrt(storeCount) * 1.5 + 9))) : 12;
         const size = radius * 2;
-        const markerHtml = hasRecords
-          ? `<div style="width:${size}px; height:${size}px; line-height:${size - 4}px; border-radius:50%; background:#e7f0ff; border:2px solid #2563eb; color:#1e40af; font-size:11px; font-weight:800; text-align:center; box-sizing:border-box; cursor:pointer; box-shadow:0 1px 4px rgba(0,0,0,0.15);">${escapeHtml(stateCode)}</div>`
-          : `<div style="width:${size}px; height:${size}px; line-height:${size - 2}px; border-radius:50%; background:rgba(255,255,255,0.85); border:1px solid #cbd5e1; color:#475569; font-size:10px; font-weight:700; text-align:center; box-sizing:border-box; cursor:pointer; box-shadow:0 1px 2px rgba(0,0,0,0.08);">${escapeHtml(stateCode)}</div>`;
+        // Whitespace-strength score (2026-09-10 ask): color the bubble by
+        // the SAME red-green score the square-cell heatmap uses, rolled up
+        // to state level server-side (reporting_heatmap()'s state_scores,
+        // weighted by zip_count+listing_count - see its docstring). Falls
+        // back to the original flat blue/gray styling when no heatmap
+        // payload has loaded yet or no cell data resolved to this state
+        // (e.g. a state with listings but no coordinate-resolved ZIPs).
+        const scored = hasRecords ? heatmapColorForState(stateCode) : null;
+        const bubbleBg = scored ? scored.color : (hasRecords ? "#e7f0ff" : "rgba(255,255,255,0.85)");
+        const bubbleBorder = scored ? scored.color : (hasRecords ? "#2563eb" : "#cbd5e1");
+        const bubbleText = scored ? "#ffffff" : (hasRecords ? "#1e40af" : "#475569");
 
         const marker = L.marker([lat, lon], {
-          icon: L.divIcon({
-            className: "",
-            html: markerHtml,
-            iconSize: [size, size],
-            iconAnchor: [radius, radius]
-          })
+          icon: buildStateBubbleIcon(stateCode, hasRecords, size, bubbleBg, bubbleBorder, bubbleText)
         });
 
-        // Interactive hover tooltip showing full state name and exact listing count
-        marker.bindTooltip(`
-          <div style="font-family: system-ui, -apple-system, sans-serif; font-size: 13px; line-height: 1.4; padding: 2px 4px;">
-            <strong style="color: #0f172a; font-size: 14px;">${escapeHtml(stateName)}</strong><br/>
-            <span style="color: ${hasRecords ? '#2563eb' : '#64748b'}; font-weight: 700; font-size: 13px;">${formatNumber(storeCount)} Listing${storeCount === 1 ? "" : "s"}</span>
-          </div>
-        `, {
+        // Interactive hover tooltip showing full state name, exact listing
+        // count, and (once available) the rolled-up whitespace-strength score.
+        marker.bindTooltip(stateBubbleTooltipHtml(stateName, storeCount, hasRecords, scored?.row), {
           permanent: false,
           sticky: true,
           opacity: 0.96,
@@ -895,9 +1237,10 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [],
         });
 
         stateCirclesLayerGroup.addLayer(marker);
+        stateBubbleRegistry.set(stateCode, { marker, hasRecords, size, storeCount, stateName });
       });
 
-      // 2. CITY CIRCLES: Aggregated at city level, shown at zoom 6-8 before marker pins appear
+      // 2. CITY CIRCLES: Aggregated at city level, shown between CITY_TIER_ZOOM_THRESHOLD and ZIP_TIER_ZOOM_THRESHOLD
       const cityAggregates = new Map();
       mapRecords.forEach((rec) => {
         const lat = parseFloat(rec.latitude);
@@ -928,22 +1271,25 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [],
         bounds.push([avgLat, avgLon]);
         focusBounds.push([avgLat, avgLon]);
 
+        // Whitespace-strength score (2026-09-10 ask), city grain: same
+        // reasoning/fallback as the state bubbles above, via
+        // reporting_heatmap()'s city_scores.
+        const cityScored = heatmapColorForCity(item.city, item.state);
+        const cityFill = cityScored ? cityScored.color : "#f3e8ff";
+        const cityStroke = cityScored ? cityScored.color : "#7c3aed";
+
         const cityMarker = L.circleMarker([avgLat, avgLon], {
           radius: Math.max(7, Math.min(22, Math.sqrt(item.count) * 2.2)),
-          fillColor: "#f3e8ff",
-          color: "#7c3aed",
+          fillColor: cityFill,
+          color: cityStroke,
           weight: 2,
           opacity: 0.92,
           fillOpacity: 0.88
         });
 
-        // Hover tooltip showing city, state and exact listing count
-        cityMarker.bindTooltip(`
-          <div style="font-family: system-ui, -apple-system, sans-serif; font-size: 13px; line-height: 1.4; padding: 2px 4px;">
-            <strong style="color: #0f172a; font-size: 14px;">${escapeHtml(item.city)}, ${escapeHtml(item.state)}</strong><br/>
-            <span style="color: #7c3aed; font-weight: 700; font-size: 13px;">${formatNumber(item.count)} Listing${item.count === 1 ? "" : "s"}</span>
-          </div>
-        `, {
+        // Hover tooltip showing city, state, exact listing count, and (once
+        // available) the rolled-up whitespace-strength score.
+        cityMarker.bindTooltip(cityBubbleTooltipHtml(item.city, item.state, item.count, cityScored?.row), {
           sticky: true,
           opacity: 0.96,
           offset: [0, -8]
@@ -958,17 +1304,102 @@ function renderReportingMap(mapRecords = [], gapRecords = [], stateRecords = [],
         });
 
         cityCirclesLayerGroup.addLayer(cityMarker);
+        cityCircleRegistry.set(`${item.city.toLowerCase()}|${item.state}`, { marker: cityMarker, city: item.city, state: item.state, count: item.count });
       });
 
-      // 3. INDIVIDUAL STORE & GAP PIN MARKERS: Shown at zoom >= 9.5 or when filtered to specific city/zip
+      // 2b. ZIP CIRCLES (BUG-102): Aggregated at ZIP level, shown at zoom
+      // ZIP_TIER_ZOOM_THRESHOLD-LISTING_TIER_ZOOM_THRESHOLD, between the city
+      // circles and the individual listing pins - same tooltip pattern as
+      // the city circles above (hover shows the ZIP, city/state and exact
+      // listing count), keyed by zip_code instead of city+state.
+      const zipAggregates = new Map();
+      mapRecords.forEach((rec) => {
+        const lat = parseFloat(rec.latitude);
+        const lon = parseFloat(rec.longitude);
+        if (!isUSLatLong(lat, lon)) return;
+        const zipCode = String(rec.zip_code || "").trim();
+        if (!zipCode) return;
+        const cityName = String(rec.city || "").trim();
+        const stateCode = String(rec.state || rec.state_name || "").toUpperCase().trim();
+        if (!zipAggregates.has(zipCode)) {
+          zipAggregates.set(zipCode, {
+            zip: zipCode,
+            city: cityName,
+            state: stateCode,
+            lats: [],
+            lons: [],
+            count: 0
+          });
+        }
+        const item = zipAggregates.get(zipCode);
+        item.lats.push(lat);
+        item.lons.push(lon);
+        item.count += 1;
+      });
+
+      zipAggregates.forEach((item) => {
+        const avgLat = item.lats.reduce((a, b) => a + b, 0) / item.lats.length;
+        const avgLon = item.lons.reduce((a, b) => a + b, 0) / item.lons.length;
+
+        const zipMarker = L.circleMarker([avgLat, avgLon], {
+          radius: Math.max(6, Math.min(18, Math.sqrt(item.count) * 2)),
+          fillColor: "#cffafe",
+          color: "#0891b2",
+          weight: 2,
+          opacity: 0.92,
+          fillOpacity: 0.88
+        });
+
+        // Hover tooltip showing ZIP, city/state and exact listing count -
+        // the same interaction pattern the city circles use above.
+        const cityStateLabel = [item.city, item.state].filter(Boolean).join(", ");
+        zipMarker.bindTooltip(`
+          <div style="font-family: system-ui, -apple-system, sans-serif; font-size: 13px; line-height: 1.4; padding: 2px 4px;">
+            <strong style="color: #0f172a; font-size: 14px;">ZIP ${escapeHtml(item.zip)}</strong>${cityStateLabel ? `<br/><span style="color: #475569;">${escapeHtml(cityStateLabel)}</span>` : ""}<br/>
+            <span style="color: #0891b2; font-weight: 700; font-size: 13px;">${formatNumber(item.count)} Listing${item.count === 1 ? "" : "s"}</span>
+          </div>
+        `, {
+          sticky: true,
+          opacity: 0.96,
+          offset: [0, -8]
+        });
+
+        // Click on a ZIP bubble zooms into it at pin level, same pattern as
+        // the city bubble click above.
+        zipMarker.on("click", () => {
+          if (item.state) currentMapScopeState = item.state;
+          if (reportingMap) reportingMap.setView([avgLat, avgLon], LISTING_TIER_ZOOM_THRESHOLD + 1);
+        });
+
+        zipCirclesLayerGroup.addLayer(zipMarker);
+      });
+
+      // 3. INDIVIDUAL STORE & GAP PIN MARKERS: Shown at zoom >= LISTING_TIER_ZOOM_THRESHOLD or when filtered to specific city/zip
       mapRecords.forEach((rec) => {
         const lat = parseFloat(rec.latitude);
         const lon = parseFloat(rec.longitude);
         if (!isUSLatLong(lat, lon)) return; // Discard non-US coordinates
         bounds.push([lat, lon]);
         focusBounds.push([lat, lon]);
+        // Position is the source of truth for "is this really a US point,"
+        // `country` a secondary tiebreaker only (user-directed) - this
+        // dataset has real state/country/coordinate mismatches (a row can
+        // carry state="OR" and country="Canada" and a coordinate in New
+        // York simultaneously, see the Oregon investigation in codex.md),
+        // so trusting `country` alone colored a large fraction of visibly
+        // US-positioned points black. `rec.state` is not a raw label - it
+        // is the OUTPUT of the geo-enrichment pipeline's coordinate-to-ZIP
+        // matching against real US reference data, so a populated state
+        // code IS a position-derived signal, stronger than the loose
+        // lat/lon bounding box isUSLatLong() uses. Only fall back to the
+        // `country` field when no state resolved at all (position gave no
+        // answer, so the label is what's left to go on).
+        const hasResolvedUsState = Boolean(String(rec.state || "").trim());
+        const countryNormalized = String(rec.country || "").trim().toLowerCase();
+        const countryLooksNonUs = countryNormalized && !["us", "usa", "united states", "united states of america"].includes(countryNormalized);
+        const isNonUs = !hasResolvedUsState && countryLooksNonUs;
         const isPrimary = primaryBrandKey && String(rec.brand || "").toLowerCase() === primaryBrandKey;
-        const color = primaryBrandKey ? (isPrimary ? "#16a34a" : "#dc2626") : "#3b82f6";
+        const color = isNonUs ? "#000000" : (primaryBrandKey ? (isPrimary ? "#16a34a" : "#dc2626") : "#3b82f6");
         const stateLabel = rec.state_name || rec.state || "";
 
         const marker = L.marker([lat, lon], {
@@ -2283,7 +2714,15 @@ function startEnrichmentStatusPolling() {
             stopButton?.classList.remove("hidden");
           } else if (running) {
             target.className = "action-feedback";
-            target.innerHTML = `${busyMarkup("Enriching in progress")} <small>Processed ${Number(state.processed || 0)} records${state.current_id ? `; current ${escapeHtml(state.current_id)}` : ""}.</small>`;
+            // "Processed 0 records" is not a status, it's the absence of
+            // one - shown only once there is a real count (or at least a
+            // current record) to report, not on every render while a batch
+            // is still starting up.
+            const processed = Number(state.processed || 0);
+            const detail = processed > 0
+              ? ` <small>Processed ${processed} records${state.current_id ? `; current ${escapeHtml(state.current_id)}` : ""}.</small>`
+              : (state.current_id ? ` <small>Starting with ${escapeHtml(state.current_id)}.</small>` : "");
+            target.innerHTML = `${busyMarkup("Enriching in progress")}${detail}`;
             stopButton?.classList.remove("hidden");
           } else if (state.state === "stopped") {
             target.className = "action-feedback warn";

@@ -345,7 +345,8 @@ class CsvWorkflowTests(unittest.TestCase):
                 with patch("whitespace_tool.workflow_server._warehouse_settings", return_value=("project", "dataset", None)):
                     with patch("whitespace_tool.workflow_server._bigquery_client", return_value=object()):
                         with patch("whitespace_tool.workflow_server._dedupe_listings_against_bronze", side_effect=fake_dedupe):
-                            with patch("whitespace_tool.workflow_server.push_to_bigquery", side_effect=fake_push):
+                            with patch("whitespace_tool.workflow_server.push_to_bigquery", side_effect=fake_push), \
+                                 patch("whitespace_tool.workflow_server._maybe_refresh_after_save"):
                                 result = save_mapper({"mapper": VALID_MAPPER, "rows": rows, "source_fields": list(VALID_ROW)})
 
         self.assertEqual(result["total_rows"], 3)
@@ -377,7 +378,8 @@ class CsvWorkflowTests(unittest.TestCase):
                 with patch("whitespace_tool.workflow_server._warehouse_settings", return_value=("project", "dataset", None)):
                     with patch("whitespace_tool.workflow_server._bigquery_client", return_value=object()):
                         with patch("whitespace_tool.workflow_server._dedupe_listings_against_bronze", side_effect=fake_dedupe):
-                            with patch("whitespace_tool.workflow_server.push_to_bigquery", side_effect=fake_push):
+                            with patch("whitespace_tool.workflow_server.push_to_bigquery", side_effect=fake_push), \
+                                 patch("whitespace_tool.workflow_server._maybe_refresh_after_save"):
                                 first = save_mapper({
                                     "mapper": dict(VALID_MAPPER),
                                     "rows": [rows[0]],

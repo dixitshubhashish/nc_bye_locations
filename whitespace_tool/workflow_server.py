@@ -14,6 +14,7 @@ import io
 import logging
 import os
 from pathlib import Path
+import random
 import socketserver
 import threading
 from time import perf_counter, sleep, time as wall_clock_time
@@ -108,6 +109,19 @@ LOGGER = _build_logger()
 ZIP_REFERENCE_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 REPORTING_REFRESH_LOCK = threading.Lock()
 REPORTING_REFRESHING = False
+# Set when a save/refresh request arrives WHILE a rebuild is already running
+# (user-identified gap, 2026-09-10): the request that finds REPORTING_REFRESHING
+# already True used to just skip outright with nothing recorded, so data
+# saved during an in-flight rebuild was not guaranteed to be picked up by
+# ANY rebuild until the next hourly scheduled tick (up to an hour later) -
+# more concurrent saves did not mean more enrichment, it meant most of them
+# were silently absorbed with no follow-up. The currently-running rebuild
+# checks this flag right before it finishes and, if set, loops immediately
+# into another pass instead of going idle - so a burst of saves during one
+# rebuild is guaranteed a fresh rebuild right after it, without spawning a
+# second concurrent one (which build_silver_layer()'s own locking would
+# reject anyway, see BUG-33/34) and without killing the one in progress.
+REPORTING_REFRESH_PENDING = False
 ENRICHMENT_STOP_REQUESTED = threading.Event()
 # The user-facing button eases enrichment off; it does not kill it.
 #
@@ -138,6 +152,24 @@ def _enrichment_checkpoint(current_id: str = "") -> None:
     if ENRICHMENT_STOP_REQUESTED.is_set():
         raise RuntimeError("Enrichment stopped by user.")
     ENRICHMENT_STATUS.update({"state": "running", "current_id": current_id, "updated_at": utc_now_iso()})
+
+
+def _sleep_checkpointed(total_seconds: float, step: float = 5.0) -> None:
+    """Sleep for total_seconds in small increments, checking
+    ENRICHMENT_STOP_REQUESTED between each one.
+
+    Used for the auto-repair worker's longer, deliberate waits (the initial
+    warm-up delay and the heavy-load backoff in start_auto_repair()) so that
+    Stop/shutdown/destructive-op aborts still land within `step` seconds
+    instead of being blocked out for the full wait.
+    """
+    remaining = max(0.0, float(total_seconds))
+    while remaining > 0:
+        _enrichment_checkpoint()
+        chunk = min(step, remaining)
+        sleep(chunk)
+        remaining -= chunk
+    _enrichment_checkpoint()
 SERVER_LAUNCH_ID = uuid4().hex
 load_dotenv()
 
@@ -201,6 +233,48 @@ def _safe_error_payload_text(text: str) -> str:
     LOGGER.error("client_error_sanitized reference=%s detail=%s", reference, text)
     return (f"Something went wrong on our side and the action did not complete. "
             f"Please try again. If it keeps happening, quote reference {reference}.")
+
+
+# Matches a same-origin local script/stylesheet reference in served HTML,
+# e.g. src="js/reporting.js?v=heatmap-v5" or src="reporting-tabs.js" (no
+# query string yet) - the (?:\?[^"]*)? makes an existing query string
+# optional so a file with none still matches and gets one added.
+_LOCAL_ASSET_SRC_PATTERN = re.compile(
+    r'((?:src|href)=")((?:js/)?[A-Za-z0-9_.\-]+\.(?:js|css))(?:\?[^"]*)?(")'
+)
+
+
+def _cache_bust_local_assets(html_bytes: bytes, ui_dir: Path) -> bytes:
+    """Rewrite every local `<script src=...>`/`<link href=...>` reference to
+    carry a `?v=<content hash>` derived from that file's OWN current bytes.
+
+    Manually-maintained version strings (`?v=heatmap-v5`, bumped by hand on
+    every edit) were the actual root cause behind a large fraction of "I
+    fixed the bug but it's still broken" reports this session - several JS
+    files (review.js, reporting.js, common.js) had NO version string at all
+    for most of a day of active editing, so a browser that had ever loaded
+    the page kept serving its own stale cached copy indefinitely, no matter
+    how many times the underlying fix landed on disk. A human (or agent)
+    forgetting to bump a string by hand is not a one-off mistake, it is a
+    recurring bug class with no self-correction - this makes the version
+    string a function of the file's actual content instead, so it is
+    IMPOSSIBLE for it to go stale: any edit to the file changes its hash on
+    the very next request, automatically, with nothing to remember.
+    """
+    def replace(match: "re.Match[str]") -> str:
+        prefix, rel_path, suffix = match.group(1), match.group(2), match.group(3)
+        asset_path = ui_dir / rel_path
+        try:
+            digest = hashlib.sha1(asset_path.read_bytes()).hexdigest()[:10]
+        except OSError:
+            return match.group(0)  # asset not found locally - leave untouched
+        return f"{prefix}{rel_path}?v={digest}{suffix}"
+
+    try:
+        text = html_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return html_bytes
+    return _LOCAL_ASSET_SRC_PATTERN.sub(replace, text).encode("utf-8")
 
 
 def _sanitize_error_fields(payload: Any, depth: int = 0) -> Any:
@@ -758,6 +832,54 @@ REQUIRED_MAPPER_FIELDS: set[str] = set()  # brand is enforced separately in vali
 REQUIRED_LOCATION_VALUES: tuple[str, ...] = ()  # brand is the only mandatory field now; see normalize_location()
 
 
+_SOURCE_NAME_PLACEHOLDERS: dict[str, str] = {
+    "csv": "restaurant_locations_csv",
+    "excel": "restaurant_locations_excel",
+    "json": "restaurant_locations_json",
+    "xml": "restaurant_locations_xml",
+    "api_get_json": "restaurant_locations_api",
+    "python_editor": "restaurant_locations_python",
+}
+
+
+def _source_name_slug(value: Any) -> str:
+    """Mirror ui/js/mapper.js's sourceNameSlug(): strip a trailing extension,
+    collapse non-alphanumerics to underscores, trim, lowercase."""
+    text = str(value or "").strip()
+    text = re.sub(r"\.[a-z0-9]+$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"[^a-z0-9]+", "_", text, flags=re.IGNORECASE)
+    return text.strip("_").lower()
+
+
+def _fallback_source_name(mapper: dict[str, Any]) -> str:
+    """BUG-101 backend hardening: the browser (ui/js/mapper.js's
+    fallbackSourceName()) fills in a non-blank source_name before every save
+    the UI itself makes, in this order: typed value, preview filename, URL
+    filename, uploaded filename, source-format placeholder. That covers the
+    only path a live user takes.
+
+    This is a safety net for the callers that do NOT go through that JS at
+    all: something hitting POST /api/save directly, or another script
+    calling save_mapper() with a hand-built payload. It cannot reproduce the
+    preview/uploaded-filename branches (the browser never sends those file
+    names to the backend), so it recovers what the payload itself carries -
+    an explicit source_url, else a source_type placeholder - so a blank
+    source_name degrades to a readable generated name instead of a hard
+    validation failure.
+    """
+    source_url = str(mapper.get("source_url", "")).strip()
+    if source_url:
+        try:
+            path = urlsplit(source_url).path
+        except ValueError:
+            path = ""
+        name = _source_name_slug(path.rsplit("/", 1)[-1]) if path else ""
+        if name:
+            return name
+    source_type = str(mapper.get("source_type", "")).strip()
+    return _SOURCE_NAME_PLACEHOLDERS.get(source_type, "restaurant_locations")
+
+
 def validate_mapper(mapper: dict[str, Any], source_fields: list[str], rows: list[dict[str, Any]]) -> list[str]:
     errors = []
     if not str(mapper.get("brand", "")).strip():
@@ -1264,13 +1386,29 @@ def dominos_source(
     return result
 
 
-@lru_cache(maxsize=8)
-def _bigquery_client(project_id: str, credentials_json: str | None):
+def _new_scoped_bigquery_client(project_id: str, credentials_json: str | None):
+    """Construct a standalone bigquery.Client, independent of the shared
+    _bigquery_client() cache below.
+
+    Used by long-running background workers (currently just the auto-repair
+    loop, see start_auto_repair()) that need to release and reacquire their
+    own connection under heavy load. _bigquery_client() is a process-wide
+    singleton shared with every foreground request; closing that one from a
+    background worker the moment load looks heavy would be most likely to
+    sever an in-flight foreground BigQuery call at exactly the wrong time.
+    A worker that wants its own open/close lifecycle needs a client nothing
+    else touches, hence this separate, uncached constructor.
+    """
     from google.cloud import bigquery
     from google.oauth2 import service_account
 
     credentials = service_account.Credentials.from_service_account_file(credentials_json) if credentials_json else None
     return bigquery.Client(project=project_id, credentials=credentials)
+
+
+@lru_cache(maxsize=8)
+def _bigquery_client(project_id: str, credentials_json: str | None):
+    return _new_scoped_bigquery_client(project_id, credentials_json)
 
 
 # ---------------------------------------------------------------------------
@@ -2428,6 +2566,19 @@ def list_templates(search: str = "", business_id: str = "", source_type_id: str 
 
 
 def list_source_types() -> dict[str, Any]:
+    # Measured, real bug (2026-09-10, found while checking demo readiness):
+    # this had NO caching at all, and `ensure_source_type()` does its own
+    # SELECT (and, on a cold table, INSERT+SELECT) round trip for EACH of
+    # the 6 static source types below, on EVERY single call - 7 sequential
+    # BigQuery statements for data that essentially never changes once
+    # bootstrapped. Measured live: ~17s, unchanged call to call, for a
+    # payload that fits in a few hundred bytes. Cached like list_brands()/
+    # list_templates() already are; the bootstrap loop only needs to run
+    # once, not on every page load.
+    cache_key = "list_source_types:v1"
+    cached = get_cached_query(cache_key)
+    if cached:
+        return cached
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
     _ensure_source_types_table(client, project_id, dataset_id)
@@ -2439,7 +2590,9 @@ def list_source_types() -> dict[str, Any]:
         if getattr(exc, "code", None) == 404:
             return {"source_types": []}
         raise
-    return {"source_types": [dict(row) for row in rows]}
+    result = {"source_types": [dict(row) for row in rows]}
+    set_cached_query(cache_key, result)
+    return result
 
 
 def _sample_loader_enabled() -> bool:
@@ -3328,11 +3481,19 @@ def _build_silver_layer_impl(low_priority: bool = False) -> dict[str, Any]:
         invalid_table = f"{silver_ref}.listings_invalid"
         top_view = f"{silver_ref}.vw_brand_location_top10"
         brand_zip_view = f"{silver_ref}.vw_brand_zip_income"
-        _safe_query(client, f"DROP TABLE IF EXISTS `{enriched_table}`", low_priority=low_priority).result()
+        # No premature DROP here, deliberately: both tables are rebuilt via
+        # `CREATE OR REPLACE TABLE` further down, which is already atomic in
+        # BigQuery and needs no preceding DROP. Dropping this early left a
+        # real window - the ENTIRE rest of this build (zip_reference,
+        # worldwide_cities, the staging table, then finally these two) -
+        # during which the table simply did not exist. Any interruption in
+        # that window (a server restart, a killed process) left it dropped
+        # with no automatic recovery and no error logged, which is exactly
+        # what happened this session (`vw_listings_needs_review` and the
+        # Review Queue both went to zero with no trace in the logs).
         _enrichment_checkpoint()
         if low_priority:
             sleep(0.05)
-        _safe_query(client, f"DROP TABLE IF EXISTS `{invalid_table}`", low_priority=low_priority).result()
         _enrichment_checkpoint()
         if low_priority:
             sleep(0.05)
@@ -3615,6 +3776,8 @@ def _build_silver_layer_impl(low_priority: bool = False) -> dict[str, Any]:
           {brand_name_case} AS brand_name,
           l.source_type_id,
           l.location_key,
+          l.template_id,
+          COALESCE(l.user_reviewed, FALSE) AS user_reviewed,
           -- Source columns no typed field covers. Silver and gold must carry
           -- this through or a custom field is invisible to everything
           -- downstream (reporting, quality, exports) even though bronze
@@ -4175,43 +4338,65 @@ def _invoke_silver_layer(low_priority: bool = False) -> dict[str, Any]:
 
 
 def _refresh_silver_background(low_priority: bool = True) -> bool:
-    global REPORTING_REFRESHING
+    global REPORTING_REFRESHING, REPORTING_REFRESH_PENDING
     with REPORTING_REFRESH_LOCK:
         if REPORTING_REFRESHING:
+            # Another save/refresh is already running the pipeline - don't
+            # spawn a second one (build_silver_layer() itself would reject
+            # that, see BUG-33/34), but don't just drop this request either.
+            # Mark it pending so the in-flight run does one more pass for
+            # us right before it goes idle, instead of this data waiting on
+            # the next hourly scheduled tick.
+            REPORTING_REFRESH_PENDING = True
             return False
         REPORTING_REFRESHING = True
 
-    def refresh() -> None:
-        global REPORTING_REFRESHING
+    def run_one_pass() -> None:
         try:
-            try:
-                auto_repair_error_batch(5)
-            except Exception as repair_exc:
-                LOGGER.warning("auto_repair_error_batch_failed error=%s", repair_exc)
-            _invoke_silver_layer(low_priority=low_priority)
-            # Reporting reads from the gold layer (mirrored into SQLite) -
-            # rebuilding silver alone would leave newly-ingested data (e.g. a
-            # brand just added via Mappings/Template Library) invisible until
-            # the next hourly _run_silver_gold_tick(). Keep gold and the
-            # mirror in sync on every on-demand refresh too.
-            _rebuild_gold_and_mirror()
-            try:
-                # Keep the lightweight review badge synchronized after an
-                # automatic enrichment pass; SQLite stores only this count,
-                # while BigQuery remains the source of truth for rows.
-                refresh_error_count("")
-            except Exception as count_exc:
-                LOGGER.warning("error_count_refresh_after_background_enrichment_failed error=%s", count_exc)
-            try:
-                # Warm Reporting's Data Quality tab after ingestion/sample
-                # load as part of the same background pipeline. This builds
-                # the SQLite quality cache and today's durable trend point
-                # without making the foreground user action wait.
-                reporting_quality_summary({}, _skip_cache=True)
-            except Exception as quality_exc:
-                LOGGER.warning("quality_reporting_refresh_after_background_enrichment_failed error=%s", quality_exc)
-        except Exception as exc:
-            LOGGER.warning("reporting_background_silver_refresh_failed error=%s", exc)
+            auto_repair_error_batch(5)
+        except Exception as repair_exc:
+            LOGGER.warning("auto_repair_error_batch_failed error=%s", repair_exc)
+        _invoke_silver_layer(low_priority=low_priority)
+        # Reporting reads from the gold layer (mirrored into SQLite) -
+        # rebuilding silver alone would leave newly-ingested data (e.g. a
+        # brand just added via Mappings/Template Library) invisible until
+        # the next hourly _run_silver_gold_tick(). Keep gold and the
+        # mirror in sync on every on-demand refresh too.
+        _rebuild_gold_and_mirror()
+        try:
+            # Keep the lightweight review badge synchronized after an
+            # automatic enrichment pass; SQLite stores only this count,
+            # while BigQuery remains the source of truth for rows.
+            refresh_error_count("")
+        except Exception as count_exc:
+            LOGGER.warning("error_count_refresh_after_background_enrichment_failed error=%s", count_exc)
+        try:
+            # Warm Reporting's Data Quality tab after ingestion/sample
+            # load as part of the same background pipeline. This builds
+            # the SQLite quality cache and today's durable trend point
+            # without making the foreground user action wait.
+            reporting_quality_summary({}, _skip_cache=True)
+        except Exception as quality_exc:
+            LOGGER.warning("quality_reporting_refresh_after_background_enrichment_failed error=%s", quality_exc)
+
+    def refresh() -> None:
+        global REPORTING_REFRESHING, REPORTING_REFRESH_PENDING
+        try:
+            while True:
+                try:
+                    run_one_pass()
+                except Exception as exc:
+                    LOGGER.warning("reporting_background_silver_refresh_failed error=%s", exc)
+                # Re-check pending INSIDE the lock, right before deciding to
+                # stop - this is what makes "saved while a rebuild was
+                # running" converge onto a guaranteed follow-up pass rather
+                # than a race between "clear the running flag" and "the next
+                # save's own check of it."
+                with REPORTING_REFRESH_LOCK:
+                    if REPORTING_REFRESH_PENDING:
+                        REPORTING_REFRESH_PENDING = False
+                        continue
+                    break
         finally:
             if ENRICHMENT_STATUS.get("state") == "running":
                 ENRICHMENT_STATUS.update({"state": "idle", "current_id": "", "updated_at": utc_now_iso()})
@@ -4225,8 +4410,24 @@ def _refresh_silver_background(low_priority: bool = True) -> bool:
 def enrichment_status() -> dict[str, Any]:
     _schedule_quality_fix_metrics_refresh()
     throttled = ENRICHMENT_THROTTLED.is_set()
-    with REPORTING_REFRESH_LOCK:
+    # Non-blocking, deliberately (real incident, 2026-09-10): this is a
+    # lightweight status READ the frontend polls every few seconds, but
+    # REPORTING_REFRESH_LOCK is held for the ENTIRE DURATION of a silver+
+    # gold rebuild - measured minutes, not milliseconds. Blocking on `with
+    # REPORTING_REFRESH_LOCK` here meant every poll of this endpoint hung
+    # for as long as a rebuild was in flight, which from the browser's side
+    # is indistinguishable from the server being dead. REPORTING_REFRESHING
+    # is a plain bool (safe to read without the lock under the GIL); if the
+    # lock is genuinely held right now, that same bool is already `True`,
+    # so skipping the wait costs nothing but the (at most microseconds-old)
+    # possibility of a torn read of ENRICHMENT_STATUS mid-update - a status
+    # display can tolerate that far better than a multi-minute hang.
+    got_lock = REPORTING_REFRESH_LOCK.acquire(blocking=False)
+    try:
         status = {**ENRICHMENT_STATUS, "refreshing": REPORTING_REFRESHING, "auto_repair": get_auto_repair_stats()}
+    finally:
+        if got_lock:
+            REPORTING_REFRESH_LOCK.release()
     # "eased" is a distinct state, not a flavour of running. The frontend uses
     # it to drop the spinner and the progress line entirely: work at this pace
     # is background housekeeping the user asked to stop being shown, and a
@@ -4275,6 +4476,40 @@ AUTO_REPAIR_BATCH_SIZE = 10
 # minute rather than ~120 - which is the point of easing rather than stopping.
 AUTO_REPAIR_EASED_BATCH_SIZE = 2
 AUTO_REPAIR_EASED_PAUSE_SECONDS = 30
+
+
+# "Start Enrichment" launch pacing (2026-09-10). This is a different axis
+# from the eased pacing above (that is the Stop button's ease-off, entirely
+# unaffected by this) - it governs how the loop behaves right after launch
+# and how it reacts to load between batches, whether eased or full speed.
+#
+#   1. A randomised 5-10 minute warm-up delay before the FIRST batch of any
+#      run, so pressing the button does not itself add load right when a
+#      user is most likely to still be interacting with the app.
+#   2. A load check before every batch (including the first, after warm-up),
+#      with three tiers:
+#        - HEAVY: something else is genuinely busy with the warehouse right
+#          now. Release this worker's own BigQuery client and wait it out.
+#        - LIGHT: the existing single-recent-foreground-action case, already
+#          handled by LAST_FOREGROUND_ACTIVITY_AT/FOREGROUND_IDLE_GRACE_SECONDS
+#          above - a short wait, client stays open, unchanged.
+#        - NORMAL: proceed with a batch.
+#
+# Load signal: this app has no real CPU/memory metric, so rather than invent
+# one, "load" is read from the two signals it already produces about its own
+# BigQuery/warehouse activity:
+#   - REPORTING_REFRESHING - true exactly while a reporting/silver-gold sync
+#     job is actively hitting BigQuery (see _refresh_silver_background and
+#     the refresh lock near the top of this file). A concrete, pre-existing
+#     "something else heavy is using the warehouse right now" flag.
+#   - LAST_FOREGROUND_ACTIVITY_AT - the existing "a real user action just
+#     happened" signal. One recent action alone is LIGHT (a blip); several
+#     consecutive load checks in a row with no idle gap in between means
+#     foreground use is sustained, not a blip, and escalates to HEAVY.
+AUTO_REPAIR_INITIAL_DELAY_MIN_SECONDS = 300.0
+AUTO_REPAIR_INITIAL_DELAY_MAX_SECONDS = 600.0
+AUTO_REPAIR_HEAVY_LOAD_STREAK_THRESHOLD = 3
+AUTO_REPAIR_HEAVY_LOAD_BACKOFF_SECONDS = 60.0
 
 
 def _enrichment_pacing() -> tuple[int, float]:
@@ -4970,7 +5205,7 @@ def _mirror_map_records(
             "brand": r.get("brand"), "name": r.get("name"), "address": r.get("address"),
             "city": r.get("city_name"), "state": r.get("state_code"), "state_name": r.get("state_name"),
             "county": r.get("county"), "zip_code": r.get("zip_code"), "phone_number": r.get("phone_number"),
-            "latitude": r.get("latitude"), "longitude": r.get("longitude"),
+            "latitude": r.get("latitude"), "longitude": r.get("longitude"), "country": r.get("country"),
         })
     # A scoped fetch (map_scope=full, with a state/county/city/zip filter
     # already applied upstream via fetch_mirror_reporting_locations) has
@@ -5131,6 +5366,230 @@ def _execute_bq_queries_parallel(queries: dict[str, tuple[str, Any]], client: An
         raise next(iter(errors.values()))
 
     return results
+
+
+HEATMAP_CELL_HALF_WIDTH_KM = 3.0
+KM_PER_DEGREE_LAT = 111.32
+
+
+def reporting_heatmap(refresh: bool = False) -> dict[str, Any]:
+    """National whitespace-strength heatmap: buckets ZIPs into ~6km-wide
+    square grid cells (3km half-width from each cell's centroid, per the
+    user's spec) and scores each cell on listing density, income, and
+    population - the ingredients of "is this a strong or weak market."
+
+    Median, not average, at the ZIP level first (user-directed): each ZIP
+    already carries a single census-sourced `median_household_income`
+    value (that IS the ZIP-level median - it is not derived from multiple
+    listings), so the aggregation this function does is ZIP -> CELL, and
+    that step uses `APPROX_QUANTILES(..., 2)[OFFSET(1)]` (median) rather
+    than `AVG` - income is a rate, not an additive quantity, and a median
+    is the correct way to roll several ZIPs' medians into one cell's
+    figure without being dragged around by one unusually rich or poor ZIP.
+    Same treatment for population (a per-ZIP count, but summed for listing
+    density and medianed for the "how populous is a typical ZIP here"
+    signal - two different questions, both legitimate, kept separate
+    below as `population_sum` vs `population_median`).
+
+    No land-area column exists anywhere in this warehouse (verified against
+    `TABLE_SCHEMAS` before writing this) - `population_median` is used as
+    the density-ish signal, not true population-per-km2. If ZIP land area
+    is ever added as a reference field, swap this for real density; noted
+    here rather than silently presented as more precise than it is.
+
+    Cell assignment: latitude buckets are fixed-width (regular degrees of
+    latitude are ~constant km everywhere); longitude buckets are NOT -
+    a degree of longitude shrinks toward the poles, so the bucket width is
+    computed per-ZIP from that ZIP's own latitude
+    (`6km / (111.32 * cos(latitude))`), which is what keeps cells
+    approximately square in real-world km at every latitude the US spans,
+    rather than visibly wide rectangles up near the Canadian border.
+
+    State/city roll-up (2026-09-10): the response also carries
+    `state_scores` and `city_scores` - the SAME per-cell `score` above,
+    rolled up to state/city grain so the zoomed-out state/city circle
+    layers can show one consistent red-to-green strength story instead of
+    a different metric than the fine-grained square cells. Each cell is
+    labeled with the state/city of its single highest-listing_count ZIP
+    (a 6km cell only straddles a boundary at the margins, so one label per
+    cell is an acceptable simplification), then averaged into its
+    state/city WEIGHTED by `zip_count + listing_count` - a straight
+    average would let a state's score swing on a single-ZIP outlier cell
+    as much as on a cell backed by dozens of ZIPs and real listing volume,
+    the same class of pitfall already flagged this session for other
+    state-level metrics (see `_mirror_top_states`, which weights by real
+    population/income rather than a flat per-row average). Each row also
+    carries its own `listing_count`/`zip_count`/`cell_count` so a caller
+    can judge how much data actually backs that state/city's score.
+    """
+    cache_key = "reporting_heatmap:v2"
+    if not refresh:
+        cached = get_cached_query(cache_key)
+        if cached:
+            return cached
+
+    project_id, dataset_id, credentials_json = _warehouse_settings()
+    client = _bigquery_client(project_id, credentials_json)
+    _, _, silver_dataset_id, gold_dataset_id, _ = _medallion_settings()
+    zip_brand_view = f"{project_id}.{gold_dataset_id}.vw_zip_brand_activity"
+
+    cell_deg_lat = HEATMAP_CELL_HALF_WIDTH_KM * 2 / KM_PER_DEGREE_LAT
+    rows = run_sql_rows(client, f"""
+    WITH zip_agg AS (
+      SELECT
+        zip_code,
+        ANY_VALUE(latitude) AS latitude,
+        ANY_VALUE(longitude) AS longitude,
+        ANY_VALUE(population) AS population,
+        ANY_VALUE(median_household_income) AS median_household_income,
+        ANY_VALUE(state_code) AS state_code,
+        ANY_VALUE(state_name) AS state_name,
+        ANY_VALUE(city_name) AS city_name,
+        SUM(location_count) AS listing_count
+      FROM `{zip_brand_view}`
+      WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+      GROUP BY zip_code
+    ),
+    gridded AS (
+      SELECT
+        *,
+        CAST(FLOOR(latitude / {cell_deg_lat}) AS INT64) AS lat_cell,
+        CAST(FLOOR(longitude / ({HEATMAP_CELL_HALF_WIDTH_KM * 2} / ({KM_PER_DEGREE_LAT} * COS(ACOS(-1) / 180 * latitude)))) AS INT64) AS lon_cell
+      FROM zip_agg
+    )
+    SELECT
+      lat_cell,
+      lon_cell,
+      AVG(latitude) AS lat,
+      AVG(longitude) AS lon,
+      SUM(listing_count) AS listing_count,
+      APPROX_QUANTILES(population, 2)[OFFSET(1)] AS population_median,
+      APPROX_QUANTILES(median_household_income, 2)[OFFSET(1)] AS median_household_income,
+      COUNT(*) AS zip_count,
+      -- Dominant state/city label for the cell: the ZIP contributing the
+      -- most listings within it. A 6km cell only straddles a state/city
+      -- boundary at the margins, so "whichever ZIP in this cell has the
+      -- most real market activity" is a reasonable single label to hang
+      -- the cell's score on for state/city roll-up below, without needing
+      -- a second weighted-mode aggregate.
+      ARRAY_AGG(state_code ORDER BY listing_count DESC, zip_code LIMIT 1)[OFFSET(0)] AS state_code,
+      ARRAY_AGG(state_name ORDER BY listing_count DESC, zip_code LIMIT 1)[OFFSET(0)] AS state_name,
+      ARRAY_AGG(city_name ORDER BY listing_count DESC, zip_code LIMIT 1)[OFFSET(0)] AS city_name
+    FROM gridded
+    GROUP BY lat_cell, lon_cell
+    """, label="reporting_heatmap")
+
+    # Min-max normalize each of the three ingredients across THIS result set
+    # (a relative "strong vs weak compared to everywhere else on the map
+    # right now" score, not an absolute one), then average them equally
+    # into one 0..1 strength score. A cell missing a value is excluded from
+    # that ingredient's normalization range and scored on the remaining
+    # ingredients only, rather than dragging every cell toward zero because
+    # of one missing field.
+    def _minmax(values: list[float]) -> tuple[float, float]:
+        clean = [v for v in values if v is not None]
+        return (min(clean), max(clean)) if clean else (0.0, 0.0)
+
+    listing_lo, listing_hi = _minmax([r["listing_count"] for r in rows])
+    pop_lo, pop_hi = _minmax([r["population_median"] for r in rows])
+    income_lo, income_hi = _minmax([r["median_household_income"] for r in rows])
+
+    def _norm(value: float | None, lo: float, hi: float) -> float | None:
+        if value is None or hi <= lo:
+            return None
+        return max(0.0, min(1.0, (value - lo) / (hi - lo)))
+
+    # State/city roll-up (user ask: "same [score] can be reflected at layer
+    # of each state ... weighting average maybe at country and state level
+    # of all hierarchy wise"). Reuses this exact per-cell 0..1 score - no
+    # separate scoring method - aggregated by a WEIGHTED average, not a
+    # straight one. A straight average would let a state's score be pulled
+    # around by cells backed by a single outlier ZIP as easily as by cells
+    # backed by dozens of ZIPs and real listing volume - the same class of
+    # pitfall this session already flagged for state-level population/income
+    # figures elsewhere (see `_mirror_top_states`/`top_states_query`, which
+    # weight by real population/income rather than a flat per-row average).
+    # Weight = zip_count + listing_count: zip_count guards against a
+    # single-ZIP cell outvoting a well-covered one (the specific pitfall
+    # named for this task), listing_count additionally lets cells with real
+    # business density speak louder, since "market strength" is partly
+    # about that density in the first place. Every cell has zip_count >= 1
+    # by construction, so weight is always > 0 - no cell is ever silently
+    # dropped from its state/city's average.
+    def _new_rollup() -> dict[str, float]:
+        return {"weighted_score_sum": 0.0, "weight_sum": 0.0, "listing_count": 0, "zip_count": 0, "cell_count": 0}
+
+    def _feed_rollup(bucket: dict[str, float], score: float, listing_count: int, zip_count: int, weight: float) -> None:
+        bucket["weighted_score_sum"] += score * weight
+        bucket["weight_sum"] += weight
+        bucket["listing_count"] += listing_count
+        bucket["zip_count"] += zip_count
+        bucket["cell_count"] += 1
+
+    def _finalize_rollup(bucket: dict[str, float]) -> dict[str, Any]:
+        score = bucket["weighted_score_sum"] / bucket["weight_sum"] if bucket["weight_sum"] > 0 else 0.0
+        return {
+            "score": round(score, 4),
+            "listing_count": int(bucket["listing_count"]),
+            "zip_count": int(bucket["zip_count"]),
+            "cell_count": int(bucket["cell_count"]),
+        }
+
+    state_rollups: dict[str, dict[str, Any]] = {}
+    city_rollups: dict[tuple[str, str], dict[str, Any]] = {}
+
+    cells = []
+    for r in rows:
+        parts = [
+            _norm(r["listing_count"], listing_lo, listing_hi),
+            _norm(r["population_median"], pop_lo, pop_hi),
+            _norm(r["median_household_income"], income_lo, income_hi),
+        ]
+        available = [p for p in parts if p is not None]
+        score = sum(available) / len(available) if available else 0.0
+        listing_count = int(r["listing_count"] or 0)
+        zip_count = int(r["zip_count"] or 0)
+        cells.append({
+            "lat": r["lat"], "lon": r["lon"], "score": round(score, 4),
+            "listing_count": listing_count,
+            "population_median": r["population_median"],
+            "median_household_income": r["median_household_income"],
+            "zip_count": zip_count,
+        })
+
+        weight = zip_count + listing_count
+        state_code = (r.get("state_code") or "").strip().upper()
+        if state_code:
+            state_bucket = state_rollups.setdefault(state_code, {**_new_rollup(), "state_name": r.get("state_name") or state_code})
+            _feed_rollup(state_bucket, score, listing_count, zip_count, weight)
+
+            city_name = (r.get("city_name") or "").strip()
+            if city_name:
+                city_key = (city_name, state_code)
+                city_bucket = city_rollups.setdefault(city_key, {**_new_rollup(), "state_name": r.get("state_name") or state_code})
+                _feed_rollup(city_bucket, score, listing_count, zip_count, weight)
+
+    state_scores = [
+        {"state": state_code, "state_name": bucket["state_name"], **_finalize_rollup(bucket)}
+        for state_code, bucket in state_rollups.items()
+    ]
+    state_scores.sort(key=lambda row: row["cell_count"], reverse=True)
+
+    city_scores = [
+        {"city": city_name, "state": state_code, "state_name": bucket["state_name"], **_finalize_rollup(bucket)}
+        for (city_name, state_code), bucket in city_rollups.items()
+    ]
+    city_scores.sort(key=lambda row: row["cell_count"], reverse=True)
+
+    result = {
+        "cells": cells,
+        "cell_half_width_km": HEATMAP_CELL_HALF_WIDTH_KM,
+        "cell_count": len(cells),
+        "state_scores": state_scores,
+        "city_scores": city_scores,
+    }
+    set_cached_query(cache_key, result)
+    return result
 
 
 def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, Any]:
@@ -5480,7 +5939,8 @@ def reporting_summary(params: dict[str, list[str]] | None = None) -> dict[str, A
       zip_code,
       phone_number,
       latitude,
-      longitude
+      longitude,
+      country
     FROM {gold_location_ref}
     WHERE latitude IS NOT NULL AND longitude IS NOT NULL
       AND (@state = '' OR UPPER(state_code) = @state)
@@ -6513,7 +6973,13 @@ def list_needs_review(business_id: str = "", state: str = "", reviewed: str = ""
         if getattr(exc, "code", None) == 404:
             return {"records": [], "offset": safe_offset, "limit": safe_limit, "has_more": False}
         raise
-    records = [dict(row) for row in result_rows]
+    records = []
+    for row in result_rows:
+        item = dict(row)
+        for key in ("first_observed_at", "last_observed_at"):
+            if hasattr(item.get(key), "isoformat"):
+                item[key] = item[key].isoformat()
+        records.append(item)
     has_more = len(records) > safe_limit
     return {"records": records[:safe_limit], "offset": safe_offset, "limit": safe_limit, "has_more": has_more}
 
@@ -8405,10 +8871,27 @@ def start_auto_repair(manual: bool = False) -> dict[str, Any]:
             ENRICHMENT_STATUS.update({"state": "running", "processed": 0, "current_id": "", "updated_at": utc_now_iso()})
             offset = 0
             fixed = 0
+            busy_streak = 0
             project_id, dataset_id, credentials_json = _warehouse_settings()
-            client = _bigquery_client(project_id, credentials_json)
+            # No client is opened yet - see the warm-up delay immediately
+            # below. Holding a connection open through a multi-minute wait
+            # that does no work would be exactly the kind of idle resource
+            # this whole change is trying to avoid.
+            client: Any = None
             try:
+                # Piece 1: deliberate delay before the first batch of any
+                # run (button press or automatic trigger alike) so starting
+                # enrichment does not itself add load right when the user is
+                # most likely to still be interacting with the app. Real and
+                # bounded (5-10 minutes, chosen once per run) - never an
+                # unbounded or indefinite wait - and interruptible via
+                # _sleep_checkpointed so Stop/shutdown still respond quickly.
+                initial_delay = random.uniform(AUTO_REPAIR_INITIAL_DELAY_MIN_SECONDS, AUTO_REPAIR_INITIAL_DELAY_MAX_SECONDS)
+                LOGGER.info("automatic_review_repair_warming_up delay=%.0fs", initial_delay)
+                _sleep_checkpointed(initial_delay)
+
                 _schedule_quality_fix_metrics_refresh(force=True)
+                client = _new_scoped_bigquery_client(project_id, credentials_json)
                 current_stats = get_auto_repair_stats()
                 base_fixed = int(current_stats.get("fixed", 0) or 0)
                 base_processed = int(current_stats.get("processed", 0) or 0)
@@ -8418,15 +8901,53 @@ def start_auto_repair(manual: bool = False) -> dict[str, Any]:
                 set_auto_repair_stats(base_fixed, base_processed, total, base_manual)
                 while offset < total:
                     _enrichment_checkpoint()
-                    # Yield to whatever the user is actively doing (parsing,
-                    # saving, reviewing) rather than competing with it for
-                    # the same BigQuery client/SQLite connections - this is
-                    # explicitly best-effort background work, so it can
-                    # always afford to wait a little longer.
+
+                    def _release_client_for_heavy_load(reason: str) -> None:
+                        nonlocal client
+                        if client is not None:
+                            LOGGER.info("automatic_review_repair_heavy_load_release_client reason=%s", reason)
+                            try:
+                                client.close()
+                            except Exception:
+                                pass
+                            client = None
+
+                    # HEAVY, tier 1: REPORTING_REFRESHING is an unambiguous,
+                    # already-existing "something else is actively hammering
+                    # BigQuery right now" flag (see _refresh_silver_background
+                    # / the refresh lock near the top of this file) - no
+                    # streak needed, release and wait it out immediately.
+                    if REPORTING_REFRESHING:
+                        _release_client_for_heavy_load("reporting_refresh")
+                        busy_streak = 0
+                        _sleep_checkpointed(AUTO_REPAIR_HEAVY_LOAD_BACKOFF_SECONDS)
+                        continue
+
+                    # LIGHT vs HEAVY tier 2: a single recent foreground action
+                    # (parse/save/reprocess/etc, see LAST_FOREGROUND_ACTIVITY_AT
+                    # above) is the pre-existing LIGHT case - wait out the
+                    # grace period once, then proceed with this batch, exactly
+                    # as before. Only when that keeps happening at the top of
+                    # several batch cycles IN A ROW (not sub-second rechecks
+                    # within one wait - busy_streak advances once per outer
+                    # loop pass, which is paced by the batch/eased pause, so a
+                    # streak means real, ongoing foreground use) does it
+                    # escalate to HEAVY.
                     idle_seconds = wall_clock_time() - LAST_FOREGROUND_ACTIVITY_AT
                     if idle_seconds < FOREGROUND_IDLE_GRACE_SECONDS:
-                        sleep(FOREGROUND_IDLE_GRACE_SECONDS - idle_seconds)
+                        busy_streak += 1
+                        if busy_streak >= AUTO_REPAIR_HEAVY_LOAD_STREAK_THRESHOLD:
+                            _release_client_for_heavy_load(f"sustained_foreground_streak={busy_streak}")
+                            busy_streak = 0
+                            _sleep_checkpointed(AUTO_REPAIR_HEAVY_LOAD_BACKOFF_SECONDS)
+                            continue
+                        _sleep_checkpointed(FOREGROUND_IDLE_GRACE_SECONDS - idle_seconds)
                         _enrichment_checkpoint()
+                    else:
+                        busy_streak = 0
+
+                    if client is None:
+                        client = _new_scoped_bigquery_client(project_id, credentials_json)
                     batch_size, batch_pause = _enrichment_pacing()
                     batch = auto_repair_error_batch(batch_size, client=client)
                     if not batch["attempted"]:
@@ -8441,7 +8962,7 @@ def start_auto_repair(manual: bool = False) -> dict[str, Any]:
                     set_auto_repair_stats(base_fixed + fixed, base_processed + processed, unresolved, base_manual)
                     ENRICHMENT_STATUS.update({"processed": offset + batch["attempted"], "current_id": "", "updated_at": utc_now_iso()})
                     offset += batch["attempted"]
-                    sleep(batch_pause)
+                    _sleep_checkpointed(batch_pause)
                 ENRICHMENT_STATUS.update({"state": "idle", "current_id": "", "updated_at": utc_now_iso()})
                 AUTO_REPAIR_STATS["remaining"] = max(total - fixed, 0)
                 set_auto_repair_stats(base_fixed + fixed, base_processed + offset, max(total - fixed, 0), base_manual)
@@ -8464,6 +8985,18 @@ def start_auto_repair(manual: bool = False) -> dict[str, Any]:
                     # button, which bypasses the backoff entirely.
                     wait = _note_auto_repair_failure()
                     LOGGER.warning("automatic_review_repair_failed retry_in=%.0fs error=%s", wait, exc)
+            finally:
+                # This is our own private client (_new_scoped_bigquery_client),
+                # never the shared _bigquery_client() singleton, so it is ours
+                # alone to close - on success, on stop, or on failure. Closing
+                # it here (rather than never, as before) is what actually
+                # lets a heavy-load release be temporary instead of leaking a
+                # transport that a later resume would never reopen.
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
 
         AUTO_REPAIR_THREAD = threading.Thread(target=worker, name="automatic-review-repair", daemon=True)
         AUTO_REPAIR_THREAD.start()
@@ -9390,6 +9923,13 @@ def save_mapper(payload: dict[str, Any], *, client: Any = None, skip_cache_inval
         len(source_fields),
     )
     mapper = _resolve_mapper_source_fields(mapper, source_fields)
+    # BUG-101 backend hardening: the browser always fills in a non-blank
+    # source_name before save (see fallbackSourceName() in ui/js/mapper.js);
+    # this only catches callers that bypass that JS entirely (a direct
+    # POST /api/save, or a hand-built payload) so they get a generated name
+    # instead of a hard validation failure. See _fallback_source_name().
+    if not str(mapper.get("source_name", "")).strip():
+        mapper["source_name"] = _fallback_source_name(mapper)
     errors = validate_mapper(mapper, source_fields, rows)
     if errors:
         raise ValueError(f"Mapper validation failed: {', '.join(errors)}")
@@ -10231,7 +10771,12 @@ def make_handler(ui_dir: Path):
             if not file_path.exists():
                 self.send_error(404, "File not found")
                 return
-            content = file_path.read_bytes()
+            # Cache-bust every local script/stylesheet reference by content
+            # hash on every request, rather than the manually-maintained
+            # `?v=...` strings this app used before - see
+            # _cache_bust_local_assets()'s docstring for why that manual
+            # approach was a real, recurring bug this session.
+            content = _cache_bust_local_assets(file_path.read_bytes(), ui_dir)
             self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(content)))
@@ -10409,6 +10954,15 @@ def make_handler(ui_dir: Path):
                 except Exception as exc:
                     LOGGER.warning("reporting_timeseries_failed error=%s", exc)
                     _json_response(self, 400, {"error": "Timeseries data is being prepared. Please refresh shortly."})
+                return
+            if self.path.startswith("/api/reporting/heatmap"):
+                try:
+                    refresh_params = parse_qs(urlsplit(self.path).query)
+                    refresh = str(refresh_params.get("refresh", [""])[0]).lower() in {"1", "true", "yes"}
+                    _json_response(self, 200, reporting_heatmap(refresh=refresh))
+                except Exception as exc:
+                    LOGGER.warning("reporting_heatmap_failed error=%s", exc)
+                    _json_response(self, 400, {"error": "Heatmap data is being prepared. Please refresh shortly."})
                 return
             if self.path.startswith("/api/reporting/table-export"):
                 try:
@@ -10633,7 +11187,20 @@ def make_handler(ui_dir: Path):
                         started = _refresh_silver_background(low_priority=True)
                         _json_response(self, 202, {"status": "enriching", "refreshing": True, "started": started})
                     else:
-                        _json_response(self, 200, build_silver_layer(low_priority=bool(payload.get("low_priority", False))))
+                        # Silver and gold must never be rebuilt independently -
+                        # gold's views (including reporting and
+                        # vw_listings_needs_review) read FROM silver, so a
+                        # silver-only rebuild through this endpoint left gold
+                        # pointing at a table that had just been dropped and
+                        # recreated out from under it, or querying a stale
+                        # definition. `_refresh_silver_background()` already
+                        # gets this right for the async path; this endpoint
+                        # is the synchronous one and chains the same way,
+                        # just inline so the caller gets a real result back
+                        # instead of a fire-and-forget 202.
+                        silver_result = build_silver_layer(low_priority=bool(payload.get("low_priority", False)))
+                        gold_result = build_gold_layer()
+                        _json_response(self, 200, {**silver_result, "gold": gold_result})
                 elif self.path == "/api/enrichment/stop":
                     # The button eases the loop off rather than killing it.
                     # The route keeps its name so existing clients keep
@@ -10788,13 +11355,12 @@ def _idle_brand_enrichment_pass() -> dict[str, Any]:
     return {"attempted": len(candidates), "updated": updated}
 
 
-_LOCATION_ENRICH_ATTEMPTED: set[str] = set()
 LOCATION_ENRICH_BATCH = 3
-# The attempted-set is in-memory only, so it grows for the life of the
-# process. Capped so a long-running server cannot accumulate one entry per
-# listing in the warehouse; clearing it just means those listings become
-# eligible to retry, which is harmless.
-LOCATION_ENRICH_ATTEMPTED_MAX = 20000
+# Durable, bronze-persisted cooldown (listings.next_enrichment_date) - not
+# an in-process set, so it survives a restart. A listing OSM has never
+# heard of is left alone for this many days rather than re-queried every
+# cycle.
+IDLE_ENRICHMENT_COOLDOWN_DAYS = 10
 
 
 def _idle_location_enrichment_pass() -> dict[str, Any]:
@@ -10824,12 +11390,18 @@ def _idle_location_enrichment_pass() -> dict[str, Any]:
 
     project_id, dataset_id, credentials_json = _warehouse_settings()
     client = _bigquery_client(project_id, credentials_json)
+    # next_enrichment_date (bronze-persisted, see warehouse_bigquery.py) is
+    # the durable cooldown - NULL or due means eligible. Replaces the old
+    # in-process _LOCATION_ENRICH_ATTEMPTED set, which reset on every
+    # restart and let a listing OSM has never heard of get re-attempted
+    # every cycle after that.
     rows = list(client.query(f"""
         SELECT listing_id, name, latitude, longitude, phone_number, website_url, email
         FROM `{project_id}.{dataset_id}.listings`
         WHERE is_deleted IS NOT TRUE
           AND name IS NOT NULL AND name != ''
           AND latitude IS NOT NULL AND longitude IS NOT NULL
+          AND (next_enrichment_date IS NULL OR next_enrichment_date <= CURRENT_TIMESTAMP())
           AND (
             (phone_number IS NULL OR phone_number = '')
             OR (website_url IS NULL OR website_url = '')
@@ -10837,50 +11409,58 @@ def _idle_location_enrichment_pass() -> dict[str, Any]:
           )
         LIMIT 50
     """).result())
-    candidates = [r for r in rows
-                  if str(r["listing_id"]) not in _LOCATION_ENRICH_ATTEMPTED][:LOCATION_ENRICH_BATCH]
+    candidates = rows[:LOCATION_ENRICH_BATCH]
     if not candidates:
         return {"attempted": 0, "updated": 0, "fields_filled": 0}
-
-    if len(_LOCATION_ENRICH_ATTEMPTED) > LOCATION_ENRICH_ATTEMPTED_MAX:
-        _LOCATION_ENRICH_ATTEMPTED.clear()
 
     updated = 0
     fields_filled = 0
     for row in candidates:
         _enrichment_checkpoint()
         listing_id = str(row["listing_id"])
-        _LOCATION_ENRICH_ATTEMPTED.add(listing_id)
         blank = [field for field in ("phone_number", "website_url", "email")
                  if not str(row[field] or "").strip()]
+        # Every attempt - resolved or not - pushes next_enrichment_date out
+        # IDLE_ENRICHMENT_COOLDOWN_DAYS, set in the SAME statement as
+        # whatever fields resolved so a listing is never left with a stale
+        # cooldown from a partially-failed write.
+        cooldown_assignment = f"next_enrichment_date = TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL {IDLE_ENRICHMENT_COOLDOWN_DAYS} DAY)"
         if not blank:
             continue
         try:
             resolved = enrich_location_contact(str(row["name"] or ""), row["latitude"], row["longitude"])
         except Exception as exc:
             LOGGER.info("location_enrich_attempt_failed listing_id=%s error=%s", listing_id, exc)
-            continue
-        fills = {field: resolved[field] for field in blank if resolved.get(field)}
-        if not fills:
-            continue
-        # The blank-only guard is repeated in SQL because the row was read a
-        # moment ago: a concurrent user edit between the SELECT and this
-        # UPDATE must win, not be clobbered by the background pass.
-        assignments = ", ".join(f"{field} = @{field}" for field in fills)
-        guards = " AND ".join(f"({field} IS NULL OR {field} = '')" for field in fills)
+            resolved = {}
+        fills = {field: resolved.get(field) for field in blank if resolved.get(field)}
         try:
-            client.query(
-                f"UPDATE `{project_id}.{dataset_id}.listings` "
-                f"SET {assignments}, last_observed_at = CURRENT_TIMESTAMP() "
-                f"WHERE listing_id = @listing_id AND {guards}",
-                job_config=bigquery.QueryJobConfig(query_parameters=[
-                    bigquery.ScalarQueryParameter(field, "STRING", value)
-                    for field, value in fills.items()
-                ] + [bigquery.ScalarQueryParameter("listing_id", "STRING", listing_id)])).result()
-            updated += 1
-            fields_filled += len(fills)
-            LOGGER.info("location_enriched listing_id=%s fields=%s matched=%s",
-                        listing_id, ",".join(sorted(fills)), resolved.get("matched_name", ""))
+            if fills:
+                # The blank-only guard is repeated in SQL because the row was
+                # read a moment ago: a concurrent user edit between the
+                # SELECT and this UPDATE must win, not be clobbered by the
+                # background pass.
+                assignments = ", ".join(f"{field} = @{field}" for field in fills)
+                guards = " AND ".join(f"({field} IS NULL OR {field} = '')" for field in fills)
+                client.query(
+                    f"UPDATE `{project_id}.{dataset_id}.listings` "
+                    f"SET {assignments}, {cooldown_assignment}, last_observed_at = CURRENT_TIMESTAMP() "
+                    f"WHERE listing_id = @listing_id AND {guards}",
+                    job_config=bigquery.QueryJobConfig(query_parameters=[
+                        bigquery.ScalarQueryParameter(field, "STRING", value)
+                        for field, value in fills.items()
+                    ] + [bigquery.ScalarQueryParameter("listing_id", "STRING", listing_id)])).result()
+                updated += 1
+                fields_filled += len(fills)
+                LOGGER.info("location_enriched listing_id=%s fields=%s matched=%s",
+                            listing_id, ",".join(sorted(fills)), resolved.get("matched_name", ""))
+            else:
+                # Nothing resolved - still record the attempt so this row
+                # isn't retried every cycle for the next 10 days.
+                client.query(
+                    f"UPDATE `{project_id}.{dataset_id}.listings` "
+                    f"SET {cooldown_assignment} WHERE listing_id = @listing_id",
+                    job_config=bigquery.QueryJobConfig(query_parameters=[
+                        bigquery.ScalarQueryParameter("listing_id", "STRING", listing_id)])).result()
         except Exception as exc:
             LOGGER.warning("location_enrich_write_failed listing_id=%s error=%s", listing_id, exc)
         sleep(BRAND_ENRICH_PAUSE_SECONDS)

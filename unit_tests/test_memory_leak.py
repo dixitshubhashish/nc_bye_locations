@@ -65,10 +65,12 @@ class MemoryLeakAndResourceTests(unittest.TestCase):
             return {"attempted": 0, "resolved": 0, "remaining": 0}
 
         with patch.object(workflow_server, "_warehouse_settings", return_value=("test-proj", "test-dataset", None)), \
-             patch.object(workflow_server, "_bigquery_client", side_effect=fake_create_client), \
+             patch.object(workflow_server, "_new_scoped_bigquery_client", side_effect=fake_create_client), \
              patch.object(workflow_server, "_count_error_listings_live", return_value=30), \
              patch.object(workflow_server, "auto_repair_error_batch", side_effect=fake_batch), \
              patch.object(workflow_server, "AUTO_REPAIR_BATCH_PAUSE_SECONDS", 0.0), \
+             patch.object(workflow_server, "AUTO_REPAIR_INITIAL_DELAY_MIN_SECONDS", 0.0), \
+             patch.object(workflow_server, "AUTO_REPAIR_INITIAL_DELAY_MAX_SECONDS", 0.0), \
              patch.object(workflow_server, "_schedule_quality_fix_metrics_refresh"), \
              patch.object(workflow_server, "refresh_error_count"), \
              patch.object(workflow_server, "invalidate_cache"), \
@@ -166,10 +168,12 @@ class AutoRepairYieldsToForegroundActivityTests(unittest.TestCase):
 
         workflow_server.LAST_FOREGROUND_ACTIVITY_AT = workflow_server.wall_clock_time()
         with patch.object(workflow_server, "_warehouse_settings", return_value=("test-proj", "test-dataset", None)), \
-             patch.object(workflow_server, "_bigquery_client", return_value=fake_client), \
+             patch.object(workflow_server, "_new_scoped_bigquery_client", return_value=fake_client), \
              patch.object(workflow_server, "_count_error_listings_live", return_value=10), \
              patch.object(workflow_server, "auto_repair_error_batch", side_effect=fake_batch), \
              patch.object(workflow_server, "AUTO_REPAIR_BATCH_PAUSE_SECONDS", 0.0), \
+             patch.object(workflow_server, "AUTO_REPAIR_INITIAL_DELAY_MIN_SECONDS", 0.0), \
+             patch.object(workflow_server, "AUTO_REPAIR_INITIAL_DELAY_MAX_SECONDS", 0.0), \
              patch.object(workflow_server, "FOREGROUND_IDLE_GRACE_SECONDS", 5.0), \
              patch.object(workflow_server, "sleep", side_effect=fake_sleep), \
              patch.object(workflow_server, "_schedule_quality_fix_metrics_refresh"), \
@@ -197,10 +201,12 @@ class AutoRepairYieldsToForegroundActivityTests(unittest.TestCase):
 
         workflow_server.LAST_FOREGROUND_ACTIVITY_AT = 0.0  # long ago
         with patch.object(workflow_server, "_warehouse_settings", return_value=("test-proj", "test-dataset", None)), \
-             patch.object(workflow_server, "_bigquery_client", return_value=fake_client), \
+             patch.object(workflow_server, "_new_scoped_bigquery_client", return_value=fake_client), \
              patch.object(workflow_server, "_count_error_listings_live", return_value=10), \
              patch.object(workflow_server, "auto_repair_error_batch", side_effect=fake_batch), \
              patch.object(workflow_server, "AUTO_REPAIR_BATCH_PAUSE_SECONDS", 0.0), \
+             patch.object(workflow_server, "AUTO_REPAIR_INITIAL_DELAY_MIN_SECONDS", 0.0), \
+             patch.object(workflow_server, "AUTO_REPAIR_INITIAL_DELAY_MAX_SECONDS", 0.0), \
              patch.object(workflow_server, "FOREGROUND_IDLE_GRACE_SECONDS", 5.0), \
              patch.object(workflow_server, "sleep", side_effect=fake_sleep), \
              patch.object(workflow_server, "_schedule_quality_fix_metrics_refresh"), \
@@ -217,6 +223,135 @@ class AutoRepairYieldsToForegroundActivityTests(unittest.TestCase):
         # per batch regardless - only the idle-grace wait (>= a few seconds)
         # must be absent when the app was already idle.
         self.assertTrue(all(seconds < 1.0 for seconds in sleep_calls), f"Unexpected idle-grace sleep: {sleep_calls}")
+
+
+class AutoRepairLaunchPacingAndHeavyLoadTests(unittest.TestCase):
+    """2026-09-10: the "Start Enrichment" button now (1) waits a randomised
+    5-10 minute warm-up before its first batch instead of running
+    immediately, and (2) checks load - REPORTING_REFRESHING, plus a streak of
+    recent foreground activity across successive batch cycles - before every
+    batch, releasing its own dedicated BigQuery client (never the shared
+    _bigquery_client() singleton) while backed off under heavy load and
+    reacquiring a fresh one on resume. This is additive to, and independent
+    of, the pre-existing eased-pacing (Stop button) and single-recent-action
+    grace wait covered by the test classes above."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self._db_path_patch = patch.object(sqlite_cache, "DB_PATH", Path(self._tmpdir) / "test.db")
+        self._db_path_patch.start()
+        self._original_activity = workflow_server.LAST_FOREGROUND_ACTIVITY_AT
+        self._original_refreshing = workflow_server.REPORTING_REFRESHING
+
+    def tearDown(self) -> None:
+        self._db_path_patch.stop()
+        workflow_server.LAST_FOREGROUND_ACTIVITY_AT = self._original_activity
+        workflow_server.REPORTING_REFRESHING = self._original_refreshing
+
+    def test_default_initial_delay_bounds_are_five_to_ten_minutes(self) -> None:
+        """Documents the actual bounds without exercising the thread - a
+        plain sanity/regression check that nobody quietly widens or narrows
+        the launch delay window."""
+        self.assertEqual(workflow_server.AUTO_REPAIR_INITIAL_DELAY_MIN_SECONDS, 300.0)
+        self.assertEqual(workflow_server.AUTO_REPAIR_INITIAL_DELAY_MAX_SECONDS, 600.0)
+        self.assertLessEqual(
+            workflow_server.AUTO_REPAIR_INITIAL_DELAY_MIN_SECONDS,
+            workflow_server.AUTO_REPAIR_INITIAL_DELAY_MAX_SECONDS)
+
+    def test_worker_waits_out_the_initial_delay_before_the_first_batch(self) -> None:
+        fake_client = FakeBigQueryClient()
+        events: list[tuple[str, float]] = []
+
+        def fake_sleep(seconds: float) -> None:
+            events.append(("sleep", seconds))
+
+        def fake_batch(limit: int = 10, offset: int = 0, *, client: Any = None) -> dict[str, int]:
+            events.append(("batch", 0.0))
+            return {"attempted": 5, "resolved": 5, "remaining": 0}
+
+        workflow_server.LAST_FOREGROUND_ACTIVITY_AT = 0.0  # idle
+        workflow_server.REPORTING_REFRESHING = False
+        with patch.object(workflow_server, "_warehouse_settings", return_value=("test-proj", "test-dataset", None)), \
+             patch.object(workflow_server, "_new_scoped_bigquery_client", return_value=fake_client), \
+             patch.object(workflow_server, "_count_error_listings_live", return_value=5), \
+             patch.object(workflow_server, "auto_repair_error_batch", side_effect=fake_batch), \
+             patch.object(workflow_server, "AUTO_REPAIR_BATCH_PAUSE_SECONDS", 0.0), \
+             patch.object(workflow_server, "AUTO_REPAIR_INITIAL_DELAY_MIN_SECONDS", 6.0), \
+             patch.object(workflow_server, "AUTO_REPAIR_INITIAL_DELAY_MAX_SECONDS", 6.0), \
+             patch.object(workflow_server, "sleep", side_effect=fake_sleep), \
+             patch.object(workflow_server, "_schedule_quality_fix_metrics_refresh"), \
+             patch.object(workflow_server, "refresh_error_count"), \
+             patch.object(workflow_server, "invalidate_cache"), \
+             patch.object(workflow_server, "_refresh_silver_background"):
+            workflow_server.AUTO_REPAIR_THREAD = None
+            workflow_server.start_auto_repair()
+            for thread in list(threading.enumerate()):
+                if thread.name == "automatic-review-repair":
+                    thread.join(timeout=5)
+
+        self.assertIn("batch", [kind for kind, _ in events], "Expected the batch to eventually run")
+        first_batch_index = next(i for i, (kind, _) in enumerate(events) if kind == "batch")
+        sleeps_before_batch = [seconds for kind, seconds in events[:first_batch_index] if kind == "sleep"]
+        self.assertGreaterEqual(sum(sleeps_before_batch), 6.0 - 1e-9, "Expected the full 6s warm-up delay before the first batch")
+
+    def test_worker_releases_client_under_reporting_refresh_and_reacquires_on_resume(self) -> None:
+        created_clients: list[FakeBigQueryClient] = []
+        closed_clients: list[FakeBigQueryClient] = []
+
+        class TrackedFakeClient(FakeBigQueryClient):
+            def close(self) -> None:
+                closed_clients.append(self)
+
+        def fake_create_client(*args: Any, **kwargs: Any) -> TrackedFakeClient:
+            client = TrackedFakeClient()
+            created_clients.append(client)
+            return client
+
+        sleep_calls: list[float] = []
+
+        def fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+            # Simulate the reporting refresh finishing partway through the
+            # heavy-load backoff wait, so the worker's next loop pass finds
+            # load back to normal and resumes.
+            if len(sleep_calls) >= 3:
+                workflow_server.REPORTING_REFRESHING = False
+
+        def fake_batch(limit: int = 10, offset: int = 0, *, client: Any = None) -> dict[str, int]:
+            self.assertIn(client, created_clients)
+            return {"attempted": 5, "resolved": 5, "remaining": 0}
+
+        workflow_server.LAST_FOREGROUND_ACTIVITY_AT = 0.0  # idle on the foreground axis
+        workflow_server.REPORTING_REFRESHING = True  # heavy from the start
+        with patch.object(workflow_server, "_warehouse_settings", return_value=("test-proj", "test-dataset", None)), \
+             patch.object(workflow_server, "_new_scoped_bigquery_client", side_effect=fake_create_client), \
+             patch.object(workflow_server, "_count_error_listings_live", return_value=5), \
+             patch.object(workflow_server, "auto_repair_error_batch", side_effect=fake_batch), \
+             patch.object(workflow_server, "AUTO_REPAIR_BATCH_PAUSE_SECONDS", 0.0), \
+             patch.object(workflow_server, "AUTO_REPAIR_INITIAL_DELAY_MIN_SECONDS", 0.0), \
+             patch.object(workflow_server, "AUTO_REPAIR_INITIAL_DELAY_MAX_SECONDS", 0.0), \
+             patch.object(workflow_server, "AUTO_REPAIR_HEAVY_LOAD_BACKOFF_SECONDS", 10.0), \
+             patch.object(workflow_server, "sleep", side_effect=fake_sleep), \
+             patch.object(workflow_server, "_schedule_quality_fix_metrics_refresh"), \
+             patch.object(workflow_server, "refresh_error_count"), \
+             patch.object(workflow_server, "invalidate_cache"), \
+             patch.object(workflow_server, "_refresh_silver_background"):
+            workflow_server.AUTO_REPAIR_THREAD = None
+            workflow_server.start_auto_repair()
+            for thread in list(threading.enumerate()):
+                if thread.name == "automatic-review-repair":
+                    thread.join(timeout=5)
+
+        # One client for the initial total-count lookup, released the moment
+        # REPORTING_REFRESHING was seen; a second, fresh one acquired only
+        # once load looked normal again to actually run the batch, and then
+        # closed by the worker's own end-of-run cleanup (the finally clause)
+        # once there was nothing left to do. Every created client gets
+        # closed exactly once - none reused after close, none left open.
+        self.assertEqual(len(created_clients), 2, "Expected the client to be released and a fresh one reacquired, not reused or leaked")
+        self.assertEqual(len(closed_clients), 2, "Expected both the heavy-load-released client and the end-of-run client to be closed")
+        self.assertIs(closed_clients[0], created_clients[0], "The first close should be the heavy-load release, not the end-of-run cleanup")
+        self.assertIs(closed_clients[1], created_clients[1], "The second close should be end-of-run cleanup of the reacquired client")
 
 
 if __name__ == "__main__":

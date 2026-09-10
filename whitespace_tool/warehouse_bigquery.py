@@ -293,6 +293,14 @@ TABLE_SCHEMAS: dict[str, list[dict[str, str]]] = {
         {"name": "validated", "type": "BOOLEAN", "mode": "NULLABLE"},
         {"name": "enriched_at", "type": "TIMESTAMP", "mode": "NULLABLE"},
         {"name": "max_enriched", "type": "BOOLEAN", "mode": "NULLABLE"},
+        # Durable cooldown for the idle background enrichment passes
+        # (_idle_location_enrichment_pass(), _idle_brand_enrichment_pass()) -
+        # NULL means never attempted. Set on every attempt, successful or
+        # not, so a listing OSM has never heard of does not get hammered
+        # every cycle either. Bronze-persisted deliberately (not the
+        # in-process attempted-set these passes used before this field
+        # existed) so the cooldown survives a restart instead of resetting.
+        {"name": "next_enrichment_date", "type": "TIMESTAMP", "mode": "NULLABLE"},
         # Set TRUE when a human corrects this row through the review-edit
         # path for a silver-layer validity failure (missing_state,
         # unresolved_coordinates, etc.) - distinct from `validated`, which

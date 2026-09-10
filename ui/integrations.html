@@ -540,11 +540,71 @@
       background: var(--panel);
     }
     .report-filter-control:focus { outline: 2px solid #bfdbfe; outline-offset: 1px; }
-    /* attachSearchableSelect() (common.js) inserts its input immediately
-       before the select it searches, so this is the gap between the two. It
-       belongs here rather than in that component, which has no business
-       knowing this rail exists. */
-    .report-filter-group > input[type="search"].report-filter-control { margin-bottom: 6px; }
+    /* attachSearchableSelect() (common.js) wraps a searchable <select> in
+       one of these: the select stays full width and on the left; the search
+       box starts collapsed to a small icon on the right and only takes
+       space (shrinking the select) once opened, instead of a second input
+       permanently sitting next to the dropdown. Self-contained on purpose -
+       a single flex row that behaves the same wherever it lands (a plain
+       block panel, a filter rail, a CSS grid), so it never has to know or
+       fight with whatever layout its parent applies to its own children. */
+    /* Always-visible scrollbar for the duplicate-brand-merge list, once it
+       has more groups than fit - `overflow-y: scroll` (set in JS,
+       renderDuplicateBrandRail()) reserves the track, but on macOS/most
+       browsers an overlay scrollbar still only APPEARS while actively
+       scrolling or hovering unless its thumb is explicitly styled visible,
+       which is what these rules do. Firefox uses the two `scrollbar-*`
+       properties instead of `::-webkit-scrollbar`. */
+    #duplicateBrandScroll { scrollbar-width: thin; scrollbar-color: var(--muted) transparent; }
+    #duplicateBrandScroll::-webkit-scrollbar { width: 8px; }
+    #duplicateBrandScroll::-webkit-scrollbar-track { background: transparent; }
+    #duplicateBrandScroll::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 4px; }
+    /* ONE visible control (attachSearchableSelect(), common.js): the real
+       <select> is hidden entirely and kept only for its value/change-event
+       semantics; the search input is the only thing rendered, always full
+       width, behaving as a combobox (shows the current selection's text,
+       click/focus opens the full list, typing filters it). Earlier
+       collapsed/expanded two-box arrangements kept rendering as two visibly
+       separate controls depending on the surrounding layout - this removes
+       that possibility structurally rather than patching the collapse logic
+       again. */
+    .searchable-select-wrap { display: flex; align-items: center; gap: 0; min-width: 0; position: relative; }
+    .searchable-select-wrap > select { display: none; }
+    .searchable-select-wrap > input[type="search"].searchable-select-input {
+      flex: 1 1 auto;
+      min-width: 0;
+      margin: 0;
+      width: 100%;
+      /* Room reserved on the right for the icon, pulled onto this input's
+         own right edge below rather than sitting as a separate control. */
+      padding-right: 44px;
+      cursor: pointer;
+    }
+    .searchable-select-toggle {
+      flex: 0 0 auto;
+      width: 42px;
+      height: 42px;
+      padding: 0;
+      border: none;
+      background: transparent;
+      color: #000;
+      font-size: 30px;
+      line-height: 1;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      /* Pulled back onto the input's own right edge so it reads as part of
+         the search box, not a separate control beside it. */
+      margin-left: -42px;
+      position: relative;
+      z-index: 1;
+    }
+    /* Rotate only the glyph, not the button box - rotating the box itself
+       turned its (invisible until hover) square hit-area into a visible
+       diamond outline. */
+    .searchable-select-toggle svg { display: block; }
+    .searchable-select-toggle:hover { color: var(--accent); }
     /* The competitor picker is a button plus a popup rather than a <select>,
        so it takes the control's metrics explicitly instead of inheriting
        them - that is the whole reason the two rails' control heights could
@@ -1234,6 +1294,11 @@
        same line as the filters on a laptop screen instead of wrapping. */
     .review-toolbar { display: grid; grid-template-columns: minmax(200px, 280px) minmax(140px, 200px) minmax(140px, 200px) auto auto; justify-content: start; gap: 8px; width: 100%; max-width: none; margin-bottom: 16px; align-items: stretch; }
     .review-toolbar input, .review-toolbar select { width: 100%; min-width: 0; box-sizing: border-box; }
+    /* Needs Review's toolbar has one fewer control (no second action button
+       like "Try Auto-Fixing with AI"), so it gets its own explicit track
+       count rather than inheriting the 5-column layout above and leaving a
+       trailing empty gap. */
+    #needsReviewToolbar { grid-template-columns: minmax(160px, 220px) minmax(120px, 160px) minmax(140px, 200px) auto; }
     .review-brand-breakdown-layout { display: grid; grid-template-columns: minmax(300px, .85fr) minmax(360px, 1.15fr); gap: 28px; align-items: center; width: 100%; }
     .review-chart-side { min-width: 0; display: grid; grid-template-columns: minmax(120px, 170px) minmax(0, 1fr); gap: 14px; align-items: center; }
     .review-ai-summary { min-width: 0; box-sizing: border-box; padding: 14px 12px; border: 1px solid #b9d6c3; border-radius: 8px; background: #f2fbf5; }
@@ -1787,22 +1852,13 @@
     .wide-brand-selector > label {
       margin-bottom: 0;
     }
-    .wide-brand-selector > input[type="search"] {
-      grid-column: 1;
+    /* The select+search pair is now one .searchable-select-wrap unit
+       (attachSearchableSelect(), common.js) rather than two separate grid
+       children each pinned to its own column - it spans both columns as a
+       single flex row and handles dropdown-left/search-right internally. */
+    .wide-brand-selector > .searchable-select-wrap {
+      grid-column: 1 / -1;
       margin: 0;
-    }
-    .wide-brand-selector > select {
-      grid-column: 2;
-      margin: 0;
-    }
-    @media (max-width: 900px) {
-      .wide-brand-selector {
-        grid-template-columns: 1fr;
-      }
-      .wide-brand-selector > input[type="search"],
-      .wide-brand-selector > select {
-        grid-column: 1;
-      }
     }
     .pre-parse-parser-panel { min-height: 100%; }
     .pre-parse-parser-panel > .panel { margin-bottom: 0; }
@@ -2939,10 +2995,15 @@ result = [
            dropdown, so this rail is the only place they surface. Hidden
            entirely when there is nothing to merge. -->
       <div class="panel left-rail-persistent hidden" id="duplicateBrandPanel">
-        <h2>Duplicate Brands</h2>
-        <div class="mapping-note">This brand was added more than once. Choose which one to keep &mdash; all its stores, templates and review items move across. Nothing is deleted.</div>
-        <div id="duplicateBrandList" style="display: grid; gap: 10px;"></div>
-        <div id="duplicateBrandStatus" class="action-feedback" role="status" aria-live="polite"></div>
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
+          <h2 style="margin: 0;">Duplicate Brands</h2>
+          <button type="button" class="text-link" id="duplicateBrandToggleBtn">Show</button>
+        </div>
+        <div id="duplicateBrandBody" class="hidden">
+          <div class="mapping-note">This brand was added more than once. Choose which one to keep &mdash; all its stores, templates and review items move across. Nothing is deleted.</div>
+          <div id="duplicateBrandList" style="display: grid; gap: 10px;"></div>
+          <div id="duplicateBrandStatus" class="action-feedback" role="status" aria-live="polite"></div>
+        </div>
       </div>
 
       <div class="panel left-rail-persistent">
@@ -3052,18 +3113,20 @@ result = [
         </div>
         <h3>1. Pick a brand and a file</h3>
         <p>Choose which brand this data belongs to, then tell us where the data is coming from — an uploaded file, a public link, an API, or a custom script. Click Parse and we'll take a quick look to see what's inside.</p>
-        <h3>2. Check the field matches</h3>
-        <p>You'll see your actual records on one side, and how each column lines up to a location field on the other. Green means we matched it automatically; light red means it's a guess worth double-checking.</p>
+        <h3>2. AI matches your fields automatically</h3>
+        <p>You'll see your actual records on one side, and how each column lines up to a location field on the other. Green means AI matched it automatically, using this and every past mapping you've confirmed; light red means it's a guess worth double-checking.</p>
         <h3>3. Save, then review</h3>
-        <p>Saving processes your entire file, not just the quick preview. Good records go straight into your reporting. Anything that needs a second look shows up in Review Error Listings, where you can fix it by hand or let auto-fix handle it.</p>
-        <h3>4. Where things live</h3>
+        <p>Saving processes your entire file, not just the quick preview. Good records go straight into your reporting. Anything that needs a second look shows up in Review Error Listings — nothing is ever silently dropped.</p>
+        <h3>4. AI cleans up and enriches your data</h3>
+        <p>In the background, AI repairs common problems automatically: ZIP codes and state names normalized, swapped or inverted coordinates fixed, offshore/wrong coordinates snapped to the nearest real city, and likely-duplicate brand entries flagged for a safe merge. Anything it can't confidently fix lands in Review with a suggested fix already attached — accept it, or fix it by hand and retry.</p>
+        <h3>5. Where things live</h3>
         <ul>
           <li><strong>Mappings:</strong> bring in your data, match its fields, and manage brands.</li>
           <li><strong>Review Error Listings:</strong> find, fix, and retry anything that didn't save cleanly.</li>
           <li><strong>Template Library:</strong> reuse a mapping you've already set up, instead of starting over.</li>
           <li><strong>Reporting:</strong> see how brands compare, spot coverage gaps, and check data quality.</li>
         </ul>
-        <h3>5. About the numbers you'll see</h3>
+        <h3>6. About the numbers you'll see</h3>
         <p>Reporting shows the latest data we have. It updates quietly in the background, and you can always hit refresh for the newest numbers. Filters only affect the report you're currently looking at.</p>
       </div>
     </dialog>
@@ -3247,10 +3310,12 @@ result = [
               <section class="report-section" style="margin-top: 0;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; flex-wrap: wrap; gap: 8px;">
                   <h2>Location Map</h2>
-                  <div style="font-size: 12px; color: var(--muted);">
-                    <span style="display: inline-block; width: 10px; height: 10px; background: #16a34a; border-radius: 50%; margin-right: 4px;"></span>Primary Brand
-                    <span style="display: inline-block; width: 10px; height: 10px; background: #dc2626; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Competitor Brands
-                    <span style="display: inline-block; width: 10px; height: 10px; background: #f59e0b; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Gap ZIPs
+                  <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+                    <div style="font-size: 12px; color: var(--muted);">
+                      <span style="display: inline-block; width: 10px; height: 10px; background: #16a34a; border-radius: 50%; margin-right: 4px;"></span>Primary Brand
+                      <span style="display: inline-block; width: 10px; height: 10px; background: #dc2626; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Competitor Brands
+                      <span style="display: inline-block; width: 10px; height: 10px; background: #f59e0b; border-radius: 50%; margin-left: 12px; margin-right: 4px;"></span>Gap ZIPs
+                    </div>
                   </div>
                 </div>
                 <!-- Rewritten by renderReportingMap() when the report comes back capped:
@@ -3406,6 +3471,18 @@ result = [
     <section id="reviewView" class="review-view hidden">
       <h2>Review Records</h2>
       <p style="color: var(--muted); font-size: 13px; margin-top: -8px; margin-bottom: 16px;">Review records that need attention. Edit and retry when ready.</p>
+      <!-- Two genuinely different failure populations, kept visually and
+           numerically separate per codex.md's reasoning: Review Error
+           Listings are rows rejected at parse/mapping time (never reached
+           `listings`); Needs Review are rows that DID reach `listings` but
+           fail silver-layer validation (missing_state, unresolved
+           coordinates, etc.). Reusing the same sub-tab pattern the
+           Reporting view already uses for its two inner tabs. -->
+      <div class="reporting-inner-tabs" id="reviewInnerTabs">
+        <button type="button" class="reporting-inner-tab active" data-review-tab="errors">Review Error Listings (<span id="reviewCount">0</span>)</button>
+        <button type="button" class="reporting-inner-tab" data-review-tab="needsReview">Needs Review (<span id="needsReviewTabCount">0</span>)</button>
+      </div>
+      <div id="reviewErrorsPanel">
       <div class="review-toolbar">
         <input id="reviewEventId" type="search" autocomplete="off" aria-label="Entity or event ID" placeholder="Search by entity / event ID">
         <select id="reviewBrandFilter" aria-label="Filter by brand">
@@ -3471,6 +3548,41 @@ result = [
       </div>
       <div id="reviewAutoRepairStatus" class="status hidden" role="status" aria-live="polite"></div>
       <div id="reviewResults" class="status">Search review records.</div>
+      </div>
+      <div id="needsReviewPanel" class="hidden">
+        <p style="color: var(--muted); font-size: 13px; margin-bottom: 16px;">Records that reached the database but fail silver-layer validation (missing state, missing ZIP, unresolved coordinates, etc.) — a separate population from Review Error Listings above, never double-counted with it.</p>
+        <div class="review-brand-breakdown" style="margin: 0 0 18px; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; background: #fff;">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px;">
+            <strong style="font-size: 13px; color: var(--ink);">Needs Review Summary</strong>
+            <button id="refreshNeedsReviewCountsBtn" class="secondary" type="button" style="font-size: 12px; padding: 4px 10px;">Refresh Counts</button>
+          </div>
+          <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+            <div class="review-state-card" style="flex: 1; min-width: 140px;">
+              <strong id="needsReviewTotalCount">-</strong>
+              <span>Total needing review</span>
+            </div>
+            <div class="review-state-card state-manual-pending" style="flex: 1; min-width: 140px;">
+              <strong id="needsReviewPendingCount">-</strong>
+              <span>Still needs attention</span>
+            </div>
+            <div class="review-state-card state-manual-fixed" style="flex: 1; min-width: 140px;">
+              <strong id="needsReviewReviewedCount">-</strong>
+              <span>Already reviewed</span>
+            </div>
+          </div>
+        </div>
+        <div class="review-toolbar" id="needsReviewToolbar">
+          <input id="needsReviewBusinessId" type="search" class="report-filter-control" autocomplete="off" aria-label="Filter by business ID" placeholder="Business ID">
+          <input id="needsReviewState" type="search" class="report-filter-control" autocomplete="off" aria-label="Filter by state code" placeholder="State (e.g. TX)">
+          <select id="needsReviewReviewedFilter" class="report-filter-control" aria-label="Filter by reviewed status">
+            <option value="">All Records</option>
+            <option value="false">Needs Attention</option>
+            <option value="true">Already Reviewed</option>
+          </select>
+          <button id="needsReviewSearchBtn" type="button">Search Records</button>
+        </div>
+        <div id="needsReviewResults" class="status">Search needs-review records.</div>
+      </div>
     </section>
     <dialog id="editRecordDialog" class="app-help-dialog app-help-dialog--form" aria-labelledby="editRecordTitle">
       <div class="app-help-content">
@@ -3489,6 +3601,21 @@ result = [
                confirm yet. -->
           <button id="acceptAsReviewedBtn" class="secondary hidden" type="button">Save anyway, review later</button>
           <button class="secondary" id="cancelEditRecordBtn" type="button">Cancel</button>
+        </div>
+      </div>
+    </dialog>
+    <dialog id="needsReviewEditDialog" class="app-help-dialog app-help-dialog--form" aria-labelledby="needsReviewEditTitle">
+      <div class="app-help-content">
+        <div class="app-help-header">
+          <h2 id="needsReviewEditTitle">Fix Record</h2>
+          <button class="secondary app-help-close" id="closeNeedsReviewEditBtn" type="button">Close</button>
+        </div>
+        <div id="needsReviewEditHints" style="background: #fff8e6; border: 1px solid #ffe58f; border-radius: 6px; padding: 12px; font-size: 13px; color: #8c6b00; margin: 16px 0;"></div>
+        <div id="needsReviewEditFeedback" class="action-feedback" style="margin-bottom: 16px; display: none;"></div>
+        <div id="needsReviewEditForm" style="max-height: 46vh; overflow-y: auto; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; padding-right: 4px;"></div>
+        <div class="button-row" style="margin-top: 12px;">
+          <button id="submitNeedsReviewEditBtn" type="button">Save Fix</button>
+          <button class="secondary" id="cancelNeedsReviewEditBtn" type="button">Cancel</button>
         </div>
       </div>
     </dialog>
@@ -3585,11 +3712,11 @@ result = [
     </div>
   </dialog>
 
-  <script src="js/common.js?v=preparse-layout-v2"></script>
-  <script src="js/reporting.js"></script>
-  <script src="reporting-tabs.js?v=quality-layout-v4"></script>
-  <script src="js/review.js"></script>
-  <script src="js/templates.js"></script>
+  <script src="js/common.js?v=searchable-select-v7"></script>
+  <script src="js/reporting.js?v=heatmap-v5"></script>
+  <script src="reporting-tabs.js?v=quality-layout-v6"></script>
+  <script src="js/review.js?v=fix-states-scope-v2"></script>
+  <script src="js/templates.js?v=brand-lock-v2"></script>
   <script src="js/mapper.js?v=preparse-layout-v6"></script>
   <script>
     el("parseBtn").addEventListener("click", parseSource);

@@ -29,16 +29,31 @@ const mappingSessionStorageKey = "competitive_whitespace_mapping_session";
 const serverLaunchStorageKey = "competitive_whitespace_server_launch";
 const el = (id) => document.getElementById(id);
 
-// Keep expired sessions and missing app routes from leaving the shell in a
-// partially rendered state. Login/session probes must be allowed to report
-// their own errors without redirecting recursively.
+// Keep an expired session from leaving the shell in a partially rendered
+// state. Login/session probes must be allowed to report their own errors
+// without redirecting recursively.
+//
+// 401/403 ONLY, deliberately NOT 404 (found and fixed 2026-09-10): 401/403
+// are the only statuses that actually mean "this session is not
+// authenticated" - a 404 means one specific resource/route was not found,
+// which happens for perfectly ordinary reasons unrelated to the session
+// (a stale in-flight request for a record that was just deleted, a
+// not-yet-existing gold view during a rebuild, a genuinely missing route).
+// Treating 404 as "wipe the session and hard-navigate to /login" meant
+// ANY single such 404, anywhere on the page, force-redirected the whole
+// app away from whatever the user was looking at mid-render - a
+// self-inflicted version of exactly the "page never settles / numbers
+// never render" symptom this was chasing. Endpoints that need their own
+// retry-on-failure behavior (e.g. refreshReviewFixStates() in review.js)
+// can only ever get a chance to run if a transient failure does NOT
+// immediately blow away the page out from under them.
 if (!window.__authResponseGuardInstalled) {
   const nativeFetch = window.fetch.bind(window);
   window.fetch = async (...args) => {
     const response = await nativeFetch(...args);
     const requestUrl = String(args[0]?.url || args[0] || "");
     const isAuthProbe = requestUrl.includes("/api/login") || requestUrl.includes("/api/session");
-    if ([401, 403, 404].includes(response.status) && !isAuthProbe && !window.location.pathname.endsWith("/login")) {
+    if ([401, 403].includes(response.status) && !isAuthProbe && !window.location.pathname.endsWith("/login")) {
       sessionStorage.removeItem(loginSessionStorageKey);
       sessionStorage.removeItem(mappingSessionStorageKey);
       window.location.replace("/login");
@@ -83,7 +98,7 @@ function formatNumber(value) {
 // from the DOM does. Call again (e.g. after reloading the option list) to
 // refresh the cached options; it reuses the existing search input rather
 // than creating a duplicate.
-function attachSearchableSelect(selectId, { threshold = 15, minChars = 2 } = {}) {
+function attachSearchableSelect(selectId, { threshold = 15, minChars = 2, hasMore = false } = {}) {
       const select = document.getElementById(selectId);
       if (!select) return;
       const liveOptions = Array.from(select.options).map((option) => ({ value: option.value, text: option.textContent, className: option.className }));
@@ -97,23 +112,47 @@ function attachSearchableSelect(selectId, { threshold = 15, minChars = 2 } = {})
       // dropdown too (BB9/BB10).
       const existing = document.getElementById(`${selectId}Search`);
       if (existing && liveOptions.length) existing.dataset.allOptions = JSON.stringify(liveOptions);
-      if (liveOptions.length <= threshold) return;
-      let search = existing;
-      // Self-healing: the input is a SIBLING of its select, and this app
-      // physically relocates the brand controls between panels
-      // (syncPreParseWorkspace). That routine works off a snapshot of the
-      // panel's children taken once, so an input created after the snapshot
-      // was stranded in the hidden panel when everything else moved back -
-      // the search box simply vanished. Put it back beside its select on
-      // every call instead of trusting where it was left.
-      if (search && search.parentNode !== select.parentNode) {
-        select.parentNode.insertBefore(search, select);
+      // Threshold only gates a SMALL, already-complete list (e.g. a 5-option
+      // source-format picker) out of getting pointless search chrome. It must
+      // never gate out the box on a list that is merely still loading - the
+      // brand pickers start with just the 2 static options (blank +
+      // "+ Create New Brand") before the network round trip resolves, and
+      // waiting for >threshold real brands to exist meant the box (and the
+      // ability to type at all) simply was not there for the first several
+      // seconds on a cold load. `hasMore` lets a caller that KNOWS more data
+      // is coming (the brand pickers) force the box to exist immediately.
+      if (!hasMore && liveOptions.length <= threshold) return;
+
+      // Dropdown stays on the left at its full width; the search box is a
+      // collapsed icon by default and only takes space (shrinking the
+      // select) once the user actually opens it - a permanently-visible
+      // second input next to the select was the thing being replaced here.
+      // Wrapping both in one element also sidesteps every surrounding
+      // layout's own column rules (a grid, a flex row, a plain block panel):
+      // the wrap is a single self-contained flex row wherever it lands, so
+      // it does not depend on - or fight with - whatever CSS the wrap's
+      // parent happens to apply to ITS children.
+      let wrap = document.getElementById(`${selectId}SearchWrap`);
+      if (!wrap) {
+        wrap = document.createElement("div");
+        wrap.id = `${selectId}SearchWrap`;
+        wrap.className = "searchable-select-wrap";
+        select.parentNode.insertBefore(wrap, select);
+        wrap.appendChild(select);
+      } else if (wrap.parentNode == null || select.parentNode !== wrap) {
+        // Self-healing, same reason as before: a panel relocation elsewhere
+        // in the app (syncPreParseWorkspace) can move the select without
+        // knowing this wrap exists yet if it ran before this function's
+        // first call. Put the select back inside its own wrap rather than
+        // trusting where either one was left.
+        wrap.appendChild(select);
       }
+      let search = existing;
       if (!search) {
         search = document.createElement("input");
         search.type = "search";
         search.id = `${selectId}Search`;
-        search.className = "report-filter-control";
+        search.className = "report-filter-control searchable-select-input";
         search.autocomplete = "off";
         // Plain label. This filters the select's own options in memory
         // (liveOptions above) - it never queries the server - so there is no
@@ -121,11 +160,55 @@ function attachSearchableSelect(selectId, { threshold = 15, minChars = 2 } = {})
         // Both brand pickers (the mapping view's and the 40/60 pre-parse
         // window's) say what they search; everything else is generic.
         search.placeholder = (selectId === "brandSelect" || selectId === "parserBusinessSelect")
-          ? "Search brand" : "Search";
+          ? "Select or search brand" : "Search";
         search.setAttribute("aria-label", "Search this list");
-        select.parentNode.insertBefore(search, select);
       }
+      let toggle = document.getElementById(`${selectId}SearchToggle`);
+      if (!toggle) {
+        toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.id = `${selectId}SearchToggle`;
+        toggle.className = "searchable-select-toggle";
+        // An inline SVG, not the 🔍 emoji: an emoji renders in its own
+        // fixed built-in colors on every platform, so `color`/size/rotation
+        // CSS on the button had no visible effect on it. `currentColor`
+        // makes this glyph a normal styleable icon instead.
+        toggle.innerHTML = '<svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="10" cy="10" r="7"></circle><line x1="21" y1="21" x2="15.2" y2="15.2"></line></svg>';
+        toggle.setAttribute("aria-label", "Search this list");
+      }
+      if (search.parentNode !== wrap) wrap.appendChild(search);
+      if (toggle.parentNode !== wrap) wrap.appendChild(toggle);
       search.dataset.allOptions = JSON.stringify(liveOptions);
+
+      // ONE visible control, not two: the underlying <select> is hidden by
+      // CSS (.searchable-select-wrap > select { display: none }) and kept
+      // only for its value/change-event semantics - every earlier version
+      // of this component that showed a select AND a search box side by
+      // side, in any collapsed/expanded arrangement, kept rendering as two
+      // visibly separate boxes depending on the surrounding layout, which
+      // is what was actually being reported. The search input is now the
+      // only thing on screen, always full width, and behaves like a
+      // combobox: it displays the current selection's text when not being
+      // edited, and clicking/focusing it opens the full list exactly like
+      // a native <select> would - typing narrows it, same as before.
+      const syncDisplayedValue = () => {
+        if (document.activeElement === search) return; // don't fight typing
+        if (!select.value) { search.value = ""; return; }
+        const current = liveOptions.find((option) => option.value === select.value);
+        search.value = current?.text || "";
+      };
+      syncDisplayedValue();
+      const openFullList = () => {
+        // A disabled search input (see setTemplateEditBrandLock()) is the
+        // ONLY visible control now that the real <select> is hidden -
+        // disabling the select alone no longer stops interaction, since
+        // nothing is reading that property here otherwise.
+        if (search.disabled) return;
+        search.focus();
+        renderSuggestions(search.value.trim().toLowerCase().replace(/\s+/g, " "), true);
+      };
+      // Re-bind on every call rather than only once: idempotent and cheap.
+      toggle.onclick = openFullList;
 
       // A real suggestion list, not just a filtered <select>.
       //
@@ -256,11 +339,37 @@ function attachSearchableSelect(selectId, { threshold = 15, minChars = 2 } = {})
         window.removeEventListener("resize", onViewportChange);
       };
       const choose = (value) => {
+        // search.oninput() narrows select.innerHTML down to only whatever
+        // matched the LAST thing typed, and nothing ever widens it back out
+        // afterwards - so picking a suggestion for a brand that isn't in
+        // that stale, narrowed option list makes `select.value = value` a
+        // silent no-op (assigning a <select> a value with no matching
+        // <option> is simply ignored by the browser, no error). That is
+        // "the dropdown loads suggestions but picking one doesn't set
+        // anything" - the option genuinely was not there to select. Rebuild
+        // from the full cached list first so the value being set always
+        // has something to land on.
+        if (!Array.from(select.options).some((option) => option.value === value)) {
+          const all = JSON.parse(search.dataset.allOptions || "[]");
+          select.innerHTML = all.map((option) => `<option value="${escapeHtml(option.value)}"${option.className ? ` class="${escapeHtml(option.className)}"` : ""}>${escapeHtml(option.text)}</option>`).join("");
+        }
         select.value = value;
         hideSuggestions();
-        search.value = "";
-        search.oninput();
         select.dispatchEvent(new Event("change"));
+        // Display the chosen option's TEXT, combobox-style - this is the
+        // one visible control, so it has to show what got picked, not go
+        // blank the way a "search box next to a select" could afford to.
+        // Set it directly rather than via syncDisplayedValue(): its "don't
+        // fight typing" guard (`activeElement === search` => no-op) also
+        // swallowed this call, because the suggestion panel's mousedown
+        // handler calls preventDefault() specifically to keep focus on the
+        // input - so a completed click-selection left the box showing the
+        // last-typed query (e.g. "Pizza") instead of the brand actually
+        // picked (e.g. "Domino's Pizza"), even though the underlying
+        // <select> value was already correct. Confirmed live in a headless
+        // browser (2026-09-10).
+        const chosenOption = JSON.parse(search.dataset.allOptions || "[]").find((option) => option.value === value);
+        search.value = chosenOption ? chosenOption.text : "";
       };
       panel.onmousedown = (event) => {
         const row = event.target.closest("[data-suggestion-value]");
@@ -268,40 +377,25 @@ function attachSearchableSelect(selectId, { threshold = 15, minChars = 2 } = {})
         event.preventDefault();
         choose(row.dataset.suggestionValue);
       };
-      search.onblur = () => window.setTimeout(hideSuggestions, 150);
-      // Focusing the box shows NOTHING until something is typed (user
-      // instruction). Dumping 1,000 names under the cursor the moment the box
-      // is clicked is the same wall of text the native popup gives, just in a
-      // different container - this panel is for narrowing, not for browsing.
-      // Browsing the whole list is what clicking the select does (below).
+      search.onblur = () => window.setTimeout(() => {
+        hideSuggestions();
+        // Nothing chosen - restore the display to whatever is actually
+        // selected (a typed query with no pick made must not overwrite the
+        // real value shown to the user).
+        syncDisplayedValue();
+      }, 150);
+      // Focusing shows the FULL list immediately (this is the one visible
+      // control now, so it has to double as the dropdown - a bare click
+      // with nothing typed yet must behave like opening a <select>, not
+      // show nothing until the user starts typing). Select-all on focus so
+      // a click-to-open immediately lets typing REPLACE the shown value
+      // rather than insert into the middle of it.
       search.onfocus = () => {
-        const query = search.value.trim().toLowerCase().replace(/\s+/g, " ");
-        if (query) renderSuggestions(query);
-        else hideSuggestions();
-      };
-      search.onkeydown = (event) => { if (event.key === "Escape") hideSuggestions(); };
-
-      // Suppress the native <select> popup and open the bounded panel instead.
-      //
-      // This is the actual fix for "big dropdown with no height limit or
-      // scroll". A native popup is drawn by the OS, not the page: max-height,
-      // overflow and size on a <select> or its <option>s are ignored, so with
-      // 1,000 brands the browser draws a list as tall as the screen and no
-      // amount of CSS shortens it. Styling the typeahead panel never helped
-      // because the panel was not what opened. The only way to bound this
-      // list is to not open the native popup at all - preventDefault() on
-      // mousedown does that - and hand the click to the panel, which does
-      // have a fixed max-height and its own scroll.
-      //
-      // Keyboard use of the select is deliberately left untouched.
-      select.onmousedown = (event) => {
-        // A locked select (template review locks the brand to the template's
-        // own business_id) must not offer a list to pick from.
-        if (event.button !== 0 || select.disabled) return;
-        event.preventDefault();
-        search.focus();
+        search.select();
         renderSuggestions(search.value.trim().toLowerCase().replace(/\s+/g, " "), true);
       };
+      search.onkeydown = (event) => { if (event.key === "Escape") hideSuggestions(); };
+      toggle.setAttribute("aria-label", "Open brand list");
 
       // showAll: open the panel with the whole list, for focus/click. The
       // native <select> popup cannot be height-capped by CSS - with 1,000
@@ -360,6 +454,18 @@ function attachSearchableSelect(selectId, { threshold = 15, minChars = 2 } = {})
         select.value = matches.some((option) => option.value === selected) ? selected : "";
         renderSuggestions(query);
       };
+
+      // The user may already be typing against the placeholder 2-option list
+      // (blank + "+ Create New Brand") when the real data lands - a later
+      // call to this function refreshes `search.dataset.allOptions` above,
+      // but nothing repaints the select or the open panel until the NEXT
+      // keystroke. Re-run the already-typed query against the fresh data now
+      // instead of leaving a stale/empty result sitting under an unchanged
+      // input - same effect as if the user had just typed the last character
+      // again, minus the keystroke.
+      if (document.activeElement === search && search.value.trim()) {
+        search.oninput();
+      }
     }
 function formatTimestamp(value) {
       if (!value) return "";
@@ -674,12 +780,33 @@ function switchView(viewId, isBootRestore = false) {
         try { sessionStorage.setItem("reportingInnerTab", "location"); } catch (_) {}
         if (typeof window.reportingResetToLocationTab === "function") window.reportingResetToLocationTab();
       }
-      if (viewId === "templateLibraryView" && !templateLibraryLoaded) loadTemplateFilters().then(loadTemplateLibrary);
+      // loadAppData() (this file) already ran loadTemplateFilters() once at
+      // boot, for every view, so templateLibraryLoaded is already true by
+      // the time a user's first real nav click lands here - the
+      // !templateLibraryLoaded guard below (kept for the template LISTING,
+      // which is the expensive, paginated fetch worth caching) was also
+      // gating the FILTERS refetch, so #templateBusinessFilter's brand
+      // option list was permanently frozen at its boot-time snapshot for
+      // the rest of the session: a brand created afterward in Mapper never
+      // appeared there without a full page reload (confirmed live,
+      // 2026-09-10). loadTemplateFilters() is two lightweight GETs
+      // (brands + source types), cheap enough to run on every visit to this
+      // tab; only the template listing itself stays behind the cache guard.
+      if (viewId === "templateLibraryView") {
+        loadTemplateFilters();
+        if (!templateLibraryLoaded) loadTemplateLibrary();
+      }
       if (viewId === "reviewView") {
         loadRejectedRecords();
         refreshReviewCount();
         if (typeof loadErrorBrandBreakdown === "function") loadErrorBrandBreakdown();
         if (typeof refreshFixCountersOnce === "function") refreshFixCountersOnce();
+        // Needs Review is a separate failure population (see codex.md) with
+        // its own sub-tab inside this view. A genuine nav click always lands
+        // back on Review Error Listings, same convention Reporting uses for
+        // its own inner tabs; only a page refresh while already here
+        // (isBootRestore) restores whichever sub-tab was open.
+        if (typeof restoreReviewInnerTab === "function") restoreReviewInnerTab(isBootRestore);
       }
     }
 
@@ -803,6 +930,18 @@ async function loadAppData() {
       // overwrites this as soon as it lands.
       if (typeof paintRememberedBrands === "function") {
         try { paintRememberedBrands(); } catch (_) {}
+      }
+      // Create the search box right now, synchronously, using whatever the
+      // select currently holds - the remembered list just painted above, or
+      // (on a first-ever visit, nothing remembered) just its 2 static
+      // options. `hasMore: true` is what lets this fire before real data
+      // exists at all: the user can start typing immediately, and
+      // attachSearchableSelect()'s later calls (once loadBrands() below
+      // resolves) refresh the option list under it and repaint any
+      // already-typed query against the real data.
+      if (typeof attachSearchableSelect === "function") {
+        attachSearchableSelect("brandSelect", { threshold: 15, minChars: 1, hasMore: true });
+        attachSearchableSelect("parserBusinessSelect", { threshold: 15, minChars: 1, hasMore: true });
       }
       await Promise.allSettled([loadFieldRegistry(), loadBrands(), loadTemplateFilters()]);
       // Apply the initial mapper layout (and enable the brand-dependent

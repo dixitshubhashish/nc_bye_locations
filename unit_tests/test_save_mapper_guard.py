@@ -136,5 +136,122 @@ class SaveMapperAllInvalidGuardTests(unittest.TestCase):
         push.assert_called_once()
 
 
+class BlankSourceNameFallbackTests(unittest.TestCase):
+    """BUG-101 backend hardening: save_mapper() must not hard-fail on a blank
+    mapper.source_name - it should generate one the same way the browser
+    does for callers that bypass ui/js/mapper.js's fallbackSourceName()
+    (a direct POST /api/save, or a hand-built payload)."""
+
+    def setUp(self) -> None:
+        self._fc = patch.object(ws, "field_catalog", side_effect=Exception("no bigquery in test"))
+        self._fc.start()
+
+    def tearDown(self) -> None:
+        self._fc.stop()
+
+    def test_fallback_prefers_source_url_filename(self) -> None:
+        mapper = {"source_url": "https://example.com/path/Weekly_Export.CSV", "source_type": "csv"}
+        self.assertEqual(ws._fallback_source_name(mapper), "weekly_export")
+
+    def test_fallback_uses_source_type_placeholder_without_url(self) -> None:
+        mapper = {"source_type": "json"}
+        self.assertEqual(ws._fallback_source_name(mapper), "restaurant_locations_json")
+
+    def test_fallback_uses_generic_placeholder_for_unknown_type(self) -> None:
+        mapper = {"source_type": "", "source_url": ""}
+        self.assertEqual(ws._fallback_source_name(mapper), "restaurant_locations")
+
+    def test_save_mapper_generates_name_for_blank_source_name(self) -> None:
+        mapper = _mapper()
+        mapper["source_name"] = "   "
+        mapper["source_url"] = "https://example.com/stores/atlanta_locations.json"
+        with patch.object(ws, "_warehouse_settings", return_value=("p", "d", None)), \
+             patch.object(ws, "_bigquery_client", return_value=object()), \
+             patch.object(ws, "_load_mapped_zip_demographics", return_value={}), \
+             patch.object(ws, "_dedupe_listings_against_bronze", side_effect=lambda c, p, d, rows: (rows, 0)), \
+             patch.object(ws, "push_to_bigquery") as push, \
+             patch.object(ws, "_maybe_refresh_after_save"):
+            # Would raise ValueError("Mapper validation failed: source_name")
+            # before this fix, since _resolve_mapper_source_fields() returns a
+            # fresh dict (mutating the caller's `mapper` above proves nothing).
+            result = ws.save_mapper({"mapper": mapper, "rows": [_valid_row()], "source_fields": SOURCE_FIELDS})
+        self.assertEqual(result["mapped_rows"], 1)
+        push.assert_called_once()
+
+    def test_save_mapper_still_rejects_when_brand_missing(self) -> None:
+        # The fallback only covers source_name - other required fields still
+        # raise, exactly as before.
+        mapper = _mapper()
+        mapper["brand"] = ""
+        mapper["source_name"] = ""
+        with self.assertRaises(ValueError):
+            ws.save_mapper({"mapper": mapper, "rows": [_valid_row()], "source_fields": SOURCE_FIELDS})
+
+
+class SaveMapperRefreshChainTests(unittest.TestCase):
+    """_maybe_refresh_after_save() -> _refresh_silver_background() is the
+    mechanism that fires after every mapper save (the "Save Listing Data"
+    button) to keep silver+gold+mirror in sync with newly-saved bronze data.
+    test_scheduler.py already covers _maybe_refresh_after_save() and
+    _refresh_silver_background() as standalone units (called directly), and
+    every existing save_mapper() test in this file patches
+    _maybe_refresh_after_save() out entirely - none of them assert it is
+    actually reached by a real (non skip_cache_invalidation) save_mapper()
+    call. These close that gap by patching one level lower
+    (_refresh_silver_background, the function _maybe_refresh_after_save()
+    itself calls) so the real save_mapper() -> _maybe_refresh_after_save()
+    call boundary is exercised, not skipped.
+    """
+
+    def setUp(self) -> None:
+        self._fc = patch.object(ws, "field_catalog", side_effect=Exception("no bigquery in test"))
+        self._fc.start()
+
+    def tearDown(self) -> None:
+        self._fc.stop()
+
+    def test_a_normal_save_reaches_the_background_refresh(self) -> None:
+        with patch.object(ws, "_warehouse_settings", return_value=("p", "d", None)), \
+             patch.object(ws, "_bigquery_client", return_value=object()), \
+             patch.object(ws, "_load_mapped_zip_demographics", return_value={}), \
+             patch.object(ws, "_dedupe_listings_against_bronze", side_effect=lambda c, p, d, rows: (rows, 0)), \
+             patch.object(ws, "push_to_bigquery") as push, \
+             patch.object(ws, "invalidate_cache") as invalidate, \
+             patch.object(ws, "_refresh_silver_background") as refresh:
+            result = ws.save_mapper({"mapper": _mapper(), "rows": [_valid_row()], "source_fields": SOURCE_FIELDS})
+
+        self.assertEqual(result["mapped_rows"], 1)
+        push.assert_called_once()
+        # skip_cache_invalidation defaults to False, so the mapper save path
+        # (unlike the sample loader, which passes True deliberately) must
+        # actually invalidate the cache and kick off the background refresh -
+        # this is what keeps Reporting/Review in sync after "Save Listing Data".
+        invalidate.assert_called_once()
+        refresh.assert_called_once()
+
+    def test_skip_cache_invalidation_true_bypasses_the_refresh(self) -> None:
+        # The sample loader calls save_mapper(..., skip_cache_invalidation=True)
+        # deliberately, to avoid firing a full refresh once per brand during a
+        # bulk load. Confirms the opposite path of the test above through the
+        # same real save_mapper() call, not just _maybe_refresh_after_save()
+        # in isolation.
+        with patch.object(ws, "_warehouse_settings", return_value=("p", "d", None)), \
+             patch.object(ws, "_bigquery_client", return_value=object()), \
+             patch.object(ws, "_load_mapped_zip_demographics", return_value={}), \
+             patch.object(ws, "_dedupe_listings_against_bronze", side_effect=lambda c, p, d, rows: (rows, 0)), \
+             patch.object(ws, "push_to_bigquery") as push, \
+             patch.object(ws, "invalidate_cache") as invalidate, \
+             patch.object(ws, "_refresh_silver_background") as refresh:
+            result = ws.save_mapper(
+                {"mapper": _mapper(), "rows": [_valid_row()], "source_fields": SOURCE_FIELDS},
+                skip_cache_invalidation=True,
+            )
+
+        self.assertEqual(result["mapped_rows"], 1)
+        push.assert_called_once()
+        invalidate.assert_not_called()
+        refresh.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -13,3 +13,4 @@ config/connections/*service*account*.json
 config/connections/service_account.json
 config/connections/keen-device-610-2af9b27dfda3.json
 .coverage
+internal-docs/
