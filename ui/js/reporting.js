@@ -914,10 +914,28 @@ async function fetchHeatmapCells() {
 // approach as before (L.canvas(), non-interactive rectangles) - showing it
 // by default doesn't change the cost of building it, only when that cost
 // is paid.
+let heatmapRetryCount = 0;
+const HEATMAP_RETRY_LIMIT = 4;
+
 async function showHeatmapLayerByDefault() {
   if (!reportingMap || !heatmapLayerGroup || heatmapVisible) return;
   const payload = await fetchHeatmapCells();
-  if (!payload) return; // fetch failed - leave it off rather than show nothing
+  if (!payload) {
+    // A failed/empty fetch used to be a dead end: heatmapVisible stayed
+    // false forever with nothing scheduled to try again, so the layer
+    // silently never appeared unless something else (a manual Refresh
+    // Report click) happened to call this function a second time. Right
+    // after a restart the first attempt can easily land mid-rebuild
+    // (silver/gold rebuild takes a few seconds) - that is exactly the
+    // transient case worth retrying on its own, same warmup-poll pattern
+    // loadReporting() already uses for the rest of the tab.
+    if (heatmapRetryCount < HEATMAP_RETRY_LIMIT) {
+      heatmapRetryCount += 1;
+      window.setTimeout(showHeatmapLayerByDefault, 5000);
+    }
+    return;
+  }
+  heatmapRetryCount = 0;
   if (heatmapLayerGroup.getLayers().length === 0) buildHeatmapLayer(payload);
   heatmapVisible = true;
   reportingMap.addLayer(heatmapLayerGroup);

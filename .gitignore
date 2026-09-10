@@ -6,7 +6,8 @@ logs/
 .venv/
 .env
 .refact/
-outputs/
+outputs/*
+!outputs/Competitive_Whitespace_Tool_Report.pdf
 data/us_zips_bigquery.csv
 config/connections/storage.json
 config/connections/*service*account*.json
@@ -14,3 +15,4 @@ config/connections/service_account.json
 config/connections/keen-device-610-2af9b27dfda3.json
 .coverage
 internal-docs/
+CLAUDE.md

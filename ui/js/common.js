@@ -817,7 +817,13 @@ function switchView(viewId, isBootRestore = false) {
         if (!templateLibraryLoaded) loadTemplateLibrary();
       }
       if (viewId === "reviewView") {
-        loadRejectedRecords();
+        // Matches the reportingView/templateLibraryView pattern just above:
+        // fetch the (expensive, paginated) record list once per page load,
+        // not on every tab switch or boot-restore - a plain revisit no
+        // longer re-triggers the "Searching" spinner by default. The cheap,
+        // mirror-backed reads below (count, brand breakdown, fix counters)
+        // still refresh every visit, same as before.
+        if (!reviewDataLoaded) loadRejectedRecords();
         refreshReviewCount();
         if (typeof loadErrorBrandBreakdown === "function") loadErrorBrandBreakdown();
         if (typeof refreshFixCountersOnce === "function") refreshFixCountersOnce();

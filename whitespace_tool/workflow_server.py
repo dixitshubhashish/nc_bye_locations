@@ -4430,6 +4430,20 @@ def _refresh_silver_background(low_priority: bool = True) -> bool:
             reporting_quality_summary({}, _skip_cache=True)
         except Exception as quality_exc:
             LOGGER.warning("quality_reporting_refresh_after_background_enrichment_failed error=%s", quality_exc)
+        # Same reasoning as the quality-summary warm above, for the Trends /
+        # Historical Quality charts: /api/reporting/timeseries has no
+        # SQLite-mirror fast path of its own, only a query-result cache keyed
+        # by (period, brands) - so the FIRST request for any not-yet-cached
+        # combination pays for 2-3 live BigQuery table scans directly
+        # (measured ~6.4s locally). 1H and 1D with no brand filter are what
+        # both charts request by default before any user interaction, so
+        # warming exactly those two here means the common case is already
+        # cached by the time someone actually opens the tab.
+        for warm_period in ("1H", "1D"):
+            try:
+                reporting_timeseries({"period": [warm_period], "refresh": ["1"]})
+            except Exception as timeseries_exc:
+                LOGGER.warning("timeseries_warm_failed period=%s error=%s", warm_period, timeseries_exc)
 
     def refresh() -> None:
         global REPORTING_REFRESHING, REPORTING_REFRESH_PENDING
@@ -10717,7 +10731,17 @@ def fix_state_counts_by_brand(client: Any = None) -> dict[str, dict[str, int]]:
       SELECT
         COALESCE(b.name, e.business_id) AS brand,
         COALESCE(e.was_ever_invalid, TRUE) AS ever_invalid,
-        COALESCE(e.resolution_status, IF(e.is_deleted IS TRUE, 'fixed', 'pending')) AS state,
+        -- is_deleted wins over a stale resolution_status: a row soft-deleted
+        -- by something other than the normal resolve path (e.g. clearing
+        -- sample data, which only ever touches is_deleted/deleted_on) still
+        -- carries whatever resolution_status it had before the delete - most
+        -- often the insert-time default 'pending'. Left as COALESCE(status,
+        -- ...), that stale 'pending' wins and the row counts as still-open
+        -- forever even though it is gone from every live query. is_deleted
+        -- is the one signal every soft-delete path sets, so it must be
+        -- authoritative for "is this row still open" regardless of what
+        -- resolution_status says.
+        IF(e.is_deleted IS TRUE, 'fixed', COALESCE(e.resolution_status, 'pending')) AS state,
         COALESCE(e.is_ai_enriched, FALSE) AS ai_fixed,
         COALESCE(e.has_ai_suggestion, FALSE) AS ai_suggested
       FROM `{project_id}.{dataset_id}.error_listings` e
@@ -10768,7 +10792,12 @@ def fix_state_counts(business_id: str = "", *, client: Any = None) -> dict[str, 
         -- soft-deleted was resolved. Backfilling that inference here keeps
         -- historical rows countable instead of silently dropping them.
         COALESCE(was_ever_invalid, TRUE) AS ever_invalid,
-        COALESCE(resolution_status, IF(is_deleted IS TRUE, 'fixed', 'pending')) AS state,
+        -- is_deleted wins over a stale resolution_status - see the matching
+        -- comment in fix_state_counts_by_brand() above for why: some
+        -- soft-delete paths (e.g. clearing sample data) never touch
+        -- resolution_status, leaving it at its insert-time 'pending' default
+        -- forever even though the row is gone from every live query.
+        IF(is_deleted IS TRUE, 'fixed', COALESCE(resolution_status, 'pending')) AS state,
         COALESCE(is_ai_enriched, FALSE) AS ai_fixed,
         COALESCE(has_ai_suggestion, FALSE) AS ai_suggested
       FROM `{project_id}.{dataset_id}.error_listings`

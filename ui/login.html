@@ -78,6 +78,7 @@
     }
     .checkbox-row input { width: auto; }
     .login-box > button,
+    .login-box > form > button,
     .login-box > .button-row button {
       width: 100%;
       margin-top: 18px;
@@ -91,8 +92,10 @@
       cursor: pointer;
     }
     .login-box > button:hover,
+    .login-box > form > button:hover,
     .login-box > .button-row button:hover { background: #005fd3; }
     .login-box > button.secondary,
+    .login-box > form > button.secondary,
     .login-box > .button-row button.secondary {
       margin-top: 10px;
       border-color: var(--line);
@@ -100,11 +103,13 @@
       color: var(--ink);
     }
     .login-box > button.secondary:hover,
+    .login-box > form > button.secondary:hover,
     .login-box > .button-row button.secondary:hover {
       border-color: var(--accent);
       background: #f4f8ff;
     }
     .login-box > button:disabled,
+    .login-box > form > button:disabled,
     .login-box > .button-row button:disabled {
       background: #aeb8c9;
       border-color: #aeb8c9;
@@ -161,15 +166,17 @@
   <main class="login-box">
     <img class="brand-logo-image" data-logo-src="birdeyeLogoDarkUrl" alt="Birdeye">
     <h1 data-product-name></h1>
-    <label for="loginUser">Username</label>
-    <input id="loginUser" autocomplete="username" value="admin">
-    <label for="loginPassword">Password</label>
-    <input id="loginPassword" type="password" autocomplete="current-password">
-    <label class="checkbox-row" for="rememberLogin">
-      <input id="rememberLogin" type="checkbox">
-      Remember login
-    </label>
-    <button id="loginBtn" type="button">Login</button>
+    <form id="loginForm">
+      <label for="loginUser">Username</label>
+      <input id="loginUser" autocomplete="username" value="admin">
+      <label for="loginPassword">Password</label>
+      <input id="loginPassword" type="password" autocomplete="current-password">
+      <label class="checkbox-row" for="rememberLogin">
+        <input id="rememberLogin" type="checkbox">
+        Remember login
+      </label>
+      <button id="loginBtn" type="submit">Login</button>
+    </form>
     <div id="loginStatus" class="status hidden"></div>
     <div id="loginReadinessStatus" class="status hidden"></div>
   </main>

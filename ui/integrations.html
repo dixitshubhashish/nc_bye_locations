@@ -1309,18 +1309,26 @@
        trailing empty gap. */
     #needsReviewToolbar { grid-template-columns: minmax(160px, 220px) minmax(120px, 160px) minmax(140px, 200px) auto; }
     .review-brand-breakdown-layout { display: grid; grid-template-columns: minmax(300px, .85fr) minmax(360px, 1.15fr); gap: 28px; align-items: center; width: 100%; }
-    .review-chart-side { min-width: 0; display: grid; grid-template-columns: minmax(120px, 170px) minmax(0, 1fr); gap: 14px; align-items: center; }
+    .review-chart-side { min-width: 0; display: grid; grid-template-columns: minmax(240px, 320px) minmax(0, 1fr); gap: 14px; align-items: center; }
+    /* The six fix-state cards, two per row instead of one long column - the
+       "Ever invalid" total used to be the 6th item in DOM order with no
+       explicit grid-column, so it auto-flowed into the chart's reserved
+       column instead of staying under the other five cards. Grouping all six
+       (plus the AI-percent summary, spanning both columns beneath them) in
+       their own nested grid removes the ambiguity outright rather than
+       patching the auto-placement guess. */
+    .review-state-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-content: start; }
     .review-ai-summary { min-width: 0; box-sizing: border-box; padding: 14px 12px; border: 1px solid #b9d6c3; border-radius: 8px; background: #f2fbf5; }
     .review-ai-summary strong { display: block; color: #147d63; font-size: 24px; line-height: 1.1; }
     .review-ai-summary span, .review-manual-summary span { display: block; margin-top: 6px; color: #53627d; font-size: 12px; line-height: 1.25; }
     .review-manual-summary { min-width: 0; box-sizing: border-box; padding: 14px 12px; border: 1px solid #b9d6c3; border-radius: 8px; background: #f2fbf5; grid-column: 1; }
     .review-manual-summary strong { display: block; color: #147d63; font-size: 24px; line-height: 1.1; }
-    .review-ai-percent-summary, .review-manual-percent-summary { min-width: 0; box-sizing: border-box; padding: 14px 12px; border: 1px solid #cbd8eb; border-radius: 8px; background: #f5f8fd; grid-column: 1; }
+    .review-ai-percent-summary, .review-manual-percent-summary { min-width: 0; box-sizing: border-box; padding: 14px 12px; border: 1px solid #cbd8eb; border-radius: 8px; background: #f5f8fd; grid-column: 1 / -1; }
     .review-ai-percent-summary strong, .review-manual-percent-summary strong { display: block; color: #2563eb; font-size: 22px; line-height: 1.1; }
     .review-ai-percent-summary span, .review-manual-percent-summary span { display: block; margin-top: 6px; color: #53627d; font-size: 12px; line-height: 1.25; }
     .review-manual-percent-summary { border-color: #f1b8b4; background: #fff1f0; }
     .review-manual-percent-summary strong { color: #cf1322; }
-    .review-chart-side > #reviewBrandChart { grid-column: 2; grid-row: 1 / span 4; }
+    .review-chart-side > #reviewBrandChart { grid-column: 2; }
     #reviewBrandChart { min-height: 340px; display: flex; justify-content: center; align-items: center; position: relative; }
     #reviewBrandChart svg { width: min(340px, 100%); height: auto; overflow: visible; }
     .review-chart-tooltip { position: absolute; z-index: 4; pointer-events: none; display: none; max-width: 220px; padding: 8px 10px; border-radius: 6px; background: #1f2937; color: #fff; font-size: 12px; line-height: 1.35; box-shadow: 0 4px 12px rgba(15, 23, 42, .22); white-space: nowrap; }
@@ -1329,6 +1337,7 @@
       .review-toolbar { grid-template-columns: 1fr; max-width: none; }
       .review-brand-breakdown-layout { grid-template-columns: 1fr; gap: 12px; }
       .review-chart-side { grid-template-columns: 1fr; }
+      .review-state-grid { grid-template-columns: 1fr; }
       .review-ai-summary { text-align: center; }
       .review-manual-summary { text-align: center; }
       .review-ai-percent-summary, .review-manual-percent-summary { text-align: center; }
@@ -3542,6 +3551,7 @@ result = [
                  EVER invalid, so the totals accumulate across days instead of
                  resetting when a record gets fixed. Same source as the
                  reporting tab's cards, so the two always agree. -->
+            <div class="review-state-grid">
             <div class="review-state-card state-ai-fixed">
               <strong id="reviewStateAiFixed">-</strong>
               <span>Fixed by AI</span>
@@ -3569,6 +3579,7 @@ result = [
             <div class="review-ai-percent-summary">
               <strong id="reviewAiFixedPercent">0.00%</strong>
               <span>AI Fixed by Total Error</span>
+            </div>
             </div>
             <!-- Kept for the live auto-repair poll, which reports progress
                  against the currently running batch. -->

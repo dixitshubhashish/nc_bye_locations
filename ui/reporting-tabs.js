@@ -740,6 +740,8 @@
   // to one point under longer buckets, which makes first paint look empty even
   // when useful minute-level/hourly shape exists.
   let historyPeriod = '1H';
+  // Same reasoning and same one-shot guard as trendAutoFallbackDone above.
+  let historyAutoFallbackDone = false;
 
   async function loadQualityHistory() {
     const chart = $('dqHistoryChart');
@@ -748,8 +750,8 @@
     const mainBrand = $('reportMainBrandSelect')?.value || '';
     const competitors = (typeof window.selectedCompetitorBrands === 'function')
       ? window.selectedCompetitorBrands() : [];
-    const fetchSeries = async (brands) => {
-      const params = new URLSearchParams({ period: historyPeriod });
+    const fetchSeries = async (brands, periodOverride) => {
+      const params = new URLSearchParams({ period: periodOverride || historyPeriod });
       // ONE `brands` parameter, comma-separated. This used to append a
       // repeated `brand` parameter, which /api/reporting/timeseries never
       // reads - it takes params.get("brands")[0] and splits it on commas - so
@@ -762,8 +764,25 @@
       if (!response.ok) throw new Error(payload.error || 'Unable to load history.');
       return Array.isArray(payload.series) ? payload.series : [];
     };
+    const hasAnyPoints = (entries) => (entries || []).some((s) => Array.isArray(s.points) && s.points.length);
     try {
-      const own = await fetchSeries(mainBrand ? [mainBrand] : []);
+      const ownBrands = mainBrand ? [mainBrand] : [];
+      let own;
+      if (historyPeriod === '1H' && !historyAutoFallbackDone) {
+        // Same reasoning as trendAutoFallbackDone's concurrent probe: fetch
+        // both periods together rather than one-then-the-other, since a cold
+        // cache makes each of these several seconds on live BigQuery.
+        historyAutoFallbackDone = true;
+        const [oneHour, oneDay] = await Promise.all([fetchSeries(ownBrands, '1H'), fetchSeries(ownBrands, '1D')]);
+        const useDay = !hasAnyPoints(oneHour) && hasAnyPoints(oneDay);
+        own = useDay ? oneDay : oneHour;
+        historyPeriod = useDay ? '1D' : '1H';
+        document.querySelectorAll('[data-history-period]').forEach((node) => {
+          node.classList.toggle('active', node.dataset.historyPeriod === historyPeriod);
+        });
+      } else {
+        own = await fetchSeries(ownBrands);
+      }
       const pick = (label) => own.find((entry) => entry.label === label)?.points || [];
       const series = [
         { label: mainBrand ? `${mainBrand} listings` : 'Listings', color: '#1677ee', points: pick('Locations') },
@@ -907,6 +926,14 @@
   }
 
   let trendState = { period: '1H' };
+  // 1H is the default because same-day datasets collapse to one point under
+  // longer buckets - but a dataset with nothing in the last hour (the load
+  // happened earlier today, or yesterday) makes that default look broken:
+  // an empty chart the user has to notice and manually switch away from.
+  // Tried once, automatically, on first load only - never fights a later
+  // explicit click back to 1H, which must be allowed to show "no data" if
+  // that is genuinely true right now.
+  let trendAutoFallbackDone = false;
 
   // Set once a real chart has been drawn, never reset - the same rule the
   // location report uses (reportHasRenderedOnce). Without it every call tore
@@ -925,12 +952,32 @@
     try {
       let qs = '';
       try { if (typeof window.reportingQueryString === 'function') qs = window.reportingQueryString(); } catch (_) {}
-      const p = new URLSearchParams(qs);
-      p.set('period', trendState.period);
-      const res = await fetch(`/api/reporting/timeseries?${p.toString()}`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Unable to load trend data.');
-      renderTrendChart(Array.isArray(data.series) ? data.series : []);
+      const fetchPeriod = async (period) => {
+        const p = new URLSearchParams(qs);
+        p.set('period', period);
+        const res = await fetch(`/api/reporting/timeseries?${p.toString()}`);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Unable to load trend data.');
+        return Array.isArray(data.series) ? data.series : [];
+      };
+      const hasPoints = (series) => series.some((s) => Array.isArray(s.points) && s.points.length);
+      let series;
+      if (trendState.period === '1H' && !trendAutoFallbackDone) {
+        // Both periods fetched together, not one-then-the-other: neither has
+        // a SQLite-mirror fast path of its own (only a per-period query-result
+        // cache), so a cold cache means each request can take several seconds
+        // on live BigQuery - fetching sequentially would mean paying for BOTH,
+        // back to back, on exactly the case this fallback exists for.
+        trendAutoFallbackDone = true;
+        const [oneHour, oneDay] = await Promise.all([fetchPeriod('1H'), fetchPeriod('1D')]);
+        const useDay = !hasPoints(oneHour) && hasPoints(oneDay);
+        series = useDay ? oneDay : oneHour;
+        trendState.period = useDay ? '1D' : '1H';
+        $('dqTrendPeriod')?.querySelectorAll('[data-period]').forEach((b) => b.classList.toggle('active', b.dataset.period === trendState.period));
+      } else {
+        series = await fetchPeriod(trendState.period);
+      }
+      renderTrendChart(series);
       trendHasRenderedOnce = true;
     } catch (err) {
       // Only replace a drawn chart with an error if there is no chart to

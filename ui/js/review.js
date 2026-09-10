@@ -10,6 +10,12 @@ let currentEditingRecord = null;
 let currentEditingMapperFields = {};
 let currentEditingRawRecord = {};
 let loadRejectedRecordsPromise = null;
+// Mirrors reportLoaded / templateLibraryLoaded (reporting.js, templates.js):
+// switchView() used to call loadRejectedRecords() unconditionally on every
+// visit to Review - including a plain tab-away-and-back - unlike every other
+// tab, which only fetches once and leaves a manual refresh (here, the Search
+// button) to pull anything newer. Set true once a search actually completes.
+let reviewDataLoaded = false;
 let reviewBrandNames = {};
 let autoRepairPollTimer = null;
 let aiFixedAnimationTimer = null;
@@ -389,6 +395,7 @@ async function _loadRejectedRecordsOnce() {
         const response = await reviewFetch(`/api/rejected?event_id=${encodeURIComponent(eventId)}&business_id=${encodeURIComponent(brandFilter)}&limit=${REVIEW_PAGE_SIZE}&offset=${reviewPage * REVIEW_PAGE_SIZE}`);
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not load review records.");
+        reviewDataLoaded = true;
         // Client-side, on this page's already-fetched batch - the same
         // heuristic that colors each row's action button, so "AI Suggested
         // Fix" here always matches what the filter picked.
